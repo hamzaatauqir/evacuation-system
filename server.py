@@ -414,7 +414,7 @@ def api_dashboard_stats():
     total = db.execute("SELECT COUNT(*) c FROM evacuees").fetchone()['c']
     departed = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed'").fetchone()['c']
     visa_obtained = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Visa Obtained'").fetchone()['c']
-    pending = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Pending'").fetchone()['c']
+    pending = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Pending' AND dup_flag='CLEAR'").fetchone()['c']
     visa_approved = db.execute("SELECT COUNT(*) c FROM evacuees WHERE visa_status='Approved'").fetchone()['c']
     iraq_entries = db.execute("SELECT COUNT(*) c FROM evacuees WHERE country='Iraq'").fetchone()['c']
 
@@ -1285,6 +1285,10 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 
 <!-- REGISTER -->
 <div id="tab-reg" class="tab"><div class="ctr">
+<div style="text-align:center;margin-bottom:18px">
+<svg width="70" height="70" viewBox="0 0 200 200" style="margin-bottom:8px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(0,102,0,0.3)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
+<h2 style="color:#006600;margin-top:6px;font-size:1.1em">New Evacuee Registration</h2>
+</div>
 <form id="regForm" onsubmit="return doRegister(event)">
 <div class="fs"><h3>Personal Information</h3><div class="fg">
 <div class="fgp"><label>Full Name *</label><input name="name" required></div>
