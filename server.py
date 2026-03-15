@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 PORT = int(os.environ.get('PORT', 8080))
+
 # Use /data/ for persistent Render Disk, fallback to local directory for development
 RENDER_DISK = Path('/data')
 if RENDER_DISK.exists() and RENDER_DISK.is_dir():
@@ -1087,7 +1088,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 @media(max-width:600px){.fg{grid-template-columns:1fr}.ctr{padding:12px}}
 </style></head><body>
 <div class="hdr">
-<div class="flag">&#127477;&#127472;</div>
+<img src="https://pbs.twimg.com/profile_images/1547508498798903296/WgFb26JR_400x400.jpg" alt="Pakistan Embassy Kuwait" style="width:80px;height:80px;border-radius:50%;margin-bottom:8px;border:2px solid rgba(255,255,255,0.3)">
 <h1>SAUDI TRANSIT VISA REGISTRATION</h1>
 <div class="sub">Pakistan Embassy Kuwait &mdash; Evacuation Assistance</div>
 </div>
@@ -1120,7 +1121,7 @@ This form is for Pakistani nationals in Kuwait requiring Saudi transit visa assi
 </div>
 </form>
 </div>
-<div class="footer">Pakistan Embassy Kuwait &mdash; Evacuation Management System<br>For emergencies call: +965-67778366</div>
+<div class="footer">Pakistan Embassy Kuwait &mdash; Evacuation Management System<br>For emergencies contact: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265<br><br><strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a></div>
 <script>
 async function submitForm(e){
 e.preventDefault();
@@ -1177,7 +1178,11 @@ a:hover{background:#004d00}
 <strong>What happens next?</strong>
 Your visa application will be reviewed by the Embassy team. You will be contacted on the mobile number you provided once there is an update on your Saudi transit visa status.
 </div>
-<p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.</p>
+<div style="background:#fff3e0;border:1px solid #ffcc80;border-radius:8px;padding:14px;font-size:.9em;color:#e65100;margin-bottom:16px;text-align:left">
+<strong style="display:block;margin-bottom:4px">&#9888;&#65039; Required: Send Passport Copies</strong>
+Please email a copy of your passport to:<br><a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
+</div>
+<p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.<br>Emergency contacts: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
 <a href="/register">Submit Another Registration</a>
 </div>
 </body></html>"""
@@ -1382,7 +1387,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="fgp"><label>Country/Region</label><input id="sr_country" value="Kuwait"></div>
 </div>
 <div class="fg" style="margin-top:10px">
-<div class="fgp"><label>Emergency Hotline</label><textarea id="sr_hotline" rows="3">Mr. Hamza Tauqir, CWA: +965-67778366
+<div class="fgp"><label>Emergency Hotline</label><textarea id="sr_hotline" rows="3">Awais: +965-55977292\nZahid: +965-55964923\nShahid Khan: +965-66568265
 Mr. Awais Saeed: +965-5597292
 Mr. Zahid Iqbal: +965-55964923
 Mr. Munir Khan: +965 9856 2753</textarea></div>
