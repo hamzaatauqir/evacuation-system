@@ -1798,9 +1798,10 @@ No deterioration in ground security situation so far.</textarea>
 <button type="button" class="btn" style="background:#eee" onclick="closeEdit()">Cancel</button>
 </div></form></div></div>
 
-<div class="mo" id="compareModal"><div class="ml" style="max-width:900px">
+<div class="mo" id="compareModal"><div class="ml" style="max-width:950px">
 <button class="cb" onclick="closeCompare()">&times;</button>
-<h3>Duplicate Comparison</h3>
+<h3 id="compareTitle">Duplicate Comparison</h3>
+<p style="font-size:.8em;color:#666;margin-bottom:10px">Click any cell to edit. Use buttons below each column to save or delete that specific record.</p>
 <div id="compareBody" style="overflow-x:auto"></div>
 <div class="bg" style="margin-top:12px">
 <button class="btn" style="background:#eee" onclick="closeCompare()">Close</button>
@@ -1952,6 +1953,7 @@ await api('/api/record/delete',{method:'POST',headers:{'Content-Type':'applicati
 closeEdit();loadRecords();loadDash();toast('Deleted')}
 
 // DUPLICATE COMPARISON
+let cmpData={};
 function closeCompare(){document.getElementById('compareModal').classList.remove('show')}
 async function compareDup(id){
 const rec=allRecords.find(x=>x.id===id);
@@ -1959,34 +1961,118 @@ if(!rec){toast('Record not found');return}
 try{
 const res=await fetch('/api/record/duplicates?id='+id);const d=await res.json();
 if(!d.duplicates||d.duplicates.length===0){toast('No matching duplicates found');return}
-const labels={id:'ID',name:'Name',passport:'Passport',cnic:'CNIC',gender:'Gender',country:'Country',
+cmpData={current:rec,duplicates:d.duplicates};
+renderCompare();
+document.getElementById('compareModal').classList.add('show');
+}catch(err){toast('Error loading comparison: '+err.message)}
+}
+function renderCompare(){
+const rec=cmpData.current;const dups=cmpData.duplicates;
+const labels={name:'Name',passport:'Passport',cnic:'CNIC',gender:'Gender',country:'Country',
 civil_id:'Civil ID',border_crossing:'Border Crossing',mobile:'Mobile',company:'Company',
 visa_status:'Visa Status',travel_status:'Travel Status',departure_date:'Departure Date',
 airline:'Airline',ticket_number:'Ticket Number',departure_airport:'Departure Airport',
 destination_country:'Destination',date_of_request:'Date of Request',email:'Email',
 planned_departure:'Planned Departure',saudi_city:'Saudi City',traveling_with_family:'With Family',
-remarks:'Remarks',dup_flag:'Dup Flag',mofa_status:'MOFA Status',created_at:'Created At'};
-const fields=Object.keys(labels);
-let html='<table style="width:100%;border-collapse:collapse;font-size:.85em"><thead><tr><th style="padding:8px;background:#006600;color:#fff;text-align:left;position:sticky;left:0;min-width:130px">Field</th>';
-html+=`<th style="padding:8px;background:#1565c0;color:#fff;text-align:left;min-width:180px">Current Record #${rec.id}</th>`;
-d.duplicates.forEach(dup=>{html+=`<th style="padding:8px;background:#c62828;color:#fff;text-align:left;min-width:180px">Match #${dup.id}</th>`});
+remarks:'Remarks'};
+const editF=Object.keys(labels);
+const allRecs=[rec,...dups];
+const colors=['#1565c0','#c62828','#e65100','#6a1b9a'];
+const colorLabels=['Current','Match','Match','Match'];
+let html='<table style="width:100%;border-collapse:collapse;font-size:.84em"><thead><tr><th style="padding:8px;background:#006600;color:#fff;text-align:left;position:sticky;left:0;min-width:120px;z-index:2">Field</th>';
+allRecs.forEach((r,ci)=>{
+const col=colors[ci]||'#333';
+const lbl=ci===0?'Current #'+r.id:'Match #'+r.id;
+html+=`<th style="padding:8px;background:${col};color:#fff;text-align:left;min-width:200px">${lbl}</th>`;
+});
 html+='</tr></thead><tbody>';
-fields.forEach((f,i)=>{
-const bg=i%2===0?'#fff':'#f5f5f5';
-html+=`<tr style="background:${bg}"><td style="padding:6px 8px;font-weight:600;border:1px solid #e0e0e0;position:sticky;left:0;background:${bg}">${labels[f]}</td>`;
-html+=`<td style="padding:6px 8px;border:1px solid #e0e0e0">${rec[f]||'—'}</td>`;
-d.duplicates.forEach(dup=>{
-const match=rec[f]&&dup[f]&&String(rec[f]).toLowerCase()===String(dup[f]).toLowerCase();
-const style=match?'background:#ffcdd2;font-weight:600':'';
-html+=`<td style="padding:6px 8px;border:1px solid #e0e0e0;${style}">${dup[f]||'—'}</td>`;
+// ID row (not editable)
+html+='<tr style="background:#e8f5e9"><td style="padding:6px 8px;font-weight:700;border:1px solid #e0e0e0;position:sticky;left:0;background:#e8f5e9;z-index:1">Record ID</td>';
+allRecs.forEach(r=>{html+=`<td style="padding:6px 8px;border:1px solid #e0e0e0;font-weight:700">#${r.id}</td>`});
+html+='</tr>';
+// Created at row (not editable)
+html+='<tr style="background:#f5f5f5"><td style="padding:6px 8px;font-weight:600;border:1px solid #e0e0e0;position:sticky;left:0;background:#f5f5f5;z-index:1">Created At</td>';
+allRecs.forEach(r=>{html+=`<td style="padding:6px 8px;border:1px solid #e0e0e0;font-size:.85em;color:#888">${r.created_at||'—'}</td>`});
+html+='</tr>';
+// Editable fields
+editF.forEach((f,i)=>{
+const bg=i%2===0?'#fff':'#f9f9f9';
+html+=`<tr style="background:${bg}"><td style="padding:6px 8px;font-weight:600;border:1px solid #e0e0e0;position:sticky;left:0;background:${bg};z-index:1">${labels[f]}</td>`;
+allRecs.forEach((r,ci)=>{
+const val=r[f]||'';
+// Check if this field matches the current record (highlight)
+const isMatch=ci>0&&rec[f]&&r[f]&&String(rec[f]).toLowerCase()===String(r[f]).toLowerCase();
+const hl=isMatch?'background:#ffcdd2;':'';
+html+=`<td style="padding:2px 4px;border:1px solid #e0e0e0;${hl}"><input data-rid="${r.id}" data-field="${f}" value="${(val+'').replace(/"/g,'&quot;')}" style="width:100%;padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:.92em;background:transparent" onfocus="this.style.background='#fff';this.style.borderColor='#1565c0'" onblur="this.style.background='transparent';this.style.borderColor='#ddd'"></td>`;
 });
 html+='</tr>';
 });
 html+='</tbody></table>';
-html+='<p style="margin-top:8px;font-size:.8em;color:#c62828">Fields highlighted in red indicate matching values between records.</p>';
+// Action buttons row for each record
+html+='<div style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap">';
+allRecs.forEach((r,ci)=>{
+const col=colors[ci]||'#333';
+const lbl=ci===0?'Current #'+r.id:'Match #'+r.id;
+html+=`<div style="flex:1;min-width:200px;border:2px solid ${col};border-radius:8px;padding:10px">`;
+html+=`<div style="font-weight:700;color:${col};margin-bottom:8px;font-size:.9em">${lbl}</div>`;
+html+=`<button class="btn btn-p" style="padding:5px 12px;font-size:.8em;margin-right:6px" onclick="saveCmpRecord(${r.id})">Save Changes</button>`;
+if(ci>0){
+html+=`<button class="btn btn-d" style="padding:5px 12px;font-size:.8em;margin-right:6px" onclick="deleteCmpRecord(${r.id},${rec.id})">Delete This</button>`;
+html+=`<button class="btn" style="padding:5px 12px;font-size:.8em;background:#e8f5e9;color:#006600;border:1px solid #006600" onclick="mergeInto(${r.id},${rec.id})">Merge into Current</button>`;
+}else{
+html+=`<span style="font-size:.75em;color:#888">Primary record</span>`;
+}
+html+='</div>';
+});
+html+='</div>';
+html+='<p style="margin-top:10px;font-size:.78em;color:#666"><strong>Red cells</strong> = matching values. <strong>Merge into Current</strong> = fills empty fields in Current with data from that record, then deletes it.</p>';
 document.getElementById('compareBody').innerHTML=html;
-document.getElementById('compareModal').classList.add('show');
-}catch(err){toast('Error loading comparison: '+err.message)}
+}
+async function saveCmpRecord(rid){
+const inputs=document.querySelectorAll(`input[data-rid="${rid}"]`);
+const data={id:rid};
+inputs.forEach(inp=>{data[inp.dataset.field]=inp.value});
+try{
+const r=await api('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+if(r&&r.success){toast('Record #'+rid+' saved');loadRecords();loadDash()}
+else toast('Error: '+(r?.error||'Save failed'));
+}catch(err){toast('Error: '+err.message)}
+}
+async function deleteCmpRecord(rid,mainId){
+if(!confirm('Delete ONLY record #'+rid+'? The current record #'+mainId+' will NOT be affected.'))return;
+try{
+await api('/api/record/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:rid})});
+toast('Record #'+rid+' deleted');
+// Remove from compare data and re-render
+cmpData.duplicates=cmpData.duplicates.filter(d=>d.id!==rid);
+if(cmpData.duplicates.length===0){closeCompare()}
+else{renderCompare()}
+loadRecords();loadDash();
+}catch(err){toast('Error: '+err.message)}
+}
+async function mergeInto(srcId,destId){
+if(!confirm('This will copy non-empty fields from #'+srcId+' into empty fields of #'+destId+', then DELETE #'+srcId+'. Continue?'))return;
+const srcInputs=document.querySelectorAll(`input[data-rid="${srcId}"]`);
+const destInputs=document.querySelectorAll(`input[data-rid="${destId}"]`);
+// Build map of dest fields
+const destMap={};
+destInputs.forEach(inp=>{destMap[inp.dataset.field]=inp});
+// Fill empty dest fields with src values
+srcInputs.forEach(inp=>{
+const f=inp.dataset.field;
+if(destMap[f]&&!destMap[f].value.trim()&&inp.value.trim()){
+destMap[f].value=inp.value;
+destMap[f].style.background='#c8e6c9';
+}
+});
+// Save destination, then delete source
+await saveCmpRecord(destId);
+await api('/api/record/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:srcId})});
+toast('Merged #'+srcId+' into #'+destId+' and deleted #'+srcId);
+cmpData.duplicates=cmpData.duplicates.filter(d=>d.id!==srcId);
+if(cmpData.duplicates.length===0){closeCompare()}
+else{renderCompare()}
+loadRecords();loadDash();
 }
 
 // CSV UPLOAD
