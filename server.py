@@ -498,9 +498,17 @@ def api_records(params):
     where = ["1=1"]
     qparams = []
     if params.get('search'):
-        s = f"%{params['search']}%"
-        where.append("(name LIKE ? OR passport LIKE ? OR cnic LIKE ? OR mobile LIKE ?)")
-        qparams.extend([s, s, s, s])
+        search_val = params['search'].strip()
+        # Support tracking number search (PKE-0001 format)
+        tracking_match = re.match(r'^PKE-?(\d+)$', search_val, re.IGNORECASE)
+        if tracking_match:
+            rec_id = int(tracking_match.group(1))
+            where.append("id = ?")
+            qparams.append(rec_id)
+        else:
+            s = f"%{search_val}%"
+            where.append("(name LIKE ? OR passport LIKE ? OR cnic LIKE ? OR mobile LIKE ? OR civil_id LIKE ?)")
+            qparams.extend([s, s, s, s, s])
     if params.get('status'):
         where.append("travel_status = ?"); qparams.append(params['status'])
     if params.get('country'):
@@ -1536,7 +1544,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div id="tab-recs" class="tab"><div class="ctr"><div class="tc">
 <h3>All Registered Evacuees</h3>
 <div class="sb">
-<input id="sInput" placeholder="Search name, passport, CNIC, mobile..." oninput="loadRecords()">
+<input id="sInput" placeholder="Search name, passport, CNIC, mobile, or tracking # (PKE-0001)..." oninput="loadRecords()">
 <select id="fStatus" onchange="loadRecords()"><option value="">All Status</option><option>Departed</option><option>Visa Obtained</option><option>Pending</option><option>Returned</option></select>
 <select id="fCountry" onchange="loadRecords()"><option value="">All Countries</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>US</option><option>KSA</option><option>UAE</option><option>Dubai</option></select>
 <select id="fGender" onchange="loadRecords()"><option value="">All Gender</option><option>Male</option><option>Female</option><option>Child</option></select>
