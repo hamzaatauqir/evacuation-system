@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EVACUATION MANAGEMENT SYSTEM - Pakistan Embassy Kuwait
+CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM - Pakistan Embassy Kuwait
 Zero-dependency Python server (stdlib only). Run: python3 server.py
 Access: http://localhost:8080
 Default login: admin / embassy2026
@@ -1136,7 +1136,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 # ═══════════════════════════════════════════════════════════════
 LOGIN_PAGE = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Login - Evacuation Management System</title>
+<title>Login - Citizen Support for Transit KSA</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#006600,#004d00);min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -1154,7 +1154,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#
 </style></head><body>
 <div class="login-box">
 <div class="flag">&#127477;&#127472;</div>
-<h1>EVACUATION MANAGEMENT</h1>
+<h1>CITIZEN SUPPORT FOR TRANSIT KSA</h1>
 <div class="sub">Pakistan Embassy Kuwait</div>
 <form onsubmit="return doLogin(event)">
 <div class="form-group"><label>Username</label><input id="username" required autofocus></div>
@@ -1321,7 +1321,7 @@ Please email a copy of your passport to:<br><a href="mailto:parepkuwaitcwa37@gma
 # ═══════════════════════════════════════════════════════════════
 MAIN_APP = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Evacuation Management System</title>
+<title>Citizen Support for Transit KSA System</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 :root{--p:#006600;--pl:#e8f5e9;--d:#c62828;--dl:#ffebee;--w:#e65100;--wl:#fff3e0;--i:#1565c0;--il:#e3f2fd;--s:#2e7d32;--bg:#f5f5f5;--card:#fff;--t:#212121;--tl:#757575;--bd:#e0e0e0;--sh:0 2px 8px rgba(0,0,0,.1)}
@@ -1384,7 +1384,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 @media print{.hdr,.nav,.btn,.sb,.np{display:none!important}.tab{display:none!important}#tab-report{display:block!important}.rp{border:none;box-shadow:none;padding:0;margin:0;max-width:100%}body{background:#fff}}
 @media(max-width:768px){.kg{grid-template-columns:repeat(2,1fr)}.cg{grid-template-columns:1fr}.nav button{padding:8px 12px;font-size:.8em}}
 </style></head><body>
-<div class="hdr"><div style="display:flex;align-items:center"><span class="flag">&#127477;&#127472;</span><div><h1>EVACUATION MANAGEMENT SYSTEM</h1><div class="sub">Pakistan Embassy Kuwait &mdash; CWA Kuwait</div></div></div>
+<div class="hdr"><div style="display:flex;align-items:center"><span class="flag">&#127477;&#127472;</span><div><h1>CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM</h1><div class="sub">Pakistan Embassy Kuwait &mdash; CWA Kuwait</div></div></div>
 <div class="user-info"><span id="userDisplay"></span><a href="/logout">Logout</a></div></div>
 <div class="nav">
 <button class="active" onclick="go('dash',this)">Dashboard</button>
@@ -1905,7 +1905,7 @@ d.by_country.forEach(c=>{h+=`<tr><td>${c.country}</td><td>${c.total}</td><td>${c
 h+=`</tbody></table></div><div class="rs"><h3>3. GENDER</h3><table><thead><tr><th>Gender</th><th>Count</th><th>Departed</th><th>%</th></tr></thead><tbody>`;
 d.by_gender.forEach(g=>{h+=`<tr><td>${g.gender}</td><td>${g.count}</td><td>${g.departed}</td><td>${(g.count/k.total*100).toFixed(1)}%</td></tr>`});
 h+=`</tbody></table></div><div class="rs"><h3>4. ASSESSMENT</h3><p>${k.pending>k.visa_approved?`<strong style="color:#c62828">ALERT:</strong> Pending (${k.pending}) outpacing resolved (${k.visa_approved}) — urgent KSA action required`:`Situation under control. Resolved (${k.visa_approved}) keeping pace with pending (${k.pending}).`}</p></div>
-<div style="margin-top:30px;padding-top:15px;border-top:1px solid #ccc;font-size:.82em;color:#777"><p>Generated: ${new Date().toLocaleString()}<br>Pakistan Embassy Kuwait - Evacuation Management System</p></div></div>`;
+<div style="margin-top:30px;padding-top:15px;border-top:1px solid #ccc;font-size:.82em;color:#777"><p>Generated: ${new Date().toLocaleString()}<br>Pakistan Embassy Kuwait - Citizen Support for Transit KSA System</p></div></div>`;
 document.getElementById('repContent').innerHTML=h}
 
 // ADMIN
@@ -2034,7 +2034,7 @@ if __name__ == '__main__':
     backup_thread.start()
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
-║   EVACUATION MANAGEMENT SYSTEM                          ║
+║   CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM                          ║
 ║   Pakistan Embassy Kuwait                               ║
 ║                                                         ║
 ║   Server running on: http://localhost:{PORT}              ║
