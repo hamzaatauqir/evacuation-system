@@ -78,6 +78,7 @@ def init_db():
         confirm_ksa_3days TEXT DEFAULT 'No',
         mofa_status TEXT DEFAULT '',
         dup_flag TEXT DEFAULT 'CLEAR',
+        departure_date TEXT,
         form_submission_id TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -110,7 +111,8 @@ def init_db():
     # Migrate: add new columns if they don't exist
     for col, coltype in [('planned_departure', 'TEXT'), ('saudi_city', 'TEXT'),
                          ('traveling_with_family', "TEXT DEFAULT 'No'"), ('confirm_ksa_3days', "TEXT DEFAULT 'No'"),
-                         ('mofa_status', "TEXT DEFAULT ''")]:
+                         ('mofa_status', "TEXT DEFAULT ''"),
+                         ('departure_date', 'TEXT')]:
         try:
             db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
             db.commit()
@@ -443,10 +445,10 @@ def api_dashboard_stats():
     iraq_entries = db.execute("SELECT COUNT(*) c FROM evacuees WHERE country='Iraq'").fetchone()['c']
     returned = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned'").fetchone()['c']
 
-    # Today's live counts
-    departed_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND planned_departure=date('now')").fetchone()['c']
+    # Today's live counts (based on departure_date field)
+    departed_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND departure_date=date('now')").fetchone()['c']
     entered_today = departed_today  # Departing Kuwait = Entering KSA same day
-    returned_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND planned_departure=date('now')").fetchone()['c']
+    returned_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND departure_date=date('now')").fetchone()['c']
 
     by_country = [dict(r) for r in db.execute("""
         SELECT country, COUNT(*) total,
@@ -530,7 +532,7 @@ def api_save_record(data, user):
               'departure_airport','destination_country','date_of_request','email',
               'dob','emergency_contact','medical','family_group_id','dependents',
               'accommodation','priority','remarks','planned_departure','saudi_city',
-              'traveling_with_family','confirm_ksa_3days']
+              'traveling_with_family','confirm_ksa_3days','departure_date']
 
     if rec_id:  # Update
         # Get old record to detect changes
@@ -608,7 +610,7 @@ def api_export_csv():
                      'Departure Airport','Destination Country','Date of Request','Email','DOB',
                      'Emergency Contact','Medical','Family Group','Dependents','Accommodation',
                      'Priority','Remarks','Planned Departure','Saudi City',
-                     'Traveling with Family','Confirm KSA 3-Days','Duplicate Flag','Created At'])
+                     'Traveling with Family','Confirm KSA 3-Days','Departure Date','Duplicate Flag','Created At'])
     def safe_get(row, key, default=''):
         try:
             return row[key]
@@ -624,6 +626,7 @@ def api_export_csv():
                         r['priority'], r['remarks'],
                         safe_get(r,'planned_departure'), safe_get(r,'saudi_city'),
                         safe_get(r,'traveling_with_family'), safe_get(r,'confirm_ksa_3days'),
+                        safe_get(r,'departure_date'),
                         r['dup_flag'], r['created_at']])
     return output.getvalue()
 
@@ -1730,7 +1733,8 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Company</label><input id="e_company"></div>
 <div class="fgp"><label>Border Crossing</label><input id="e_border_crossing"></div>
 <div class="fgp"><label>KSA Visa Status</label><select id="e_visa_status"><option value="">Select</option><option>Approved</option><option>Pending</option><option>Rejected</option></select></div>
-<div class="fgp"><label>Travel Status</label><select id="e_travel_status"><option>Pending</option><option>Visa Obtained</option><option>Departed</option><option>Returned</option></select></div>
+<div class="fgp"><label>Travel Status</label><select id="e_travel_status" onchange="autoFillDepartDate(this.value)"><option>Pending</option><option>Visa Obtained</option><option>Departed</option><option>Returned</option></select></div>
+<div class="fgp"><label>Departure Date</label><input type="date" id="e_departure_date"></div>
 <div class="fgp"><label>Airline</label><input id="e_airline"></div>
 <div class="fgp"><label>Ticket Number</label><input id="e_ticket_number"></div>
 <div class="fgp"><label>Departure Airport</label><input id="e_departure_airport"></div>
@@ -1750,10 +1754,14 @@ No deterioration in ground security situation so far.</textarea>
 <script>
 let charts={},allRecords=[];
 const F=['name','passport','cnic','gender','country','civil_id','border_crossing','mobile','company',
-'visa_status','travel_status','airline','ticket_number','departure_airport','destination_country',
+'visa_status','travel_status','departure_date','airline','ticket_number','departure_airport','destination_country',
 'date_of_request','email','dob','emergency_contact','medical','family_group_id','dependents',
 'accommodation','priority','remarks'];
 
+function autoFillDepartDate(status){
+if((status==='Departed'||status==='Returned')&&!document.getElementById('e_departure_date').value){
+document.getElementById('e_departure_date').value=new Date().toISOString().slice(0,10);
+}}
 function go(tab,btn){
 document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
