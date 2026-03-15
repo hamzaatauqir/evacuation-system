@@ -441,6 +441,12 @@ def api_dashboard_stats():
     pending = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Pending' AND dup_flag='CLEAR'").fetchone()['c']
     visa_approved = db.execute("SELECT COUNT(*) c FROM evacuees WHERE visa_status='Approved'").fetchone()['c']
     iraq_entries = db.execute("SELECT COUNT(*) c FROM evacuees WHERE country='Iraq'").fetchone()['c']
+    returned = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned'").fetchone()['c']
+
+    # Today's live counts
+    departed_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND planned_departure=date('now')").fetchone()['c']
+    entered_today = departed_today  # Departing Kuwait = Entering KSA same day
+    returned_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND planned_departure=date('now')").fetchone()['c']
 
     by_country = [dict(r) for r in db.execute("""
         SELECT country, COUNT(*) total,
@@ -476,7 +482,9 @@ def api_dashboard_stats():
     db.close()
     return {
         'kpi': {'total': total, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
-                'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates},
+                'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates,
+                'departed_today': departed_today, 'entered_today': entered_today,
+                'returned': returned, 'returned_today': returned_today},
         'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
         'by_visa': by_visa, 'by_border': by_border
     }
@@ -1456,7 +1464,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 </div></div>
 <div class="fs"><h3>Visa &amp; Travel</h3><div class="fg">
 <div class="fgp"><label>KSA Visa Status</label><select name="visa_status"><option value="">Select</option><option>Approved</option><option>Pending</option><option>Rejected</option></select></div>
-<div class="fgp"><label>Travel Status *</label><select name="travel_status" required><option value="">Select</option><option>Pending</option><option>Visa Obtained</option><option>Departed</option></select></div>
+<div class="fgp"><label>Travel Status *</label><select name="travel_status" required><option value="">Select</option><option>Pending</option><option>Visa Obtained</option><option>Departed</option><option>Returned</option></select></div>
 <div class="fgp"><label>Airline</label><select name="airline"><option value="">Select</option><option>PIA</option><option>Kuwait Airways</option><option>Jazeera</option><option>Emirates</option><option>Air Blue</option></select></div>
 <div class="fgp"><label>Ticket Number</label><input name="ticket_number"></div>
 <div class="fgp"><label>Departure Airport</label><input name="departure_airport"></div>
@@ -1477,7 +1485,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <h3>All Registered Evacuees</h3>
 <div class="sb">
 <input id="sInput" placeholder="Search name, passport, CNIC, mobile..." oninput="loadRecords()">
-<select id="fStatus" onchange="loadRecords()"><option value="">All Status</option><option>Departed</option><option>Visa Obtained</option><option>Pending</option></select>
+<select id="fStatus" onchange="loadRecords()"><option value="">All Status</option><option>Departed</option><option>Visa Obtained</option><option>Pending</option><option>Returned</option></select>
 <select id="fCountry" onchange="loadRecords()"><option value="">All Countries</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>US</option><option>KSA</option><option>UAE</option><option>Dubai</option></select>
 <select id="fGender" onchange="loadRecords()"><option value="">All Gender</option><option>Male</option><option>Female</option><option>Child</option></select>
 <select id="fDup" onchange="loadRecords()"><option value="">All</option><option value="DUPLICATE">Duplicates Only</option><option value="CLEAR">Clean Only</option></select>
@@ -1722,7 +1730,7 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Company</label><input id="e_company"></div>
 <div class="fgp"><label>Border Crossing</label><input id="e_border_crossing"></div>
 <div class="fgp"><label>KSA Visa Status</label><select id="e_visa_status"><option value="">Select</option><option>Approved</option><option>Pending</option><option>Rejected</option></select></div>
-<div class="fgp"><label>Travel Status</label><select id="e_travel_status"><option>Pending</option><option>Visa Obtained</option><option>Departed</option></select></div>
+<div class="fgp"><label>Travel Status</label><select id="e_travel_status"><option>Pending</option><option>Visa Obtained</option><option>Departed</option><option>Returned</option></select></div>
 <div class="fgp"><label>Airline</label><input id="e_airline"></div>
 <div class="fgp"><label>Ticket Number</label><input id="e_ticket_number"></div>
 <div class="fgp"><label>Departure Airport</label><input id="e_departure_airport"></div>
@@ -1767,51 +1775,61 @@ document.getElementById('kpiGrid').innerHTML=`
 <div class="kc i"><div class="lb">Visa Obtained</div><div class="vl">${k.visa_obtained}</div><div class="su">Awaiting travel</div></div>
 <div class="kc d"><div class="lb">Pending Visa</div><div class="vl">${k.pending}</div><div class="su">Requires action</div></div>
 <div class="kc s"><div class="lb">KSA Approved</div><div class="vl">${k.visa_approved}</div><div class="su">Mission KSA</div></div>
-<div class="kc w"><div class="lb">Iraq Entries</div><div class="vl">${k.iraq_entries}</div><div class="su">Cross-border</div></div>`;
+<div class="kc w"><div class="lb">Iraq Entries</div><div class="vl">${k.iraq_entries}</div><div class="su">Cross-border</div></div>
+${k.returned > 0 ? '<div class="kc d"><div class="lb">Returned</div><div class="vl">'+k.returned+'</div><div class="su">'+k.returned_today+' today</div></div>' : ''}
+<div class="kc s" style="background:#fff3e0;border-color:#e65100"><div class="lb" style="color:#e65100">Today Live</div><div class="vl" style="color:#e65100">${k.departed_today}</div><div class="su" style="color:#bf360c">${k.departed_today} departed | ${k.entered_today} entered KSA</div></div>`;
 if(k.pending>k.visa_approved){document.getElementById('alertBar').style.display='flex';document.getElementById('alertText').textContent=`ALERT: Pending (${k.pending}) outpacing resolved (${k.visa_approved}) — urgent KSA action needed`}
 else document.getElementById('alertBar').style.display='none';
 
 // Charts
-mkChart('c1','doughnut',{labels:['Departed','Visa Obtained','Pending'],datasets:[{data:[k.departed,k.visa_obtained,k.pending],backgroundColor:['#4caf50','#2196f3','#ff9800'],borderWidth:2}]},{plugins:{legend:{position:'bottom'}}});
+mkChart('c1','doughnut',{labels:['Departed','Visa Obtained','Pending','Returned'],datasets:[{data:[k.departed,k.visa_obtained,k.pending,k.returned],backgroundColor:['#4caf50','#2196f3','#ff9800','#e65100'],borderWidth:2}]},{plugins:{legend:{position:'bottom'}}});
 const cn=d.by_country;
 mkChart('c2','bar',{labels:cn.map(c=>c.country||'Unknown'),datasets:[{label:'Total',data:cn.map(c=>c.total),backgroundColor:'#1565c0'}]},{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}});
 // Transit Flow Map
 document.getElementById('transitMap').innerHTML=`
-<svg viewBox="0 0 500 400" style="width:100%;max-width:480px;font-family:Arial,sans-serif">
+<svg viewBox="0 0 500 480" style="width:100%;max-width:500px;font-family:Arial,sans-serif">
 <defs>
 <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#006600"/></marker>
 <marker id="arrowR" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#c62828"/></marker>
+<marker id="arrowO" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto"><polygon points="10 0, 0 3.5, 10 7" fill="#e65100"/></marker>
 </defs>
+<!-- Today's Live Banner -->
+<rect x="60" y="2" width="380" height="32" rx="6" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
+<text x="250" y="22" text-anchor="middle" font-size="11" font-weight="bold" fill="#e65100">TODAY: ${k.departed_today} Departed  |  ${k.entered_today} Entered KSA  |  ${k.returned_today} Returned</text>
 <!-- Iraq -->
-<rect x="140" y="5" width="220" height="70" rx="10" fill="#f5f5f5" stroke="#bbb" stroke-width="1.5"/>
-<text x="250" y="32" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">IRAQ</text>
-<text x="250" y="52" text-anchor="middle" font-size="10" fill="#777">${k.iraq_entries} entered from Iraq</text>
+<rect x="140" y="42" width="220" height="70" rx="10" fill="#f5f5f5" stroke="#bbb" stroke-width="1.5"/>
+<text x="250" y="69" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">IRAQ</text>
+<text x="250" y="89" text-anchor="middle" font-size="10" fill="#777">${k.iraq_entries} entered from Iraq</text>
 <!-- Arrow Iraq → Kuwait -->
-<line x1="250" y1="75" x2="250" y2="120" stroke="#c62828" stroke-width="3" marker-end="url(#arrowR)">
+<line x1="250" y1="112" x2="250" y2="157" stroke="#c62828" stroke-width="3" marker-end="url(#arrowR)">
 <animate attributeName="stroke-dashoffset" from="20" to="0" dur="1s" repeatCount="indefinite"/>
 </line>
-<text x="285" y="102" font-size="9" fill="#c62828" font-weight="600">Entering</text>
+<text x="285" y="139" font-size="9" fill="#c62828" font-weight="600">Entering</text>
 <!-- Kuwait -->
-<rect x="100" y="125" width="300" height="120" rx="14" fill="#e8f5e9" stroke="#006600" stroke-width="2.5"/>
-<text x="250" y="155" text-anchor="middle" font-size="11" fill="#006600" font-weight="bold">STATE OF KUWAIT</text>
-<text x="250" y="178" text-anchor="middle" font-size="22" font-weight="bold" fill="#006600">${k.total}</text>
-<text x="250" y="196" text-anchor="middle" font-size="10" fill="#006600">Pakistani Nationals Registered</text>
-<text x="165" y="228" text-anchor="middle" font-size="9" fill="#555">Khafji Border</text>
-<text x="335" y="228" text-anchor="middle" font-size="9" fill="#555">Salmi Border</text>
-<circle cx="165" cy="238" r="3" fill="#006600"/><circle cx="335" cy="238" r="3" fill="#006600"/>
-<!-- Arrows Kuwait → KSA -->
-<line x1="165" y1="245" x2="165" y2="295" stroke="#006600" stroke-width="3" marker-end="url(#arrowG)">
+<rect x="100" y="162" width="300" height="120" rx="14" fill="#e8f5e9" stroke="#006600" stroke-width="2.5"/>
+<text x="250" y="190" text-anchor="middle" font-size="11" fill="#006600" font-weight="bold">STATE OF KUWAIT</text>
+<text x="250" y="213" text-anchor="middle" font-size="22" font-weight="bold" fill="#006600">${k.total}</text>
+<text x="250" y="231" text-anchor="middle" font-size="10" fill="#006600">Pakistani Nationals Registered</text>
+<text x="165" y="263" text-anchor="middle" font-size="9" fill="#555">Khafji Border</text>
+<text x="335" y="263" text-anchor="middle" font-size="9" fill="#555">Salmi Border</text>
+<circle cx="165" cy="273" r="3" fill="#006600"/><circle cx="335" cy="273" r="3" fill="#006600"/>
+<!-- Arrows Kuwait → KSA (departing) -->
+<line x1="165" y1="280" x2="165" y2="340" stroke="#006600" stroke-width="3" marker-end="url(#arrowG)">
 <animate attributeName="stroke-dashoffset" from="20" to="0" dur="1s" repeatCount="indefinite"/>
 </line>
-<line x1="335" y1="245" x2="335" y2="295" stroke="#006600" stroke-width="3" marker-end="url(#arrowG)">
+<line x1="335" y1="280" x2="335" y2="340" stroke="#006600" stroke-width="3" marker-end="url(#arrowG)">
 <animate attributeName="stroke-dashoffset" from="20" to="0" dur="1s" repeatCount="indefinite"/>
 </line>
-<text x="250" y="280" text-anchor="middle" font-size="10" fill="#006600" font-weight="600">Departing to KSA</text>
+<text x="250" y="318" text-anchor="middle" font-size="10" fill="#006600" font-weight="600">Departing to KSA</text>
+<!-- Return arrow KSA → Kuwait (if any returned) -->
+${k.returned > 0 ? '<line x1="430" y1="370" x2="430" y2="270" stroke="#e65100" stroke-width="2.5" stroke-dasharray="6,3" marker-end="url(#arrowO)"><animate attributeName="stroke-dashoffset" from="20" to="0" dur="1.5s" repeatCount="indefinite"/></line><text x="458" y="325" font-size="8" fill="#e65100" font-weight="600" transform="rotate(90,458,325)">Returned</text>' : ''}
 <!-- KSA -->
-<rect x="80" y="300" width="340" height="85" rx="10" fill="#f5f5f5" stroke="#bbb" stroke-width="1.5"/>
-<text x="250" y="328" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">KINGDOM OF SAUDI ARABIA</text>
-<text x="250" y="352" text-anchor="middle" font-size="28" font-weight="bold" fill="#006600">${k.departed}</text>
-<text x="250" y="372" text-anchor="middle" font-size="11" fill="#555">Departed via Transit</text>
+<rect x="80" y="348" width="340" height="120" rx="10" fill="#f5f5f5" stroke="#bbb" stroke-width="1.5"/>
+<text x="250" y="372" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">KINGDOM OF SAUDI ARABIA</text>
+<text x="250" y="400" text-anchor="middle" font-size="28" font-weight="bold" fill="#006600">${k.departed}</text>
+<text x="250" y="418" text-anchor="middle" font-size="11" fill="#555">Departed via Transit</text>
+<text x="250" y="438" text-anchor="middle" font-size="10" fill="#e65100" font-weight="600">${k.returned > 0 ? k.returned + ' Returned from Border' : ''}</text>
+<text x="250" y="456" text-anchor="middle" font-size="9" fill="#888">${k.departed_today > 0 ? 'Today: ' + k.departed_today + ' crossed into KSA' : ''}</text>
 </svg>`;
 mkChart('c3','doughnut',{labels:d.by_gender.map(g=>g.gender||'Unknown'),datasets:[{data:d.by_gender.map(g=>g.count),backgroundColor:['#1565c0','#e91e63','#ff9800','#9e9e9e'],borderWidth:2}]},{plugins:{legend:{position:'bottom'}}});
 const dd=d.by_date;let cum=0;const cumD=dd.map(x=>{cum+=x.new_requests;return cum});
@@ -1837,7 +1855,7 @@ allRecords=await api('/api/records?'+p.toString());if(!allRecords)return;
 document.getElementById('recCount').textContent=`Showing ${allRecords.length} records`;
 let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>Edit</th></tr></thead><tbody>';
 allRecords.forEach((r,i)=>{
-const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':'bdg-vis';
+const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':r.travel_status==='Returned'?'bdg-rej':'bdg-vis';
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
 const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
 const ms=r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20;font-size:.7em">Sent</span>':'-';
