@@ -13,8 +13,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 PORT = int(os.environ.get('PORT', 8080))
-DB_PATH = Path(__file__).parent / 'evacuation.db'
-BACKUP_DIR = Path(__file__).parent / 'backups'
+# Use /data/ for persistent Render Disk, fallback to local directory for development
+RENDER_DISK = Path('/data')
+if RENDER_DISK.exists() and RENDER_DISK.is_dir():
+    DB_PATH = RENDER_DISK / 'evacuation.db'
+    BACKUP_DIR = RENDER_DISK / 'backups'
+else:
+    DB_PATH = Path(__file__).parent / 'evacuation.db'
+    BACKUP_DIR = Path(__file__).parent / 'backups'
 SESSIONS = {}  # token -> {user, role, expires}
 
 # ═══════════════════════════════════════════════════════════════
