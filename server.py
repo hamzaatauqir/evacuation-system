@@ -268,10 +268,12 @@ def get_session(cookie_str):
 # DUPLICATE DETECTION
 # ═══════════════════════════════════════════════════════════════
 def check_duplicates(db, record, exclude_id=None):
+    """Check for duplicates based on: Passport, CNIC, and Civil ID only.
+    Name and mobile are NOT checked — different people can share names, families share mobiles."""
     flags = []
     passport = (record.get('passport') or '').strip().upper()
     cnic = re.sub(r'[\s\-]', '', record.get('cnic') or '')
-    name = (record.get('name') or '').strip().lower()
+    civil_id = (record.get('civil_id') or '').strip()
 
     if passport:
         q = "SELECT id, name FROM evacuees WHERE UPPER(TRIM(passport)) = ?"
@@ -287,12 +289,12 @@ def check_duplicates(db, record, exclude_id=None):
         dup = db.execute(q, params).fetchone()
         if dup: flags.append(f"CNIC match with #{dup['id']} ({dup['name']})")
 
-    if name and len(name) > 3:
-        q = "SELECT id, name FROM evacuees WHERE LOWER(TRIM(name)) = ?"
-        params = [name]
+    if civil_id:
+        q = "SELECT id, name FROM evacuees WHERE TRIM(civil_id) = ?"
+        params = [civil_id]
         if exclude_id: q += " AND id != ?"; params.append(exclude_id)
         dup = db.execute(q, params).fetchone()
-        if dup: flags.append(f"Name match with #{dup['id']} ({dup['name']})")
+        if dup: flags.append(f"Civil ID match with #{dup['id']} ({dup['name']})")
 
     return flags
 
