@@ -745,7 +745,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         params = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
 
-        if path == '/register':
+        if path in ('/embassy-registration', '/register'):
             # Public registration page — no login needed
             db = get_db()
             enabled = db.execute("SELECT value FROM settings WHERE key='public_registration'").fetchone()
@@ -754,7 +754,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_html('<html><body style="font-family:Arial;text-align:center;padding:60px"><h1>Registration Closed</h1><p>Public registration is currently closed. Please contact the Embassy directly.</p></body></html>')
             else:
                 self.send_html(PUBLIC_REGISTER_PAGE)
-        elif path == '/register/success':
+        elif path in ('/embassy-registration/success', '/register/success'):
             self.send_html(REGISTER_SUCCESS_PAGE)
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
@@ -1090,12 +1090,12 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <div class="hdr">
 <svg width="70" height="70" viewBox="0 0 200 200" style="margin-bottom:8px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
 <h1>SAUDI TRANSIT VISA REGISTRATION</h1>
-<div class="sub">Pakistan Embassy Kuwait &mdash; Evacuation Assistance</div>
+<div class="sub">Pakistan Embassy Kuwait &mdash; Consular Services</div>
 </div>
 <div class="ctr">
 <div class="notice">
 <strong>&#9888;&#65039; Important Information</strong>
-This form is for Pakistani nationals in Kuwait requiring Saudi transit visa assistance for evacuation. Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
+This form is for Pakistani nationals in Kuwait requiring Saudi transit visa assistance. Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
 </div>
 <form id="regForm" onsubmit="return submitForm(event)">
 <div class="fs"><h3>Personal Information</h3>
@@ -1148,7 +1148,7 @@ if(d.success){
     document.getElementById('dupWarning').innerHTML='<strong>&#9888; Note:</strong> Your record was saved but a possible duplicate was detected: '+d.dup_details.join('; ')+'. If you already registered, you do not need to register again.';
     document.getElementById('dupWarning').style.display='block';
   }
-  window.location='/register/success';
+  window.location='/embassy-registration/success';
 }else{
   document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
   document.getElementById('errorMsg').style.display='block';
@@ -1189,7 +1189,7 @@ Your visa application will be reviewed by the Embassy team. You will be contacte
 Please email a copy of your passport to:<br><a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
 </div>
 <p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.<br>Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>Tel: (+965) 25327651, 25354073<br>Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
-<a href="/register">Submit Another Registration</a>
+<a href="/embassy-registration">Submit Another Registration</a>
 </div>
 </body></html>"""
 
@@ -1710,7 +1710,7 @@ if(r?.key){const url=window.location.origin+'/api/webhook/forms?key='+r.key;
 document.getElementById('webhookKeyDisplay').innerHTML=`<strong>API Key:</strong> ${r.key}<br><strong>Webhook URL:</strong> <code>${url}</code>`;
 document.getElementById('webhookUrl').textContent=url;toast('Key generated')}}
 // PUBLIC REGISTRATION TOGGLE
-document.getElementById('publicLink').textContent=window.location.origin+'/register';
+document.getElementById('publicLink').textContent=window.location.origin+'/embassy-registration';
 async function togglePublicReg(){const val=document.getElementById('regToggle').value;
 await api('/api/setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'public_registration',value:val})});
 toast('Public registration '+(val==='enabled'?'OPENED':'CLOSED'))}
