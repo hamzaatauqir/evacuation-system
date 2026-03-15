@@ -969,7 +969,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/record/delete':
             user = self.require_auth()
             if not user: return
-            if user['role'] != 'admin': self.send_json({'error': 'Only admin can delete records'}, 403); return
+            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Only admin or operator can delete records'}, 403); return
             data = json.loads(body)
             self.send_json(api_delete_record(data['id'], user['user']))
 
@@ -1713,7 +1713,7 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div class="bg">
 <button type="submit" class="btn btn-p">Save Changes</button>
-<button type="button" class="btn btn-d" onclick="delRecord()" data-admin-only>Delete</button>
+<button type="button" class="btn btn-d" onclick="delRecord()">Delete</button>
 <button type="button" class="btn" style="background:#eee" onclick="closeEdit()">Cancel</button>
 </div></form></div></div>
 
