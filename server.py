@@ -1079,14 +1079,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
-                        [user['username'], from_id, to_id])
+                        [user['user'], from_id, to_id])
                     count = cur.rowcount
                     db.commit()
                 elif ids and len(ids) > 0:
                     placeholders = ','.join(['?'] * len(ids))
                     cur = db.execute(f"""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id IN ({placeholders}) AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
-                        [user['username']] + [int(i) for i in ids])
+                        [user['user']] + [int(i) for i in ids])
                     count = cur.rowcount
                     db.commit()
                 else:
@@ -1094,7 +1094,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_json({'success': False, 'error': 'No records selected'}, 400)
                     return
                 db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_batch_sent', 0, ?, ?)",
-                          [user['username'], f'Marked {count} records as Sent to MOFA'])
+                          [user['user'], f'Marked {count} records as Sent to MOFA'])
                 db.commit()
                 db.close()
                 self.send_json({'success': True, 'count': count})
