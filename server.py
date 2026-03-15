@@ -1782,6 +1782,23 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fs"><h3>Audit Log (Recent)</h3><div class="scroll-t"><table id="auditTbl"></table></div></div>
 </div></div>
 
+<!-- VIEW MODAL -->
+<div class="mo" id="viewModal"><div class="ml" style="max-width:780px">
+<button class="cb" onclick="closeView()">&times;</button>
+<div id="viewHeader" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+<h3 style="margin:0">Citizen Profile <span id="viewId" style="color:#006600"></span></h3>
+<span id="viewTracking" style="background:#e8f5e9;color:#006600;padding:4px 12px;border-radius:6px;font-weight:700;font-size:.9em"></span>
+</div>
+<div id="viewBadges" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+<div id="viewBody"></div>
+<div class="bg" style="margin-top:14px">
+<button class="btn btn-i" id="viewEditBtn" onclick="viewToggleEdit()">Edit Record</button>
+<button class="btn btn-p" id="viewSaveBtn" style="display:none" onclick="viewSave()">Save Changes</button>
+<button class="btn btn-d" onclick="viewDelete()">Delete</button>
+<button class="btn" style="background:#eee" onclick="closeView()">Close</button>
+</div>
+</div></div>
+
 <!-- EDIT MODAL -->
 <div class="mo" id="editModal"><div class="ml">
 <button class="cb" onclick="closeEdit()">&times;</button>
@@ -1940,15 +1957,140 @@ const ge=document.getElementById('fGender').value;if(ge)p.set('gender',ge);
 const du=document.getElementById('fDup').value;if(du)p.set('dup',du);
 allRecords=await api('/api/records?'+p.toString());if(!allRecords)return;
 document.getElementById('recCount').textContent=`Showing ${allRecords.length} records`;
-let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>Edit</th></tr></thead><tbody>';
+let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>Actions</th></tr></thead><tbody>';
 allRecords.forEach((r,i)=>{
 const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':r.travel_status==='Returned'?'bdg-rej':'bdg-vis';
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
 const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
 const ms=r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20;font-size:.7em">Sent</span>':'-';
 const cmpBtn=r.dup_flag==='DUPLICATE'?`<button class="btn btn-d" style="padding:2px 6px;font-size:.7em;margin-left:4px" onclick="compareDup(${r.id})">Compare</button>`:'';
-h+=`<tr><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td><button class="btn btn-i" style="padding:3px 8px;font-size:.75em" onclick="openEdit(${r.id})">Edit</button></td></tr>`;
+h+=`<tr><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button></td></tr>`;
 });h+='</tbody>';document.getElementById('recTbl').innerHTML=h;
+}
+
+// VIEW RECORD
+let viewRec=null;
+function openView(id){
+viewRec=allRecords.find(x=>x.id===id);
+if(!viewRec){toast('Record not found');return}
+const r=viewRec;
+document.getElementById('viewId').textContent='#'+r.id;
+document.getElementById('viewTracking').textContent='PKE-'+String(r.id).padStart(4,'0');
+// Status badges
+const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':r.travel_status==='Returned'?'bdg-rej':'bdg-vis';
+const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
+const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
+document.getElementById('viewBadges').innerHTML=`
+<span class="bdg ${vb}">Visa: ${r.visa_status||'—'}</span>
+<span class="bdg ${sb}">Status: ${r.travel_status||'—'}</span>
+<span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>
+${r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20">MOFA Sent</span>':''}
+${r.priority&&r.priority!=='Normal'?'<span class="bdg" style="background:#fff3e0;color:#e65100">Priority: '+r.priority+'</span>':''}`;
+// Build profile sections
+const sec=(title,fields)=>{
+let s=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#006600;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #e8f5e9;margin-bottom:8px">${title}</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px">`;
+fields.forEach(([label,val])=>{
+s+=`<div style="font-size:.85em"><span style="color:#888;display:block;font-size:.85em">${label}</span><strong style="color:#333">${val||'—'}</strong></div>`;
+});
+return s+'</div></div>';
+};
+let html=sec('Personal Information',[
+['Full Name',r.name],['Passport Number',r.passport],['CNIC',r.cnic],['Gender',r.gender],
+['Date of Birth',r.dob],['Country',r.country],['Civil ID',r.civil_id],['Email',r.email],
+['Mobile',r.mobile],['Company',r.company]
+]);
+html+=sec('Travel Details',[
+['Border Crossing',r.border_crossing],['Planned Departure',r.planned_departure],
+['Departure Date',r.departure_date],['Transit Stay Saudi City',r.saudi_city],
+['Traveling with Family',r.traveling_with_family],['Confirm KSA 3-Days',r.confirm_ksa_3days],
+['Airline',r.airline],['Ticket Number',r.ticket_number],
+['Departure Airport',r.departure_airport],['Destination',r.destination_country]
+]);
+html+=sec('Status & Processing',[
+['KSA Visa Status',r.visa_status],['Travel Status',r.travel_status],
+['MOFA Status',r.mofa_status||'—'],['Duplicate Flag',r.dup_flag],
+['Priority',r.priority],['Date of Request',r.date_of_request]
+]);
+html+=sec('Additional',[
+['Emergency Contact',r.emergency_contact],['Medical',r.medical],
+['Accommodation',r.accommodation],['Dependents',r.dependents],
+['Family Group ID',r.family_group_id],['Remarks',r.remarks]
+]);
+html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:.8em;color:#999;margin-top:8px;padding-top:8px;border-top:1px solid #eee">
+<div>Created: ${r.created_at||'—'}</div><div>Updated: ${r.updated_at||'—'} ${r.updated_by?'by '+r.updated_by:''}</div></div>`;
+document.getElementById('viewBody').innerHTML=html;
+document.getElementById('viewModal').classList.add('show');
+}
+let viewEditMode=false;
+function closeView(){document.getElementById('viewModal').classList.remove('show');viewEditMode=false}
+function viewToggleEdit(){
+if(!viewRec)return;
+viewEditMode=true;
+document.getElementById('viewEditBtn').style.display='none';
+document.getElementById('viewSaveBtn').style.display='';
+// Rebuild body with editable fields
+const r=viewRec;
+const sel=(name,opts,cur)=>{let s=`<select data-vf="${name}" style="width:100%;padding:5px 8px;border:1px solid #1565c0;border-radius:4px;font-size:.9em;background:#fff">`;
+opts.forEach(o=>{s+=`<option${(cur||'')===o?' selected':''}>${o}</option>`});return s+'</select>';};
+const inp=(name,val,type)=>`<input data-vf="${name}" type="${type||'text'}" value="${(val||'').toString().replace(/"/g,'&quot;')}" style="width:100%;padding:5px 8px;border:1px solid #1565c0;border-radius:4px;font-size:.9em">`;
+const ta=(name,val)=>`<textarea data-vf="${name}" rows="2" style="width:100%;padding:5px 8px;border:1px solid #1565c0;border-radius:4px;font-size:.9em">${val||''}</textarea>`;
+const sec=(title,fields)=>{
+let s=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#1565c0;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #bbdefb;margin-bottom:8px">${title} (editing)</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px">`;
+fields.forEach(([label,html])=>{
+s+=`<div><label style="color:#555;font-size:.78em;display:block;margin-bottom:2px">${label}</label>${html}</div>`;
+});
+return s+'</div></div>';
+};
+let html=sec('Personal Information',[
+['Full Name',inp('name',r.name)],['Passport Number',inp('passport',r.passport)],
+['CNIC',inp('cnic',r.cnic)],['Gender',sel('gender',['Male','Female','Child'],r.gender)],
+['Date of Birth',inp('dob',r.dob,'date')],['Country',sel('country',['Kuwait','Pakistan','KSA','Iraq','US','Bahrain','Qatar','Oman','UAE','Dubai'],r.country)],
+['Civil ID',inp('civil_id',r.civil_id)],['Email',inp('email',r.email)],
+['Mobile',inp('mobile',r.mobile)],['Company',inp('company',r.company)]
+]);
+html+=sec('Travel Details',[
+['Border Crossing',inp('border_crossing',r.border_crossing)],['Planned Departure',inp('planned_departure',r.planned_departure,'date')],
+['Departure Date',inp('departure_date',r.departure_date,'date')],['Transit Stay Saudi City',inp('saudi_city',r.saudi_city)],
+['Traveling with Family',sel('traveling_with_family',['Yes','No'],r.traveling_with_family)],['Confirm KSA 3-Days',sel('confirm_ksa_3days',['Yes','No'],r.confirm_ksa_3days)],
+['Airline',inp('airline',r.airline)],['Ticket Number',inp('ticket_number',r.ticket_number)],
+['Departure Airport',inp('departure_airport',r.departure_airport)],['Destination',inp('destination_country',r.destination_country)]
+]);
+html+=sec('Status & Processing',[
+['KSA Visa Status',sel('visa_status',['Approved','Pending','Rejected'],r.visa_status)],
+['Travel Status',sel('travel_status',['Pending','Visa Obtained','Departed','Returned'],r.travel_status)],
+['Priority',sel('priority',['Normal','High','Medium','Low'],r.priority)],
+['Date of Request',inp('date_of_request',r.date_of_request,'date')]
+]);
+html+=sec('Additional',[
+['Emergency Contact',inp('emergency_contact',r.emergency_contact)],['Medical',inp('medical',r.medical)],
+['Accommodation',inp('accommodation',r.accommodation)],['Dependents',inp('dependents',r.dependents)],
+['Family Group ID',inp('family_group_id',r.family_group_id)],['Remarks',ta('remarks',r.remarks)]
+]);
+document.getElementById('viewBody').innerHTML=html;
+}
+async function viewSave(){
+if(!viewRec)return;
+const data={id:viewRec.id};
+document.querySelectorAll('[data-vf]').forEach(el=>{data[el.dataset.vf]=el.value});
+try{
+const r=await api('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+if(r&&r.success){
+toast('Record #'+viewRec.id+' saved successfully');
+// Update local record
+Object.keys(data).forEach(k=>{if(k!=='id')viewRec[k]=data[k]});
+viewEditMode=false;
+document.getElementById('viewEditBtn').style.display='';
+document.getElementById('viewSaveBtn').style.display='none';
+openView(viewRec.id);
+loadRecords();loadDash();
+}else{toast('Error: '+(r?.error||'Save failed'))}
+}catch(err){toast('Error: '+err.message)}
+}
+async function viewDelete(){
+if(!viewRec)return;
+if(!confirm('Delete record #'+viewRec.id+' ('+viewRec.name+')? This cannot be undone.'))return;
+await api('/api/record/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:viewRec.id})});
+closeView();loadRecords();loadDash();toast('Record #'+viewRec.id+' deleted');
 }
 
 // REGISTER
