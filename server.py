@@ -116,6 +116,10 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+    # Normalize border crossing names
+    db.execute("UPDATE evacuees SET border_crossing='Khafji Border' WHERE border_crossing IN ('Khafji Boarder','Khafji Crossing','khafji border','khafji')")
+    db.execute("UPDATE evacuees SET border_crossing='Salmi Border' WHERE border_crossing IN ('Salmi Boarder','Salmi Crossing','salmi border','salmi')")
+    db.commit()
     db.close()
 
 # ═══════════════════════════════════════════════════════════════
@@ -352,6 +356,10 @@ def import_csv_data(csv_text, user='system', mode='smart'):
                     rec['date_of_request'] = dt.strftime('%Y-%m-%d')
                 except: pass
 
+            # Normalize border crossing
+            if rec.get('border_crossing'):
+                rec['border_crossing'] = normalize_border(rec['border_crossing'])
+
             # Check for duplicate by passport
             passport = rec.get('passport', '')
             existing = None
@@ -497,7 +505,16 @@ def api_records(params):
     db.close()
     return result
 
+def normalize_border(val):
+    if not val: return val
+    v = val.strip().lower()
+    if 'khafji' in v or 'khafi' in v: return 'Khafji Border'
+    if 'salmi' in v or 'salmy' in v: return 'Salmi Border'
+    return val
+
 def api_save_record(data, user):
+    if data.get('border_crossing'):
+        data['border_crossing'] = normalize_border(data['border_crossing'])
     db = get_db()
     rec_id = data.get('id')
     fields = ['name','passport','cnic','gender','country','civil_id','border_crossing',
@@ -925,6 +942,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             # Clean data
             data['passport'] = data['passport'].strip().upper()
+            if data.get('border_crossing'):
+                data['border_crossing'] = normalize_border(data['border_crossing'])
             if data.get('cnic'):
                 data['cnic'] = re.sub(r'[\s]', '', data['cnic'])
             if not data.get('date_of_request'):
@@ -1227,7 +1246,7 @@ The situation in Kuwait remains stable and under control. This registration faci
 <div class="fg">
 <div class="fgp"><label>Country of Residence <span class="req">*</span></label><select name="country" required><option value="">Select Country</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>KSA</option><option>US</option><option>Bahrain</option><option>Qatar</option><option>Oman</option><option>UAE</option></select></div>
 <div class="fgp"><label>Kuwaiti Civil ID Number (if any)</label><input name="civil_id" placeholder="Ignore if on visit visa"></div>
-<div class="fgp"><label>Border Crossing Area <span class="req">*</span></label><select name="border_crossing" required><option value="">Select Crossing</option><option>Khafji Border</option><option>Salmi Boarder</option><option>Salmi Crossing</option></select></div>
+<div class="fgp"><label>Border Crossing Area <span class="req">*</span></label><select name="border_crossing" required><option value="">Select Crossing</option><option>Khafji Border</option><option>Salmi Border</option></select></div>
 <div class="fgp"><label>Profession / Company</label><input name="company" placeholder="Your profession or company"></div>
 </div></div>
 <div class="fs"><h3>Travel Details</h3>
@@ -1429,7 +1448,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="fgp"><label>Country of Residence *</label><select name="country" required><option value="">Select</option><option>Kuwait</option><option>Pakistan</option><option>KSA</option><option>Iraq</option><option>US</option><option>Bahrain</option><option>Qatar</option><option>Oman</option><option>UAE</option><option>Dubai</option></select></div>
 <div class="fgp"><label>Civil ID</label><input name="civil_id"></div>
 <div class="fgp"><label>Company/Purpose</label><input name="company"></div>
-<div class="fgp"><label>Border Crossing</label><select name="border_crossing"><option value="">Select</option><option>Khafji Border</option><option>Khafji Crossing</option><option>Salmi Crossing</option><option>Salmi Boarder</option></select></div>
+<div class="fgp"><label>Border Crossing</label><select name="border_crossing"><option value="">Select</option><option>Khafji Border</option><option>Salmi Border</option></select></div>
 <div class="fgp"><label>Family Group ID</label><input name="family_group_id" placeholder="e.g. FAM-001"></div>
 <div class="fgp"><label>Dependents</label><input type="number" name="dependents" min="0" value="0"></div>
 <div class="fgp"><label>Accommodation</label><input name="accommodation"></div>
