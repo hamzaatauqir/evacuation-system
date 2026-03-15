@@ -1113,7 +1113,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <div class="ctr">
 <div class="notice">
 <strong>&#9888;&#65039; Important Information</strong>
-As the situation in Kuwait is currently stable and under control, this service is mainly for those on Visit Visa to Kuwait and require Three Days Transit Visa Facilitation for Saudi Arabia.<br><br>Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
+The situation in Kuwait remains stable and under control. This registration facility has been established as a measure to assist Pakistani nationals who may require travel facilitation, and, at present, this service is primarily intended for individuals on Visit Visas in Kuwait who may require three-day transit visa facilitation through the Kingdom of Saudi Arabia to return to Pakistan.<br><br>All Pakistani nationals are advised to remain calm and continue their normal activities, while staying updated through official announcements issued by the Government of Kuwait, and to strictly follow the guidance and instructions issued by Kuwaiti authorities.<br><br>The Embassy remains in close coordination with the relevant Kuwaiti authorities and will continue to provide updates and assistance as required.<br><br>Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
 </div>
 <form id="regForm" onsubmit="return submitForm(event)">
 <div class="fs"><h3>Personal Information</h3>
@@ -1135,7 +1135,7 @@ As the situation in Kuwait is currently stable and under control, this service i
 <div class="fs"><h3>Travel Details</h3>
 <div class="fg">
 <div class="fgp"><label>Planned Departure from Kuwait <span class="req">*</span></label><input type="date" name="planned_departure" required></div>
-<div class="fgp"><label>Stay in Saudi City (Planned) <span class="req">*</span></label><input name="saudi_city" required placeholder="e.g. Riyadh, Jeddah, Dammam"></div>
+<div class="fgp"><label>Transit Stay in Saudi City (Planned) <span class="req">*</span></label><input name="saudi_city" required placeholder="e.g. Riyadh, Jeddah, Dammam"></div>
 <div class="fgp"><label>Traveling with Family or Alone? <span class="req">*</span></label><select name="traveling_with_family" required><option value="">Select</option><option value="Yes">Yes — Traveling with Family</option><option value="No">No — Traveling Alone</option></select></div>
 <div class="fgp"><label>You have to leave KSA in Three Days as per the requirements <span class="req">*</span></label><select name="confirm_ksa_3days" required><option value="">Select</option><option value="Yes">Yes — I Confirm</option></select></div>
 </div></div>
@@ -1345,7 +1345,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="fgp"><label>Priority</label><select name="priority"><option value="">Normal</option><option>High</option><option>Medium</option><option>Low</option></select></div>
 <div class="fgp"><label>Date of Request</label><input type="date" name="date_of_request"></div>
 <div class="fgp"><label>Planned Departure from Kuwait</label><input type="date" name="planned_departure"></div>
-<div class="fgp"><label>Stay in Saudi City (Planned)</label><input name="saudi_city" placeholder="e.g. Riyadh, Jeddah, Dammam"></div>
+<div class="fgp"><label>Transit Stay in Saudi City (Planned)</label><input name="saudi_city" placeholder="e.g. Riyadh, Jeddah, Dammam"></div>
 <div class="fgp"><label>Traveling with Family?</label><select name="traveling_with_family"><option value="">Select</option><option value="Yes">Yes</option><option value="No">No</option></select></div>
 <div class="fgp"><label>Confirm KSA 3-Day Requirement</label><select name="confirm_ksa_3days"><option value="">Select</option><option value="Yes">Yes</option><option value="No">No</option></select></div>
 </div></div>
