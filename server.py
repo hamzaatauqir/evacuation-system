@@ -41,6 +41,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
+        password_plain TEXT DEFAULT '',
         role TEXT DEFAULT 'operator',
         full_name TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -118,6 +119,12 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+    # Migrate users table: add password_plain column
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN password_plain TEXT DEFAULT ''")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
     # Normalize border crossing names
     db.execute("UPDATE evacuees SET border_crossing='Khafji Border' WHERE border_crossing IN ('Khafji Boarder','Khafji Crossing','khafji border','khafji')")
     db.execute("UPDATE evacuees SET border_crossing='Salmi Border' WHERE border_crossing IN ('Salmi Boarder','Salmi Crossing','salmi border','salmi')")
@@ -599,15 +606,15 @@ def api_delete_record(rec_id, user):
 
 def api_users_list():
     db = get_db()
-    users = [dict(r) for r in db.execute("SELECT id, username, role, full_name, created_at FROM users").fetchall()]
+    users = [dict(r) for r in db.execute("SELECT id, username, role, full_name, password_plain, created_at FROM users").fetchall()]
     db.close()
     return users
 
 def api_create_user(data):
     db = get_db()
     try:
-        db.execute("INSERT INTO users (username, password_hash, role, full_name) VALUES (?, ?, ?, ?)",
-                   (data['username'], hash_pw(data['password']), data.get('role', 'operator'), data.get('full_name', '')))
+        db.execute("INSERT INTO users (username, password_hash, password_plain, role, full_name) VALUES (?, ?, ?, ?, ?)",
+                   (data['username'], hash_pw(data['password']), data['password'], data.get('role', 'operator'), data.get('full_name', '')))
         db.commit(); db.close()
         return {'success': True}
     except sqlite3.IntegrityError:
@@ -1084,6 +1091,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = json.loads(body)
             self.send_json(api_create_user(data))
 
+        elif path == '/api/user/update':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            uid = data.get('id')
+            if not uid: self.send_json({'error': 'User ID required'}, 400); return
+            db = get_db()
+            updates, params = [], []
+            if data.get('role'):
+                updates.append("role = ?"); params.append(data['role'])
+            if data.get('full_name') is not None:
+                updates.append("full_name = ?"); params.append(data['full_name'])
+            if data.get('new_password'):
+                updates.append("password_hash = ?"); params.append(hash_pw(data['new_password']))
+                updates.append("password_plain = ?"); params.append(data['new_password'])
+            if updates:
+                params.append(uid)
+                db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
+                db.commit()
+            db.close()
+            self.send_json({'success': True})
+
+        elif path == '/api/user/delete':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            uid = data.get('id')
+            db = get_db()
+            target = db.execute("SELECT username FROM users WHERE id = ?", [uid]).fetchone()
+            if target and target['username'] == user['user']:
+                db.close()
+                self.send_json({'error': 'Cannot delete your own account'}, 400); return
+            db.execute("DELETE FROM users WHERE id = ?", [uid])
+            db.commit(); db.close()
+            self.send_json({'success': True})
+
         elif path == '/api/webhook/forms':
             params = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
             api_key = params.get('key', '')
@@ -1112,7 +1157,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             data = json.loads(body)
             db = get_db()
-            db.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_pw(data['new_password']), user['user']))
+            target_user = data.get('username', user['user'])
+            # Only admin can change other users' passwords
+            if target_user != user['user'] and user['role'] != 'admin':
+                db.close()
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            db.execute("UPDATE users SET password_hash = ?, password_plain = ? WHERE username = ?",
+                       (hash_pw(data['new_password']), data['new_password'], target_user))
             db.commit(); db.close()
             self.send_json({'success': True})
 
@@ -1482,7 +1533,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 @media(max-width:768px){.kg{grid-template-columns:repeat(2,1fr)}.cg{grid-template-columns:1fr}.nav button{padding:8px 12px;font-size:.8em}}
 </style></head><body>
 <div class="hdr"><div style="display:flex;align-items:center"><span class="flag">&#127477;&#127472;</span><div><h1>CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM</h1><div class="sub">Pakistan Embassy Kuwait &mdash; CWA Kuwait</div></div></div>
-<div class="user-info"><span id="userDisplay"></span><a href="/logout">Logout</a></div></div>
+<div class="user-info"><span id="userDisplay"></span><a href="#" onclick="document.getElementById('pwModal').classList.add('show');return false" style="background:rgba(255,255,255,.08)">Change Password</a><a href="/logout">Logout</a></div></div>
 <div class="nav">
 <button class="active" onclick="go('dash',this)">Dashboard</button>
 <button onclick="go('reg',this)">New Registration</button>
@@ -1780,6 +1831,17 @@ No deterioration in ground security situation so far.</textarea>
 <button class="btn btn-p" style="margin-top:10px" onclick="changePw()">Change Password</button>
 </div>
 <div class="fs"><h3>Audit Log (Recent)</h3><div class="scroll-t"><table id="auditTbl"></table></div></div>
+</div></div>
+
+<!-- PASSWORD CHANGE MODAL -->
+<div class="mo" id="pwModal"><div class="ml" style="max-width:400px">
+<button class="cb" onclick="document.getElementById('pwModal').classList.remove('show')">&times;</button>
+<h3>Change Your Password</h3>
+<div class="fg" style="margin:14px 0">
+<div class="fgp" style="width:100%"><label>New Password</label><input id="myNewPw" type="password" style="width:100%"></div>
+<div class="fgp" style="width:100%"><label>Confirm Password</label><input id="myConfPw" type="password" style="width:100%"></div>
+</div>
+<button class="btn btn-p" onclick="changeMyPw()">Update Password</button>
 </div></div>
 
 <!-- VIEW MODAL -->
@@ -2341,8 +2403,14 @@ document.getElementById('repContent').innerHTML=h}
 // ADMIN
 async function loadAdmin(){
 const u=await api('/api/users');
-if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Created</th></tr></thead><tbody>';
-u.forEach(x=>{h+=`<tr><td>${x.username}</td><td>${x.full_name||'-'}</td><td>${x.role}</td><td>${x.created_at}</td></tr>`});
+if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Password</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+u.forEach(x=>{
+const pwDisplay=x.password_plain?`<span class="pw-hidden" id="pw_${x.id}" onclick="this.textContent=this.dataset.pw;this.style.cursor='default'" data-pw="${(x.password_plain||'').replace(/"/g,'&quot;')}" style="cursor:pointer;color:#1565c0;font-size:.85em" title="Click to reveal">••••••••</span>`:'<span style="color:#999;font-size:.8em">Not stored</span>';
+h+=`<tr><td><strong>${x.username}</strong></td><td>${x.full_name||'-'}</td>
+<td><select onchange="updateUserRole(${x.id},this.value)" style="padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:.85em">
+<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='viewer'?' selected':''}>viewer</option></select></td>
+<td>${pwDisplay}</td><td style="font-size:.8em">${x.created_at}</td>
+<td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminResetPw(${x.id},'${x.username}')">Reset PW</button><button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="adminDeleteUser(${x.id},'${x.username}')">Delete</button></td></tr>`});
 h+='</tbody>';document.getElementById('usersTbl').innerHTML=h}
 const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
@@ -2365,9 +2433,29 @@ document.getElementById('publicLink').textContent=window.location.origin+'/embas
 async function togglePublicReg(){const val=document.getElementById('regToggle').value;
 await api('/api/setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'public_registration',value:val})});
 toast('Public registration '+(val==='enabled'?'OPENED':'CLOSED'))}
+async function changeMyPw(){
+const pw=document.getElementById('myNewPw').value;
+const conf=document.getElementById('myConfPw').value;
+if(!pw){toast('Enter a new password');return}
+if(pw!==conf){toast('Passwords do not match');return}
+const r=await api('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pw})});
+if(r?.success){toast('Password changed successfully');document.getElementById('myNewPw').value='';document.getElementById('myConfPw').value='';document.getElementById('pwModal').classList.remove('show')}
+else toast('Error: '+(r?.error||'failed'))}
 async function changePw(){const pw=document.getElementById('newPw').value;if(!pw){toast('Enter password');return}
 await api('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pw})});
 document.getElementById('newPw').value='';toast('Password changed')}
+async function updateUserRole(uid,role){
+const r=await api('/api/user/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:uid,role})});
+if(r?.success){toast('Role updated to '+role)}else{toast('Error: '+(r?.error||'failed'));loadAdmin()}}
+async function adminResetPw(uid,uname){
+const pw=prompt('Enter new password for '+uname+':');
+if(!pw)return;
+const r=await api('/api/user/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:uid,new_password:pw})});
+if(r?.success){toast('Password reset for '+uname);loadAdmin()}else toast('Error: '+(r?.error||'failed'))}
+async function adminDeleteUser(uid,uname){
+if(!confirm('Delete user "'+uname+'"? This cannot be undone.'))return;
+const r=await api('/api/user/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:uid})});
+if(r?.success){toast('User "'+uname+'" deleted');loadAdmin()}else toast('Error: '+(r?.error||'failed'))}
 
 // BULK VISA UPDATE
 async function bulkVisaUpdate(){
