@@ -838,6 +838,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', len(body))
             self.end_headers()
             self.wfile.write(body)
+        elif path == '/api/record/duplicates':
+            user = self.require_auth()
+            if not user: return
+            params = parse_qs(urlparse(self.path).query)
+            rec_id = int(params.get('id', [0])[0])
+            db = get_db()
+            rec = db.execute("SELECT * FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+            if not rec:
+                db.close()
+                self.send_json({'duplicates': []})
+                return
+            rec = dict(rec)
+            duplicates = []
+            passport = (rec.get('passport') or '').strip().upper()
+            cnic = re.sub(r'[\s\-]', '', rec.get('cnic') or '')
+            civil_id = (rec.get('civil_id') or '').strip()
+            seen_ids = set()
+            if passport:
+                rows = db.execute("SELECT * FROM evacuees WHERE UPPER(TRIM(passport)) = ? AND id != ?", [passport, rec_id]).fetchall()
+                for r in rows:
+                    if r['id'] not in seen_ids:
+                        duplicates.append(dict(r)); seen_ids.add(r['id'])
+            if cnic:
+                rows = db.execute("SELECT * FROM evacuees WHERE REPLACE(REPLACE(cnic, '-', ''), ' ', '') = ? AND id != ?", [cnic, rec_id]).fetchall()
+                for r in rows:
+                    if r['id'] not in seen_ids:
+                        duplicates.append(dict(r)); seen_ids.add(r['id'])
+            if civil_id:
+                rows = db.execute("SELECT * FROM evacuees WHERE TRIM(civil_id) = ? AND id != ?", [civil_id, rec_id]).fetchall()
+                for r in rows:
+                    if r['id'] not in seen_ids:
+                        duplicates.append(dict(r)); seen_ids.add(r['id'])
+            db.close()
+            self.send_json({'duplicates': duplicates})
+            return
         elif path == '/api/mofa-pending':
             user = self.require_auth()
             if not user: return
@@ -1303,7 +1338,7 @@ if(d.success){
     document.getElementById('dupWarning').innerHTML='<strong>&#9888; Note:</strong> Your record was saved but a possible duplicate was detected: '+d.dup_details.join('; ')+'. If you already registered, you do not need to register again.';
     document.getElementById('dupWarning').style.display='block';
   }
-  window.location='/embassy-registration/success';
+  window.location='/embassy-registration/success?tid=PKE-'+String(d.id).padStart(4,'0');
 }else{
   document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
   document.getElementById('errorMsg').style.display='block';
@@ -1334,18 +1369,30 @@ a:hover{background:#004d00}
 <div class="card">
 <div class="check">&#9989;</div>
 <h1>Registration Successful!</h1>
+<div id="trackingBox" style="background:#e8f5e9;border:2px solid #006600;border-radius:10px;padding:16px;margin:12px 0;display:none">
+<div style="font-size:.8em;color:#555;text-transform:uppercase;letter-spacing:1px">Your Tracking Number</div>
+<div id="trackingNum" style="font-size:1.8em;font-weight:700;color:#006600;letter-spacing:2px;margin:4px 0"></div>
+<div style="font-size:.75em;color:#888">Please save this number for future reference</div>
+</div>
 <p>Your details have been submitted to Pakistan Embassy Kuwait. Your application is now being processed.</p>
 <div class="info">
 <strong>What happens next?</strong>
 Your visa application will be reviewed by the Embassy team. You will be contacted on the mobile number you provided once there is an update on your Saudi transit visa status.
 </div>
-<div style="background:#fff3e0;border:1px solid #ffcc80;border-radius:8px;padding:14px;font-size:.9em;color:#e65100;margin-bottom:16px;text-align:left">
-<strong style="display:block;margin-bottom:4px">&#9888;&#65039; Required: Send Passport Copies</strong>
-Please email a copy of your passport to:<br><a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
+<div style="background:#fff3e0;border:2px solid #e65100;border-radius:8px;padding:16px;font-size:.95em;color:#333;margin-bottom:16px;text-align:left">
+<strong style="display:block;margin-bottom:6px;color:#c62828;font-size:1.05em">&#9888;&#65039; Required: Send Passport Copies</strong>
+Please email a copy of your passport to:<br>
+<div style="background:#fff;border:2px dashed #006600;border-radius:6px;padding:12px;margin-top:8px;text-align:center">
+<a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:700;font-size:1.15em;text-decoration:underline;display:inline;padding:0;background:none;border-radius:0">parepkuwaitcwa37@gmail.com</a>
+</div>
 </div>
 <p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.<br>Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>Tel: (+965) 25327651, 25354073<br>Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
 <a href="/embassy-registration">Submit Another Registration</a>
 </div>
+<script>
+const tid=new URLSearchParams(window.location.search).get('tid');
+if(tid){document.getElementById('trackingNum').textContent=tid;document.getElementById('trackingBox').style.display='block'}
+</script>
 </body></html>"""
 
 # ═══════════════════════════════════════════════════════════════
@@ -1751,6 +1798,15 @@ No deterioration in ground security situation so far.</textarea>
 <button type="button" class="btn" style="background:#eee" onclick="closeEdit()">Cancel</button>
 </div></form></div></div>
 
+<div class="mo" id="compareModal"><div class="ml" style="max-width:900px">
+<button class="cb" onclick="closeCompare()">&times;</button>
+<h3>Duplicate Comparison</h3>
+<div id="compareBody" style="overflow-x:auto"></div>
+<div class="bg" style="margin-top:12px">
+<button class="btn" style="background:#eee" onclick="closeCompare()">Close</button>
+</div>
+</div></div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1869,7 +1925,8 @@ const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
 const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
 const ms=r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20;font-size:.7em">Sent</span>':'-';
-h+=`<tr><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span></td><td>${ms}</td><td><button class="btn btn-i" style="padding:3px 8px;font-size:.75em" onclick="openEdit(${r.id})">Edit</button></td></tr>`;
+const cmpBtn=r.dup_flag==='DUPLICATE'?`<button class="btn btn-d" style="padding:2px 6px;font-size:.7em;margin-left:4px" onclick="compareDup(${r.id})">Compare</button>`:'';
+h+=`<tr><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td><button class="btn btn-i" style="padding:3px 8px;font-size:.75em" onclick="openEdit(${r.id})">Edit</button></td></tr>`;
 });h+='</tbody>';document.getElementById('recTbl').innerHTML=h;
 }
 
@@ -1893,6 +1950,44 @@ async function delRecord(){const id=parseInt(document.getElementById('e_id').val
 if(!confirm('Delete this record?'))return;
 await api('/api/record/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
 closeEdit();loadRecords();loadDash();toast('Deleted')}
+
+// DUPLICATE COMPARISON
+function closeCompare(){document.getElementById('compareModal').classList.remove('show')}
+async function compareDup(id){
+const rec=allRecords.find(x=>x.id===id);
+if(!rec){toast('Record not found');return}
+try{
+const res=await fetch('/api/record/duplicates?id='+id);const d=await res.json();
+if(!d.duplicates||d.duplicates.length===0){toast('No matching duplicates found');return}
+const labels={id:'ID',name:'Name',passport:'Passport',cnic:'CNIC',gender:'Gender',country:'Country',
+civil_id:'Civil ID',border_crossing:'Border Crossing',mobile:'Mobile',company:'Company',
+visa_status:'Visa Status',travel_status:'Travel Status',departure_date:'Departure Date',
+airline:'Airline',ticket_number:'Ticket Number',departure_airport:'Departure Airport',
+destination_country:'Destination',date_of_request:'Date of Request',email:'Email',
+planned_departure:'Planned Departure',saudi_city:'Saudi City',traveling_with_family:'With Family',
+remarks:'Remarks',dup_flag:'Dup Flag',mofa_status:'MOFA Status',created_at:'Created At'};
+const fields=Object.keys(labels);
+let html='<table style="width:100%;border-collapse:collapse;font-size:.85em"><thead><tr><th style="padding:8px;background:#006600;color:#fff;text-align:left;position:sticky;left:0;min-width:130px">Field</th>';
+html+=`<th style="padding:8px;background:#1565c0;color:#fff;text-align:left;min-width:180px">Current Record #${rec.id}</th>`;
+d.duplicates.forEach(dup=>{html+=`<th style="padding:8px;background:#c62828;color:#fff;text-align:left;min-width:180px">Match #${dup.id}</th>`});
+html+='</tr></thead><tbody>';
+fields.forEach((f,i)=>{
+const bg=i%2===0?'#fff':'#f5f5f5';
+html+=`<tr style="background:${bg}"><td style="padding:6px 8px;font-weight:600;border:1px solid #e0e0e0;position:sticky;left:0;background:${bg}">${labels[f]}</td>`;
+html+=`<td style="padding:6px 8px;border:1px solid #e0e0e0">${rec[f]||'—'}</td>`;
+d.duplicates.forEach(dup=>{
+const match=rec[f]&&dup[f]&&String(rec[f]).toLowerCase()===String(dup[f]).toLowerCase();
+const style=match?'background:#ffcdd2;font-weight:600':'';
+html+=`<td style="padding:6px 8px;border:1px solid #e0e0e0;${style}">${dup[f]||'—'}</td>`;
+});
+html+='</tr>';
+});
+html+='</tbody></table>';
+html+='<p style="margin-top:8px;font-size:.8em;color:#c62828">Fields highlighted in red indicate matching values between records.</p>';
+document.getElementById('compareBody').innerHTML=html;
+document.getElementById('compareModal').classList.add('show');
+}catch(err){toast('Error loading comparison: '+err.message)}
+}
 
 // CSV UPLOAD
 async function uploadCSV(){const file=document.getElementById('csvFile').files[0];if(!file){toast('Select a file');return}
