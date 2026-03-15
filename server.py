@@ -1387,6 +1387,11 @@ a:hover{background:#004d00}
 <strong>What happens next?</strong>
 Your visa application will be reviewed by the Embassy team. You will be contacted on the mobile number you provided once there is an update on your Saudi transit visa status.
 </div>
+<div style="background:#ffebee;border:2px solid #c62828;border-radius:8px;padding:16px;margin-bottom:16px;text-align:left">
+<div style="color:#c62828;font-weight:700;font-size:1em;margin-bottom:8px">&#9888;&#65039; IMPORTANT / اہم ہدایات</div>
+<p style="color:#b71c1c;font-weight:700;font-size:.95em;margin-bottom:10px;line-height:1.5">PLEASE DO NOT BUY TICKET UNLESS EMBASSY STAFF CONTACTS YOU TO DO SO. IN CASE OF BUYING TICKET WITHOUT APPROVAL OF TRANSIT VISA YOU WILL BE RESPONSIBLE.</p>
+<p style="color:#333;font-size:.95em;line-height:1.8;direction:rtl;text-align:right;font-weight:600">براہِ کرم سفارت خانے کے عملے کی ہدایت/رابطہ ہونے تک ٹکٹ ہرگز نہ خریدیں۔<br>اگر آپ نے ٹرانزٹ ویزا کی منظوری کے بغیر ٹکٹ خریدا تو اس کی تمام ذمہ داری آپ کی اپنی ہوگی۔</p>
+</div>
 <div style="background:#fff3e0;border:2px solid #e65100;border-radius:8px;padding:16px;font-size:.95em;color:#333;margin-bottom:16px;text-align:left">
 <strong style="display:block;margin-bottom:6px;color:#c62828;font-size:1.05em">&#9888;&#65039; Required: Send Passport Copies</strong>
 Please email a copy of your passport to:<br>
