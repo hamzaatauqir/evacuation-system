@@ -812,17 +812,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             db = get_db()
-            rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status FROM evacuees
-                WHERE travel_status='Pending' AND dup_flag='CLEAR'
-                ORDER BY id""").fetchall()
+            # Check if mofa_status column exists
+            cols = [c[1] for c in db.execute("PRAGMA table_info(evacuees)").fetchall()]
+            has_mofa = 'mofa_status' in cols
+            if has_mofa:
+                rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status FROM evacuees
+                    WHERE travel_status='Pending' AND dup_flag='CLEAR'
+                    ORDER BY id""").fetchall()
+            else:
+                rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
+                    WHERE travel_status='Pending' AND dup_flag='CLEAR'
+                    ORDER BY id""").fetchall()
             db.close()
             result = []
             for r in rows:
                 d = dict(r)
-                try:
-                    d['mofa_status'] = r['mofa_status'] or ''
-                except (IndexError, KeyError):
+                if not has_mofa:
                     d['mofa_status'] = ''
+                else:
+                    d['mofa_status'] = d.get('mofa_status', '') or ''
                 result.append(d)
             self.send_json(result)
         elif path == '/api/mofa-export':
@@ -1058,7 +1066,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             from_id = data.get('from_id')
             to_id = data.get('to_id')
             db = get_db()
-            if from_id and to_id:
+            # Ensure mofa_status column exists
+            try:
+                db.execute("ALTER TABLE evacuees ADD COLUMN mofa_status TEXT DEFAULT ''")
+                db.commit()
+            except sqlite3.OperationalError:
+                pass
+            if from_id is not None and to_id is not None:
                 db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
                     WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'""",
                     [user['username'], int(from_id), int(to_id)])
