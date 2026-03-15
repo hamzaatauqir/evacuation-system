@@ -76,6 +76,7 @@ def init_db():
         saudi_city TEXT,
         traveling_with_family TEXT DEFAULT 'No',
         confirm_ksa_3days TEXT DEFAULT 'No',
+        mofa_status TEXT DEFAULT '',
         dup_flag TEXT DEFAULT 'CLEAR',
         form_submission_id TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -108,7 +109,8 @@ def init_db():
         pass
     # Migrate: add new columns if they don't exist
     for col, coltype in [('planned_departure', 'TEXT'), ('saudi_city', 'TEXT'),
-                         ('traveling_with_family', "TEXT DEFAULT 'No'"), ('confirm_ksa_3days', "TEXT DEFAULT 'No'")]:
+                         ('traveling_with_family', "TEXT DEFAULT 'No'"), ('confirm_ksa_3days', "TEXT DEFAULT 'No'"),
+                         ('mofa_status', "TEXT DEFAULT ''")]:
         try:
             db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
             db.commit()
@@ -806,6 +808,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', len(body))
             self.end_headers()
             self.wfile.write(body)
+        elif path == '/api/mofa-pending':
+            user = self.require_auth()
+            if not user: return
+            db = get_db()
+            rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status FROM evacuees
+                WHERE travel_status='Pending' AND dup_flag='CLEAR'
+                ORDER BY id""").fetchall()
+            db.close()
+            result = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d['mofa_status'] = r['mofa_status'] or ''
+                except (IndexError, KeyError):
+                    d['mofa_status'] = ''
+                result.append(d)
+            self.send_json(result)
+        elif path == '/api/mofa-export':
+            user = self.require_auth()
+            if not user: return
+            from_id = int(params.get('from', 0))
+            to_id = int(params.get('to', 999999))
+            db = get_db()
+            rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
+                WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                ORDER BY id""", [from_id, to_id]).fetchall()
+            db.close()
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(['S.No', 'Name', 'Passport Number', 'Border Entry Point'])
+            for i, r in enumerate(rows, 1):
+                writer.writerow([i, r['name'], r['passport'], r['border_crossing']])
+            body = output.getvalue().encode('utf-8-sig')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="MOFA_visa_request_{datetime.now().strftime("%Y%m%d")}.csv"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == '/api/users':
             user = self.require_auth()
             if not user: return
@@ -1008,6 +1049,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', len(docx_bytes))
             self.end_headers()
             self.wfile.write(docx_bytes)
+
+        elif path == '/api/mofa-mark-sent':
+            user = self.require_auth()
+            if not user: return
+            data = json.loads(body)
+            ids = data.get('ids', [])
+            from_id = data.get('from_id')
+            to_id = data.get('to_id')
+            db = get_db()
+            if from_id and to_id:
+                db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
+                    WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'""",
+                    [user['username'], int(from_id), int(to_id)])
+                count = db.execute("""SELECT COUNT(*) c FROM evacuees WHERE id >= ? AND id <= ?
+                    AND travel_status='Pending' AND dup_flag='CLEAR' AND mofa_status='Sent to MOFA'""",
+                    [int(from_id), int(to_id)]).fetchone()['c']
+            elif ids:
+                placeholders = ','.join(['?'] * len(ids))
+                db.execute(f"UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=? WHERE id IN ({placeholders})",
+                          [user['username']] + ids)
+                count = len(ids)
+            else:
+                db.close()
+                self.send_json({'success': False, 'error': 'No records selected'}, 400)
+                return
+            db.commit()
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_batch_sent', 0, ?, ?)",
+                      [user['username'], f'Marked {count} records as Sent to MOFA (IDs {from_id or ids[0]}-{to_id or ids[-1]})'])
+            db.commit()
+            db.close()
+            self.send_json({'success': True, 'count': count})
 
         elif path == '/api/bulk-visa-update':
             user = self.require_auth()
@@ -1268,7 +1340,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 .fs h3{margin-bottom:14px;padding-bottom:6px;border-bottom:2px solid var(--pl)}
 .btn{padding:9px 20px;border:none;border-radius:7px;cursor:pointer;font-weight:600;font-size:.88em;transition:.2s}
 .btn-p{background:var(--p);color:#fff}.btn-p:hover{background:#004d00}
-.btn-d{background:var(--d);color:#fff}.btn-i{background:var(--i);color:#fff}
+.btn-d{background:var(--d);color:#fff}.btn-i{background:var(--i);color:#fff}.hidden{display:none!important}
 .btn-w{background:var(--w);color:#fff}
 .bg{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
 .sb{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
@@ -1298,6 +1370,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <button class="active" onclick="go('dash',this)">Dashboard</button>
 <button onclick="go('reg',this)">New Registration</button>
 <button onclick="go('recs',this)">All Records</button>
+<button onclick="go('mofa',this)">MOFA Export</button>
 <button onclick="go('csv',this)">CSV Import</button>
 <button onclick="go('report',this)">SITREP Report</button>
 <button onclick="go('sitrep',this)">SITREP Editor</button>
@@ -1405,6 +1478,33 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 3. Upload here using the form above<br><br>
 <strong>Webhook URL:</strong> <code id="webhookUrl">Set up in Admin tab</code>
 </p></div>
+</div></div>
+
+<!-- MOFA EXPORT -->
+<div id="tab-mofa" class="tab"><div class="ctr">
+<div class="fs">
+<h3 style="color:var(--p)">MOFA Visa Request — Download &amp; Send</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Select a range of pending cases to download for MOFA Saudi Arabia. Only shows clean (non-duplicate) pending records. Download contains: Name, Passport Number, and Border Entry Point.</p>
+<div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:14px">
+<div class="fgp"><label style="font-size:.82em;font-weight:600">From Record #</label><select id="mofaFrom" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:220px"></select></div>
+<div class="fgp"><label style="font-size:.82em;font-weight:600">To Record #</label><select id="mofaTo" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:220px"></select></div>
+<button class="btn btn-p" style="padding:10px 20px" onclick="loadMofaPreview()">Preview</button>
+</div>
+<div id="mofaStats" style="margin-bottom:12px;font-size:.9em;display:none">
+<span style="background:var(--pl);color:var(--p);padding:4px 12px;border-radius:20px;font-weight:600" id="mofaCount"></span>
+<span style="margin-left:8px;color:var(--tl)" id="mofaRange"></span>
+</div>
+<div class="scroll-t"><table id="mofaTbl" style="font-size:.88em"></table></div>
+<div style="display:flex;gap:10px;margin-top:14px" id="mofaActions" class="hidden">
+<button class="btn btn-p" style="padding:10px 20px" onclick="downloadMofa()">Download CSV for MOFA</button>
+<button class="btn" style="padding:10px 20px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80" onclick="markSentToMofa()">Mark as Sent to MOFA</button>
+</div>
+</div>
+<div class="fs" style="margin-top:16px">
+<h3>Previously Sent Batches</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">Records already marked as "Sent to MOFA"</p>
+<div class="scroll-t"><table id="mofaSentTbl" style="font-size:.88em"></table></div>
+</div>
 </div></div>
 
 <!-- REPORT -->
@@ -1611,7 +1711,7 @@ document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
 document.getElementById('tab-'+tab).classList.add('active');
 btn.classList.add('active');
-if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='admin')loadAdmin();
+if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();
 }
 
 async function api(url,opts){const r=await fetch(url,opts);if(r.status===302||r.redirected){window.location='/login';return null}return r.json()}
@@ -1657,12 +1757,13 @@ const ge=document.getElementById('fGender').value;if(ge)p.set('gender',ge);
 const du=document.getElementById('fDup').value;if(du)p.set('dup',du);
 allRecords=await api('/api/records?'+p.toString());if(!allRecords)return;
 document.getElementById('recCount').textContent=`Showing ${allRecords.length} records`;
-let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>Edit</th></tr></thead><tbody>';
+let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>Edit</th></tr></thead><tbody>';
 allRecords.forEach((r,i)=>{
 const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':'bdg-vis';
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
 const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
-h+=`<tr><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span></td><td><button class="btn btn-i" style="padding:3px 8px;font-size:.75em" onclick="openEdit(${r.id})">Edit</button></td></tr>`;
+const ms=r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20;font-size:.7em">Sent</span>':'-';
+h+=`<tr><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span></td><td>${ms}</td><td><button class="btn btn-i" style="padding:3px 8px;font-size:.75em" onclick="openEdit(${r.id})">Edit</button></td></tr>`;
 });h+='</tbody>';document.getElementById('recTbl').innerHTML=h;
 }
 
@@ -1700,6 +1801,60 @@ document.getElementById('importStats').innerHTML=`
 <span class="stat-box stat-err">Errors: ${d.errors||0}</span>`;
 document.getElementById('importDetails').textContent=(d.details||[]).join('\n');
 loadDash();toast(`Import done: ${d.imported} new, ${d.skipped_dup} skipped, ${d.updated} updated`)}
+
+// MOFA EXPORT
+let mofaRecords=[];
+async function loadMofaData(){
+const rows=await api('/api/mofa-pending');if(!rows)return;
+mofaRecords=rows;
+const selFrom=document.getElementById('mofaFrom');
+const selTo=document.getElementById('mofaTo');
+selFrom.innerHTML='';selTo.innerHTML='';
+const newRecs=rows.filter(r=>!r.mofa_status||r.mofa_status===''||r.mofa_status==='New');
+const sentRecs=rows.filter(r=>r.mofa_status==='Sent to MOFA');
+newRecs.forEach(r=>{
+selFrom.innerHTML+=`<option value="${r.id}">#${r.id} — ${r.name} (${r.passport})</option>`;
+selTo.innerHTML+=`<option value="${r.id}">#${r.id} — ${r.name} (${r.passport})</option>`;
+});
+if(newRecs.length>0)selTo.value=newRecs[newRecs.length-1].id;
+// Sent table
+let sh='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Border Entry</th><th>Status</th></tr></thead><tbody>';
+sentRecs.forEach((r,i)=>{
+sh+=`<tr><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td><span class="bdg" style="background:#c8e6c9;color:#1b5e20">Sent to MOFA</span></td></tr>`;
+});
+sh+=sentRecs.length?'</tbody>':`<tr><td colspan="5" style="text-align:center;color:var(--tl);padding:20px">No records sent to MOFA yet</td></tr></tbody>`;
+document.getElementById('mofaSentTbl').innerHTML=sh;
+}
+function loadMofaPreview(){
+const fromId=parseInt(document.getElementById('mofaFrom').value);
+const toId=parseInt(document.getElementById('mofaTo').value);
+if(fromId>toId){toast('From record must be before To record');return}
+const filtered=mofaRecords.filter(r=>r.id>=fromId&&r.id<=toId&&(!r.mofa_status||r.mofa_status===''||r.mofa_status==='New'));
+document.getElementById('mofaStats').style.display='block';
+document.getElementById('mofaCount').textContent=filtered.length+' cases ready for MOFA';
+document.getElementById('mofaRange').textContent=`Record #${fromId} to #${toId}`;
+let h='<thead><tr><th>S.No</th><th>Record #</th><th>Name</th><th>Passport Number</th><th>Border Entry Point</th></tr></thead><tbody>';
+filtered.forEach((r,i)=>{
+h+=`<tr><td>${i+1}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td></tr>`;
+});
+h+=filtered.length?'</tbody>':`<tr><td colspan="5" style="text-align:center;color:var(--tl);padding:20px">No new records in this range</td></tr></tbody>`;
+document.getElementById('mofaTbl').innerHTML=h;
+document.getElementById('mofaActions').classList.toggle('hidden',filtered.length===0);
+}
+function downloadMofa(){
+const fromId=document.getElementById('mofaFrom').value;
+const toId=document.getElementById('mofaTo').value;
+window.open(`/api/mofa-export?from=${fromId}&to=${toId}`,'_blank');
+}
+async function markSentToMofa(){
+const fromId=parseInt(document.getElementById('mofaFrom').value);
+const toId=parseInt(document.getElementById('mofaTo').value);
+const filtered=mofaRecords.filter(r=>r.id>=fromId&&r.id<=toId&&(!r.mofa_status||r.mofa_status===''||r.mofa_status==='New'));
+if(!confirm(`Mark ${filtered.length} records (#${fromId} to #${toId}) as "Sent to MOFA"? This cannot be undone.`))return;
+const r=await api('/api/mofa-mark-sent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_id:fromId,to_id:toId})});
+if(r&&r.success){toast(`${r.count} records marked as Sent to MOFA`);loadMofaData();loadMofaPreview()}
+else toast('Error: '+(r?.error||'unknown'));
+}
 
 // REPORT
 async function genReport(){const d=await api('/api/stats');if(!d)return;
@@ -1811,7 +1966,7 @@ document.getElementById('userDisplay').textContent=USER_NAME+' ('+USER_ROLE+')';
 if(USER_ROLE==='viewer'){
 document.querySelectorAll('.nav button').forEach(b=>{
 const tab=b.textContent.trim();
-if(['New Registration','CSV Import','Admin'].includes(tab)){b.style.display='none'}});
+if(['New Registration','CSV Import','MOFA Export','Admin'].includes(tab)){b.style.display='none'}});
 document.querySelectorAll('.btn-d').forEach(b=>b.style.display='none');// hide delete buttons
 }
 // Operator: can register, import, edit, but NOT delete data, export, or manage users
