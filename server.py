@@ -439,18 +439,22 @@ def import_csv_data(csv_text, user='system', mode='smart'):
 # ═══════════════════════════════════════════════════════════════
 def api_dashboard_stats():
     db = get_db()
-    total = db.execute("SELECT COUNT(*) c FROM evacuees").fetchone()['c']
-    departed = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed'").fetchone()['c']
-    visa_obtained = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Visa Obtained'").fetchone()['c']
+    total_all = db.execute("SELECT COUNT(*) c FROM evacuees").fetchone()['c']
+    total = db.execute("SELECT COUNT(*) c FROM evacuees WHERE dup_flag='CLEAR'").fetchone()['c']
+    departed = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND dup_flag='CLEAR'").fetchone()['c']
+    visa_obtained = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Visa Obtained' AND dup_flag='CLEAR'").fetchone()['c']
     pending = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Pending' AND dup_flag='CLEAR'").fetchone()['c']
-    visa_approved = db.execute("SELECT COUNT(*) c FROM evacuees WHERE visa_status='Approved'").fetchone()['c']
-    iraq_entries = db.execute("SELECT COUNT(*) c FROM evacuees WHERE country='Iraq'").fetchone()['c']
-    returned = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned'").fetchone()['c']
+    visa_approved = db.execute("SELECT COUNT(*) c FROM evacuees WHERE visa_status='Approved' AND dup_flag='CLEAR'").fetchone()['c']
+    iraq_entries = db.execute("SELECT COUNT(*) c FROM evacuees WHERE country='Iraq' AND dup_flag='CLEAR'").fetchone()['c']
+    returned = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND dup_flag='CLEAR'").fetchone()['c']
 
     # Today's live counts (based on departure_date field)
-    departed_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND departure_date=date('now')").fetchone()['c']
+    departed_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND departure_date=date('now') AND dup_flag='CLEAR'").fetchone()['c']
     entered_today = departed_today  # Departing Kuwait = Entering KSA same day
-    returned_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND departure_date=date('now')").fetchone()['c']
+    returned_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND departure_date=date('now') AND dup_flag='CLEAR'").fetchone()['c']
+
+    # Pre-database Jazeera Airways passengers (departed before system was set up)
+    jazeera_departed = 120
 
     by_country = [dict(r) for r in db.execute("""
         SELECT country, COUNT(*) total,
@@ -485,10 +489,11 @@ def api_dashboard_stats():
 
     db.close()
     return {
-        'kpi': {'total': total, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
+        'kpi': {'total': total, 'total_all': total_all, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
                 'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates,
                 'departed_today': departed_today, 'entered_today': entered_today,
-                'returned': returned, 'returned_today': returned_today},
+                'returned': returned, 'returned_today': returned_today,
+                'jazeera_departed': jazeera_departed},
         'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
         'by_visa': by_visa, 'by_border': by_border
     }
@@ -1849,9 +1854,10 @@ function toast(m){const t=document.getElementById('toast');t.textContent=m;t.sty
 async function loadDash(){
 const d=await api('/api/stats');if(!d)return;
 const k=d.kpi;
+const totalDeparted=k.departed+k.jazeera_departed;
 document.getElementById('kpiGrid').innerHTML=`
-<div class="kc i"><div class="lb">Total Registered</div><div class="vl">${k.total}</div><div class="su">All evacuees</div></div>
-<div class="kc s"><div class="lb">Departed</div><div class="vl">${k.departed}</div><div class="su">${k.total?(k.departed/k.total*100).toFixed(1):0}% of total</div></div>
+<div class="kc i"><div class="lb">Total Registered</div><div class="vl">${k.total}</div><div class="su">Clean records (${k.duplicates} duplicates excluded)</div></div>
+<div class="kc s"><div class="lb">Total Departed</div><div class="vl">${totalDeparted}</div><div style="display:flex;justify-content:space-between;font-size:.78em;color:#555;margin-top:4px;padding-top:4px;border-top:1px dashed #ccc"><span>${k.departed} System</span><span>${k.jazeera_departed} Jazeera Airways</span></div></div>
 <div class="kc i"><div class="lb">Visa Obtained</div><div class="vl">${k.visa_obtained}</div><div class="su">Awaiting travel</div></div>
 <div class="kc d"><div class="lb">Pending Visa</div><div class="vl">${k.pending}</div><div class="su">Requires action</div></div>
 <div class="kc s"><div class="lb">KSA Approved</div><div class="vl">${k.visa_approved}</div><div class="su">Mission KSA</div></div>
@@ -1906,8 +1912,9 @@ ${k.returned > 0 ? '<line x1="430" y1="370" x2="430" y2="270" stroke="#e65100" s
 <!-- KSA -->
 <rect x="80" y="348" width="340" height="120" rx="10" fill="#f5f5f5" stroke="#bbb" stroke-width="1.5"/>
 <text x="250" y="372" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">KINGDOM OF SAUDI ARABIA</text>
-<text x="250" y="400" text-anchor="middle" font-size="28" font-weight="bold" fill="#006600">${k.departed}</text>
-<text x="250" y="418" text-anchor="middle" font-size="11" fill="#555">Departed via Transit</text>
+<text x="250" y="396" text-anchor="middle" font-size="28" font-weight="bold" fill="#006600">${k.departed}</text>
+<text x="250" y="414" text-anchor="middle" font-size="11" fill="#555">Departed via Transit</text>
+<text x="250" y="430" text-anchor="middle" font-size="10" fill="#2e7d32" font-style="italic">+ ${k.jazeera_departed} Jazeera Airways (pre-system)</text>
 <text x="250" y="438" text-anchor="middle" font-size="10" fill="#e65100" font-weight="600">${k.returned > 0 ? k.returned + ' Returned from Border' : ''}</text>
 <text x="250" y="456" text-anchor="middle" font-size="9" fill="#888">${k.departed_today > 0 ? 'Today: ' + k.departed_today + ' crossed into KSA' : ''}</text>
 </svg>`;
@@ -2175,7 +2182,8 @@ let h=`<div class="rp"><h1>EVACUATION SITREP</h1><h2>${fmtDate}</h2>
 <div style="text-align:center;margin-bottom:16px"><strong>PAKISTAN EMBASSY KUWAIT</strong><br>CWA Kuwait</div>
 <div class="rs"><h3>1. KEY METRICS</h3><table>
 <tr><td>Total Registered</td><td style="text-align:right"><strong>${k.total}</strong></td></tr>
-<tr><td>Total Departed</td><td style="text-align:right"><strong>${k.departed}</strong></td></tr>
+<tr><td>Departed (System)</td><td style="text-align:right"><strong>${k.departed}</strong></td></tr>
+<tr><td>Jazeera Airways (Pre-system)</td><td style="text-align:right"><strong>${k.jazeera_departed}</strong></td></tr>
 <tr><td>Visa Obtained (Awaiting Travel)</td><td style="text-align:right"><strong>${k.visa_obtained}</strong></td></tr>
 <tr><td>Pending Visas from Mission KSA</td><td style="text-align:right;color:#c62828"><strong>${k.pending}</strong></td></tr>
 <tr><td>KSA Visa Approved</td><td style="text-align:right"><strong>${k.visa_approved}</strong></td></tr>
