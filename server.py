@@ -1061,39 +1061,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/mofa-mark-sent':
             user = self.require_auth()
             if not user: return
-            data = json.loads(body)
-            ids = data.get('ids', [])
-            from_id = data.get('from_id')
-            to_id = data.get('to_id')
-            db = get_db()
-            # Ensure mofa_status column exists
             try:
-                db.execute("ALTER TABLE evacuees ADD COLUMN mofa_status TEXT DEFAULT ''")
+                data = json.loads(body)
+                from_id = data.get('from_id')
+                to_id = data.get('to_id')
+                ids = data.get('ids', [])
+                db = get_db()
+                # Ensure mofa_status column exists
+                try:
+                    db.execute("ALTER TABLE evacuees ADD COLUMN mofa_status TEXT DEFAULT ''")
+                    db.commit()
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+                if from_id is not None and to_id is not None:
+                    from_id = int(from_id)
+                    to_id = int(to_id)
+                    cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
+                        WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                        AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
+                        [user['username'], from_id, to_id])
+                    count = cur.rowcount
+                    db.commit()
+                elif ids and len(ids) > 0:
+                    placeholders = ','.join(['?'] * len(ids))
+                    cur = db.execute(f"""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
+                        WHERE id IN ({placeholders}) AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
+                        [user['username']] + [int(i) for i in ids])
+                    count = cur.rowcount
+                    db.commit()
+                else:
+                    db.close()
+                    self.send_json({'success': False, 'error': 'No records selected'}, 400)
+                    return
+                db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_batch_sent', 0, ?, ?)",
+                          [user['username'], f'Marked {count} records as Sent to MOFA'])
                 db.commit()
-            except sqlite3.OperationalError:
-                pass
-            if from_id is not None and to_id is not None:
-                db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
-                    WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'""",
-                    [user['username'], int(from_id), int(to_id)])
-                count = db.execute("""SELECT COUNT(*) c FROM evacuees WHERE id >= ? AND id <= ?
-                    AND travel_status='Pending' AND dup_flag='CLEAR' AND mofa_status='Sent to MOFA'""",
-                    [int(from_id), int(to_id)]).fetchone()['c']
-            elif ids:
-                placeholders = ','.join(['?'] * len(ids))
-                db.execute(f"UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=? WHERE id IN ({placeholders})",
-                          [user['username']] + ids)
-                count = len(ids)
-            else:
                 db.close()
-                self.send_json({'success': False, 'error': 'No records selected'}, 400)
-                return
-            db.commit()
-            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_batch_sent', 0, ?, ?)",
-                      [user['username'], f'Marked {count} records as Sent to MOFA (IDs {from_id or ids[0]}-{to_id or ids[-1]})'])
-            db.commit()
-            db.close()
-            self.send_json({'success': True, 'count': count})
+                self.send_json({'success': True, 'count': count})
+            except Exception as e:
+                self.send_json({'success': False, 'error': str(e)}, 500)
 
         elif path == '/api/bulk-visa-update':
             user = self.require_auth()
@@ -1819,7 +1825,10 @@ loadDash();toast(`Import done: ${d.imported} new, ${d.skipped_dup} skipped, ${d.
 // MOFA EXPORT
 let mofaRecords=[];
 async function loadMofaData(){
-const rows=await api('/api/mofa-pending');if(!rows)return;
+try{
+const resp=await fetch('/api/mofa-pending');
+const rows=await resp.json();
+if(!rows||rows.error){console.log('MOFA load error:',rows);return}
 mofaRecords=rows;
 const selFrom=document.getElementById('mofaFrom');
 const selTo=document.getElementById('mofaTo');
@@ -1838,6 +1847,10 @@ sh+=`<tr><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_
 });
 sh+=sentRecs.length?'</tbody>':`<tr><td colspan="5" style="text-align:center;color:var(--tl);padding:20px">No records sent to MOFA yet</td></tr></tbody>`;
 document.getElementById('mofaSentTbl').innerHTML=sh;
+document.getElementById('mofaStats').style.display='none';
+document.getElementById('mofaTbl').innerHTML='';
+document.getElementById('mofaActions').classList.add('hidden');
+}catch(err){console.log('MOFA load exception:',err)}
 }
 function loadMofaPreview(){
 const fromId=parseInt(document.getElementById('mofaFrom').value);
@@ -1861,13 +1874,17 @@ const toId=document.getElementById('mofaTo').value;
 window.open(`/api/mofa-export?from=${fromId}&to=${toId}`,'_blank');
 }
 async function markSentToMofa(){
+try{
 const fromId=parseInt(document.getElementById('mofaFrom').value);
 const toId=parseInt(document.getElementById('mofaTo').value);
 const filtered=mofaRecords.filter(r=>r.id>=fromId&&r.id<=toId&&(!r.mofa_status||r.mofa_status===''||r.mofa_status==='New'));
-if(!confirm(`Mark ${filtered.length} records (#${fromId} to #${toId}) as "Sent to MOFA"? This cannot be undone.`))return;
-const r=await api('/api/mofa-mark-sent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_id:fromId,to_id:toId})});
-if(r&&r.success){toast(`${r.count} records marked as Sent to MOFA`);loadMofaData();loadMofaPreview()}
-else toast('Error: '+(r?.error||'unknown'));
+if(filtered.length===0){toast('No new records in this range');return}
+if(!confirm('Mark '+filtered.length+' records (#'+fromId+' to #'+toId+') as Sent to MOFA? This cannot be undone.'))return;
+const resp=await fetch('/api/mofa-mark-sent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_id:fromId,to_id:toId})});
+const r=await resp.json();
+if(r&&r.success){toast(r.count+' records marked as Sent to MOFA');await loadMofaData();loadMofaPreview()}
+else{toast('Error: '+(r?.error||'Server returned error'));console.log('MOFA mark error:',r)}
+}catch(err){toast('Error: '+err.message);console.log('MOFA mark exception:',err)}
 }
 
 // REPORT
