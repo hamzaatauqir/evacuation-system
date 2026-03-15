@@ -738,7 +738,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         params = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
 
-        if path == '/login':
+        if path == '/register':
+            # Public registration page — no login needed
+            db = get_db()
+            enabled = db.execute("SELECT value FROM settings WHERE key='public_registration'").fetchone()
+            db.close()
+            if enabled and enabled['value'] == 'disabled':
+                self.send_html('<html><body style="font-family:Arial;text-align:center;padding:60px"><h1>Registration Closed</h1><p>Public registration is currently closed. Please contact the Embassy directly.</p></body></html>')
+            else:
+                self.send_html(PUBLIC_REGISTER_PAGE)
+        elif path == '/register/success':
+            self.send_html(REGISTER_SUCCESS_PAGE)
+        elif path == '/login':
             self.send_html(LOGIN_PAGE)
         elif path == '/':
             user = self.require_auth()
@@ -806,7 +817,52 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         body = self.read_body()
 
-        if path == '/api/login':
+        if path == '/api/public-register':
+            # Public registration — no auth needed, but with spam protection
+            db = get_db()
+            enabled = db.execute("SELECT value FROM settings WHERE key='public_registration'").fetchone()
+            if enabled and enabled['value'] == 'disabled':
+                db.close()
+                self.send_json({'success': False, 'error': 'Registration is currently closed'}, 403)
+                return
+
+            # Rate limiting: max 10 submissions per IP per hour
+            client_ip = self.client_address[0]
+            one_hour_ago = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+            recent = db.execute("SELECT COUNT(*) c FROM audit_log WHERE user = ? AND action = 'public_register' AND created_at > ?",
+                               [client_ip, one_hour_ago]).fetchone()['c']
+            if recent >= 10:
+                db.close()
+                self.send_json({'success': False, 'error': 'Too many submissions. Please try again later.'}, 429)
+                return
+            db.close()
+
+            data = json.loads(body)
+            # Validate required fields
+            if not data.get('name') or not data.get('passport') or not data.get('mobile'):
+                self.send_json({'success': False, 'error': 'Name, Passport, and Mobile are required'}, 400)
+                return
+
+            # Clean data
+            data['passport'] = data['passport'].strip().upper()
+            if data.get('cnic'):
+                data['cnic'] = re.sub(r'[\s]', '', data['cnic'])
+            if not data.get('date_of_request'):
+                data['date_of_request'] = datetime.now().strftime('%Y-%m-%d')
+            if not data.get('travel_status'):
+                data['travel_status'] = 'Pending'
+
+            result = api_save_record(data, 'public')
+            # Log for rate limiting
+            db = get_db()
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('public_register', ?, ?, ?)",
+                       (result.get('id'), client_ip, json.dumps({'name': data['name'], 'passport': data['passport']})))
+            db.commit()
+            db.close()
+            self.send_json(result)
+            return
+
+        elif path == '/api/login':
             data = json.loads(body)
             db = get_db()
             user = db.execute("SELECT * FROM users WHERE username = ?", [data.get('username', '')]).fetchone()
@@ -900,6 +956,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             db.commit(); db.close()
             self.send_json({'success': True})
 
+        elif path == '/api/setting':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            db = get_db()
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [data['key'], data['value']])
+            db.commit(); db.close()
+            self.send_json({'success': True})
+
         elif path == '/api/generate-sitrep-docx':
             user = self.require_auth()
             if not user: return
@@ -983,6 +1049,132 @@ if(d.success){window.location='/'}
 else{const el=document.getElementById('error');el.textContent=d.error||'Login failed';el.style.display='block'}
 return false}
 </script></body></html>"""
+
+# ═══════════════════════════════════════════════════════════════
+# PUBLIC REGISTRATION PAGE (no login required)
+# ═══════════════════════════════════════════════════════════════
+PUBLIC_REGISTER_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Saudi Transit Visa Registration - Pakistan Embassy Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
+.hdr{background:linear-gradient(135deg,#006600,#004d00);color:#fff;padding:20px 24px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.hdr h1{font-size:1.4em;margin-bottom:4px}.hdr .sub{font-size:.85em;opacity:.9}
+.hdr .flag{font-size:2em;margin-bottom:6px}
+.ctr{max-width:700px;margin:0 auto;padding:20px}
+.notice{background:#fff3e0;border:1px solid #ffcc80;border-radius:10px;padding:14px 18px;margin-bottom:18px;font-size:.88em;color:#e65100;line-height:1.5}
+.notice strong{display:block;margin-bottom:4px}
+.fs{background:#fff;border-radius:12px;padding:22px;box-shadow:0 2px 8px rgba(0,0,0,.1);margin-bottom:16px}
+.fs h3{margin-bottom:14px;padding-bottom:6px;border-bottom:2px solid #e8f5e9;color:#006600;font-size:1.05em}
+.fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+.fgp{display:flex;flex-direction:column}.fgp label{font-size:.82em;font-weight:600;margin-bottom:3px;color:#757575}
+.fgp .req{color:#c62828}
+.fgp input,.fgp select{padding:10px 12px;border:1px solid #e0e0e0;border-radius:8px;font-size:.9em;transition:border .2s}
+.fgp input:focus,.fgp select:focus{border-color:#006600;outline:none;box-shadow:0 0 0 3px rgba(0,102,0,.1)}
+.btn{padding:14px 32px;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:1em;transition:.2s;width:100%}
+.btn-p{background:#006600;color:#fff}.btn-p:hover{background:#004d00}
+.btn-p:disabled{background:#999;cursor:not-allowed}
+.error{color:#c62828;font-size:.85em;margin-top:8px;display:none}
+.footer{text-align:center;padding:20px;font-size:.8em;color:#999}
+.dup-warning{background:#ffebee;border:1px solid #ef9a9a;border-radius:8px;padding:12px;margin-top:12px;display:none;color:#c62828;font-size:.88em}
+@media(max-width:600px){.fg{grid-template-columns:1fr}.ctr{padding:12px}}
+</style></head><body>
+<div class="hdr">
+<div class="flag">&#127477;&#127472;</div>
+<h1>SAUDI TRANSIT VISA REGISTRATION</h1>
+<div class="sub">Pakistan Embassy Kuwait &mdash; Evacuation Assistance</div>
+</div>
+<div class="ctr">
+<div class="notice">
+<strong>&#9888;&#65039; Important Information</strong>
+This form is for Pakistani nationals in Kuwait requiring Saudi transit visa assistance for evacuation. Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
+</div>
+<form id="regForm" onsubmit="return submitForm(event)">
+<div class="fs"><h3>Personal Information</h3>
+<div class="fg">
+<div class="fgp"><label>Full Name <span class="req">*</span></label><input name="name" required placeholder="As shown on passport"></div>
+<div class="fgp"><label>Passport Number <span class="req">*</span></label><input name="passport" required placeholder="e.g. ML3955083" style="text-transform:uppercase"></div>
+<div class="fgp"><label>Gender <span class="req">*</span></label><select name="gender" required><option value="">Select Gender</option><option>Male</option><option>Female</option><option>Child</option></select></div>
+<div class="fgp"><label>CNIC Number (without dashes)</label><input name="cnic" placeholder="e.g. 3520112345671"></div>
+<div class="fgp"><label>Mobile Number <span class="req">*</span></label><input name="mobile" required placeholder="e.g. 00965-99816580"></div>
+<div class="fgp"><label>Email Address</label><input name="email" type="email" placeholder="your@email.com"></div>
+</div></div>
+<div class="fs"><h3>Residence &amp; Location</h3>
+<div class="fg">
+<div class="fgp"><label>Country of Residence <span class="req">*</span></label><select name="country" required><option value="">Select Country</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>KSA</option><option>US</option><option>Bahrain</option><option>Qatar</option><option>Oman</option><option>UAE</option></select></div>
+<div class="fgp"><label>Kuwaiti Civil ID Number (if any)</label><input name="civil_id" placeholder="Ignore if on visit visa"></div>
+<div class="fgp"><label>Border Crossing Area <span class="req">*</span></label><select name="border_crossing" required><option value="">Select Crossing</option><option>Khafji Border</option><option>Salmi Boarder</option><option>Salmi Crossing</option></select></div>
+<div class="fgp"><label>Profession / Company</label><input name="company" placeholder="Your profession or company"></div>
+</div></div>
+<div style="margin-top:8px">
+<button type="submit" class="btn btn-p" id="submitBtn">Submit Registration</button>
+<div class="error" id="errorMsg"></div>
+<div class="dup-warning" id="dupWarning"></div>
+</div>
+</form>
+</div>
+<div class="footer">Pakistan Embassy Kuwait &mdash; Evacuation Management System<br>For emergencies call: +965-67778366</div>
+<script>
+async function submitForm(e){
+e.preventDefault();
+const btn=document.getElementById('submitBtn');
+btn.disabled=true;btn.textContent='Submitting...';
+document.getElementById('errorMsg').style.display='none';
+document.getElementById('dupWarning').style.display='none';
+
+const fd=new FormData(e.target);const data={};
+fd.forEach((v,k)=>data[k]=v);
+data.travel_status='Pending';
+
+try{
+const r=await fetch('/api/public-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+const d=await r.json();
+if(d.success){
+  if(d.dup_details && d.dup_details.length > 0){
+    document.getElementById('dupWarning').innerHTML='<strong>&#9888; Note:</strong> Your record was saved but a possible duplicate was detected: '+d.dup_details.join('; ')+'. If you already registered, you do not need to register again.';
+    document.getElementById('dupWarning').style.display='block';
+  }
+  window.location='/register/success';
+}else{
+  document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
+  document.getElementById('errorMsg').style.display='block';
+  btn.disabled=false;btn.textContent='Submit Registration';
+}
+}catch(err){
+document.getElementById('errorMsg').textContent='Network error. Please check your connection and try again.';
+document.getElementById('errorMsg').style.display='block';
+btn.disabled=false;btn.textContent='Submit Registration';
+}return false}
+</script></body></html>"""
+
+REGISTER_SUCCESS_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Registration Successful - Pakistan Embassy Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:16px;padding:40px;max-width:500px;width:90%;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.1)}
+.check{font-size:4em;margin-bottom:12px}
+h1{color:#2e7d32;font-size:1.5em;margin-bottom:8px}
+p{color:#555;line-height:1.6;margin-bottom:16px}
+.info{background:#e8f5e9;border-radius:8px;padding:14px;font-size:.88em;color:#1b5e20;margin-bottom:16px;text-align:left}
+.info strong{display:block;margin-bottom:4px}
+a{display:inline-block;padding:12px 24px;background:#006600;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;margin-top:8px}
+a:hover{background:#004d00}
+</style></head><body>
+<div class="card">
+<div class="check">&#9989;</div>
+<h1>Registration Successful!</h1>
+<p>Your details have been submitted to Pakistan Embassy Kuwait. Your application is now being processed.</p>
+<div class="info">
+<strong>What happens next?</strong>
+Your visa application will be reviewed by the Embassy team. You will be contacted on the mobile number you provided once there is an update on your Saudi transit visa status.
+</div>
+<p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.</p>
+<a href="/register">Submit Another Registration</a>
+</div>
+</body></html>"""
 
 # ═══════════════════════════════════════════════════════════════
 # MAIN APPLICATION (single-page app)
@@ -1271,6 +1463,21 @@ No deterioration in ground security situation so far.</textarea>
 <button class="btn btn-p" onclick="createUser()">Create User</button>
 <div style="margin-top:14px"><table id="usersTbl"></table></div>
 </div>
+<div class="fs" style="border-left:3px solid var(--s)">
+<h3>Public Registration Link</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Share this link with the public. Anyone can register through it — no login needed. Data goes directly into your dashboard.</p>
+<div style="background:#f0f7f0;padding:14px;border-radius:8px;margin-bottom:12px">
+<strong>Public Link:</strong> <code id="publicLink" style="font-size:1em;color:var(--p)"></code>
+<button class="btn" style="padding:4px 12px;font-size:.8em;background:#eee;margin-left:8px" onclick="navigator.clipboard.writeText(document.getElementById('publicLink').textContent);toast('Link copied!')">Copy</button>
+</div>
+<div style="display:flex;align-items:center;gap:12px">
+<label style="font-weight:600">Registration Status:</label>
+<select id="regToggle" onchange="togglePublicReg()" style="padding:8px;border-radius:6px;border:1px solid var(--bd)">
+<option value="enabled">Open (accepting registrations)</option>
+<option value="disabled">Closed (show closed message)</option>
+</select>
+</div>
+</div>
 <div class="fs"><h3>Webhook / API Key</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Generate an API key for Microsoft Forms Power Automate integration.</p>
 <button class="btn btn-w" onclick="genWebhookKey()">Generate New API Key</button>
@@ -1481,6 +1688,11 @@ const r=await api('/api/generate-webhook-key',{method:'POST'});
 if(r?.key){const url=window.location.origin+'/api/webhook/forms?key='+r.key;
 document.getElementById('webhookKeyDisplay').innerHTML=`<strong>API Key:</strong> ${r.key}<br><strong>Webhook URL:</strong> <code>${url}</code>`;
 document.getElementById('webhookUrl').textContent=url;toast('Key generated')}}
+// PUBLIC REGISTRATION TOGGLE
+document.getElementById('publicLink').textContent=window.location.origin+'/register';
+async function togglePublicReg(){const val=document.getElementById('regToggle').value;
+await api('/api/setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'public_registration',value:val})});
+toast('Public registration '+(val==='enabled'?'OPENED':'CLOSED'))}
 async function changePw(){const pw=document.getElementById('newPw').value;if(!pw){toast('Enter password');return}
 await api('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pw})});
 document.getElementById('newPw').value='';toast('Password changed')}
