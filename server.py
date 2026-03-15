@@ -1088,7 +1088,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 @media(max-width:600px){.fg{grid-template-columns:1fr}.ctr{padding:12px}}
 </style></head><body>
 <div class="hdr">
-<img src="https://pbs.twimg.com/profile_images/1547508498798903296/WgFb26JR_400x400.jpg" alt="Pakistan Embassy Kuwait" style="width:80px;height:80px;border-radius:50%;margin-bottom:8px;border:2px solid rgba(255,255,255,0.3)">
+<svg width="70" height="70" viewBox="0 0 200 200" style="margin-bottom:8px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
 <h1>SAUDI TRANSIT VISA REGISTRATION</h1>
 <div class="sub">Pakistan Embassy Kuwait &mdash; Evacuation Assistance</div>
 </div>
@@ -1121,7 +1121,13 @@ This form is for Pakistani nationals in Kuwait requiring Saudi transit visa assi
 </div>
 </form>
 </div>
-<div class="footer">Pakistan Embassy Kuwait &mdash; Evacuation Management System<br>For emergencies contact: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265<br><br><strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a></div>
+<div class="footer" style="line-height:1.8">
+<strong style="color:#333">Embassy of Pakistan, Kuwait</strong><br>
+Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
+Tel: (+965) 25327651, 25354073 | Fax: (+965) 25327648, 25356594<br>
+<strong>Emergency Contacts:</strong> Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265<br><br>
+<strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
+</div>
 <script>
 async function submitForm(e){
 e.preventDefault();
@@ -1182,7 +1188,7 @@ Your visa application will be reviewed by the Embassy team. You will be contacte
 <strong style="display:block;margin-bottom:4px">&#9888;&#65039; Required: Send Passport Copies</strong>
 Please email a copy of your passport to:<br><a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
 </div>
-<p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.<br>Emergency contacts: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
+<p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.<br>Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>Tel: (+965) 25327651, 25354073<br>Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
 <a href="/register">Submit Another Registration</a>
 </div>
 </body></html>"""
