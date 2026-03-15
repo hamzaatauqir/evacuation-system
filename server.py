@@ -1420,6 +1420,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div id="tab-dash" class="tab active"><div class="ctr">
 <div class="alert" id="alertBar"><span>&#9888;&#65039;</span><span id="alertText"></span></div>
 <div class="kg" id="kpiGrid"></div>
+<div class="cc" style="margin-bottom:16px"><h3>Transit Flow Map</h3><div id="transitMap" style="display:flex;justify-content:center"></div></div>
 <div class="cg"><div class="cc"><h3>Status Breakdown</h3><canvas id="c1"></canvas></div><div class="cc"><h3>Country Distribution</h3><canvas id="c2"></canvas></div></div>
 <div class="cg"><div class="cc"><h3>Gender Breakdown</h3><canvas id="c3"></canvas></div><div class="cc"><h3>Daily Requests &amp; Cumulative</h3><canvas id="c4"></canvas></div></div>
 <div class="cg"><div class="cc"><h3>KSA Visa Status</h3><canvas id="c5"></canvas></div><div class="cc"><h3>Border Crossings</h3><canvas id="c6"></canvas></div></div>
@@ -1774,6 +1775,44 @@ else document.getElementById('alertBar').style.display='none';
 mkChart('c1','doughnut',{labels:['Departed','Visa Obtained','Pending'],datasets:[{data:[k.departed,k.visa_obtained,k.pending],backgroundColor:['#4caf50','#2196f3','#ff9800'],borderWidth:2}]},{plugins:{legend:{position:'bottom'}}});
 const cn=d.by_country;
 mkChart('c2','bar',{labels:cn.map(c=>c.country||'Unknown'),datasets:[{label:'Total',data:cn.map(c=>c.total),backgroundColor:'#1565c0'}]},{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}});
+// Transit Flow Map
+document.getElementById('transitMap').innerHTML=`
+<svg viewBox="0 0 500 400" style="width:100%;max-width:480px;font-family:Arial,sans-serif">
+<defs>
+<marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#006600"/></marker>
+<marker id="arrowR" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#c62828"/></marker>
+</defs>
+<!-- Iraq -->
+<rect x="140" y="5" width="220" height="70" rx="10" fill="#f5f5f5" stroke="#bbb" stroke-width="1.5"/>
+<text x="250" y="32" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">IRAQ</text>
+<text x="250" y="52" text-anchor="middle" font-size="10" fill="#777">${k.iraq_entries} entered from Iraq</text>
+<!-- Arrow Iraq → Kuwait -->
+<line x1="250" y1="75" x2="250" y2="120" stroke="#c62828" stroke-width="3" marker-end="url(#arrowR)">
+<animate attributeName="stroke-dashoffset" from="20" to="0" dur="1s" repeatCount="indefinite"/>
+</line>
+<text x="285" y="102" font-size="9" fill="#c62828" font-weight="600">Entering</text>
+<!-- Kuwait -->
+<rect x="100" y="125" width="300" height="120" rx="14" fill="#e8f5e9" stroke="#006600" stroke-width="2.5"/>
+<text x="250" y="155" text-anchor="middle" font-size="11" fill="#006600" font-weight="bold">STATE OF KUWAIT</text>
+<text x="250" y="178" text-anchor="middle" font-size="22" font-weight="bold" fill="#006600">${k.total}</text>
+<text x="250" y="196" text-anchor="middle" font-size="10" fill="#006600">Pakistani Nationals Registered</text>
+<text x="165" y="228" text-anchor="middle" font-size="9" fill="#555">Khafji Border</text>
+<text x="335" y="228" text-anchor="middle" font-size="9" fill="#555">Salmi Border</text>
+<circle cx="165" cy="238" r="3" fill="#006600"/><circle cx="335" cy="238" r="3" fill="#006600"/>
+<!-- Arrows Kuwait → KSA -->
+<line x1="165" y1="245" x2="165" y2="295" stroke="#006600" stroke-width="3" marker-end="url(#arrowG)">
+<animate attributeName="stroke-dashoffset" from="20" to="0" dur="1s" repeatCount="indefinite"/>
+</line>
+<line x1="335" y1="245" x2="335" y2="295" stroke="#006600" stroke-width="3" marker-end="url(#arrowG)">
+<animate attributeName="stroke-dashoffset" from="20" to="0" dur="1s" repeatCount="indefinite"/>
+</line>
+<text x="250" y="280" text-anchor="middle" font-size="10" fill="#006600" font-weight="600">Departing to KSA</text>
+<!-- KSA -->
+<rect x="80" y="300" width="340" height="85" rx="10" fill="#f5f5f5" stroke="#bbb" stroke-width="1.5"/>
+<text x="250" y="328" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">KINGDOM OF SAUDI ARABIA</text>
+<text x="250" y="352" text-anchor="middle" font-size="28" font-weight="bold" fill="#006600">${k.departed}</text>
+<text x="250" y="372" text-anchor="middle" font-size="11" fill="#555">Departed via Transit</text>
+</svg>`;
 mkChart('c3','doughnut',{labels:d.by_gender.map(g=>g.gender||'Unknown'),datasets:[{data:d.by_gender.map(g=>g.count),backgroundColor:['#1565c0','#e91e63','#ff9800','#9e9e9e'],borderWidth:2}]},{plugins:{legend:{position:'bottom'}}});
 const dd=d.by_date;let cum=0;const cumD=dd.map(x=>{cum+=x.new_requests;return cum});
 mkChart('c4','bar',{labels:dd.map(x=>(x.date||'').slice(5)),datasets:[{type:'line',label:'Cumulative',data:cumD,borderColor:'#c62828',backgroundColor:'transparent',borderWidth:2,yAxisID:'y1',tension:.3},{label:'New',data:dd.map(x=>x.new_requests),backgroundColor:'#1565c0',yAxisID:'y'}]},{scales:{y:{beginAtZero:true,title:{display:true,text:'Daily'}},y1:{position:'right',beginAtZero:true,title:{display:true,text:'Cum.'},grid:{drawOnChartArea:false}}}});
