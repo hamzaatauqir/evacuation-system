@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 EVACUATION MANAGEMENT SYSTEM - Pakistan Embassy Kuwait
 Zero-dependency Python server (stdlib only). Run: python3 server.py
@@ -581,6 +582,11 @@ def api_export_csv():
                      'Emergency Contact','Medical','Family Group','Dependents','Accommodation',
                      'Priority','Remarks','Planned Departure','Saudi City',
                      'Traveling with Family','Confirm KSA 3-Days','Duplicate Flag','Created At'])
+    def safe_get(row, key, default=''):
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return default
     for i, r in enumerate(rows, 1):
         writer.writerow([i, r['name'], r['passport'], r['cnic'], r['gender'], r['country'],
                         r['civil_id'], r['border_crossing'], r['mobile'], r['company'],
@@ -589,8 +595,8 @@ def api_export_csv():
                         r['email'], r['dob'], r['emergency_contact'], r['medical'],
                         r['family_group_id'], r['dependents'], r['accommodation'],
                         r['priority'], r['remarks'],
-                        r.get('planned_departure',''), r.get('saudi_city',''),
-                        r.get('traveling_with_family',''), r.get('confirm_ksa_3days',''),
+                        safe_get(r,'planned_departure'), safe_get(r,'saudi_city'),
+                        safe_get(r,'traveling_with_family'), safe_get(r,'confirm_ksa_3days'),
                         r['dup_flag'], r['created_at']])
     return output.getvalue()
 
@@ -1113,7 +1119,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <div class="ctr">
 <div class="notice">
 <strong>&#9888;&#65039; Important Information</strong>
-The situation in Kuwait remains stable and under control. This registration facility has been established as a measure to assist Pakistani nationals who may require travel facilitation, and, at present, this service is primarily intended for individuals on Visit Visas in Kuwait who may require three-day transit visa facilitation through the Kingdom of Saudi Arabia to return to Pakistan.<br><br>All Pakistani nationals are advised to remain calm and continue their normal activities, while staying updated through official announcements issued by the Government of Kuwait, and to strictly follow the guidance and instructions issued by Kuwaiti authorities.<br><br>The Embassy remains in close coordination with the relevant Kuwaiti authorities and will continue to provide updates and assistance as required.<br><br>Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
+The situation in Kuwait remains stable and under control. This registration facility has been established as a measure to assist Pakistani nationals who may require travel facilitation, and, at present, this service is primarily intended for individuals on Visit Visas in Kuwait who may require three-day transit visa facilitation through the Kingdom of Saudi Arabia to return to Pakistan.<br><br>All Pakistani nationals are advised to remain calm and continue their normal activities, while staying updated through official announcements issued by the Government of Kuwait, and to strictly follow the guidance and instructions issued by Kuwaiti authorities.<br><br>The Embassy remains in close coordination with the relevant Kuwaiti authorities and will continue to provide updates and assistance as required.<br><br><hr style="border:none;border-top:1px solid #ffcc80;margin:14px 0"><div dir="rtl" style="text-align:right;font-family:'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Urdu Typesetting',Tahoma,Arial,sans-serif;line-height:2;font-size:.95em">کویت میں الحمدلله کویتی حکومت کے موثر اقدامات کی وجہ سے زندگی معمول کے مطابق ہے ۔ تاہم پاکستانی شہریوں سے گذارش ہے کہ غیر ضروری سفر سے احتراز کریں -<br><br>پاکستانی شہری (خاص طور پہ جو لوگ وزٹ ویزا پہ آۓ ہوئے ہیں اور واپس جانا چاہتے ہیں یا وہ لوگ جن کا کسی فیملی ایمرجنسی کی وجہ سے پاکستان جانا ناگزیر ہو ) رجسٹریشن کراسکتے ہیں ۔ تاکہ سفارتخانہ پاکستان واپسی کے لیے سعودی عرب کا تین روزہ ٹرانزٹ ویزا حاصل کرنے میں آپ کی مدد کر سکے ۔<br><br>تمام پاکستانی شہریوں سے گزارش ہے کہ وہ پُرسکون رہیں اور اپنی معمول کی سرگرمیاں جاری رکھیں۔ مزید یہ کہ معلومات کے حصول کے لیے صرف حکومتِ کویت کے سرکاری ذرائع سے جاری کردہ اعلانات پر توجہ دیں اور کویتی حکام کی جانب سے جاری ہدایات پر عمل کریں۔ سفارت خانہ متعلقہ کویتی حکام کے ساتھ مسلسل رابطے میں ہے اور ضرورت کے مطابق پاکستانی شہریوں کو رہنمائی اور معاونت فراہم کرتا رہے گا -</div><br>Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
 </div>
 <form id="regForm" onsubmit="return submitForm(event)">
 <div class="fs"><h3>Personal Information</h3>
