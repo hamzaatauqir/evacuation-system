@@ -71,6 +71,10 @@ def init_db():
         accommodation TEXT,
         priority TEXT DEFAULT 'Normal',
         remarks TEXT,
+        planned_departure TEXT,
+        saudi_city TEXT,
+        traveling_with_family TEXT DEFAULT 'No',
+        confirm_ksa_3days TEXT DEFAULT 'No',
         dup_flag TEXT DEFAULT 'CLEAR',
         form_submission_id TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -101,6 +105,14 @@ def init_db():
         db.commit()
     except sqlite3.IntegrityError:
         pass
+    # Migrate: add new columns if they don't exist
+    for col, coltype in [('planned_departure', 'TEXT'), ('saudi_city', 'TEXT'),
+                         ('traveling_with_family', "TEXT DEFAULT 'No'"), ('confirm_ksa_3days', "TEXT DEFAULT 'No'")]:
+        try:
+            db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     db.close()
 
 # ═══════════════════════════════════════════════════════════════
@@ -378,7 +390,8 @@ def import_csv_data(csv_text, user='system', mode='smart'):
                 'mobile','company','visa_status','travel_status','airline','ticket_number',
                 'departure_airport','destination_country','date_of_request','email',
                 'dob','emergency_contact','medical','family_group_id','dependents',
-                'accommodation','priority','remarks','dup_flag','form_submission_id'
+                'accommodation','priority','remarks','planned_departure','saudi_city',
+                'traveling_with_family','confirm_ksa_3days','dup_flag','form_submission_id'
             )]
             if 'travel_status' not in fields:
                 fields.append('travel_status')
@@ -488,7 +501,8 @@ def api_save_record(data, user):
               'mobile','company','visa_status','travel_status','airline','ticket_number',
               'departure_airport','destination_country','date_of_request','email',
               'dob','emergency_contact','medical','family_group_id','dependents',
-              'accommodation','priority','remarks']
+              'accommodation','priority','remarks','planned_departure','saudi_city',
+              'traveling_with_family','confirm_ksa_3days']
 
     if rec_id:  # Update
         # Get old record to detect changes
@@ -565,7 +579,8 @@ def api_export_csv():
                      'Mobile','Company','Visa Status','Travel Status','Airline','Ticket Number',
                      'Departure Airport','Destination Country','Date of Request','Email','DOB',
                      'Emergency Contact','Medical','Family Group','Dependents','Accommodation',
-                     'Priority','Remarks','Duplicate Flag','Created At'])
+                     'Priority','Remarks','Planned Departure','Saudi City',
+                     'Traveling with Family','Confirm KSA 3-Days','Duplicate Flag','Created At'])
     for i, r in enumerate(rows, 1):
         writer.writerow([i, r['name'], r['passport'], r['cnic'], r['gender'], r['country'],
                         r['civil_id'], r['border_crossing'], r['mobile'], r['company'],
@@ -573,7 +588,10 @@ def api_export_csv():
                         r['departure_airport'], r['destination_country'], r['date_of_request'],
                         r['email'], r['dob'], r['emergency_contact'], r['medical'],
                         r['family_group_id'], r['dependents'], r['accommodation'],
-                        r['priority'], r['remarks'], r['dup_flag'], r['created_at']])
+                        r['priority'], r['remarks'],
+                        r.get('planned_departure',''), r.get('saudi_city',''),
+                        r.get('traveling_with_family',''), r.get('confirm_ksa_3days',''),
+                        r['dup_flag'], r['created_at']])
     return output.getvalue()
 
 def api_audit_log():
@@ -1095,7 +1113,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <div class="ctr">
 <div class="notice">
 <strong>&#9888;&#65039; Important Information</strong>
-This form is for Pakistani nationals in Kuwait requiring Saudi transit visa assistance. Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
+As the situation in Kuwait is currently stable and under control, this service is mainly for those on Visit Visa to Kuwait and require Three Days Transit Visa Facilitation for Saudi Arabia.<br><br>Please fill in all required fields accurately. Your passport number will be used to track your application. Do not submit multiple times — duplicate entries are automatically detected.
 </div>
 <form id="regForm" onsubmit="return submitForm(event)">
 <div class="fs"><h3>Personal Information</h3>
@@ -1113,6 +1131,13 @@ This form is for Pakistani nationals in Kuwait requiring Saudi transit visa assi
 <div class="fgp"><label>Kuwaiti Civil ID Number (if any)</label><input name="civil_id" placeholder="Ignore if on visit visa"></div>
 <div class="fgp"><label>Border Crossing Area <span class="req">*</span></label><select name="border_crossing" required><option value="">Select Crossing</option><option>Khafji Border</option><option>Salmi Boarder</option><option>Salmi Crossing</option></select></div>
 <div class="fgp"><label>Profession / Company</label><input name="company" placeholder="Your profession or company"></div>
+</div></div>
+<div class="fs"><h3>Travel Details</h3>
+<div class="fg">
+<div class="fgp"><label>Planned Departure from Kuwait <span class="req">*</span></label><input type="date" name="planned_departure" required></div>
+<div class="fgp"><label>Stay in Saudi City (Planned) <span class="req">*</span></label><input name="saudi_city" required placeholder="e.g. Riyadh, Jeddah, Dammam"></div>
+<div class="fgp"><label>Traveling with Family or Alone? <span class="req">*</span></label><select name="traveling_with_family" required><option value="">Select</option><option value="Yes">Yes — Traveling with Family</option><option value="No">No — Traveling Alone</option></select></div>
+<div class="fgp"><label>You have to leave KSA in Three Days as per the requirements <span class="req">*</span></label><select name="confirm_ksa_3days" required><option value="">Select</option><option value="Yes">Yes — I Confirm</option></select></div>
 </div></div>
 <div style="margin-top:8px">
 <button type="submit" class="btn btn-p" id="submitBtn">Submit Registration</button>
@@ -1319,6 +1344,10 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="fgp"><label>Destination</label><input name="destination_country"></div>
 <div class="fgp"><label>Priority</label><select name="priority"><option value="">Normal</option><option>High</option><option>Medium</option><option>Low</option></select></div>
 <div class="fgp"><label>Date of Request</label><input type="date" name="date_of_request"></div>
+<div class="fgp"><label>Planned Departure from Kuwait</label><input type="date" name="planned_departure"></div>
+<div class="fgp"><label>Stay in Saudi City (Planned)</label><input name="saudi_city" placeholder="e.g. Riyadh, Jeddah, Dammam"></div>
+<div class="fgp"><label>Traveling with Family?</label><select name="traveling_with_family"><option value="">Select</option><option value="Yes">Yes</option><option value="No">No</option></select></div>
+<div class="fgp"><label>Confirm KSA 3-Day Requirement</label><select name="confirm_ksa_3days"><option value="">Select</option><option value="Yes">Yes</option><option value="No">No</option></select></div>
 </div></div>
 <div class="fs"><h3>Remarks</h3><div class="fgp"><textarea name="remarks" rows="2"></textarea></div>
 <div class="bg"><button type="submit" class="btn btn-p">Register Evacuee</button><button type="reset" class="btn" style="background:#eee">Clear</button></div>
