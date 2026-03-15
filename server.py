@@ -7,7 +7,7 @@ Access: http://localhost:8080
 Default login: admin / embassy2026
 """
 
-import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading
+import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading, base64
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta
@@ -252,9 +252,71 @@ def bulk_update_visa_status(passport_list, new_status, user='system'):
     return results
 
 # ═══════════════════════════════════════════════════════════════
-# AUTH HELPERS
+# AUTH & SECURITY HELPERS
 # ═══════════════════════════════════════════════════════════════
+# Server-side encryption key — generated once per deployment, stored in DB
+def _get_enc_key():
+    db = get_db()
+    row = db.execute("SELECT value FROM settings WHERE key='enc_key'").fetchone()
+    if row:
+        db.close()
+        return row['value']
+    key = secrets.token_hex(32)
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('enc_key', ?)", [key])
+    db.commit(); db.close()
+    return key
+
+def encrypt_pw(plain):
+    """Encrypt password for admin-only storage (not for auth — hash is used for auth)"""
+    if not plain: return ''
+    key = _get_enc_key()
+    key_bytes = key.encode()
+    encrypted = bytes([plain.encode()[i] ^ key_bytes[i % len(key_bytes)] for i in range(len(plain.encode()))])
+    return base64.b64encode(encrypted).decode()
+
+def decrypt_pw(enc):
+    """Decrypt password — only called when admin requests it"""
+    if not enc: return ''
+    try:
+        key = _get_enc_key()
+        key_bytes = key.encode()
+        encrypted = base64.b64decode(enc.encode())
+        return bytes([encrypted[i] ^ key_bytes[i % len(key_bytes)] for i in range(len(encrypted))]).decode()
+    except Exception:
+        return '(encrypted)'
+
 def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
+
+def esc(val):
+    """Escape HTML to prevent XSS"""
+    if val is None: return ''
+    return str(val).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;').replace("'",'&#x27;')
+
+# Login rate limiting: track failed attempts per IP
+LOGIN_ATTEMPTS = {}  # ip -> {'count': n, 'lockout_until': timestamp}
+
+def check_login_rate(ip):
+    """Returns True if login is allowed, False if locked out"""
+    now = time.time()
+    if ip in LOGIN_ATTEMPTS:
+        info = LOGIN_ATTEMPTS[ip]
+        if info.get('lockout_until', 0) > now:
+            return False
+        # Reset if lockout expired
+        if info.get('lockout_until', 0) <= now and info['count'] >= 5:
+            LOGIN_ATTEMPTS[ip] = {'count': 0}
+    return True
+
+def record_login_failure(ip):
+    now = time.time()
+    if ip not in LOGIN_ATTEMPTS:
+        LOGIN_ATTEMPTS[ip] = {'count': 0}
+    LOGIN_ATTEMPTS[ip]['count'] += 1
+    if LOGIN_ATTEMPTS[ip]['count'] >= 5:
+        LOGIN_ATTEMPTS[ip]['lockout_until'] = now + 300  # 5 minute lockout
+
+def record_login_success(ip):
+    LOGIN_ATTEMPTS.pop(ip, None)
 
 def create_session(username, role):
     token = secrets.token_hex(32)
@@ -606,7 +668,7 @@ def api_delete_record(rec_id, user):
 
 def api_users_list():
     db = get_db()
-    users = [dict(r) for r in db.execute("SELECT id, username, role, full_name, password_plain, created_at FROM users").fetchall()]
+    users = [dict(r) for r in db.execute("SELECT id, username, role, full_name, created_at FROM users").fetchall()]
     db.close()
     return users
 
@@ -614,7 +676,7 @@ def api_create_user(data):
     db = get_db()
     try:
         db.execute("INSERT INTO users (username, password_hash, password_plain, role, full_name) VALUES (?, ?, ?, ?, ?)",
-                   (data['username'], hash_pw(data['password']), data['password'], data.get('role', 'operator'), data.get('full_name', '')))
+                   (data['username'], hash_pw(data['password']), encrypt_pw(data['password']), data.get('role', 'operator'), data.get('full_name', '')))
         db.commit(); db.close()
         return {'success': True}
     except sqlite3.IntegrityError:
@@ -785,11 +847,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {args[0]}")
 
+    def _security_headers(self):
+        """Add security headers to every response"""
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-XSS-Protection', '1; mode=block')
+        self.send_header('Referrer-Policy', 'strict-origin-when-cross-origin')
+        self.send_header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+
     def send_json(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', len(body))
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -798,6 +869,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', len(body))
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1030,11 +1102,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         elif path == '/api/login':
+            client_ip = self.client_address[0]
+            if not check_login_rate(client_ip):
+                self.send_json({'success': False, 'error': 'Too many failed attempts. Please wait 5 minutes.'}, 429)
+                return
             data = json.loads(body)
             db = get_db()
             user = db.execute("SELECT * FROM users WHERE username = ?", [data.get('username', '')]).fetchone()
             db.close()
             if user and user['password_hash'] == hash_pw(data.get('password', '')):
+                record_login_success(client_ip)
                 token = create_session(user['username'], user['role'])
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -1044,7 +1121,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(resp)
             else:
-                self.send_json({'success': False, 'error': 'Invalid credentials'}, 401)
+                record_login_failure(client_ip)
+                remaining = 5 - LOGIN_ATTEMPTS.get(client_ip, {}).get('count', 0)
+                msg = 'Invalid credentials' + (f' ({remaining} attempts remaining)' if remaining > 0 else '')
+                self.send_json({'success': False, 'error': msg}, 401)
 
         elif path == '/api/record':
             user = self.require_auth()
@@ -1106,7 +1186,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 updates.append("full_name = ?"); params.append(data['full_name'])
             if data.get('new_password'):
                 updates.append("password_hash = ?"); params.append(hash_pw(data['new_password']))
-                updates.append("password_plain = ?"); params.append(data['new_password'])
+                updates.append("password_plain = ?"); params.append(encrypt_pw(data['new_password']))
             if updates:
                 params.append(uid)
                 db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
@@ -1163,7 +1243,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 db.close()
                 self.send_json({'error': 'Unauthorized'}, 403); return
             db.execute("UPDATE users SET password_hash = ?, password_plain = ? WHERE username = ?",
-                       (hash_pw(data['new_password']), data['new_password'], target_user))
+                       (hash_pw(data['new_password']), encrypt_pw(data['new_password']), target_user))
             db.commit(); db.close()
             self.send_json({'success': True})
 
@@ -2403,13 +2483,12 @@ document.getElementById('repContent').innerHTML=h}
 // ADMIN
 async function loadAdmin(){
 const u=await api('/api/users');
-if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Password</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
 u.forEach(x=>{
-const pwDisplay=x.password_plain?`<span class="pw-hidden" id="pw_${x.id}" onclick="this.textContent=this.dataset.pw;this.style.cursor='default'" data-pw="${(x.password_plain||'').replace(/"/g,'&quot;')}" style="cursor:pointer;color:#1565c0;font-size:.85em" title="Click to reveal">••••••••</span>`:'<span style="color:#999;font-size:.8em">Not stored</span>';
 h+=`<tr><td><strong>${x.username}</strong></td><td>${x.full_name||'-'}</td>
 <td><select onchange="updateUserRole(${x.id},this.value)" style="padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:.85em">
 <option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='viewer'?' selected':''}>viewer</option></select></td>
-<td>${pwDisplay}</td><td style="font-size:.8em">${x.created_at}</td>
+<td style="font-size:.8em">${x.created_at}</td>
 <td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminResetPw(${x.id},'${x.username}')">Reset PW</button><button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="adminDeleteUser(${x.id},'${x.username}')">Delete</button></td></tr>`});
 h+='</tbody>';document.getElementById('usersTbl').innerHTML=h}
 const a=await api('/api/audit');
