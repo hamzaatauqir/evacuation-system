@@ -1113,13 +1113,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             output = io.StringIO()
             writer = csv.writer(output)
             if filter_type in ('pending_mofa', 'all_sent'):
-                header = ['S.No', 'Record #', 'Name', 'Passport Number', 'Border Entry Point', 'Mobile']
+                header = ['S.No', 'Record #', 'Name', 'Passport Number', 'Border Entry Point']
                 if filter_type == 'all_sent':
                     header.append('Visa Status')
                 header.extend(['MOFA Letter/Fax No.', 'Letter Date', 'Sent to MOFA Date'])
                 writer.writerow(header)
                 for i, r in enumerate(rows, 1):
-                    row = [i, r['id'], r['name'], r['passport'], r['border_crossing'], r.get('mobile','')]
+                    row = [i, r['id'], r['name'], r['passport'], r['border_crossing']]
                     if filter_type == 'all_sent':
                         row.append(r.get('visa_status',''))
                     row.extend([r.get('mofa_letter_number',''), r.get('mofa_letter_date',''), r.get('mofa_sent_date','')])
@@ -1566,6 +1566,11 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <h1>SAUDI TRANSIT VISA REGISTRATION</h1>
 <div class="sub">Pakistan Embassy Kuwait &mdash; Consular Services</div>
 </div>
+<div style="background:linear-gradient(135deg,#1565c0,#0d47a1);padding:14px 20px;text-align:center">
+<a href="/track-application" style="color:#fff;text-decoration:none;font-weight:700;font-size:1.05em;display:inline-flex;align-items:center;gap:8px">
+<span style="font-size:1.4em">&#128270;</span> Already Registered? Track Your Application Status Here
+<span style="background:rgba(255,255,255,.25);padding:4px 12px;border-radius:20px;font-size:.85em;margin-left:8px">Check Now &rarr;</span></a>
+</div>
 <div class="ctr">
 <div class="notice">
 <strong>&#9888;&#65039; Important Information</strong>
@@ -1607,8 +1612,7 @@ The situation in Kuwait remains stable and under control. This registration faci
 Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
 Tel: (+965) 25327651, 25354073 | Fax: (+965) 25327648, 25356594<br>
 <strong>Emergency Contacts:</strong> Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265<br><br>
-<strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a><br><br>
-<a href="/track-application" style="display:inline-block;padding:10px 24px;background:#1565c0;color:#fff;text-decoration:none;border-radius:8px;font-weight:600">&#128269; Track Your Application Status</a>
+<strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
 </div>
 <script>
 async function submitForm(e){
@@ -1649,36 +1653,56 @@ PUBLIC_TRACKING_PAGE = """<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
-.hdr{background:linear-gradient(135deg,#006600,#004d00);color:#fff;padding:20px 24px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.2)}
-.hdr h1{font-size:1.4em;margin-bottom:4px}.hdr .sub{font-size:.85em;opacity:.9}
-.ctr{max-width:600px;margin:0 auto;padding:20px}
-.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,.1);margin-bottom:16px}
-.fgp{margin-bottom:14px}.fgp label{display:block;font-size:.82em;font-weight:600;color:#757575;margin-bottom:4px}
-.fgp input{width:100%;padding:12px;border:1px solid #e0e0e0;border-radius:8px;font-size:1em}
-.fgp input:focus{border-color:#006600;outline:none;box-shadow:0 0 0 3px rgba(0,102,0,.1)}
-.btn{width:100%;padding:14px;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:1em;transition:.2s}
-.btn-p{background:#006600;color:#fff}.btn-p:hover{background:#004d00}
-.btn-p:disabled{background:#999;cursor:not-allowed}
-.result{display:none;margin-top:20px}
-.status-box{border-radius:12px;padding:20px;margin-bottom:16px;text-align:center}
-.status-approved{background:#e8f5e9;border:2px solid #2e7d32}
-.status-pending{background:#fff3e0;border:2px solid #e65100}
-.status-processing{background:#e3f2fd;border:2px solid #1565c0}
-.status-icon{font-size:3em;margin-bottom:8px}
-.status-label{font-size:1.3em;font-weight:700;margin-bottom:4px}
-.status-detail{font-size:.9em;color:#555;line-height:1.5}
-.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
-.info-item{background:#f8f9fa;border-radius:8px;padding:10px 14px}
-.info-item .lbl{font-size:.75em;color:#888;text-transform:uppercase;letter-spacing:.5px}
-.info-item .val{font-size:.95em;font-weight:600;color:#333;margin-top:2px}
-.emergency-box{background:#ffebee;border:2px solid #c62828;border-radius:12px;padding:18px;margin-top:16px;text-align:center}
-.emergency-box h3{color:#c62828;font-size:1.1em;margin-bottom:10px}
-.emergency-box .nums{font-size:.92em;line-height:2;color:#333}
+.hdr{background:linear-gradient(135deg,#006600,#004d00);color:#fff;padding:24px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.hdr h1{font-size:1.5em;margin-bottom:4px;letter-spacing:.5px}.hdr .sub{font-size:.85em;opacity:.9}
+.ctr{max-width:620px;margin:0 auto;padding:20px}
+.card{background:#fff;border-radius:14px;padding:28px;box-shadow:0 4px 16px rgba(0,0,0,.08);margin-bottom:16px}
+.search-wrap{position:relative}
+.search-wrap input{width:100%;padding:16px 16px 16px 48px;border:2px solid #e0e0e0;border-radius:12px;font-size:1.1em;text-transform:uppercase;letter-spacing:1px;transition:all .3s}
+.search-wrap input:focus{border-color:#006600;outline:none;box-shadow:0 0 0 4px rgba(0,102,0,.12)}
+.search-wrap .icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:1.3em;color:#999}
+.btn{width:100%;padding:16px;border:none;border-radius:12px;cursor:pointer;font-weight:700;font-size:1.05em;transition:all .3s;margin-top:14px}
+.btn-p{background:linear-gradient(135deg,#006600,#004d00);color:#fff}.btn-p:hover{background:linear-gradient(135deg,#004d00,#003300);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,102,0,.3)}
+.btn-p:disabled{background:#999;cursor:not-allowed;transform:none;box-shadow:none}
+.loader{display:none;text-align:center;padding:24px}
+.loader .spinner{width:40px;height:40px;border:4px solid #e0e0e0;border-top:4px solid #006600;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 10px}
+@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+.result{display:none;animation:fadeIn .4s ease}
+.status-box{border-radius:14px;padding:24px;margin-bottom:16px;text-align:center;animation:fadeIn .5s ease}
+.status-approved{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #2e7d32}
+.status-pending{background:linear-gradient(135deg,#fff3e0,#ffe0b2);border:2px solid #e65100}
+.status-processing{background:linear-gradient(135deg,#e3f2fd,#bbdefb);border:2px solid #1565c0}
+.status-icon{font-size:3.5em;margin-bottom:10px}
+.status-label{font-size:1.4em;font-weight:800;margin-bottom:6px}
+.status-detail{font-size:.92em;color:#555;line-height:1.6}
+.status-detail-ur{font-size:.95em;line-height:2;direction:rtl;text-align:right;font-family:'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Urdu Typesetting',Tahoma,sans-serif;margin-top:8px;color:#444;border-top:1px dashed #ccc;padding-top:8px}
+.timeline{margin:20px 0;padding:0 10px}
+.tl-step{display:flex;align-items:flex-start;margin-bottom:0;position:relative}
+.tl-dot{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.85em;font-weight:700;flex-shrink:0;z-index:1}
+.tl-dot.done{background:#2e7d32;color:#fff}.tl-dot.active{background:#e65100;color:#fff;animation:pulse 1.5s infinite}.tl-dot.wait{background:#e0e0e0;color:#999}
+.tl-line{width:3px;background:#e0e0e0;min-height:30px;margin-left:12px}
+.tl-line.done{background:#2e7d32}
+.tl-text{margin-left:12px;padding:4px 0 16px}
+.tl-text .tl-title{font-weight:700;font-size:.9em;color:#333}
+.tl-text .tl-sub{font-size:.8em;color:#888;margin-top:2px}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px;animation:fadeIn .6s ease}
+.info-item{background:#f8f9fa;border-radius:10px;padding:12px 14px;border:1px solid #eee}
+.info-item .lbl{font-size:.72em;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+.info-item .val{font-size:.98em;font-weight:700;color:#333;margin-top:3px}
+.emergency-box{background:linear-gradient(135deg,#ffebee,#ffcdd2);border:2px solid #c62828;border-radius:14px;padding:22px;margin-top:16px;text-align:center;animation:fadeIn .7s ease}
+.emergency-box h3{color:#c62828;font-size:1.15em;margin-bottom:10px}
+.emergency-box .nums{font-size:.92em;line-height:2.2;color:#333}
 .emergency-box a{color:#006600;font-weight:700;text-decoration:none}
-.error-msg{color:#c62828;font-size:.88em;text-align:center;margin-top:12px;display:none}
+.emergency-box a:hover{text-decoration:underline}
+.call-btn{display:inline-block;padding:10px 20px;background:#c62828;color:#fff;border-radius:8px;text-decoration:none;font-weight:700;margin:4px;font-size:.9em;transition:.2s}
+.call-btn:hover{background:#b71c1c;transform:translateY(-1px)}
+.error-msg{background:#ffebee;color:#c62828;font-size:.9em;text-align:center;padding:12px;border-radius:8px;margin-top:14px;display:none;border:1px solid #ef9a9a;animation:fadeIn .3s ease}
 .footer{text-align:center;padding:20px;font-size:.8em;color:#999;line-height:1.8}
-.track-link{display:inline-block;margin-top:12px;color:#006600;text-decoration:none;font-weight:600;font-size:.9em}
-@media(max-width:600px){.info-grid{grid-template-columns:1fr}.ctr{padding:12px}}
+.back-link{display:block;text-align:center;margin-top:12px;color:#006600;text-decoration:none;font-weight:600;font-size:.92em;padding:10px;border-radius:8px;transition:.2s}
+.back-link:hover{background:#e8f5e9}
+@media(max-width:600px){.info-grid{grid-template-columns:1fr}.ctr{padding:12px}.card{padding:20px}}
 </style></head><body>
 <div class="hdr">
 <svg width="60" height="60" viewBox="0 0 200 200" style="margin-bottom:6px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
@@ -1687,30 +1711,48 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 </div>
 <div class="ctr">
 <div class="card">
-<h3 style="color:#006600;margin-bottom:14px;text-align:center">Check Your Application Status</h3>
-<div class="fgp"><label>Enter Your Passport Number</label><input id="passportInput" placeholder="e.g. ML3955083" style="text-transform:uppercase"></div>
-<button class="btn btn-p" onclick="doTrack()">Check Status</button>
+<h3 style="color:#006600;margin-bottom:4px;text-align:center;font-size:1.15em">Check Your Application Status</h3>
+<p style="text-align:center;color:#888;font-size:.82em;margin-bottom:16px">Enter your passport number to view the current status of your transit visa application</p>
+<div dir="rtl" style="text-align:center;font-family:'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Urdu Typesetting',Tahoma,sans-serif;font-size:.88em;color:#888;margin-bottom:16px;line-height:1.8">
+اپنا پاسپورٹ نمبر درج کریں تاکہ آپ اپنی ٹرانزٹ ویزا درخواست کی صورتحال جان سکیں
+</div>
+<div class="search-wrap">
+<span class="icon">&#128269;</span>
+<input id="passportInput" placeholder="e.g. ML3955083" autocomplete="off">
+</div>
+<button class="btn btn-p" id="trackBtn" onclick="doTrack()">Check Status</button>
 <div class="error-msg" id="errMsg"></div>
+</div>
+<div class="loader" id="loader">
+<div class="spinner"></div>
+<div style="color:#555;font-size:.9em">Searching for your application...</div>
+<div dir="rtl" style="font-family:'Noto Nastaliq Urdu','Urdu Typesetting',Tahoma,sans-serif;color:#888;font-size:.85em;margin-top:4px">آپ کی درخواست تلاش کی جا رہی ہے</div>
 </div>
 <div class="result" id="resultBox">
 <div id="statusBox"></div>
+<div id="timelineBox"></div>
 <div id="infoGrid"></div>
 <div id="emergencySection" style="display:none">
 <div class="emergency-box">
 <h3>&#128222; CONTACT EMBASSY IMMEDIATELY</h3>
-<p style="font-size:.88em;color:#555;margin-bottom:10px">Your visa has been approved! Please contact the Embassy immediately for further instructions on travelling.</p>
-<div class="nums">
-<strong>Emergency Contact Numbers:</strong><br>
-Mr. Awais Saeed: <a href="tel:+96555977292">+965-55977292</a><br>
-Mr. Zahid Iqbal: <a href="tel:+96555964923">+965-55964923</a><br>
-Mr. Shahid Khan: <a href="tel:+96566568265">+965-66568265</a><br><br>
+<p style="font-size:.9em;color:#555;margin-bottom:6px">Your visa has been approved! Please contact the Embassy <strong>immediately</strong> for further instructions on travelling.</p>
+<div dir="rtl" style="font-family:'Noto Nastaliq Urdu','Urdu Typesetting',Tahoma,sans-serif;font-size:.92em;color:#c62828;font-weight:700;line-height:1.8;margin-bottom:12px">
+آپ کا ویزا منظور ہو گیا ہے! براہ کرم سفارت خانے سے فوری رابطہ کریں
+</div>
+<div style="margin:12px 0">
+<a href="tel:+96555977292" class="call-btn">&#128222; Awais: +965-55977292</a>
+<a href="tel:+96555964923" class="call-btn">&#128222; Zahid: +965-55964923</a>
+<a href="tel:+96566568265" class="call-btn">&#128222; Shahid: +965-66568265</a>
+</div>
+<div class="nums" style="margin-top:10px;font-size:.85em;color:#555">
 <strong>Embassy Phone:</strong> <a href="tel:+96525327651">(+965) 25327651</a>, <a href="tel:+96525354073">25354073</a><br>
 <strong>Email:</strong> <a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a>
 </div>
 </div>
 </div>
+<button class="btn" style="background:#eee;color:#333;margin-top:12px" onclick="document.getElementById('resultBox').style.display='none';document.getElementById('passportInput').value='';document.getElementById('passportInput').focus()">Search Another Passport</button>
 </div>
-<a href="/embassy-registration" class="track-link" style="display:block;text-align:center">&larr; Back to Registration</a>
+<a href="/embassy-registration" class="back-link">&larr; Back to Registration Page</a>
 </div>
 <div class="footer">
 <strong style="color:#333">Embassy of Pakistan, Kuwait</strong><br>
@@ -1720,45 +1762,61 @@ Tel: (+965) 25327651, 25354073 | Fax: (+965) 25327648, 25356594
 <script>
 async function doTrack(){
 const q=document.getElementById('passportInput').value.trim();
-if(!q){document.getElementById('errMsg').textContent='Please enter your passport number';document.getElementById('errMsg').style.display='block';return}
+if(!q){document.getElementById('errMsg').textContent='Please enter your passport number / براہ کرم اپنا پاسپورٹ نمبر درج کریں';document.getElementById('errMsg').style.display='block';return}
 document.getElementById('errMsg').style.display='none';
 document.getElementById('resultBox').style.display='none';
+document.getElementById('loader').style.display='block';
+document.getElementById('trackBtn').disabled=true;
 try{
 const r=await fetch('/api/public-track?type=passport&q='+encodeURIComponent(q));
 const d=await r.json();
+document.getElementById('loader').style.display='none';
+document.getElementById('trackBtn').disabled=false;
 if(d.success){
 const s=d.data;
-let statusClass='status-processing',icon='&#128338;',label='Being Processed';
-if(s.status==='APPROVED'){statusClass='status-approved';icon='&#9989;';label='VISA APPROVED'}
-else if(s.status==='PENDING_MOFA'){statusClass='status-pending';icon='&#9203;';label='Pending MOFA KSA Approval'}
+let statusClass='status-processing',icon='&#128338;',label='Being Processed',labelUr='پروسیسنگ جاری ہے';
+let step1='done',step2='wait',step3='wait';
+if(s.status==='APPROVED'){statusClass='status-approved';icon='&#9989;';label='VISA APPROVED';labelUr='ویزا منظور ہو گیا';step1='done';step2='done';step3='done'}
+else if(s.status==='PENDING_MOFA'){statusClass='status-pending';icon='&#9203;';label='Pending MOFA KSA Approval';labelUr='سعودی وزارت خارجہ سے منظوری زیر التوا';step1='done';step2='active';step3='wait'}
 document.getElementById('statusBox').innerHTML=`
 <div class="status-box ${statusClass}">
 <div class="status-icon">${icon}</div>
 <div class="status-label">${label}</div>
 <div class="status-detail">${s.status_detail}</div>
+<div class="status-detail-ur">${labelUr}</div>
 </div>`;
+// Timeline
+let tl='<div class="timeline">';
+tl+=`<div class="tl-step"><div class="tl-dot ${step1}">1</div><div class="tl-text"><div class="tl-title">Application Registered / درخواست درج ہو گئی</div><div class="tl-sub">${s.registered_date||'Submitted'}</div></div></div>`;
+tl+=`<div class="tl-line ${step1==='done'?'done':''}"></div>`;
+tl+=`<div class="tl-step"><div class="tl-dot ${step2}">2</div><div class="tl-text"><div class="tl-title">Sent to MOFA KSA / سعودی وزارت خارجہ کو بھیج دیا گیا</div><div class="tl-sub">${s.mofa_sent_date||'Awaiting'}</div></div></div>`;
+tl+=`<div class="tl-line ${step2==='done'?'done':''}"></div>`;
+tl+=`<div class="tl-step"><div class="tl-dot ${step3}">3</div><div class="tl-text"><div class="tl-title">Visa Decision / ویزا فیصلہ</div><div class="tl-sub">${s.status==='APPROVED'?'Approved - Contact Embassy':'Pending'}</div></div></div>`;
+tl+='</div>';
+document.getElementById('timelineBox').innerHTML=tl;
 let grid=`<div class="info-grid">
 <div class="info-item"><div class="lbl">Tracking Number</div><div class="val">${s.tracking_number}</div></div>
 <div class="info-item"><div class="lbl">Name</div><div class="val">${s.name}</div></div>
 <div class="info-item"><div class="lbl">Passport</div><div class="val">${s.passport}</div></div>
 <div class="info-item"><div class="lbl">Registered On</div><div class="val">${s.registered_date||'N/A'}</div></div>`;
 if(s.mofa_sent_date){
-grid+=`<div class="info-item" style="grid-column:1/-1;background:#fff3e0"><div class="lbl">Sent to MOFA KSA On</div><div class="val" style="color:#e65100">${s.mofa_sent_date}</div></div>`;
+grid+=`<div class="info-item" style="grid-column:1/-1;background:#fff3e0;border-color:#ffe0b2"><div class="lbl">Sent to MOFA KSA On</div><div class="val" style="color:#e65100">${s.mofa_sent_date}</div></div>`;
 }
 grid+='</div>';
 document.getElementById('infoGrid').innerHTML=grid;
 document.getElementById('emergencySection').style.display=s.status==='APPROVED'?'block':'none';
 document.getElementById('resultBox').style.display='block';
 }else{
-document.getElementById('errMsg').textContent=d.error||'Not found';
+document.getElementById('errMsg').innerHTML=(d.error||'Not found')+'<br><span dir="rtl" style="font-family:Tahoma,sans-serif;font-size:.9em">اس پاسپورٹ نمبر سے کوئی درخواست نہیں ملی</span>';
 document.getElementById('errMsg').style.display='block';
 }
 }catch(err){
+document.getElementById('loader').style.display='none';
+document.getElementById('trackBtn').disabled=false;
 document.getElementById('errMsg').textContent='Network error. Please try again.';
 document.getElementById('errMsg').style.display='block';
 }
 }
-// Allow Enter key to submit
 document.getElementById('passportInput').addEventListener('keypress',e=>{if(e.key==='Enter')doTrack()});
 </script></body></html>"""
 
@@ -2007,6 +2065,10 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="fgp"><label style="font-size:.82em;font-weight:600">To Record #</label><select id="mofaTo" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:220px"></select></div>
 <button class="btn btn-p" style="padding:10px 20px" onclick="loadMofaPreview()">Preview</button>
 </div>
+<div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:14px;padding:14px;background:#fff8e1;border:1px solid #ffe082;border-radius:8px">
+<div class="fgp" style="flex:1;min-width:220px"><label style="font-size:.82em;font-weight:600;color:#e65100">MOFA KSA Letter / Fax Number <span style="color:#c62828">*</span></label><input id="mofaLetterNum" placeholder="e.g. MOFA/KW/2026/0123 or Fax-456" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;width:100%"></div>
+<div class="fgp" style="min-width:180px"><label style="font-size:.82em;font-weight:600;color:#e65100">Letter / Fax Date <span style="color:#c62828">*</span></label><input type="date" id="mofaLetterDate" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;width:100%"></div>
+</div>
 <div id="mofaStats" style="margin-bottom:12px;font-size:.9em;display:none">
 <span style="background:var(--pl);color:var(--p);padding:4px 12px;border-radius:20px;font-weight:600" id="mofaCount"></span>
 <span style="margin-left:8px;color:var(--tl)" id="mofaRange"></span>
@@ -2014,7 +2076,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="scroll-t"><table id="mofaTbl" style="font-size:.88em"></table></div>
 <div style="display:flex;gap:10px;margin-top:14px" id="mofaActions" class="hidden">
 <button class="btn btn-p" style="padding:10px 20px" onclick="downloadMofa()">Download CSV for MOFA</button>
-<button class="btn" style="padding:10px 20px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80" onclick="showMofaSendModal()">Mark as Sent to MOFA</button>
+<button class="btn" style="padding:10px 20px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80" onclick="confirmSendToMofa()">Mark as Sent to MOFA</button>
 </div>
 </div>
 
@@ -2043,20 +2105,6 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 </div>
 </div></div>
 
-<!-- MOFA SEND MODAL -->
-<div class="mo" id="mofaSendModal"><div class="ml" style="max-width:500px">
-<button class="cb" onclick="document.getElementById('mofaSendModal').classList.remove('show')">&times;</button>
-<h3 style="color:#e65100">Send Batch to MOFA KSA</h3>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Please enter the MOFA KSA letter/fax reference number and date for this batch. This information will be stored for follow-up tracking.</p>
-<div class="fg" style="margin-bottom:14px">
-<div class="fgp"><label>MOFA KSA Letter / Fax Number <span style="color:#c62828">*</span></label><input id="mofaLetterNum" placeholder="e.g. MOFA/KW/2026/0123 or Fax-456"></div>
-<div class="fgp"><label>Letter / Fax Date <span style="color:#c62828">*</span></label><input type="date" id="mofaLetterDate"></div>
-</div>
-<div style="display:flex;gap:10px">
-<button class="btn btn-p" style="flex:1" onclick="confirmSendToMofa()">Confirm &amp; Mark as Sent</button>
-<button class="btn" style="flex:1;background:#eee" onclick="document.getElementById('mofaSendModal').classList.remove('show')">Cancel</button>
-</div>
-</div></div>
 
 <!-- REPORT -->
 <div id="tab-report" class="tab"><div class="ctr">
@@ -2718,6 +2766,8 @@ filterSentRecords();
 document.getElementById('mofaStats').style.display='none';
 document.getElementById('mofaTbl').innerHTML='';
 document.getElementById('mofaActions').classList.add('hidden');
+// Set default letter date to today
+document.getElementById('mofaLetterDate').value=new Date().toISOString().slice(0,10);
 // Load batch history
 loadMofaBatches();
 }catch(err){console.log('MOFA load exception:',err)}
@@ -2731,12 +2781,12 @@ filtered=mofaSentRecords.filter(r=>r.visa_status!=='Approved');
 filtered=mofaSentRecords.filter(r=>r.visa_status==='Approved');
 }
 document.getElementById('mofaSentCount').textContent=filtered.length+' records';
-let sh='<thead><tr><th>#</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Mobile</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
+let sh='<thead><tr><th>#</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
 filtered.forEach((r,i)=>{
 const vs=r.visa_status==='Approved'?'<span class="bdg bdg-app">Approved</span>':'<span class="bdg bdg-pen">Pending</span>';
-sh+=`<tr><td>${i+1}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td>${r.mobile||'-'}</td><td>${vs}</td><td>${r.mofa_letter_number||'-'}</td><td>${r.mofa_letter_date||'-'}</td><td>${r.mofa_sent_date||'-'}</td></tr>`;
+sh+=`<tr><td>${i+1}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td>${vs}</td><td>${r.mofa_letter_number||'-'}</td><td>${r.mofa_letter_date||'-'}</td><td>${r.mofa_sent_date||'-'}</td></tr>`;
 });
-sh+=filtered.length?'</tbody>':`<tr><td colspan="10" style="text-align:center;color:var(--tl);padding:20px">No records found</td></tr></tbody>`;
+sh+=filtered.length?'</tbody>':`<tr><td colspan="9" style="text-align:center;color:var(--tl);padding:20px">No records found</td></tr></tbody>`;
 document.getElementById('mofaSentTbl').innerHTML=sh;
 }
 async function loadMofaBatches(){
@@ -2772,15 +2822,6 @@ const fromId=document.getElementById('mofaFrom').value;
 const toId=document.getElementById('mofaTo').value;
 window.open(`/api/mofa-export?from=${fromId}&to=${toId}&filter=new`,'_blank');
 }
-function showMofaSendModal(){
-const fromId=parseInt(document.getElementById('mofaFrom').value);
-const toId=parseInt(document.getElementById('mofaTo').value);
-const filtered=mofaRecords.filter(r=>r.id>=fromId&&r.id<=toId&&(!r.mofa_status||r.mofa_status===''||r.mofa_status==='New'));
-if(filtered.length===0){toast('No new records in this range');return}
-document.getElementById('mofaLetterDate').value=new Date().toISOString().slice(0,10);
-document.getElementById('mofaLetterNum').value='';
-document.getElementById('mofaSendModal').classList.add('show');
-}
 async function confirmSendToMofa(){
 try{
 const letterNum=document.getElementById('mofaLetterNum').value.trim();
@@ -2795,7 +2836,6 @@ const resp=await fetch('/api/mofa-mark-sent',{method:'POST',headers:{'Content-Ty
 body:JSON.stringify({from_id:fromId,to_id:toId,letter_number:letterNum,letter_date:letterDate})});
 const r=await resp.json();
 if(r&&r.success){
-document.getElementById('mofaSendModal').classList.remove('show');
 toast(r.count+' records marked as Sent to MOFA (Letter: '+letterNum+')');
 await loadMofaData();loadMofaPreview();
 }else{toast('Error: '+(r?.error||'Server returned error'))}
@@ -2829,9 +2869,9 @@ html+='@media print{body{margin:0;padding:10px}}';
 html+='</style></head><body>';
 html+='<div class="header"><h1>PAKISTAN EMBASSY KUWAIT</h1><h2>'+title+'</h2>';
 html+='<p style="font-size:11px;color:#555">Generated: '+new Date().toLocaleString()+'</p></div>';
-html+='<table><thead><tr><th>S.No</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Mobile</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
+html+='<table><thead><tr><th>S.No</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
 filtered.forEach((r,i)=>{
-html+='<tr><td>'+(i+1)+'</td><td>'+r.id+'</td><td>'+r.name+'</td><td>'+r.passport+'</td><td>'+(r.border_crossing||'-')+'</td><td>'+(r.mobile||'-')+'</td><td>'+(r.visa_status||'Pending')+'</td><td>'+(r.mofa_letter_number||'-')+'</td><td>'+(r.mofa_letter_date||'-')+'</td><td>'+(r.mofa_sent_date||'-')+'</td></tr>';
+html+='<tr><td>'+(i+1)+'</td><td>'+r.id+'</td><td>'+r.name+'</td><td>'+r.passport+'</td><td>'+(r.border_crossing||'-')+'</td><td>'+(r.visa_status||'Pending')+'</td><td>'+(r.mofa_letter_number||'-')+'</td><td>'+(r.mofa_letter_date||'-')+'</td><td>'+(r.mofa_sent_date||'-')+'</td></tr>';
 });
 html+='</tbody></table>';
 html+='<p style="margin-top:16px;font-size:10px;color:#888">Total Records: '+filtered.length+' | Pakistan Embassy Kuwait - Citizen Support for Transit KSA System</p>';
