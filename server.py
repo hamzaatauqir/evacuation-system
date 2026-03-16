@@ -97,6 +97,18 @@ def init_db():
         key TEXT PRIMARY KEY,
         value TEXT
     );
+    CREATE TABLE IF NOT EXISTS mofa_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        letter_number TEXT,
+        letter_date TEXT,
+        sent_date TEXT,
+        sent_by TEXT,
+        from_id INTEGER,
+        to_id INTEGER,
+        record_count INTEGER DEFAULT 0,
+        remarks TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE INDEX IF NOT EXISTS idx_passport ON evacuees(passport);
     CREATE INDEX IF NOT EXISTS idx_cnic ON evacuees(cnic);
     CREATE INDEX IF NOT EXISTS idx_travel_status ON evacuees(travel_status);
@@ -114,6 +126,9 @@ def init_db():
                          ('traveling_with_family', "TEXT DEFAULT 'No'"), ('confirm_ksa_3days', "TEXT DEFAULT 'No'"),
                          ('mofa_status', "TEXT DEFAULT ''"),
                          ('departure_date', 'TEXT'),
+                         ('mofa_batch_id', 'INTEGER'),
+                         ('mofa_letter_number', 'TEXT'),
+                         ('mofa_letter_date', 'TEXT'),
                          ('mofa_sent_date', 'TEXT')]:
         try:
             db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
@@ -129,37 +144,6 @@ def init_db():
     # Normalize border crossing names
     db.execute("UPDATE evacuees SET border_crossing='Khafji Border' WHERE border_crossing IN ('Khafji Boarder','Khafji Crossing','khafji border','khafji')")
     db.execute("UPDATE evacuees SET border_crossing='Salmi Border' WHERE border_crossing IN ('Salmi Boarder','Salmi Crossing','salmi border','salmi')")
-    db.commit()
-    # One-time historical MOFA import from Excel data (safe to re-run — only updates unsent records)
-    _historical_mofa = [
-        ("2026-03-10", ["CE9459393","BZ9459833","CZ9824143","AZ7126233","GY4124895","KV1161963","EM5140202","CD5575824","BV6976744","DR5841481","BB5777838","AN5775824","AD8521384"]),
-        ("2026-03-11", ["AP1949521","AA1716674","DF7125852","BQ7128703","CH5994403","BL1164824","NQ1157873","AJ7801894","EM1917033","GM9899062","HV1224372","JL1334983","UW5149542","HB1853912","AH5593142","FA0993993"]),
-        ("2026-03-12", ["AE8001653","SC4151881","MZ6800422","AA8094222","DF9150183","HK4101004","FF4133292","GD1807624","AF8172314","SB1849251","QQ8450261","EP1824822","JC4121893","UP4131613","AE1504793","EG1403731","DY1401311","LN5469641","WL1338932","DT8678713","XR3092263","ED5134112","GW9612443","FN3796282","AL8108523","JG1911702","CY4911953","SQ 3996382","VH3140643"]),
-        ("2026-03-15", ["EZ5771811","AP9630902","CE8978602","DZ2225711","CA8489522","JE5141864","AD6520923","FD4109814","VF3090392","HM3991093","LX3112042","GG7793461","JW6171321","KA8914371","JW6179941","EA7960461","TP1012511","VD4148092","CR4185743","CE1753043","AU5154243","WZ0000561","CA4916013","BA6853223","CP5974803","EB4913763","EU5970192","LB5978381","HD1189251","BB9211094","CP5976913","JK9826912","AR1786362","MX1071331","VH4101693","WF1847871","JU5970261","HP3993513","EF1206243","BR1157193","GW4794612","DW3793713","BD5029573","AT5970935","LW5155532","AD5485141","FS1514352","AB3749214","CD4103274","AA5970773","AB5979753","BW3401683","ZU1802343","QQ1817503","EA9456572","BF9899795","CL9826443","CP3491722","GX1156104","AG0888893","BE5981713","AP1949521","AA1716674","BQ7128703","CH5994403","BL1164824","NQ1157873","AJ7801894","EM1917033","HV1224372","JL1334983","UW5149542","HB1853912","AH5593142","FA0993993","HL5752243","EF1792864","QP1167912","AT1859645","GX1209071","ZF1831511","MZ1831131","AK3700344","AV3995813","SY9153972","BB0796953","AU18265274","KB5465612","BK5988342","YG5153511","XS5154041","NQ5169271","GA5128793","GS1747551","EU9848082","CC6906014","TM1163452","AH5959372","CF5499113","AR0576224","BM1152743","DW1182271","XE1156663","BG4106254","GG1222642","LJ1808303","HB1206721","AH3441702","RN5152661","CZ60367917","AF7674523","NY84582718","SC1074011","CE1889033","CG9458123","ET4173973"]),
-    ]
-    for batch_date, passports in _historical_mofa:
-        for pp in passports:
-            pp_clean = pp.strip().upper().replace(' ', '')
-            row = db.execute("SELECT id, mofa_status, mofa_sent_date FROM evacuees WHERE UPPER(REPLACE(TRIM(passport), ' ', '')) = ?", [pp_clean]).fetchone()
-            if row:
-                # Set date for records that are already Sent to MOFA but have no date
-                if row['mofa_status'] == 'Sent to MOFA' and (not row['mofa_sent_date'] or row['mofa_sent_date'] == ''):
-                    db.execute("UPDATE evacuees SET mofa_sent_date=? WHERE id=?", [batch_date, row['id']])
-                # Also mark records that haven't been sent yet
-                elif row['mofa_status'] != 'Sent to MOFA':
-                    db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?
-                        WHERE id=? AND (mofa_status IS NULL OR mofa_status='' OR mofa_status='New')""",
-                        [batch_date, row['id']])
-    db.commit()
-    # Backfill: any records marked 'Sent to MOFA' that STILL have no date — use updated_at date
-    db.execute("""UPDATE evacuees SET mofa_sent_date = DATE(updated_at)
-        WHERE mofa_status='Sent to MOFA' AND (mofa_sent_date IS NULL OR mofa_sent_date='')
-        AND updated_at IS NOT NULL AND updated_at != ''""")
-    # Final fallback: if still no date, use today
-    from datetime import datetime as _dt
-    _today = _dt.now().strftime('%Y-%m-%d')
-    db.execute("""UPDATE evacuees SET mofa_sent_date = ?
-        WHERE mofa_status='Sent to MOFA' AND (mofa_sent_date IS NULL OR mofa_sent_date='')""", [_today])
     db.commit()
     db.close()
 
@@ -693,28 +677,9 @@ def api_save_record(data, user):
 
 def api_delete_record(rec_id, user):
     db = get_db()
-    # Before deleting, get the record's identifiers so we can re-evaluate its matches
-    deleted_rec = db.execute("SELECT passport, cnic, civil_id FROM evacuees WHERE id = ?", [rec_id]).fetchone()
     db.execute("DELETE FROM evacuees WHERE id = ?", [rec_id])
     db.execute("INSERT INTO audit_log (action, record_id, user) VALUES ('delete', ?, ?)", (rec_id, user))
-    db.commit()
-
-    # Re-evaluate duplicate flags for records that matched the deleted record
-    # This ensures the original entry gets cleared and becomes eligible for MOFA
-    if deleted_rec:
-        cleared = 0
-        dups = db.execute("SELECT id FROM evacuees WHERE dup_flag = 'DUPLICATE'").fetchall()
-        for dup_row in dups:
-            rec = dict(db.execute("SELECT * FROM evacuees WHERE id = ?", [dup_row['id']]).fetchone())
-            new_flags = check_duplicates(db, rec, exclude_id=rec['id'])
-            if not new_flags:
-                db.execute("UPDATE evacuees SET dup_flag = 'CLEAR', updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?",
-                           [user, rec['id']])
-                cleared += 1
-        if cleared:
-            db.commit()
-
-    db.close()
+    db.commit(); db.close()
     return {'success': True}
 
 def api_users_list():
@@ -944,7 +909,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         params = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
 
-        if path in ('/embassy-registration', '/register'):
+        if path in ('/track-application', '/embassy-registration/track'):
+            # Public tracking page — no login needed
+            self.send_html(PUBLIC_TRACKING_PAGE)
+        elif path == '/api/public-track':
+            # Public tracking API — no login needed
+            search_val = params.get('q', '').strip()
+            search_type = params.get('type', 'passport')  # passport or tracking
+            if not search_val:
+                self.send_json({'success': False, 'error': 'Please enter a passport or tracking number'}, 400)
+                return
+            db = get_db()
+            rec = None
+            if search_type == 'tracking':
+                tracking_match = re.match(r'^PKE-?(\d+)$', search_val, re.IGNORECASE)
+                if tracking_match:
+                    rec_id = int(tracking_match.group(1))
+                    rec = db.execute("""SELECT id, name, passport, mofa_status, visa_status, travel_status,
+                        COALESCE(mofa_sent_date,'') as mofa_sent_date,
+                        COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                        date_of_request, created_at
+                        FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
+            else:
+                passport = search_val.upper().strip()
+                rec = db.execute("""SELECT id, name, passport, mofa_status, visa_status, travel_status,
+                    COALESCE(mofa_sent_date,'') as mofa_sent_date,
+                    COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                    date_of_request, created_at
+                    FROM evacuees WHERE UPPER(TRIM(passport)) = ?""", [passport]).fetchone()
+            db.close()
+            if rec:
+                r = dict(rec)
+                # Determine public-facing status
+                status_info = {}
+                status_info['tracking_number'] = 'PKE-' + str(r['id']).zfill(4)
+                status_info['name'] = r['name']
+                status_info['passport'] = r['passport'][:3] + '****' + r['passport'][-2:] if r['passport'] and len(r['passport']) > 5 else '****'
+                status_info['registered_date'] = r['date_of_request'] or r['created_at'] or ''
+                status_info['mofa_sent_date'] = r['mofa_sent_date'] or ''
+                if r['visa_status'] == 'Approved':
+                    status_info['status'] = 'APPROVED'
+                    status_info['status_detail'] = 'Your transit visa has been APPROVED by MOFA KSA.'
+                    status_info['action_required'] = True
+                elif r['mofa_status'] == 'Sent to MOFA':
+                    status_info['status'] = 'PENDING_MOFA'
+                    status_info['status_detail'] = 'Your application has been sent to MOFA KSA and is pending approval.'
+                    status_info['action_required'] = False
+                else:
+                    status_info['status'] = 'PROCESSING'
+                    status_info['status_detail'] = 'Your application is being processed by the Embassy. It will be sent to MOFA KSA shortly.'
+                    status_info['action_required'] = False
+                self.send_json({'success': True, 'data': status_info})
+            else:
+                self.send_json({'success': False, 'error': 'No application found with this information. Please check your passport number or tracking number and try again.'})
+            return
+        elif path in ('/embassy-registration', '/register'):
             # Public registration page — no login needed
             db = get_db()
             enabled = db.execute("SELECT value FROM settings WHERE key='public_registration'").fetchone()
@@ -955,10 +974,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_html(PUBLIC_REGISTER_PAGE)
         elif path in ('/embassy-registration/success', '/register/success'):
             self.send_html(REGISTER_SUCCESS_PAGE)
-        elif path == '/embassy-registration/already-registered':
-            self.send_html(ALREADY_REGISTERED_PAGE)
-        elif path in ('/embassy-registration/track', '/track'):
-            self.send_html(TRACK_STATUS_PAGE)
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
         elif path == '/':
@@ -1024,15 +1039,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             db = get_db()
-            # Check if mofa_status column exists
             cols = [c[1] for c in db.execute("PRAGMA table_info(evacuees)").fetchall()]
             has_mofa = 'mofa_status' in cols
+            has_letter = 'mofa_letter_number' in cols
             if has_mofa:
-                rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status, mofa_sent_date FROM evacuees
-                    WHERE travel_status='Pending' AND dup_flag='CLEAR'
+                rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status,
+                    visa_status, mobile,
+                    COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                    COALESCE(mofa_letter_date,'') as mofa_letter_date,
+                    COALESCE(mofa_sent_date,'') as mofa_sent_date,
+                    COALESCE(mofa_batch_id,'') as mofa_batch_id
+                    FROM evacuees
+                    WHERE dup_flag='CLEAR' AND (travel_status='Pending' OR mofa_status='Sent to MOFA')
                     ORDER BY id""").fetchall()
             else:
-                rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
+                rows = db.execute("""SELECT id, name, passport, border_crossing, visa_status, mobile FROM evacuees
                     WHERE travel_status='Pending' AND dup_flag='CLEAR'
                     ORDER BY id""").fetchall()
             db.close()
@@ -1041,32 +1062,77 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 d = dict(r)
                 if not has_mofa:
                     d['mofa_status'] = ''
-                    d['mofa_sent_date'] = ''
                 else:
                     d['mofa_status'] = d.get('mofa_status', '') or ''
-                    d['mofa_sent_date'] = d.get('mofa_sent_date', '') or ''
+                if not has_letter:
+                    d['mofa_letter_number'] = ''
+                    d['mofa_letter_date'] = ''
+                    d['mofa_sent_date'] = ''
+                    d['mofa_batch_id'] = ''
                 result.append(d)
             self.send_json(result)
+        elif path == '/api/mofa-batches':
+            user = self.require_auth()
+            if not user: return
+            db = get_db()
+            try:
+                batches = [dict(r) for r in db.execute("SELECT * FROM mofa_batches ORDER BY id DESC").fetchall()]
+            except:
+                batches = []
+            db.close()
+            self.send_json(batches)
         elif path == '/api/mofa-export':
             user = self.require_auth()
             if not user: return
             from_id = int(params.get('from', 0))
             to_id = int(params.get('to', 999999))
+            filter_type = params.get('filter', 'new')  # new, pending_mofa, all_sent
             db = get_db()
-            rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
-                WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
-                AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
-                ORDER BY id""", [from_id, to_id]).fetchall()
+            if filter_type == 'pending_mofa':
+                rows = db.execute("""SELECT id, name, passport, border_crossing, mobile,
+                    COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                    COALESCE(mofa_letter_date,'') as mofa_letter_date,
+                    COALESCE(mofa_sent_date,'') as mofa_sent_date
+                    FROM evacuees
+                    WHERE mofa_status='Sent to MOFA' AND visa_status != 'Approved' AND dup_flag='CLEAR'
+                    ORDER BY id""").fetchall()
+            elif filter_type == 'all_sent':
+                rows = db.execute("""SELECT id, name, passport, border_crossing, mobile, visa_status,
+                    COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                    COALESCE(mofa_letter_date,'') as mofa_letter_date,
+                    COALESCE(mofa_sent_date,'') as mofa_sent_date
+                    FROM evacuees
+                    WHERE mofa_status='Sent to MOFA' AND dup_flag='CLEAR'
+                    ORDER BY id""").fetchall()
+            else:
+                rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
+                    WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                    AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+                    ORDER BY id""", [from_id, to_id]).fetchall()
             db.close()
             output = io.StringIO()
             writer = csv.writer(output)
-            writer.writerow(['S.No', 'Name', 'Passport Number', 'Border Entry Point'])
-            for i, r in enumerate(rows, 1):
-                writer.writerow([i, r['name'], r['passport'], r['border_crossing']])
+            if filter_type in ('pending_mofa', 'all_sent'):
+                header = ['S.No', 'Record #', 'Name', 'Passport Number', 'Border Entry Point', 'Mobile']
+                if filter_type == 'all_sent':
+                    header.append('Visa Status')
+                header.extend(['MOFA Letter/Fax No.', 'Letter Date', 'Sent to MOFA Date'])
+                writer.writerow(header)
+                for i, r in enumerate(rows, 1):
+                    row = [i, r['id'], r['name'], r['passport'], r['border_crossing'], r.get('mobile','')]
+                    if filter_type == 'all_sent':
+                        row.append(r.get('visa_status',''))
+                    row.extend([r.get('mofa_letter_number',''), r.get('mofa_letter_date',''), r.get('mofa_sent_date','')])
+                    writer.writerow(row)
+            else:
+                writer.writerow(['S.No', 'Name', 'Passport Number', 'Border Entry Point'])
+                for i, r in enumerate(rows, 1):
+                    writer.writerow([i, r['name'], r['passport'], r['border_crossing']])
             body = output.getvalue().encode('utf-8-sig')
+            fname = f'MOFA_{"pending_followup" if filter_type=="pending_mofa" else "visa_request"}_{datetime.now().strftime("%Y%m%d")}.csv'
             self.send_response(200)
             self.send_header('Content-Type', 'text/csv; charset=utf-8')
-            self.send_header('Content-Disposition', f'attachment; filename="MOFA_visa_request_{datetime.now().strftime("%Y%m%d")}.csv"')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
             self.send_header('Content-Length', len(body))
             self.end_headers()
             self.wfile.write(body)
@@ -1112,55 +1178,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         body = self.read_body()
 
-        if path == '/api/track-status':
-            # Public tracking by passport number — no auth needed
-            try:
-                data = json.loads(body)
-                passport_q = data.get('passport', '').strip().upper()
-                if not passport_q or len(passport_q) < 4:
-                    self.send_json({'success': False, 'error': 'Please enter a valid Passport Number'}, 400)
-                    return
-                db = get_db()
-                row = db.execute("""SELECT id, name, passport, travel_status, mofa_status, mofa_sent_date,
-                    visa_status, date_of_request, border_crossing, departure_date, dup_flag
-                    FROM evacuees WHERE UPPER(TRIM(passport)) = ? AND dup_flag='CLEAR'
-                    ORDER BY id DESC LIMIT 1""", [passport_q]).fetchone()
-                db.close()
-                if not row:
-                    self.send_json({'success': False, 'error': 'No record found with this passport number. If you recently registered, please wait a few minutes and try again.'}, 404)
-                    return
-                r = dict(row)
-                # Determine step progress for the citizen
-                steps = []
-                steps.append({'label': 'Registered', 'label_ur': 'رجسٹرڈ', 'done': True})
-                mofa_sent = r.get('mofa_status') == 'Sent to MOFA'
-                steps.append({'label': 'Sent to MOFA', 'label_ur': 'موفا کو بھیجا گیا', 'done': mofa_sent})
-                visa_ok = r.get('visa_status') in ('Approved', 'Issued', 'Visa Obtained')
-                visa_label = 'Contact Embassy' if visa_ok else 'Visa Status'
-                visa_label_ur = 'سفارتخانے سے رابطہ کریں' if visa_ok else 'ویزا کی صورتحال'
-                steps.append({'label': visa_label, 'label_ur': visa_label_ur, 'done': visa_ok})
-                departed = r.get('travel_status') == 'Departed'
-                steps.append({'label': 'Departed', 'label_ur': 'روانگی', 'done': departed})
-                # Build safe response (no sensitive data)
-                tracking_id = 'PKE-' + str(r['id']).zfill(4)
-                self.send_json({
-                    'success': True,
-                    'tracking': tracking_id,
-                    'name': r['name'],
-                    'passport_masked': r['passport'][:2] + '***' + r['passport'][-2:] if r.get('passport') and len(r['passport']) > 4 else '***',
-                    'travel_status': r.get('travel_status', 'Pending'),
-                    'mofa_status': r.get('mofa_status', '') or 'Pending',
-                    'mofa_sent_date': r.get('mofa_sent_date', '') or '',
-                    'visa_status': r.get('visa_status', '') or 'Pending',
-                    'date_of_request': r.get('date_of_request', ''),
-                    'border_crossing': r.get('border_crossing', ''),
-                    'departure_date': r.get('departure_date', '') or '',
-                    'steps': steps
-                })
-            except Exception as e:
-                self.send_json({'success': False, 'error': str(e)}, 500)
-            return
-
         if path == '/api/public-register':
             # Public registration — no auth needed, but with spam protection
             db = get_db()
@@ -1193,37 +1210,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 data['border_crossing'] = normalize_border(data['border_crossing'])
             if data.get('cnic'):
                 data['cnic'] = re.sub(r'[\s]', '', data['cnic'])
-            if data.get('civil_id'):
-                data['civil_id'] = data['civil_id'].strip()
             if not data.get('date_of_request'):
                 data['date_of_request'] = datetime.now().strftime('%Y-%m-%d')
             if not data.get('travel_status'):
                 data['travel_status'] = 'Pending'
-
-            # Block duplicate registrations by Passport, CNIC, or Civil ID
-            db = get_db()
-            existing = None
-            passport = data.get('passport', '')
-            cnic = re.sub(r'[\s\-]', '', data.get('cnic', ''))
-            civil_id = data.get('civil_id', '').strip()
-
-            if passport:
-                existing = db.execute("SELECT id FROM evacuees WHERE UPPER(TRIM(passport)) = UPPER(TRIM(?))", [passport]).fetchone()
-            if not existing and cnic:
-                existing = db.execute("SELECT id FROM evacuees WHERE REPLACE(REPLACE(cnic, '-', ''), ' ', '') = REPLACE(REPLACE(?, '-', ''), ' ', '')", [cnic]).fetchone()
-            if not existing and civil_id:
-                existing = db.execute("SELECT id FROM evacuees WHERE UPPER(TRIM(civil_id)) = UPPER(TRIM(?))", [civil_id]).fetchone()
-            db.close()
-
-            if existing:
-                tracking = 'PKE-' + str(existing['id']).zfill(4)
-                self.send_json({
-                    'success': False,
-                    'duplicate': True,
-                    'tracking': tracking,
-                    'error': 'already_registered'
-                }, 409)
-                return
 
             result = api_save_record(data, 'public')
             # Log for rate limiting
@@ -1411,96 +1401,63 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 from_id = data.get('from_id')
                 to_id = data.get('to_id')
                 ids = data.get('ids', [])
+                letter_number = data.get('letter_number', '')
+                letter_date = data.get('letter_date', '')
                 db = get_db()
                 # Ensure mofa_status column exists
                 try:
                     db.execute("ALTER TABLE evacuees ADD COLUMN mofa_status TEXT DEFAULT ''")
                     db.commit()
                 except sqlite3.OperationalError:
-                    pass  # column already exists
+                    pass
+                for col in ['mofa_batch_id', 'mofa_letter_number', 'mofa_letter_date', 'mofa_sent_date']:
+                    try:
+                        db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} TEXT")
+                        db.commit()
+                    except sqlite3.OperationalError:
+                        pass
+                sent_date = datetime.now().strftime('%Y-%m-%d %H:%M')
                 if from_id is not None and to_id is not None:
                     from_id = int(from_id)
                     to_id = int(to_id)
-                    today = datetime.now().strftime('%Y-%m-%d')
-                    cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?,
+                    cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA',
+                        mofa_letter_number=?, mofa_letter_date=?, mofa_sent_date=?,
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
-                        [today, user['user'], from_id, to_id])
+                        [letter_number, letter_date, sent_date, user['user'], from_id, to_id])
                     count = cur.rowcount
                     db.commit()
                 elif ids and len(ids) > 0:
                     placeholders = ','.join(['?'] * len(ids))
-                    today = datetime.now().strftime('%Y-%m-%d')
-                    cur = db.execute(f"""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?,
+                    cur = db.execute(f"""UPDATE evacuees SET mofa_status='Sent to MOFA',
+                        mofa_letter_number=?, mofa_letter_date=?, mofa_sent_date=?,
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id IN ({placeholders}) AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
-                        [today, user['user']] + [int(i) for i in ids])
+                        [letter_number, letter_date, sent_date, user['user']] + [int(i) for i in ids])
                     count = cur.rowcount
                     db.commit()
                 else:
                     db.close()
                     self.send_json({'success': False, 'error': 'No records selected'}, 400)
                     return
+                # Create batch record
+                batch_cur = db.execute("""INSERT INTO mofa_batches (letter_number, letter_date, sent_date, sent_by, from_id, to_id, record_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    [letter_number, letter_date, sent_date, user['user'], from_id or 0, to_id or 0, count])
+                batch_id = batch_cur.lastrowid
+                # Update batch_id on records
+                if from_id is not None and to_id is not None:
+                    db.execute("""UPDATE evacuees SET mofa_batch_id=? WHERE id >= ? AND id <= ?
+                        AND mofa_status='Sent to MOFA' AND mofa_sent_date=?""",
+                        [batch_id, from_id, to_id, sent_date])
                 db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_batch_sent', 0, ?, ?)",
-                          [user['user'], f'Marked {count} records as Sent to MOFA'])
+                          [user['user'], f'Marked {count} records as Sent to MOFA | Letter: {letter_number} | Date: {letter_date}'])
                 db.commit()
                 db.close()
-                self.send_json({'success': True, 'count': count})
+                self.send_json({'success': True, 'count': count, 'batch_id': batch_id})
             except Exception as e:
                 self.send_json({'success': False, 'error': str(e)}, 500)
-
-        elif path == '/api/mofa-import-historical':
-            user = self.require_auth()
-            if not user: return
-            if user['role'] != 'admin':
-                self.send_json({'success': False, 'error': 'Admin only'}, 403)
-                return
-            try:
-                data = json.loads(body)
-                batches = data.get('batches', [])
-                db = get_db()
-                total_matched = 0
-                total_not_found = 0
-                details = []
-                for batch in batches:
-                    batch_date = batch.get('date', '')
-                    passports = batch.get('passports', [])
-                    batch_matched = 0
-                    batch_missing = []
-                    for pp in passports:
-                        pp_clean = pp.strip().upper().replace(' ', '')
-                        row = db.execute("SELECT id FROM evacuees WHERE UPPER(REPLACE(TRIM(passport), ' ', '')) = ?", [pp_clean]).fetchone()
-                        if row:
-                            db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?,
-                                updated_at=CURRENT_TIMESTAMP, updated_by=?
-                                WHERE id=? AND (mofa_status IS NULL OR mofa_status='' OR mofa_status='New')""",
-                                [batch_date, user['user'], row['id']])
-                            batch_matched += 1
-                        else:
-                            batch_missing.append(pp)
-                            total_not_found += 1
-                    total_matched += batch_matched
-                    details.append({'date': batch_date, 'matched': batch_matched, 'missing': batch_missing})
-                db.commit()
-                db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_historical_import', 0, ?, ?)",
-                          [user['user'], f'Historical import: {total_matched} matched, {total_not_found} not found'])
-                db.commit()
-                db.close()
-                self.send_json({'success': True, 'total_matched': total_matched, 'total_not_found': total_not_found, 'details': details})
-            except Exception as e:
-                self.send_json({'success': False, 'error': str(e)}, 500)
-
-        elif path == '/api/mofa-print-today':
-            user = self.require_auth()
-            if not user: return
-            db = get_db()
-            today = datetime.now().strftime('%Y-%m-%d')
-            rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
-                WHERE mofa_sent_date=? AND mofa_status='Sent to MOFA' AND dup_flag='CLEAR'
-                ORDER BY id""", [today]).fetchall()
-            db.close()
-            self.send_json([dict(r) for r in rows])
 
         elif path == '/api/bulk-visa-update':
             user = self.require_auth()
@@ -1608,10 +1565,6 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <svg width="70" height="70" viewBox="0 0 200 200" style="margin-bottom:8px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
 <h1>SAUDI TRANSIT VISA REGISTRATION</h1>
 <div class="sub">Pakistan Embassy Kuwait &mdash; Consular Services</div>
-<div style="margin-top:12px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
-<a href="/embassy-registration" style="color:#fff;text-decoration:none;padding:8px 20px;border-radius:8px;font-size:.88em;font-weight:600;background:rgba(255,255,255,.25)">Register</a>
-<a href="/embassy-registration/track" style="color:#fff;text-decoration:none;padding:8px 20px;border-radius:8px;font-size:.88em;font-weight:600;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.4)">&#128270; Track Your Application</a>
-</div>
 </div>
 <div class="ctr">
 <div class="notice">
@@ -1654,7 +1607,8 @@ The situation in Kuwait remains stable and under control. This registration faci
 Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
 Tel: (+965) 25327651, 25354073 | Fax: (+965) 25327648, 25356594<br>
 <strong>Emergency Contacts:</strong> Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265<br><br>
-<strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
+<strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a><br><br>
+<a href="/track-application" style="display:inline-block;padding:10px 24px;background:#1565c0;color:#fff;text-decoration:none;border-radius:8px;font-weight:600">&#128269; Track Your Application Status</a>
 </div>
 <script>
 async function submitForm(e){
@@ -1677,8 +1631,6 @@ if(d.success){
     document.getElementById('dupWarning').style.display='block';
   }
   window.location='/embassy-registration/success?tid=PKE-'+String(d.id).padStart(4,'0');
-}else if(d.duplicate || d.error==='already_registered'){
-  window.location='/embassy-registration/already-registered?tid='+(d.tracking||'');
 }else{
   document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
   document.getElementById('errorMsg').style.display='block';
@@ -1689,6 +1641,125 @@ document.getElementById('errorMsg').textContent='Network error. Please check you
 document.getElementById('errorMsg').style.display='block';
 btn.disabled=false;btn.textContent='Submit Registration';
 }return false}
+</script></body></html>"""
+
+PUBLIC_TRACKING_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Track Your Application - Pakistan Embassy Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
+.hdr{background:linear-gradient(135deg,#006600,#004d00);color:#fff;padding:20px 24px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.hdr h1{font-size:1.4em;margin-bottom:4px}.hdr .sub{font-size:.85em;opacity:.9}
+.ctr{max-width:600px;margin:0 auto;padding:20px}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,.1);margin-bottom:16px}
+.fgp{margin-bottom:14px}.fgp label{display:block;font-size:.82em;font-weight:600;color:#757575;margin-bottom:4px}
+.fgp input{width:100%;padding:12px;border:1px solid #e0e0e0;border-radius:8px;font-size:1em}
+.fgp input:focus{border-color:#006600;outline:none;box-shadow:0 0 0 3px rgba(0,102,0,.1)}
+.btn{width:100%;padding:14px;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:1em;transition:.2s}
+.btn-p{background:#006600;color:#fff}.btn-p:hover{background:#004d00}
+.btn-p:disabled{background:#999;cursor:not-allowed}
+.result{display:none;margin-top:20px}
+.status-box{border-radius:12px;padding:20px;margin-bottom:16px;text-align:center}
+.status-approved{background:#e8f5e9;border:2px solid #2e7d32}
+.status-pending{background:#fff3e0;border:2px solid #e65100}
+.status-processing{background:#e3f2fd;border:2px solid #1565c0}
+.status-icon{font-size:3em;margin-bottom:8px}
+.status-label{font-size:1.3em;font-weight:700;margin-bottom:4px}
+.status-detail{font-size:.9em;color:#555;line-height:1.5}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+.info-item{background:#f8f9fa;border-radius:8px;padding:10px 14px}
+.info-item .lbl{font-size:.75em;color:#888;text-transform:uppercase;letter-spacing:.5px}
+.info-item .val{font-size:.95em;font-weight:600;color:#333;margin-top:2px}
+.emergency-box{background:#ffebee;border:2px solid #c62828;border-radius:12px;padding:18px;margin-top:16px;text-align:center}
+.emergency-box h3{color:#c62828;font-size:1.1em;margin-bottom:10px}
+.emergency-box .nums{font-size:.92em;line-height:2;color:#333}
+.emergency-box a{color:#006600;font-weight:700;text-decoration:none}
+.error-msg{color:#c62828;font-size:.88em;text-align:center;margin-top:12px;display:none}
+.footer{text-align:center;padding:20px;font-size:.8em;color:#999;line-height:1.8}
+.track-link{display:inline-block;margin-top:12px;color:#006600;text-decoration:none;font-weight:600;font-size:.9em}
+@media(max-width:600px){.info-grid{grid-template-columns:1fr}.ctr{padding:12px}}
+</style></head><body>
+<div class="hdr">
+<svg width="60" height="60" viewBox="0 0 200 200" style="margin-bottom:6px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
+<h1>TRACK YOUR APPLICATION</h1>
+<div class="sub">Saudi Transit Visa &mdash; Pakistan Embassy Kuwait</div>
+</div>
+<div class="ctr">
+<div class="card">
+<h3 style="color:#006600;margin-bottom:14px;text-align:center">Check Your Application Status</h3>
+<div class="fgp"><label>Enter Your Passport Number</label><input id="passportInput" placeholder="e.g. ML3955083" style="text-transform:uppercase"></div>
+<button class="btn btn-p" onclick="doTrack()">Check Status</button>
+<div class="error-msg" id="errMsg"></div>
+</div>
+<div class="result" id="resultBox">
+<div id="statusBox"></div>
+<div id="infoGrid"></div>
+<div id="emergencySection" style="display:none">
+<div class="emergency-box">
+<h3>&#128222; CONTACT EMBASSY IMMEDIATELY</h3>
+<p style="font-size:.88em;color:#555;margin-bottom:10px">Your visa has been approved! Please contact the Embassy immediately for further instructions on travelling.</p>
+<div class="nums">
+<strong>Emergency Contact Numbers:</strong><br>
+Mr. Awais Saeed: <a href="tel:+96555977292">+965-55977292</a><br>
+Mr. Zahid Iqbal: <a href="tel:+96555964923">+965-55964923</a><br>
+Mr. Shahid Khan: <a href="tel:+96566568265">+965-66568265</a><br><br>
+<strong>Embassy Phone:</strong> <a href="tel:+96525327651">(+965) 25327651</a>, <a href="tel:+96525354073">25354073</a><br>
+<strong>Email:</strong> <a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a>
+</div>
+</div>
+</div>
+</div>
+<a href="/embassy-registration" class="track-link" style="display:block;text-align:center">&larr; Back to Registration</a>
+</div>
+<div class="footer">
+<strong style="color:#333">Embassy of Pakistan, Kuwait</strong><br>
+Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
+Tel: (+965) 25327651, 25354073 | Fax: (+965) 25327648, 25356594
+</div>
+<script>
+async function doTrack(){
+const q=document.getElementById('passportInput').value.trim();
+if(!q){document.getElementById('errMsg').textContent='Please enter your passport number';document.getElementById('errMsg').style.display='block';return}
+document.getElementById('errMsg').style.display='none';
+document.getElementById('resultBox').style.display='none';
+try{
+const r=await fetch('/api/public-track?type=passport&q='+encodeURIComponent(q));
+const d=await r.json();
+if(d.success){
+const s=d.data;
+let statusClass='status-processing',icon='&#128338;',label='Being Processed';
+if(s.status==='APPROVED'){statusClass='status-approved';icon='&#9989;';label='VISA APPROVED'}
+else if(s.status==='PENDING_MOFA'){statusClass='status-pending';icon='&#9203;';label='Pending MOFA KSA Approval'}
+document.getElementById('statusBox').innerHTML=`
+<div class="status-box ${statusClass}">
+<div class="status-icon">${icon}</div>
+<div class="status-label">${label}</div>
+<div class="status-detail">${s.status_detail}</div>
+</div>`;
+let grid=`<div class="info-grid">
+<div class="info-item"><div class="lbl">Tracking Number</div><div class="val">${s.tracking_number}</div></div>
+<div class="info-item"><div class="lbl">Name</div><div class="val">${s.name}</div></div>
+<div class="info-item"><div class="lbl">Passport</div><div class="val">${s.passport}</div></div>
+<div class="info-item"><div class="lbl">Registered On</div><div class="val">${s.registered_date||'N/A'}</div></div>`;
+if(s.mofa_sent_date){
+grid+=`<div class="info-item" style="grid-column:1/-1;background:#fff3e0"><div class="lbl">Sent to MOFA KSA On</div><div class="val" style="color:#e65100">${s.mofa_sent_date}</div></div>`;
+}
+grid+='</div>';
+document.getElementById('infoGrid').innerHTML=grid;
+document.getElementById('emergencySection').style.display=s.status==='APPROVED'?'block':'none';
+document.getElementById('resultBox').style.display='block';
+}else{
+document.getElementById('errMsg').textContent=d.error||'Not found';
+document.getElementById('errMsg').style.display='block';
+}
+}catch(err){
+document.getElementById('errMsg').textContent='Network error. Please try again.';
+document.getElementById('errMsg').style.display='block';
+}
+}
+// Allow Enter key to submit
+document.getElementById('passportInput').addEventListener('keypress',e=>{if(e.key==='Enter')doTrack()});
 </script></body></html>"""
 
 REGISTER_SUCCESS_PAGE = """<!DOCTYPE html>
@@ -1732,380 +1803,12 @@ Please email a copy of your passport to:<br>
 </div>
 </div>
 <p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.<br>Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>Tel: (+965) 25327651, 25354073<br>Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
-<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:8px">
 <a href="/embassy-registration">Submit Another Registration</a>
-<a id="trackLink" href="/embassy-registration/track" style="background:#1565c0;display:none">&#128270; Track Your Application</a>
-</div>
+<a href="/track-application" style="display:inline-block;padding:12px 24px;background:#1565c0;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;margin-top:8px">Track Your Application</a>
 </div>
 <script>
 const tid=new URLSearchParams(window.location.search).get('tid');
-if(tid){document.getElementById('trackingNum').textContent=tid;document.getElementById('trackingBox').style.display='block';
-const tl=document.getElementById('trackLink');tl.href='/embassy-registration/track';tl.style.display='inline-block'}
-</script>
-</body></html>"""
-
-ALREADY_REGISTERED_PAGE = """<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Already Registered - Pakistan Embassy Kuwait</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#f5f5f5 0%,#e8f5e9 100%);min-height:100vh;display:flex;flex-direction:column}
-.top-bar{background:linear-gradient(135deg,#006600,#004d00);padding:16px 24px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 10px rgba(0,0,0,.2)}
-.top-bar .flag{font-size:2em}
-.top-bar .title{color:#fff;font-size:1.1em;font-weight:700}
-.top-bar .sub{color:rgba(255,255,255,.85);font-size:.8em}
-.main{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
-.card{background:#fff;border-radius:20px;padding:0;max-width:560px;width:95%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.12);overflow:hidden;animation:slideUp .5s ease-out}
-@keyframes slideUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
-.card-header{background:linear-gradient(135deg,#e65100,#bf360c);padding:28px 32px;color:#fff}
-.card-header .icon{font-size:3em;margin-bottom:8px;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
-.card-header h1{font-size:1.5em;font-weight:700;margin-bottom:4px}
-.card-header p{font-size:.9em;opacity:.9}
-.card-body{padding:28px 32px}
-.tracking-box{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #006600;border-radius:14px;padding:20px;margin:0 0 20px 0;position:relative;overflow:hidden}
-.tracking-box::before{content:'';position:absolute;top:-50%;right:-50%;width:100%;height:100%;background:radial-gradient(circle,rgba(0,102,0,.05) 0%,transparent 70%)}
-.tracking-box .label{font-size:.75em;color:#555;text-transform:uppercase;letter-spacing:2px;font-weight:600}
-.tracking-box .number{font-size:2.4em;font-weight:800;color:#006600;letter-spacing:3px;margin:6px 0;text-shadow:0 1px 2px rgba(0,0,0,.1)}
-.tracking-box .save-hint{font-size:.78em;color:#666;margin-top:4px}
-.copy-btn{display:inline-flex;align-items:center;gap:6px;margin-top:8px;padding:8px 18px;background:#006600;color:#fff;border:none;border-radius:8px;font-size:.82em;font-weight:600;cursor:pointer;transition:all .2s}
-.copy-btn:hover{background:#004d00;transform:translateY(-1px)}
-.copy-btn.copied{background:#2e7d32}
-.status-steps{display:flex;justify-content:center;gap:0;margin:20px 0;position:relative}
-.step{display:flex;flex-direction:column;align-items:center;flex:1;position:relative;z-index:1}
-.step .dot{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.85em;font-weight:700;color:#fff;margin-bottom:6px;transition:all .3s}
-.step.done .dot{background:#006600}
-.step.active .dot{background:#e65100;animation:glow 1.5s infinite}
-.step.pending .dot{background:#ccc}
-@keyframes glow{0%,100%{box-shadow:0 0 4px rgba(230,81,0,.3)}50%{box-shadow:0 0 14px rgba(230,81,0,.5)}}
-.step .step-label{font-size:.68em;color:#777;font-weight:500;max-width:70px;text-align:center;line-height:1.3}
-.step-line{position:absolute;top:18px;left:18%;right:18%;height:3px;background:#e0e0e0;z-index:0}
-.step-line .fill{height:100%;background:#006600;transition:width .5s}
-.info-card{background:#fff8e1;border:1px solid #ffe082;border-radius:12px;padding:18px;margin-bottom:18px;text-align:left}
-.info-card .info-title{font-weight:700;color:#e65100;font-size:.92em;margin-bottom:6px;display:flex;align-items:center;gap:6px}
-.info-card .info-text{font-size:.86em;color:#555;line-height:1.7}
-.urdu-section{direction:rtl;text-align:right;font-size:.92em;color:#333;line-height:2;margin-top:12px;padding-top:12px;border-top:1px dashed #e0c68a}
-.contact-card{background:#f5f5f5;border-radius:12px;padding:16px;margin-bottom:18px;text-align:left}
-.contact-card .contact-title{font-weight:700;color:#006600;font-size:.88em;margin-bottom:10px;display:flex;align-items:center;gap:6px}
-.contact-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:.82em;color:#555}
-.contact-row .c-icon{font-size:1.1em}
-.contact-row a{color:#006600;text-decoration:none;font-weight:500}
-.contact-row a:hover{text-decoration:underline}
-.btn-row{display:flex;gap:10px;justify-content:center;margin-top:6px}
-a.btn{display:inline-flex;align-items:center;gap:6px;padding:12px 24px;background:#006600;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;font-size:.9em;transition:all .2s;box-shadow:0 2px 8px rgba(0,102,0,.2)}
-a.btn:hover{background:#004d00;transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,102,0,.3)}
-a.btn-outline{background:transparent;color:#006600;border:2px solid #006600;box-shadow:none}
-a.btn-outline:hover{background:#e8f5e9}
-.footer{text-align:center;padding:16px;font-size:.75em;color:#999}
-@media(max-width:480px){.card-body{padding:20px 18px}.tracking-box .number{font-size:1.8em}.status-steps{gap:0}.btn-row{flex-direction:column}}
-</style></head><body>
-<div class="top-bar">
-<div class="flag">&#127477;&#127472;</div>
-<div><div class="title">Embassy of Pakistan, Kuwait</div><div class="sub">Citizen Support for Transit KSA System</div></div>
-</div>
-<div class="main">
-<div class="card">
-<div class="card-header">
-<div class="icon">&#128203;</div>
-<h1>Registration Already Exists</h1>
-<p>Your Passport / CNIC / Civil ID is already in our system</p>
-</div>
-<div class="card-body">
-<div class="tracking-box">
-<div class="label">Your Tracking Number</div>
-<div class="number" id="trackingNum">---</div>
-<div class="save-hint">Keep this number safe for all future correspondence</div>
-<button class="copy-btn" onclick="copyTracking()" id="copyBtn">&#128203; Copy Number</button>
-</div>
-<div style="position:relative;margin:20px 0">
-<div class="step-line"><div class="fill" style="width:33%"></div></div>
-<div class="status-steps">
-<div class="step done"><div class="dot">&#10003;</div><div class="step-label">Registered</div></div>
-<div class="step active"><div class="dot">2</div><div class="step-label">Under Review</div></div>
-<div class="step pending"><div class="dot">3</div><div class="step-label">MOFA Request</div></div>
-<div class="step pending"><div class="dot">4</div><div class="step-label">Visa Issued</div></div>
-</div>
-</div>
-<div class="info-card">
-<div class="info-title">&#9888;&#65039; No Action Required</div>
-<div class="info-text">
-Your application is <strong>already being processed</strong>. There is no need to register again. Embassy staff will contact you on your registered mobile number once there is an update regarding your Saudi transit visa.
-<div class="urdu-section">
-&#1570;&#1662; &#1705;&#1740; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1662;&#1729;&#1604;&#1746; &#1587;&#1746; &#1605;&#1608;&#1580;&#1608;&#1583; &#1729;&#1746; &#1575;&#1608;&#1585; &#1575;&#1587; &#1662;&#1585; &#1705;&#1575;&#1585;&#1585;&#1608;&#1575;&#1574;&#1740; &#1729;&#1608; &#1585;&#1729;&#1740; &#1729;&#1746;&#1748; &#1583;&#1608;&#1576;&#1575;&#1585;&#1729; &#1585;&#1580;&#1587;&#1657;&#1585; &#1705;&#1585;&#1606;&#1746; &#1705;&#1740; &#1590;&#1585;&#1608;&#1585;&#1578; &#1606;&#1729;&#1740;&#1722; &#1729;&#1746;&#1748; &#1608;&#1740;&#1586;&#1575; &#1705;&#1740; &#1589;&#1608;&#1585;&#1578;&#1581;&#1575;&#1604; &#1705;&#1746; &#1576;&#1575;&#1585;&#1746; &#1605;&#1740;&#1722; &#1570;&#1662; &#1587;&#1746; &#1570;&#1662; &#1705;&#1746; &#1605;&#1608;&#1576;&#1575;&#1574;&#1604; &#1606;&#1605;&#1576;&#1585; &#1662;&#1585; &#1585;&#1575;&#1576;&#1591;&#1729; &#1705;&#1740;&#1575; &#1580;&#1575;&#1574;&#1746; &#1711;&#1575;&#1748;
-<br><br>
-<strong>&#1575;&#1729;&#1605;: &#1580;&#1576; &#1578;&#1705; &#1587;&#1601;&#1575;&#1585;&#1578;&#1582;&#1575;&#1606;&#1746; &#1705;&#1575; &#1593;&#1605;&#1604;&#1729; &#1570;&#1662; &#1587;&#1746; &#1585;&#1575;&#1576;&#1591;&#1729; &#1606;&#1729; &#1705;&#1585;&#1746;&#1548; &#1657;&#1705;&#1657; &#1582;&#1585;&#1740;&#1583;&#1606;&#1746; &#1587;&#1746; &#1711;&#1585;&#1740;&#1586; &#1705;&#1585;&#1740;&#1722;&#1748;</strong>
-</div>
-</div>
-</div>
-<div class="contact-card">
-<div class="contact-title">&#127971; Contact Embassy for Changes</div>
-<div class="contact-row"><span class="c-icon">&#128205;</span> Villa 440, Street 108, Block 12, Jabriya, Kuwait</div>
-<div class="contact-row"><span class="c-icon">&#128222;</span> <a href="tel:+96525327651">(+965) 25327651</a> &nbsp;|&nbsp; <a href="tel:+96525354073">25354073</a></div>
-<div class="contact-row"><span class="c-icon">&#128241;</span> Awais: <a href="tel:+96555977292">+965-55977292</a></div>
-<div class="contact-row"><span class="c-icon">&#128241;</span> Zahid: <a href="tel:+96555964923">+965-55964923</a></div>
-<div class="contact-row"><span class="c-icon">&#128241;</span> Shahid Khan: <a href="tel:+96566568265">+965-66568265</a></div>
-<div class="contact-row"><span class="c-icon">&#9993;</span> <a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a></div>
-</div>
-<div class="btn-row">
-<a class="btn" href="/embassy-registration">&#8592; Back to Registration</a>
-</div>
-</div>
-</div>
-</div>
-<div class="footer">Embassy of Pakistan, Kuwait &mdash; Citizen Support for Transit KSA System</div>
-<script>
-const tid=new URLSearchParams(window.location.search).get('tid');
-if(tid){document.getElementById('trackingNum').textContent=tid}
-function copyTracking(){
-  const num=document.getElementById('trackingNum').textContent;
-  if(num && num!=='---'){
-    navigator.clipboard.writeText(num).then(()=>{
-      const btn=document.getElementById('copyBtn');
-      btn.innerHTML='&#10003; Copied!';btn.classList.add('copied');
-      setTimeout(()=>{btn.innerHTML='&#128203; Copy Number';btn.classList.remove('copied')},2000);
-    }).catch(()=>{
-      const el=document.createElement('textarea');el.value=num;document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el);
-      const btn=document.getElementById('copyBtn');btn.innerHTML='&#10003; Copied!';btn.classList.add('copied');
-      setTimeout(()=>{btn.innerHTML='&#128203; Copy Number';btn.classList.remove('copied')},2000);
-    });
-  }
-}
-</script>
-</body></html>"""
-
-TRACK_STATUS_PAGE = r"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Track Your Application - Pakistan Embassy Kuwait</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#f5f5f5 0%,#e8f5e9 100%);min-height:100vh;display:flex;flex-direction:column}
-.top-bar{background:linear-gradient(135deg,#006600,#004d00);padding:16px 24px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 10px rgba(0,0,0,.2)}
-.top-bar .flag{font-size:2em}
-.top-bar .title{color:#fff;font-size:1.1em;font-weight:700}
-.top-bar .sub{color:rgba(255,255,255,.85);font-size:.8em}
-.top-bar-nav{display:flex;gap:10px;margin-left:auto}
-.top-bar-nav a{color:#fff;text-decoration:none;padding:8px 16px;border-radius:8px;font-size:.85em;font-weight:500;transition:all .2s}
-.top-bar-nav a:hover{background:rgba(255,255,255,.15)}
-.top-bar-nav a.active{background:rgba(255,255,255,.25)}
-.main{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
-.card{background:#fff;border-radius:20px;max-width:600px;width:95%;box-shadow:0 8px 40px rgba(0,0,0,.12);overflow:hidden;animation:slideUp .5s ease-out}
-@keyframes slideUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
-.card-header{background:linear-gradient(135deg,#006600,#004d00);padding:28px 32px;color:#fff;text-align:center}
-.card-header .icon{font-size:3em;margin-bottom:8px}
-.card-header h1{font-size:1.4em;font-weight:700;margin-bottom:4px}
-.card-header p{font-size:.88em;opacity:.9}
-.card-body{padding:28px 32px}
-.search-box{position:relative;margin-bottom:20px}
-.search-box input{width:100%;padding:16px 20px 16px 50px;border:2px solid #e0e0e0;border-radius:14px;font-size:1.1em;font-weight:600;letter-spacing:1px;text-transform:uppercase;transition:all .3s}
-.search-box input:focus{border-color:#006600;outline:none;box-shadow:0 0 0 4px rgba(0,102,0,.1)}
-.search-box input::placeholder{text-transform:none;font-weight:400;letter-spacing:0;color:#bbb}
-.search-box .search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:1.3em;color:#999}
-.search-btn{width:100%;padding:14px;background:linear-gradient(135deg,#006600,#004d00);color:#fff;border:none;border-radius:12px;font-size:1em;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px}
-.search-btn:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,102,0,.3)}
-.search-btn:disabled{background:#999;cursor:not-allowed;transform:none;box-shadow:none}
-.or-text{text-align:center;color:#999;font-size:.85em;margin:16px 0;position:relative}
-.or-text::before,.or-text::after{content:'';position:absolute;top:50%;width:38%;height:1px;background:#e0e0e0}
-.or-text::before{left:0}.or-text::after{right:0}
-.error-msg{background:#ffebee;border:1px solid #ef9a9a;border-radius:10px;padding:14px;color:#c62828;font-size:.9em;margin-top:16px;display:none;text-align:center}
-.result{display:none;animation:fadeIn .4s ease-out}
-@keyframes fadeIn{from{opacity:0}to{opacity:1}}
-.result-header{text-align:center;padding:20px 0 16px;border-bottom:1px solid #e8f5e9}
-.result-header .tracking{font-size:2em;font-weight:800;color:#006600;letter-spacing:2px}
-.result-header .name{font-size:1em;color:#555;margin-top:4px}
-.result-header .passport{font-size:.85em;color:#999}
-.steps-container{padding:24px 0;position:relative}
-.steps{display:flex;justify-content:space-between;position:relative;z-index:1}
-.step-line-bg{position:absolute;top:22px;left:12%;right:12%;height:4px;background:#e0e0e0;z-index:0;border-radius:2px}
-.step-line-fill{height:100%;background:linear-gradient(90deg,#006600,#2e7d32);border-radius:2px;transition:width .8s ease-out}
-.step{display:flex;flex-direction:column;align-items:center;flex:1;z-index:1}
-.step .dot{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1em;font-weight:700;color:#fff;margin-bottom:8px;transition:all .4s;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.1)}
-.step.done .dot{background:linear-gradient(135deg,#006600,#2e7d32)}
-.step.active .dot{background:linear-gradient(135deg,#e65100,#ff6d00);animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{box-shadow:0 0 4px rgba(230,81,0,.3)}50%{box-shadow:0 0 16px rgba(230,81,0,.5)}}
-.step.waiting .dot{background:#ccc}
-.step .step-label{font-size:.72em;color:#555;font-weight:600;text-align:center;max-width:80px;line-height:1.3}
-.step .step-label-ur{font-size:.68em;color:#999;direction:rtl;max-width:80px;text-align:center;margin-top:2px}
-.detail-cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}
-.detail-card{background:#f8faf8;border:1px solid #e8f5e9;border-radius:10px;padding:12px 14px}
-.detail-card .dc-label{font-size:.7em;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
-.detail-card .dc-value{font-size:.95em;font-weight:600;color:#333}
-.detail-card.highlight{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border-color:#a5d6a7}
-.detail-card.highlight .dc-value{color:#006600}
-.detail-card.warn{background:#fff8e1;border-color:#ffe082}
-.detail-card.warn .dc-value{color:#e65100}
-.info-banner{background:#e3f2fd;border:1px solid #90caf9;border-radius:10px;padding:14px;margin-top:16px;font-size:.85em;color:#1565c0;text-align:center;line-height:1.6}
-.info-banner .urdu{direction:rtl;text-align:right;margin-top:8px;padding-top:8px;border-top:1px dashed #90caf9;color:#333;line-height:2}
-.btn-row{display:flex;gap:10px;justify-content:center;margin-top:20px}
-a.btn{display:inline-flex;align-items:center;gap:6px;padding:12px 24px;text-decoration:none;border-radius:10px;font-weight:600;font-size:.9em;transition:all .2s}
-a.btn-green{background:#006600;color:#fff;box-shadow:0 2px 8px rgba(0,102,0,.2)}
-a.btn-green:hover{background:#004d00;transform:translateY(-1px)}
-a.btn-outline{background:transparent;color:#006600;border:2px solid #006600}
-a.btn-outline:hover{background:#e8f5e9}
-.detail-card.visa-ready{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #006600;grid-column:1/-1}
-.detail-card.visa-ready .dc-label{color:#006600;font-weight:700;font-size:.8em}
-.detail-card.visa-ready .dc-value{color:#006600;font-size:1.05em;font-weight:700}
-.visa-contact-banner{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #006600;border-radius:14px;padding:20px;margin-top:16px;text-align:center;animation:fadeIn .4s ease-out}
-.vcb-header{font-size:1.3em;font-weight:800;color:#006600;margin-bottom:2px}
-.vcb-header-ur{font-size:1.1em;font-weight:700;color:#006600;direction:rtl;margin-bottom:10px}
-.vcb-msg{font-size:.92em;color:#333;margin-bottom:4px;line-height:1.5}
-.vcb-msg-ur{font-size:.88em;color:#555;direction:rtl;line-height:1.8;margin-bottom:14px;padding-bottom:12px;border-bottom:1px dashed #a5d6a7}
-.vcb-contacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:12px}
-.vcb-contact{background:#fff;border:1px solid #a5d6a7;border-radius:8px;padding:8px 12px;font-size:.88em;font-weight:500}
-.vcb-contact a{color:#006600;text-decoration:none;font-weight:600}
-.vcb-contact a:hover{text-decoration:underline}
-.vcb-visit{font-size:.85em;color:#555;margin-top:8px;padding:8px;background:rgba(255,255,255,.6);border-radius:6px}
-.footer{text-align:center;padding:16px;font-size:.75em;color:#999}
-@media(max-width:480px){.card-body{padding:20px 16px}.detail-cards{grid-template-columns:1fr}.steps .step .step-label{font-size:.65em;max-width:60px}.vcb-contacts{grid-template-columns:1fr}}
-</style></head><body>
-<div class="top-bar">
-<div class="flag">&#127477;&#127472;</div>
-<div><div class="title">Embassy of Pakistan, Kuwait</div><div class="sub">Citizen Support for Transit KSA System</div></div>
-<div class="top-bar-nav">
-<a href="/embassy-registration">Register</a>
-<a href="/embassy-registration/track" class="active">Track Status</a>
-</div>
-</div>
-<div class="main">
-<div class="card">
-<div class="card-header">
-<div class="icon">&#128270;</div>
-<h1>Track Your Application</h1>
-<p>Enter your Passport Number to check your application status</p>
-<p style="direction:rtl;margin-top:6px;font-size:.85em">&#1575;&#1662;&#1606;&#1740; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1705;&#1740; &#1589;&#1608;&#1585;&#1578;&#1581;&#1575;&#1604; &#1580;&#1575;&#1606;&#1606;&#1746; &#1705;&#1746; &#1604;&#1740;&#1746; &#1575;&#1662;&#1606;&#1575; &#1662;&#1575;&#1587;&#1662;&#1608;&#1585;&#1657; &#1606;&#1605;&#1576;&#1585; &#1583;&#1585;&#1580; &#1705;&#1585;&#1740;&#1722;</p>
-</div>
-<div class="card-body">
-<div id="searchSection">
-<div class="search-box">
-<span class="search-icon">&#128196;</span>
-<input type="text" id="passportInput" placeholder="Enter your Passport Number" maxlength="12" style="text-transform:uppercase" autofocus
-  onkeydown="if(event.key==='Enter')checkStatus()">
-</div>
-<button class="search-btn" id="searchBtn" onclick="checkStatus()">Check Status</button>
-<p style="text-align:center;font-size:.82em;color:#999;margin-top:12px">Enter the passport number you used during registration</p>
-<p style="text-align:center;font-size:.82em;color:#999;direction:rtl;margin-top:4px">وہ پاسپورٹ نمبر درج کریں جو آپ نے رجسٹریشن کے وقت استعمال کیا تھا</p>
-</div>
-<div class="error-msg" id="errorMsg"></div>
-<div class="result" id="resultSection">
-<div class="result-header">
-<div class="tracking" id="resTracking"></div>
-<div class="name" id="resName"></div>
-<div class="passport" id="resPassport"></div>
-</div>
-<div class="steps-container">
-<div class="step-line-bg"><div class="step-line-fill" id="stepFill"></div></div>
-<div class="steps" id="stepsRow"></div>
-</div>
-<div class="detail-cards" id="detailCards"></div>
-<div id="visaContactBanner" class="visa-contact-banner" style="display:none">
-<div class="vcb-header">&#127881; Your Visa is Ready!</div>
-<div class="vcb-header-ur">&#1570;&#1662; &#1705;&#1575; &#1608;&#1740;&#1586;&#1575; &#1578;&#1740;&#1575;&#1585; &#1729;&#1746;!</div>
-<div class="vcb-msg">Please contact the Embassy immediately for <strong>ticket booking</strong>. Do NOT buy tickets on your own.</div>
-<div class="vcb-msg-ur">&#1576;&#1585;&#1575;&#1729;&#1616; &#1705;&#1585;&#1605; &#1657;&#1705;&#1657; &#1705;&#1740; &#1576;&#1705;&#1606;&#1711; &#1705;&#1746; &#1604;&#1740;&#1746; &#1601;&#1608;&#1585;&#1740; &#1591;&#1608;&#1585; &#1662;&#1585; &#1587;&#1601;&#1575;&#1585;&#1578;&#1582;&#1575;&#1606;&#1746; &#1587;&#1746; &#1585;&#1575;&#1576;&#1591;&#1729; &#1705;&#1585;&#1740;&#1722;&#1748; &#1582;&#1608;&#1583; &#1587;&#1746; &#1657;&#1705;&#1657; &#1606;&#1729; &#1582;&#1585;&#1740;&#1583;&#1740;&#1722;&#1748;</div>
-<div class="vcb-contacts">
-<div class="vcb-contact"><span>&#128222;</span> <a href="tel:+96525327651">(+965) 25327651</a></div>
-<div class="vcb-contact"><span>&#128222;</span> <a href="tel:+96525354073">(+965) 25354073</a></div>
-<div class="vcb-contact"><span>&#128241;</span> Awais: <a href="tel:+96555977292">+965-55977292</a></div>
-<div class="vcb-contact"><span>&#128241;</span> Zahid: <a href="tel:+96555964923">+965-55964923</a></div>
-<div class="vcb-contact"><span>&#128241;</span> Shahid Khan: <a href="tel:+96566568265">+965-66568265</a></div>
-</div>
-<div class="vcb-visit">&#127971; Or visit: Villa 440, Street 108, Block 12, Jabriya, Kuwait</div>
-</div>
-<div class="info-banner">
-<strong>&#9888;&#65039; PLEASE DO NOT BUY TICKET UNLESS EMBASSY STAFF CONTACTS YOU TO DO SO</strong>
-<div class="urdu"><strong>&#1575;&#1729;&#1605;: &#1580;&#1576; &#1578;&#1705; &#1587;&#1601;&#1575;&#1585;&#1578;&#1582;&#1575;&#1606;&#1746; &#1705;&#1575; &#1593;&#1605;&#1604;&#1729; &#1570;&#1662; &#1587;&#1746; &#1585;&#1575;&#1576;&#1591;&#1729; &#1606;&#1729; &#1705;&#1585;&#1746;&#1548; &#1657;&#1705;&#1657; &#1582;&#1585;&#1740;&#1583;&#1606;&#1746; &#1587;&#1746; &#1711;&#1585;&#1740;&#1586; &#1705;&#1585;&#1740;&#1722;&#1748;</strong></div>
-</div>
-<div class="btn-row">
-<a class="btn btn-outline" href="#" onclick="document.getElementById('resultSection').style.display='none';document.getElementById('searchSection').style.display='block';document.getElementById('passportInput').focus();return false">&#8592; Search Again</a>
-<a class="btn btn-green" href="/embassy-registration">New Registration</a>
-</div>
-</div>
-</div>
-</div>
-</div>
-<div class="footer">Embassy of Pakistan, Kuwait &mdash; Citizen Support for Transit KSA System</div>
-<script>
-async function checkStatus(){
-const pp=document.getElementById('passportInput').value.trim();
-if(!pp){
-const el=document.getElementById('passportInput');
-el.style.borderColor='#c62828';el.style.animation='shake .4s';
-setTimeout(()=>{el.style.animation='';el.style.borderColor=''},600);
-return;
-}
-const btn=document.getElementById('searchBtn');
-btn.disabled=true;btn.textContent='Searching...';
-document.getElementById('errorMsg').style.display='none';
-document.getElementById('resultSection').style.display='none';
-try{
-const resp=await fetch('/api/track-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({passport:pp.toUpperCase()})});
-const d=await resp.json();
-btn.disabled=false;btn.textContent='Check Status';
-if(d.success){
-document.getElementById('searchSection').style.display='none';
-renderResult(d);
-}else{
-const err=document.getElementById('errorMsg');
-err.textContent=d.error||'No record found with this passport number';
-err.style.display='block';
-}
-}catch(e){
-btn.disabled=false;btn.textContent='Check Status';
-document.getElementById('errorMsg').textContent='Network error. Please check your connection and try again.';
-document.getElementById('errorMsg').style.display='block';
-}
-}
-function renderResult(d){
-document.getElementById('resTracking').textContent=d.name;
-document.getElementById('resName').textContent='Tracking: '+d.tracking;
-document.getElementById('resPassport').textContent='Passport: '+d.passport_masked;
-// Determine if visa arrived
-const visaArrived=d.visa_status==='Approved'||d.visa_status==='Issued'||d.visa_status==='Visa Obtained';
-// Steps
-const stepsRow=document.getElementById('stepsRow');
-stepsRow.innerHTML='';
-let doneCount=0;
-const icons=['\u2713','\u2709','\u2713','\u2708'];
-d.steps.forEach((s,i)=>{if(s.done)doneCount=i+1});
-d.steps.forEach((s,i)=>{
-const cls=i<doneCount?'done':(i===doneCount?'active':'waiting');
-const div=document.createElement('div');
-div.className='step '+cls;
-div.innerHTML='<div class="dot">'+(i<doneCount?icons[i]:(i+1))+'</div><div class="step-label">'+s.label+'</div><div class="step-label-ur">'+s.label_ur+'</div>';
-stepsRow.appendChild(div);
-});
-const pct=doneCount===0?0:((doneCount)/(d.steps.length-1)*100);
-document.getElementById('stepFill').style.width=Math.min(pct,100)+'%';
-// Detail cards
-const cards=document.getElementById('detailCards');
-let ch='';
-ch+=detailCard('Application Date',d.date_of_request||'--','highlight');
-ch+=detailCard('Travel Status',d.travel_status,'highlight');
-const mofaVal=d.mofa_status==='Sent to MOFA'?'Sent to MOFA'+(d.mofa_sent_date?' ('+d.mofa_sent_date+')':''):(d.mofa_status||'Pending');
-ch+=detailCard('MOFA Status',mofaVal,d.mofa_status==='Sent to MOFA'?'highlight':'');
-// Visa status — if arrived, show "Contact Embassy for Ticket Booking"
-if(visaArrived){
-ch+=detailCard('Visa Status','VISA READY - Contact Embassy for Ticket Booking','visa-ready');
-}else{
-ch+=detailCard('Visa Status',d.visa_status||'Pending','warn');
-}
-ch+=detailCard('Border Crossing',d.border_crossing||'--','');
-ch+=detailCard('Departure Date',d.departure_date||'Not yet scheduled','');
-cards.innerHTML=ch;
-// Show/hide the visa-ready contact banner
-const contactBanner=document.getElementById('visaContactBanner');
-if(visaArrived){
-contactBanner.style.display='block';
-}else{
-contactBanner.style.display='none';
-}
-document.getElementById('resultSection').style.display='block';
-}
-function detailCard(label,value,cls){
-return '<div class="detail-card '+cls+'"><div class="dc-label">'+label+'</div><div class="dc-value">'+value+'</div></div>';
-}
-// Auto-fill from URL params
-const urlPP=new URLSearchParams(window.location.search).get('pp');
-if(urlPP){document.getElementById('passportInput').value=urlPP;checkStatus()}
+if(tid){document.getElementById('trackingNum').textContent=tid;document.getElementById('trackingBox').style.display='block'}
 </script>
 </body></html>"""
 
@@ -2297,8 +2000,8 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <!-- MOFA EXPORT -->
 <div id="tab-mofa" class="tab"><div class="ctr">
 <div class="fs">
-<h3 style="color:var(--p)">MOFA Visa Request — New Batch</h3>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Select pending cases to send to MOFA Saudi Arabia. Only shows <strong>unsent</strong>, clean (non-duplicate), pending records.</p>
+<h3 style="color:var(--p)">MOFA Visa Request &mdash; New Batch to Send</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Select a range of pending cases to download for MOFA Saudi Arabia. Only shows clean (non-duplicate) pending records not yet sent to MOFA.</p>
 <div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:14px">
 <div class="fgp"><label style="font-size:.82em;font-weight:600">From Record #</label><select id="mofaFrom" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:220px"></select></div>
 <div class="fgp"><label style="font-size:.82em;font-weight:600">To Record #</label><select id="mofaTo" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:220px"></select></div>
@@ -2311,40 +2014,47 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="scroll-t"><table id="mofaTbl" style="font-size:.88em"></table></div>
 <div style="display:flex;gap:10px;margin-top:14px" id="mofaActions" class="hidden">
 <button class="btn btn-p" style="padding:10px 20px" onclick="downloadMofa()">Download CSV for MOFA</button>
-<button class="btn" style="padding:10px 20px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80" onclick="markSentToMofa()">Mark as Sent to MOFA</button>
+<button class="btn" style="padding:10px 20px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80" onclick="showMofaSendModal()">Mark as Sent to MOFA</button>
 </div>
 </div>
-<div class="fs" style="margin-top:16px">
-<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-<h3>Today's MOFA Batch</h3>
-<button class="btn btn-p" style="padding:8px 18px;font-size:.85em" onclick="printTodayMofa()">&#128424; Print Today's Sent List</button>
+
+<div class="fs" style="margin-top:16px;border-left:4px solid #e65100">
+<h3 style="color:#e65100">MOFA KSA Follow-up &mdash; Previously Sent Batches</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:12px">Track all batches sent to MOFA KSA. Filter by status to identify pending cases for follow-up. Download printable lists with letter/fax reference numbers.</p>
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+<select id="mofaSentFilter" onchange="filterSentRecords()" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;font-size:.88em;min-width:220px">
+<option value="all">All Sent to MOFA</option>
+<option value="pending_mofa">Pending at MOFA KSA (Visa Not Yet Approved)</option>
+<option value="approved">Approved by MOFA KSA</option>
+</select>
+<span id="mofaSentCount" style="font-size:.88em;color:var(--tl);font-weight:600"></span>
 </div>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">Records marked as "Sent to MOFA" today — ready for printing</p>
-<div class="scroll-t"><table id="mofaTodayTbl" style="font-size:.88em"></table></div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+<button class="btn btn-p" style="padding:8px 16px;font-size:.85em" onclick="downloadMofaPendingCSV()">Download Excel/CSV</button>
+<button class="btn btn-i" style="padding:8px 16px;font-size:.85em" onclick="printMofaPending()">Print / PDF</button>
 </div>
-<div class="fs" style="margin-top:16px">
-<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-<h3>All Previously Sent Batches</h3>
+<div class="scroll-t"><table id="mofaSentTbl" style="font-size:.85em"></table></div>
 </div>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">Complete history of all records sent to MOFA, grouped by date</p>
-<div class="scroll-t"><table id="mofaSentTbl" style="font-size:.88em"></table></div>
+
+<div class="fs" style="margin-top:16px;border-left:4px solid #1565c0">
+<h3 style="color:#1565c0">Batch History</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">All MOFA batches sent with letter/fax reference numbers for follow-up.</p>
+<div class="scroll-t"><table id="mofaBatchTbl" style="font-size:.85em"></table></div>
 </div>
-<div class="fs" style="margin-top:16px" data-admin-only>
-<h3 style="color:var(--w)">Import Historical MOFA Data</h3>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">One-time import: paste passport numbers from each batch date to update records that were sent to MOFA before the system was created.</p>
-<div id="mofaImportArea">
-<div class="mofa-import-batch" style="background:#f9f9f9;border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:10px">
-<div style="display:flex;gap:12px;align-items:start;flex-wrap:wrap">
-<div class="fgp"><label style="font-size:.82em;font-weight:600">Batch Date</label><input type="date" class="import-date" style="padding:8px;border:1px solid var(--bd);border-radius:6px"></div>
-<div class="fgp" style="flex:1;min-width:250px"><label style="font-size:.82em;font-weight:600">Passport Numbers (one per line)</label><textarea class="import-passports" rows="4" style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:6px;font-family:monospace;font-size:.85em" placeholder="CE9459393&#10;BZ9459833&#10;CZ9824143"></textarea></div>
+</div></div>
+
+<!-- MOFA SEND MODAL -->
+<div class="mo" id="mofaSendModal"><div class="ml" style="max-width:500px">
+<button class="cb" onclick="document.getElementById('mofaSendModal').classList.remove('show')">&times;</button>
+<h3 style="color:#e65100">Send Batch to MOFA KSA</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Please enter the MOFA KSA letter/fax reference number and date for this batch. This information will be stored for follow-up tracking.</p>
+<div class="fg" style="margin-bottom:14px">
+<div class="fgp"><label>MOFA KSA Letter / Fax Number <span style="color:#c62828">*</span></label><input id="mofaLetterNum" placeholder="e.g. MOFA/KW/2026/0123 or Fax-456"></div>
+<div class="fgp"><label>Letter / Fax Date <span style="color:#c62828">*</span></label><input type="date" id="mofaLetterDate"></div>
 </div>
-</div>
-</div>
-<div style="display:flex;gap:10px;margin-top:10px">
-<button class="btn" style="padding:8px 16px;background:#f5f5f5;border:1px solid var(--bd);color:var(--t)" onclick="addImportBatch()">+ Add Another Batch Date</button>
-<button class="btn btn-p" style="padding:8px 20px" onclick="runMofaImport()">Import &amp; Match Records</button>
-</div>
-<div id="mofaImportResult" style="margin-top:12px;display:none"></div>
+<div style="display:flex;gap:10px">
+<button class="btn btn-p" style="flex:1" onclick="confirmSendToMofa()">Confirm &amp; Mark as Sent</button>
+<button class="btn" style="flex:1;background:#eee" onclick="document.getElementById('mofaSendModal').classList.remove('show')">Cancel</button>
 </div>
 </div></div>
 
@@ -2742,7 +2452,7 @@ html+=sec('Travel Details',[
 ]);
 html+=sec('Status & Processing',[
 ['KSA Visa Status',r.visa_status],['Travel Status',r.travel_status],
-['MOFA Status',r.mofa_status||'—'],['MOFA Sent Date',r.mofa_sent_date||'—'],['Duplicate Flag',r.dup_flag],
+['MOFA Status',r.mofa_status||'—'],['Duplicate Flag',r.dup_flag],
 ['Priority',r.priority],['Date of Request',r.date_of_request]
 ]);
 html+=sec('Additional',[
@@ -2986,7 +2696,7 @@ document.getElementById('importDetails').textContent=(d.details||[]).join('\n');
 loadDash();toast(`Import done: ${d.imported} new, ${d.skipped_dup} skipped, ${d.updated} updated`)}
 
 // MOFA EXPORT
-let mofaRecords=[];
+let mofaRecords=[],mofaSentRecords=[];
 async function loadMofaData(){
 try{
 const resp=await fetch('/api/mofa-pending');
@@ -2997,40 +2707,49 @@ const selFrom=document.getElementById('mofaFrom');
 const selTo=document.getElementById('mofaTo');
 selFrom.innerHTML='';selTo.innerHTML='';
 const newRecs=rows.filter(r=>!r.mofa_status||r.mofa_status===''||r.mofa_status==='New');
-const sentRecs=rows.filter(r=>r.mofa_status==='Sent to MOFA');
+mofaSentRecords=rows.filter(r=>r.mofa_status==='Sent to MOFA');
 newRecs.forEach(r=>{
 selFrom.innerHTML+=`<option value="${r.id}">#${r.id} — ${r.name} (${r.passport})</option>`;
 selTo.innerHTML+=`<option value="${r.id}">#${r.id} — ${r.name} (${r.passport})</option>`;
 });
 if(newRecs.length>0)selTo.value=newRecs[newRecs.length-1].id;
-// Today's batch table
-const today=new Date().toISOString().slice(0,10);
-const todayRecs=sentRecs.filter(r=>r.mofa_sent_date===today);
-let th='<thead><tr><th>S.No</th><th>#</th><th>Name</th><th>Passport</th><th>Border Entry</th><th>Sent Date</th></tr></thead><tbody>';
-todayRecs.forEach((r,i)=>{
-th+=`<tr><td>${i+1}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td>${r.mofa_sent_date||'-'}</td></tr>`;
-});
-th+=todayRecs.length?'</tbody>':`<tr><td colspan="6" style="text-align:center;color:var(--tl);padding:20px">No records sent to MOFA today yet</td></tr></tbody>`;
-document.getElementById('mofaTodayTbl').innerHTML=th;
-// All sent table grouped by date
-const dateGroups={};
-sentRecs.forEach(r=>{const d=r.mofa_sent_date||'Unknown';if(!dateGroups[d])dateGroups[d]=[];dateGroups[d].push(r)});
-const sortedDates=Object.keys(dateGroups).sort().reverse();
-let sh='<thead><tr><th>S.No</th><th>#</th><th>Name</th><th>Passport</th><th>Border Entry</th><th>Sent Date</th></tr></thead><tbody>';
-let sno=0;
-sortedDates.forEach(dt=>{
-sh+=`<tr style="background:#e8f5e9"><td colspan="6" style="font-weight:700;color:var(--p);padding:8px 10px">Batch: ${dt} (${dateGroups[dt].length} records)</td></tr>`;
-dateGroups[dt].forEach(r=>{
-sno++;
-sh+=`<tr><td>${sno}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td>${r.mofa_sent_date||'-'}</td></tr>`;
-});
-});
-sh+=sentRecs.length?'</tbody>':`<tr><td colspan="6" style="text-align:center;color:var(--tl);padding:20px">No records sent to MOFA yet</td></tr></tbody>`;
-document.getElementById('mofaSentTbl').innerHTML=sh;
+// Render sent table with current filter
+filterSentRecords();
 document.getElementById('mofaStats').style.display='none';
 document.getElementById('mofaTbl').innerHTML='';
 document.getElementById('mofaActions').classList.add('hidden');
+// Load batch history
+loadMofaBatches();
 }catch(err){console.log('MOFA load exception:',err)}
+}
+function filterSentRecords(){
+const filter=document.getElementById('mofaSentFilter').value;
+let filtered=mofaSentRecords;
+if(filter==='pending_mofa'){
+filtered=mofaSentRecords.filter(r=>r.visa_status!=='Approved');
+}else if(filter==='approved'){
+filtered=mofaSentRecords.filter(r=>r.visa_status==='Approved');
+}
+document.getElementById('mofaSentCount').textContent=filtered.length+' records';
+let sh='<thead><tr><th>#</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Mobile</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
+filtered.forEach((r,i)=>{
+const vs=r.visa_status==='Approved'?'<span class="bdg bdg-app">Approved</span>':'<span class="bdg bdg-pen">Pending</span>';
+sh+=`<tr><td>${i+1}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td>${r.mobile||'-'}</td><td>${vs}</td><td>${r.mofa_letter_number||'-'}</td><td>${r.mofa_letter_date||'-'}</td><td>${r.mofa_sent_date||'-'}</td></tr>`;
+});
+sh+=filtered.length?'</tbody>':`<tr><td colspan="10" style="text-align:center;color:var(--tl);padding:20px">No records found</td></tr></tbody>`;
+document.getElementById('mofaSentTbl').innerHTML=sh;
+}
+async function loadMofaBatches(){
+try{
+const resp=await fetch('/api/mofa-batches');
+const batches=await resp.json();
+let h='<thead><tr><th>Batch#</th><th>Letter/Fax No.</th><th>Letter Date</th><th>Sent Date</th><th>Sent By</th><th>Records</th><th>Range</th></tr></thead><tbody>';
+batches.forEach(b=>{
+h+=`<tr><td><strong>#${b.id}</strong></td><td style="color:#e65100;font-weight:600">${b.letter_number||'-'}</td><td>${b.letter_date||'-'}</td><td>${b.sent_date||'-'}</td><td>${b.sent_by||'-'}</td><td>${b.record_count}</td><td>#${b.from_id} - #${b.to_id}</td></tr>`;
+});
+h+=batches.length?'</tbody>':`<tr><td colspan="7" style="text-align:center;color:var(--tl);padding:20px">No batches recorded yet</td></tr></tbody>`;
+document.getElementById('mofaBatchTbl').innerHTML=h;
+}catch(err){console.log('Batch load error:',err)}
 }
 function loadMofaPreview(){
 const fromId=parseInt(document.getElementById('mofaFrom').value);
@@ -3051,96 +2770,76 @@ document.getElementById('mofaActions').classList.toggle('hidden',filtered.length
 function downloadMofa(){
 const fromId=document.getElementById('mofaFrom').value;
 const toId=document.getElementById('mofaTo').value;
-window.open(`/api/mofa-export?from=${fromId}&to=${toId}`,'_blank');
+window.open(`/api/mofa-export?from=${fromId}&to=${toId}&filter=new`,'_blank');
 }
-async function markSentToMofa(){
-try{
+function showMofaSendModal(){
 const fromId=parseInt(document.getElementById('mofaFrom').value);
 const toId=parseInt(document.getElementById('mofaTo').value);
 const filtered=mofaRecords.filter(r=>r.id>=fromId&&r.id<=toId&&(!r.mofa_status||r.mofa_status===''||r.mofa_status==='New'));
 if(filtered.length===0){toast('No new records in this range');return}
-if(!confirm('Mark '+filtered.length+' records (#'+fromId+' to #'+toId+') as Sent to MOFA? This cannot be undone.'))return;
-const resp=await fetch('/api/mofa-mark-sent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_id:fromId,to_id:toId})});
-const r=await resp.json();
-if(r&&r.success){toast(r.count+' records marked as Sent to MOFA');await loadMofaData();loadMofaPreview()}
-else{toast('Error: '+(r?.error||'Server returned error'));console.log('MOFA mark error:',r)}
-}catch(err){toast('Error: '+err.message);console.log('MOFA mark exception:',err)}
+document.getElementById('mofaLetterDate').value=new Date().toISOString().slice(0,10);
+document.getElementById('mofaLetterNum').value='';
+document.getElementById('mofaSendModal').classList.add('show');
 }
-function printTodayMofa(){
-const tbl=document.getElementById('mofaTodayTbl');
-if(!tbl||tbl.rows.length<=1){toast('No records sent today to print');return}
-const today=new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
-const rows=tbl.querySelectorAll('tbody tr');
-let printRows='';
-rows.forEach(r=>{printRows+=r.outerHTML});
-const w=window.open('','_blank');
-w.document.write(`<!DOCTYPE html><html><head><title>MOFA Batch - ${today}</title><style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',Arial,sans-serif;padding:30px;font-size:12pt}
-.hdr{text-align:center;margin-bottom:24px;border-bottom:3px double #006600;padding-bottom:16px}
-.hdr h1{font-size:14pt;color:#006600;margin-bottom:4px}
-.hdr h2{font-size:11pt;color:#333}
-.hdr p{font-size:10pt;color:#666;margin-top:6px}
-table{width:100%;border-collapse:collapse;margin-top:12px}
-th{background:#006600;color:#fff;padding:8px 10px;text-align:left;font-size:10pt}
-td{padding:7px 10px;border-bottom:1px solid #ddd;font-size:10pt}
-tr:nth-child(even){background:#f9f9f9}
-.footer{margin-top:30px;border-top:1px solid #ccc;padding-top:12px;font-size:9pt;color:#666;display:flex;justify-content:space-between}
-@media print{body{padding:15px}th{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
-</style></head><body>
-<div class="hdr"><h1>Embassy of Pakistan, Kuwait</h1><h2>MOFA Saudi Transit Visa Request</h2><p>Batch Date: ${today} | Total: ${rows.length} persons</p></div>
-<table><thead><tr><th>S.No</th><th>#</th><th>Name</th><th>Passport Number</th><th>Border Entry Point</th><th>Sent Date</th></tr></thead><tbody>${printRows}</tbody></table>
-<div class="footer"><span>Generated by Citizen Support for Transit KSA System</span><span>Printed: ${new Date().toLocaleString()}</span></div>
-<scr'+'ipt>window.print()<\/scr'+'ipt></body></html>`);
-w.document.close();
-}
-function addImportBatch(){
-const area=document.getElementById('mofaImportArea');
-const div=document.createElement('div');
-div.className='mofa-import-batch';
-div.style.cssText='background:#f9f9f9;border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:10px';
-div.innerHTML=`<div style="display:flex;gap:12px;align-items:start;flex-wrap:wrap">
-<div class="fgp"><label style="font-size:.82em;font-weight:600">Batch Date</label><input type="date" class="import-date" style="padding:8px;border:1px solid var(--bd);border-radius:6px"></div>
-<div class="fgp" style="flex:1;min-width:250px"><label style="font-size:.82em;font-weight:600">Passport Numbers (one per line)</label><textarea class="import-passports" rows="4" style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:6px;font-family:monospace;font-size:.85em" placeholder="CE9459393&#10;BZ9459833"></textarea></div>
-<button onclick="this.closest('.mofa-import-batch').remove()" style="background:#ffebee;border:1px solid #ef9a9a;color:#c62828;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:.8em;margin-top:20px">Remove</button>
-</div>`;
-area.appendChild(div);
-}
-async function runMofaImport(){
-const batches=[];
-document.querySelectorAll('.mofa-import-batch').forEach(b=>{
-const date=b.querySelector('.import-date').value;
-const text=b.querySelector('.import-passports').value.trim();
-if(date&&text){
-const passports=text.split('\n').map(p=>p.trim()).filter(p=>p.length>0);
-if(passports.length>0)batches.push({date,passports});
-}
-});
-if(batches.length===0){toast('Please enter at least one batch with date and passport numbers');return}
-const total=batches.reduce((s,b)=>s+b.passports.length,0);
-if(!confirm(`Import ${total} passport numbers across ${batches.length} batch date(s)?`))return;
+async function confirmSendToMofa(){
 try{
-const resp=await fetch('/api/mofa-import-historical',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batches})});
+const letterNum=document.getElementById('mofaLetterNum').value.trim();
+const letterDate=document.getElementById('mofaLetterDate').value;
+if(!letterNum){toast('Please enter the MOFA KSA Letter/Fax number');return}
+if(!letterDate){toast('Please enter the letter date');return}
+const fromId=parseInt(document.getElementById('mofaFrom').value);
+const toId=parseInt(document.getElementById('mofaTo').value);
+const filtered=mofaRecords.filter(r=>r.id>=fromId&&r.id<=toId&&(!r.mofa_status||r.mofa_status===''||r.mofa_status==='New'));
+if(!confirm('Mark '+filtered.length+' records (#'+fromId+' to #'+toId+') as Sent to MOFA?\n\nLetter/Fax: '+letterNum+'\nDate: '+letterDate+'\n\nThis cannot be undone.'))return;
+const resp=await fetch('/api/mofa-mark-sent',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({from_id:fromId,to_id:toId,letter_number:letterNum,letter_date:letterDate})});
 const r=await resp.json();
-const resDiv=document.getElementById('mofaImportResult');
-resDiv.style.display='block';
-if(r.success){
-let html=`<div style="background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;padding:14px;margin-bottom:10px">
-<strong style="color:#1b5e20">Import Complete!</strong> Matched: ${r.total_matched} | Not Found: ${r.total_not_found}</div>`;
-r.details.forEach(d=>{
-html+=`<div style="background:#f9f9f9;border:1px solid #e0e0e0;border-radius:6px;padding:10px;margin-bottom:6px;font-size:.88em">
-<strong>Batch ${d.date}:</strong> ${d.matched} matched`;
-if(d.missing.length>0){
-html+=` | <span style="color:#c62828">${d.missing.length} not found: ${d.missing.join(', ')}</span>`;
-}
-html+='</div>';
-});
-resDiv.innerHTML=html;
-await loadMofaData();
-}else{
-resDiv.innerHTML=`<div style="background:#ffebee;border:1px solid #ef9a9a;border-radius:8px;padding:14px;color:#c62828"><strong>Error:</strong> ${r.error}</div>`;
-}
+if(r&&r.success){
+document.getElementById('mofaSendModal').classList.remove('show');
+toast(r.count+' records marked as Sent to MOFA (Letter: '+letterNum+')');
+await loadMofaData();loadMofaPreview();
+}else{toast('Error: '+(r?.error||'Server returned error'))}
 }catch(err){toast('Error: '+err.message)}
+}
+function downloadMofaPendingCSV(){
+const filter=document.getElementById('mofaSentFilter').value;
+const filterParam=filter==='pending_mofa'?'pending_mofa':filter==='approved'?'all_sent':'all_sent';
+window.open('/api/mofa-export?filter='+filterParam,'_blank');
+}
+function printMofaPending(){
+const filter=document.getElementById('mofaSentFilter').value;
+let filtered=mofaSentRecords;
+let title='All Records Sent to MOFA KSA';
+if(filter==='pending_mofa'){
+filtered=mofaSentRecords.filter(r=>r.visa_status!=='Approved');
+title='Cases Pending at MOFA KSA - Follow-up Required';
+}else if(filter==='approved'){
+filtered=mofaSentRecords.filter(r=>r.visa_status==='Approved');
+title='Cases Approved by MOFA KSA';
+}
+let html='<html><head><title>'+title+'</title><style>';
+html+='body{font-family:Arial,sans-serif;padding:20px;font-size:12px}';
+html+='h1{font-size:16px;text-align:center;margin-bottom:4px}';
+html+='h2{font-size:12px;text-align:center;color:#555;margin-bottom:12px}';
+html+='table{width:100%;border-collapse:collapse;margin-top:10px}';
+html+='th,td{border:1px solid #999;padding:5px 8px;text-align:left;font-size:11px}';
+html+='th{background:#e8f5e9;font-weight:bold}';
+html+='.header{text-align:center;margin-bottom:16px;border-bottom:2px solid #006600;padding-bottom:10px}';
+html+='@media print{body{margin:0;padding:10px}}';
+html+='</style></head><body>';
+html+='<div class="header"><h1>PAKISTAN EMBASSY KUWAIT</h1><h2>'+title+'</h2>';
+html+='<p style="font-size:11px;color:#555">Generated: '+new Date().toLocaleString()+'</p></div>';
+html+='<table><thead><tr><th>S.No</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Mobile</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
+filtered.forEach((r,i)=>{
+html+='<tr><td>'+(i+1)+'</td><td>'+r.id+'</td><td>'+r.name+'</td><td>'+r.passport+'</td><td>'+(r.border_crossing||'-')+'</td><td>'+(r.mobile||'-')+'</td><td>'+(r.visa_status||'Pending')+'</td><td>'+(r.mofa_letter_number||'-')+'</td><td>'+(r.mofa_letter_date||'-')+'</td><td>'+(r.mofa_sent_date||'-')+'</td></tr>';
+});
+html+='</tbody></table>';
+html+='<p style="margin-top:16px;font-size:10px;color:#888">Total Records: '+filtered.length+' | Pakistan Embassy Kuwait - Citizen Support for Transit KSA System</p>';
+html+='</body></html>';
+const w=window.open('','_blank');
+w.document.write(html);
+w.document.close();
+w.setTimeout(()=>w.print(),500);
 }
 
 // REPORT
