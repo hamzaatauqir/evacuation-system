@@ -1122,11 +1122,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             civil_id = data.get('civil_id', '').strip()
 
             if passport:
-                existing = db.execute("SELECT id FROM evacuees WHERE UPPER(TRIM(passport)) = ?", [passport]).fetchone()
+                existing = db.execute("SELECT id FROM evacuees WHERE UPPER(TRIM(passport)) = UPPER(TRIM(?))", [passport]).fetchone()
             if not existing and cnic:
-                existing = db.execute("SELECT id FROM evacuees WHERE REPLACE(REPLACE(cnic, '-', ''), ' ', '') = ?", [cnic]).fetchone()
+                existing = db.execute("SELECT id FROM evacuees WHERE REPLACE(REPLACE(cnic, '-', ''), ' ', '') = REPLACE(REPLACE(?, '-', ''), ' ', '')", [cnic]).fetchone()
             if not existing and civil_id:
-                existing = db.execute("SELECT id FROM evacuees WHERE TRIM(civil_id) = ?", [civil_id]).fetchone()
+                existing = db.execute("SELECT id FROM evacuees WHERE UPPER(TRIM(civil_id)) = UPPER(TRIM(?))", [civil_id]).fetchone()
             db.close()
 
             if existing:
@@ -1531,8 +1531,8 @@ if(d.success){
     document.getElementById('dupWarning').style.display='block';
   }
   window.location='/embassy-registration/success?tid=PKE-'+String(d.id).padStart(4,'0');
-}else if(d.duplicate){
-  window.location='/embassy-registration/already-registered?tid='+d.tracking;
+}else if(d.duplicate || d.error==='already_registered'){
+  window.location='/embassy-registration/already-registered?tid='+(d.tracking||'');
 }else{
   document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
   document.getElementById('errorMsg').style.display='block';
@@ -1599,43 +1599,127 @@ ALREADY_REGISTERED_PAGE = """<!DOCTYPE html>
 <title>Already Registered - Pakistan Embassy Kuwait</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.card{background:#fff;border-radius:16px;padding:40px;max-width:520px;width:90%;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.1)}
-.icon{font-size:3.5em;margin-bottom:12px}
-h1{color:#e65100;font-size:1.4em;margin-bottom:8px}
-p{color:#555;line-height:1.6;margin-bottom:16px}
-.tracking-box{background:#e8f5e9;border:2px solid #006600;border-radius:10px;padding:16px;margin:16px 0}
-.tracking-box .label{font-size:.8em;color:#555;text-transform:uppercase;letter-spacing:1px}
-.tracking-box .number{font-size:2em;font-weight:700;color:#006600;letter-spacing:2px;margin:4px 0}
-.info{background:#fff3e0;border:1px solid #ffcc80;border-radius:8px;padding:14px;font-size:.88em;color:#e65100;margin-bottom:16px;text-align:left}
-.info strong{display:block;margin-bottom:4px}
-a.btn{display:inline-block;padding:12px 24px;background:#006600;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;margin-top:8px}
-a.btn:hover{background:#004d00}
-.urdu{direction:rtl;text-align:right;font-size:.95em;color:#333;line-height:1.8;margin-top:10px;padding-top:10px;border-top:1px solid #eee}
+body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#f5f5f5 0%,#e8f5e9 100%);min-height:100vh;display:flex;flex-direction:column}
+.top-bar{background:linear-gradient(135deg,#006600,#004d00);padding:16px 24px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.top-bar .flag{font-size:2em}
+.top-bar .title{color:#fff;font-size:1.1em;font-weight:700}
+.top-bar .sub{color:rgba(255,255,255,.85);font-size:.8em}
+.main{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{background:#fff;border-radius:20px;padding:0;max-width:560px;width:95%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.12);overflow:hidden;animation:slideUp .5s ease-out}
+@keyframes slideUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
+.card-header{background:linear-gradient(135deg,#e65100,#bf360c);padding:28px 32px;color:#fff}
+.card-header .icon{font-size:3em;margin-bottom:8px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+.card-header h1{font-size:1.5em;font-weight:700;margin-bottom:4px}
+.card-header p{font-size:.9em;opacity:.9}
+.card-body{padding:28px 32px}
+.tracking-box{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #006600;border-radius:14px;padding:20px;margin:0 0 20px 0;position:relative;overflow:hidden}
+.tracking-box::before{content:'';position:absolute;top:-50%;right:-50%;width:100%;height:100%;background:radial-gradient(circle,rgba(0,102,0,.05) 0%,transparent 70%)}
+.tracking-box .label{font-size:.75em;color:#555;text-transform:uppercase;letter-spacing:2px;font-weight:600}
+.tracking-box .number{font-size:2.4em;font-weight:800;color:#006600;letter-spacing:3px;margin:6px 0;text-shadow:0 1px 2px rgba(0,0,0,.1)}
+.tracking-box .save-hint{font-size:.78em;color:#666;margin-top:4px}
+.copy-btn{display:inline-flex;align-items:center;gap:6px;margin-top:8px;padding:8px 18px;background:#006600;color:#fff;border:none;border-radius:8px;font-size:.82em;font-weight:600;cursor:pointer;transition:all .2s}
+.copy-btn:hover{background:#004d00;transform:translateY(-1px)}
+.copy-btn.copied{background:#2e7d32}
+.status-steps{display:flex;justify-content:center;gap:0;margin:20px 0;position:relative}
+.step{display:flex;flex-direction:column;align-items:center;flex:1;position:relative;z-index:1}
+.step .dot{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.85em;font-weight:700;color:#fff;margin-bottom:6px;transition:all .3s}
+.step.done .dot{background:#006600}
+.step.active .dot{background:#e65100;animation:glow 1.5s infinite}
+.step.pending .dot{background:#ccc}
+@keyframes glow{0%,100%{box-shadow:0 0 4px rgba(230,81,0,.3)}50%{box-shadow:0 0 14px rgba(230,81,0,.5)}}
+.step .step-label{font-size:.68em;color:#777;font-weight:500;max-width:70px;text-align:center;line-height:1.3}
+.step-line{position:absolute;top:18px;left:18%;right:18%;height:3px;background:#e0e0e0;z-index:0}
+.step-line .fill{height:100%;background:#006600;transition:width .5s}
+.info-card{background:#fff8e1;border:1px solid #ffe082;border-radius:12px;padding:18px;margin-bottom:18px;text-align:left}
+.info-card .info-title{font-weight:700;color:#e65100;font-size:.92em;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.info-card .info-text{font-size:.86em;color:#555;line-height:1.7}
+.urdu-section{direction:rtl;text-align:right;font-size:.92em;color:#333;line-height:2;margin-top:12px;padding-top:12px;border-top:1px dashed #e0c68a}
+.contact-card{background:#f5f5f5;border-radius:12px;padding:16px;margin-bottom:18px;text-align:left}
+.contact-card .contact-title{font-weight:700;color:#006600;font-size:.88em;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.contact-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:.82em;color:#555}
+.contact-row .c-icon{font-size:1.1em}
+.contact-row a{color:#006600;text-decoration:none;font-weight:500}
+.contact-row a:hover{text-decoration:underline}
+.btn-row{display:flex;gap:10px;justify-content:center;margin-top:6px}
+a.btn{display:inline-flex;align-items:center;gap:6px;padding:12px 24px;background:#006600;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;font-size:.9em;transition:all .2s;box-shadow:0 2px 8px rgba(0,102,0,.2)}
+a.btn:hover{background:#004d00;transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,102,0,.3)}
+a.btn-outline{background:transparent;color:#006600;border:2px solid #006600;box-shadow:none}
+a.btn-outline:hover{background:#e8f5e9}
+.footer{text-align:center;padding:16px;font-size:.75em;color:#999}
+@media(max-width:480px){.card-body{padding:20px 18px}.tracking-box .number{font-size:1.8em}.status-steps{gap:0}.btn-row{flex-direction:column}}
 </style></head><body>
+<div class="top-bar">
+<div class="flag">&#127477;&#127472;</div>
+<div><div class="title">Embassy of Pakistan, Kuwait</div><div class="sub">Citizen Support for Transit KSA System</div></div>
+</div>
+<div class="main">
 <div class="card">
-<div class="icon">&#9888;&#65039;</div>
-<h1>You Have Already Registered</h1>
-<p>Our records show that a registration already exists with the same Passport Number, CNIC, or Civil ID that you entered.</p>
+<div class="card-header">
+<div class="icon">&#128203;</div>
+<h1>Registration Already Exists</h1>
+<p>Your Passport / CNIC / Civil ID is already in our system</p>
+</div>
+<div class="card-body">
 <div class="tracking-box">
-<div class="label">Your Existing Tracking Number</div>
-<div class="number" id="trackingNum"></div>
-<div style="font-size:.75em;color:#888">Please save this number for future reference</div>
+<div class="label">Your Tracking Number</div>
+<div class="number" id="trackingNum">---</div>
+<div class="save-hint">Keep this number safe for all future correspondence</div>
+<button class="copy-btn" onclick="copyTracking()" id="copyBtn">&#128203; Copy Number</button>
 </div>
-<div class="info">
-<strong>Your application is already being processed.</strong>
-There is no need to register again. You will be contacted on the mobile number you provided once there is an update on your Saudi transit visa status.
-<div class="urdu">آپ کی درخواست پہلے سے موجود ہے اور اس پر کارروائی ہو رہی ہے۔ دوبارہ رجسٹر کرنے کی ضرورت نہیں ہے۔ ویزا کی صورتحال کے بارے میں آپ سے آپ کے موبائل نمبر پر رابطہ کیا جائے گا۔</div>
+<div style="position:relative;margin:20px 0">
+<div class="step-line"><div class="fill" style="width:33%"></div></div>
+<div class="status-steps">
+<div class="step done"><div class="dot">&#10003;</div><div class="step-label">Registered</div></div>
+<div class="step active"><div class="dot">2</div><div class="step-label">Under Review</div></div>
+<div class="step pending"><div class="dot">3</div><div class="step-label">MOFA Request</div></div>
+<div class="step pending"><div class="dot">4</div><div class="step-label">Visa Issued</div></div>
 </div>
-<p style="font-size:.85em;color:#999">If you need to make changes to your application, please contact the Embassy directly.<br>
-Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
-Tel: (+965) 25327651, 25354073<br>
-Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
-<a class="btn" href="/embassy-registration">Back to Registration</a>
 </div>
+<div class="info-card">
+<div class="info-title">&#9888;&#65039; No Action Required</div>
+<div class="info-text">
+Your application is <strong>already being processed</strong>. There is no need to register again. Embassy staff will contact you on your registered mobile number once there is an update regarding your Saudi transit visa.
+<div class="urdu-section">
+&#1570;&#1662; &#1705;&#1740; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1662;&#1729;&#1604;&#1746; &#1587;&#1746; &#1605;&#1608;&#1580;&#1608;&#1583; &#1729;&#1746; &#1575;&#1608;&#1585; &#1575;&#1587; &#1662;&#1585; &#1705;&#1575;&#1585;&#1585;&#1608;&#1575;&#1574;&#1740; &#1729;&#1608; &#1585;&#1729;&#1740; &#1729;&#1746;&#1748; &#1583;&#1608;&#1576;&#1575;&#1585;&#1729; &#1585;&#1580;&#1587;&#1657;&#1585; &#1705;&#1585;&#1606;&#1746; &#1705;&#1740; &#1590;&#1585;&#1608;&#1585;&#1578; &#1606;&#1729;&#1740;&#1722; &#1729;&#1746;&#1748; &#1608;&#1740;&#1586;&#1575; &#1705;&#1740; &#1589;&#1608;&#1585;&#1578;&#1581;&#1575;&#1604; &#1705;&#1746; &#1576;&#1575;&#1585;&#1746; &#1605;&#1740;&#1722; &#1570;&#1662; &#1587;&#1746; &#1570;&#1662; &#1705;&#1746; &#1605;&#1608;&#1576;&#1575;&#1574;&#1604; &#1606;&#1605;&#1576;&#1585; &#1662;&#1585; &#1585;&#1575;&#1576;&#1591;&#1729; &#1705;&#1740;&#1575; &#1580;&#1575;&#1574;&#1746; &#1711;&#1575;&#1748;
+<br><br>
+<strong>&#1575;&#1729;&#1605;: &#1580;&#1576; &#1578;&#1705; &#1587;&#1601;&#1575;&#1585;&#1578;&#1582;&#1575;&#1606;&#1746; &#1705;&#1575; &#1593;&#1605;&#1604;&#1729; &#1570;&#1662; &#1587;&#1746; &#1585;&#1575;&#1576;&#1591;&#1729; &#1606;&#1729; &#1705;&#1585;&#1746;&#1548; &#1657;&#1705;&#1657; &#1582;&#1585;&#1740;&#1583;&#1606;&#1746; &#1587;&#1746; &#1711;&#1585;&#1740;&#1586; &#1705;&#1585;&#1740;&#1722;&#1748;</strong>
+</div>
+</div>
+</div>
+<div class="contact-card">
+<div class="contact-title">&#127971; Contact Embassy for Changes</div>
+<div class="contact-row"><span class="c-icon">&#128205;</span> Villa 440, Street 108, Block 12, Jabriya, Kuwait</div>
+<div class="contact-row"><span class="c-icon">&#128222;</span> <a href="tel:+96525327651">(+965) 25327651</a> &nbsp;|&nbsp; <a href="tel:+96525354073">25354073</a></div>
+<div class="contact-row"><span class="c-icon">&#128241;</span> Awais: <a href="tel:+96555977292">+965-55977292</a></div>
+<div class="contact-row"><span class="c-icon">&#128241;</span> Zahid: <a href="tel:+96555964923">+965-55964923</a></div>
+<div class="contact-row"><span class="c-icon">&#128241;</span> Shahid Khan: <a href="tel:+96566568265">+965-66568265</a></div>
+<div class="contact-row"><span class="c-icon">&#9993;</span> <a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a></div>
+</div>
+<div class="btn-row">
+<a class="btn" href="/embassy-registration">&#8592; Back to Registration</a>
+</div>
+</div>
+</div>
+</div>
+<div class="footer">Embassy of Pakistan, Kuwait &mdash; Citizen Support for Transit KSA System</div>
 <script>
 const tid=new URLSearchParams(window.location.search).get('tid');
 if(tid){document.getElementById('trackingNum').textContent=tid}
+function copyTracking(){
+  const num=document.getElementById('trackingNum').textContent;
+  if(num && num!=='---'){
+    navigator.clipboard.writeText(num).then(()=>{
+      const btn=document.getElementById('copyBtn');
+      btn.innerHTML='&#10003; Copied!';btn.classList.add('copied');
+      setTimeout(()=>{btn.innerHTML='&#128203; Copy Number';btn.classList.remove('copied')},2000);
+    }).catch(()=>{
+      const el=document.createElement('textarea');el.value=num;document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el);
+      const btn=document.getElementById('copyBtn');btn.innerHTML='&#10003; Copied!';btn.classList.add('copied');
+      setTimeout(()=>{btn.innerHTML='&#128203; Copy Number';btn.classList.remove('copied')},2000);
+    });
+  }
+}
 </script>
 </body></html>"""
 
