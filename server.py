@@ -113,7 +113,8 @@ def init_db():
     for col, coltype in [('planned_departure', 'TEXT'), ('saudi_city', 'TEXT'),
                          ('traveling_with_family', "TEXT DEFAULT 'No'"), ('confirm_ksa_3days', "TEXT DEFAULT 'No'"),
                          ('mofa_status', "TEXT DEFAULT ''"),
-                         ('departure_date', 'TEXT')]:
+                         ('departure_date', 'TEXT'),
+                         ('mofa_sent_date', 'TEXT')]:
         try:
             db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
             db.commit()
@@ -128,6 +129,22 @@ def init_db():
     # Normalize border crossing names
     db.execute("UPDATE evacuees SET border_crossing='Khafji Border' WHERE border_crossing IN ('Khafji Boarder','Khafji Crossing','khafji border','khafji')")
     db.execute("UPDATE evacuees SET border_crossing='Salmi Border' WHERE border_crossing IN ('Salmi Boarder','Salmi Crossing','salmi border','salmi')")
+    db.commit()
+    # One-time historical MOFA import from Excel data (safe to re-run — only updates unsent records)
+    _historical_mofa = [
+        ("2026-03-10", ["CE9459393","BZ9459833","CZ9824143","AZ7126233","GY4124895","KV1161963","EM5140202","CD5575824","BV6976744","DR5841481","BB5777838","AN5775824","AD8521384"]),
+        ("2026-03-11", ["AP1949521","AA1716674","DF7125852","BQ7128703","CH5994403","BL1164824","NQ1157873","AJ7801894","EM1917033","GM9899062","HV1224372","JL1334983","UW5149542","HB1853912","AH5593142","FA0993993"]),
+        ("2026-03-12", ["AE8001653","SC4151881","MZ6800422","AA8094222","DF9150183","HK4101004","FF4133292","GD1807624","AF8172314","SB1849251","QQ8450261","EP1824822","JC4121893","UP4131613","AE1504793","EG1403731","DY1401311","LN5469641","WL1338932","DT8678713","XR3092263","ED5134112","GW9612443","FN3796282","AL8108523","JG1911702","CY4911953","SQ 3996382","VH3140643"]),
+        ("2026-03-15", ["EZ5771811","AP9630902","CE8978602","DZ2225711","CA8489522","JE5141864","AD6520923","FD4109814","VF3090392","HM3991093","LX3112042","GG7793461","JW6171321","KA8914371","JW6179941","EA7960461","TP1012511","VD4148092","CR4185743","CE1753043","AU5154243","WZ0000561","CA4916013","BA6853223","CP5974803","EB4913763","EU5970192","LB5978381","HD1189251","BB9211094","CP5976913","JK9826912","AR1786362","MX1071331","VH4101693","WF1847871","JU5970261","HP3993513","EF1206243","BR1157193","GW4794612","DW3793713","BD5029573","AT5970935","LW5155532","AD5485141","FS1514352","AB3749214","CD4103274","AA5970773","AB5979753","BW3401683","ZU1802343","QQ1817503","EA9456572","BF9899795","CL9826443","CP3491722","GX1156104","AG0888893","BE5981713","AP1949521","AA1716674","BQ7128703","CH5994403","BL1164824","NQ1157873","AJ7801894","EM1917033","HV1224372","JL1334983","UW5149542","HB1853912","AH5593142","FA0993993","HL5752243","EF1792864","QP1167912","AT1859645","GX1209071","ZF1831511","MZ1831131","AK3700344","AV3995813","SY9153972","BB0796953","AU18265274","KB5465612","BK5988342","YG5153511","XS5154041","NQ5169271","GA5128793","GS1747551","EU9848082","CC6906014","TM1163452","AH5959372","CF5499113","AR0576224","BM1152743","DW1182271","XE1156663","BG4106254","GG1222642","LJ1808303","HB1206721","AH3441702","RN5152661","CZ60367917","AF7674523","NY84582718","SC1074011","CE1889033","CG9458123","ET4173973"]),
+    ]
+    for batch_date, passports in _historical_mofa:
+        for pp in passports:
+            pp_clean = pp.strip().upper().replace(' ', '')
+            row = db.execute("SELECT id FROM evacuees WHERE UPPER(REPLACE(TRIM(passport), ' ', '')) = ?", [pp_clean]).fetchone()
+            if row:
+                db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?
+                    WHERE id=? AND (mofa_status IS NULL OR mofa_status='' OR mofa_status='New')""",
+                    [batch_date, row['id']])
     db.commit()
     db.close()
 
@@ -994,7 +1011,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cols = [c[1] for c in db.execute("PRAGMA table_info(evacuees)").fetchall()]
             has_mofa = 'mofa_status' in cols
             if has_mofa:
-                rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status FROM evacuees
+                rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status, mofa_sent_date FROM evacuees
                     WHERE travel_status='Pending' AND dup_flag='CLEAR'
                     ORDER BY id""").fetchall()
             else:
@@ -1007,8 +1024,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 d = dict(r)
                 if not has_mofa:
                     d['mofa_status'] = ''
+                    d['mofa_sent_date'] = ''
                 else:
                     d['mofa_status'] = d.get('mofa_status', '') or ''
+                    d['mofa_sent_date'] = d.get('mofa_sent_date', '') or ''
                 result.append(d)
             self.send_json(result)
         elif path == '/api/mofa-export':
@@ -1019,6 +1038,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             db = get_db()
             rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
                 WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
                 ORDER BY id""", [from_id, to_id]).fetchall()
             db.close()
             output = io.StringIO()
@@ -1335,17 +1355,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if from_id is not None and to_id is not None:
                     from_id = int(from_id)
                     to_id = int(to_id)
-                    cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?,
+                        updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
-                        [user['user'], from_id, to_id])
+                        [today, user['user'], from_id, to_id])
                     count = cur.rowcount
                     db.commit()
                 elif ids and len(ids) > 0:
                     placeholders = ','.join(['?'] * len(ids))
-                    cur = db.execute(f"""UPDATE evacuees SET mofa_status='Sent to MOFA', updated_at=CURRENT_TIMESTAMP, updated_by=?
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    cur = db.execute(f"""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?,
+                        updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id IN ({placeholders}) AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
-                        [user['user']] + [int(i) for i in ids])
+                        [today, user['user']] + [int(i) for i in ids])
                     count = cur.rowcount
                     db.commit()
                 else:
@@ -1359,6 +1383,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'success': True, 'count': count})
             except Exception as e:
                 self.send_json({'success': False, 'error': str(e)}, 500)
+
+        elif path == '/api/mofa-import-historical':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'success': False, 'error': 'Admin only'}, 403)
+                return
+            try:
+                data = json.loads(body)
+                batches = data.get('batches', [])
+                db = get_db()
+                total_matched = 0
+                total_not_found = 0
+                details = []
+                for batch in batches:
+                    batch_date = batch.get('date', '')
+                    passports = batch.get('passports', [])
+                    batch_matched = 0
+                    batch_missing = []
+                    for pp in passports:
+                        pp_clean = pp.strip().upper().replace(' ', '')
+                        row = db.execute("SELECT id FROM evacuees WHERE UPPER(REPLACE(TRIM(passport), ' ', '')) = ?", [pp_clean]).fetchone()
+                        if row:
+                            db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?,
+                                updated_at=CURRENT_TIMESTAMP, updated_by=?
+                                WHERE id=? AND (mofa_status IS NULL OR mofa_status='' OR mofa_status='New')""",
+                                [batch_date, user['user'], row['id']])
+                            batch_matched += 1
+                        else:
+                            batch_missing.append(pp)
+                            total_not_found += 1
+                    total_matched += batch_matched
+                    details.append({'date': batch_date, 'matched': batch_matched, 'missing': batch_missing})
+                db.commit()
+                db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_historical_import', 0, ?, ?)",
+                          [user['user'], f'Historical import: {total_matched} matched, {total_not_found} not found'])
+                db.commit()
+                db.close()
+                self.send_json({'success': True, 'total_matched': total_matched, 'total_not_found': total_not_found, 'details': details})
+            except Exception as e:
+                self.send_json({'success': False, 'error': str(e)}, 500)
+
+        elif path == '/api/mofa-print-today':
+            user = self.require_auth()
+            if not user: return
+            db = get_db()
+            today = datetime.now().strftime('%Y-%m-%d')
+            rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
+                WHERE mofa_sent_date=? AND mofa_status='Sent to MOFA' AND dup_flag='CLEAR'
+                ORDER BY id""", [today]).fetchall()
+            db.close()
+            self.send_json([dict(r) for r in rows])
 
         elif path == '/api/bulk-visa-update':
             user = self.require_auth()
@@ -1911,8 +1987,8 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <!-- MOFA EXPORT -->
 <div id="tab-mofa" class="tab"><div class="ctr">
 <div class="fs">
-<h3 style="color:var(--p)">MOFA Visa Request — Download &amp; Send</h3>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Select a range of pending cases to download for MOFA Saudi Arabia. Only shows clean (non-duplicate) pending records. Download contains: Name, Passport Number, and Border Entry Point.</p>
+<h3 style="color:var(--p)">MOFA Visa Request — New Batch</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Select pending cases to send to MOFA Saudi Arabia. Only shows <strong>unsent</strong>, clean (non-duplicate), pending records.</p>
 <div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:14px">
 <div class="fgp"><label style="font-size:.82em;font-weight:600">From Record #</label><select id="mofaFrom" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:220px"></select></div>
 <div class="fgp"><label style="font-size:.82em;font-weight:600">To Record #</label><select id="mofaTo" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:220px"></select></div>
@@ -1929,9 +2005,36 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 </div>
 </div>
 <div class="fs" style="margin-top:16px">
-<h3>Previously Sent Batches</h3>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">Records already marked as "Sent to MOFA"</p>
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+<h3>Today's MOFA Batch</h3>
+<button class="btn btn-p" style="padding:8px 18px;font-size:.85em" onclick="printTodayMofa()">&#128424; Print Today's Sent List</button>
+</div>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">Records marked as "Sent to MOFA" today — ready for printing</p>
+<div class="scroll-t"><table id="mofaTodayTbl" style="font-size:.88em"></table></div>
+</div>
+<div class="fs" style="margin-top:16px">
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+<h3>All Previously Sent Batches</h3>
+</div>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">Complete history of all records sent to MOFA, grouped by date</p>
 <div class="scroll-t"><table id="mofaSentTbl" style="font-size:.88em"></table></div>
+</div>
+<div class="fs" style="margin-top:16px" data-admin-only>
+<h3 style="color:var(--w)">Import Historical MOFA Data</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:10px">One-time import: paste passport numbers from each batch date to update records that were sent to MOFA before the system was created.</p>
+<div id="mofaImportArea">
+<div class="mofa-import-batch" style="background:#f9f9f9;border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:10px">
+<div style="display:flex;gap:12px;align-items:start;flex-wrap:wrap">
+<div class="fgp"><label style="font-size:.82em;font-weight:600">Batch Date</label><input type="date" class="import-date" style="padding:8px;border:1px solid var(--bd);border-radius:6px"></div>
+<div class="fgp" style="flex:1;min-width:250px"><label style="font-size:.82em;font-weight:600">Passport Numbers (one per line)</label><textarea class="import-passports" rows="4" style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:6px;font-family:monospace;font-size:.85em" placeholder="CE9459393&#10;BZ9459833&#10;CZ9824143"></textarea></div>
+</div>
+</div>
+</div>
+<div style="display:flex;gap:10px;margin-top:10px">
+<button class="btn" style="padding:8px 16px;background:#f5f5f5;border:1px solid var(--bd);color:var(--t)" onclick="addImportBatch()">+ Add Another Batch Date</button>
+<button class="btn btn-p" style="padding:8px 20px" onclick="runMofaImport()">Import &amp; Match Records</button>
+</div>
+<div id="mofaImportResult" style="margin-top:12px;display:none"></div>
 </div>
 </div></div>
 
@@ -2329,7 +2432,7 @@ html+=sec('Travel Details',[
 ]);
 html+=sec('Status & Processing',[
 ['KSA Visa Status',r.visa_status],['Travel Status',r.travel_status],
-['MOFA Status',r.mofa_status||'—'],['Duplicate Flag',r.dup_flag],
+['MOFA Status',r.mofa_status||'—'],['MOFA Sent Date',r.mofa_sent_date||'—'],['Duplicate Flag',r.dup_flag],
 ['Priority',r.priority],['Date of Request',r.date_of_request]
 ]);
 html+=sec('Additional',[
@@ -2590,12 +2693,29 @@ selFrom.innerHTML+=`<option value="${r.id}">#${r.id} — ${r.name} (${r.passport
 selTo.innerHTML+=`<option value="${r.id}">#${r.id} — ${r.name} (${r.passport})</option>`;
 });
 if(newRecs.length>0)selTo.value=newRecs[newRecs.length-1].id;
-// Sent table
-let sh='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Border Entry</th><th>Status</th></tr></thead><tbody>';
-sentRecs.forEach((r,i)=>{
-sh+=`<tr><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td><span class="bdg" style="background:#c8e6c9;color:#1b5e20">Sent to MOFA</span></td></tr>`;
+// Today's batch table
+const today=new Date().toISOString().slice(0,10);
+const todayRecs=sentRecs.filter(r=>r.mofa_sent_date===today);
+let th='<thead><tr><th>S.No</th><th>#</th><th>Name</th><th>Passport</th><th>Border Entry</th><th>Sent Date</th></tr></thead><tbody>';
+todayRecs.forEach((r,i)=>{
+th+=`<tr><td>${i+1}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td>${r.mofa_sent_date||'-'}</td></tr>`;
 });
-sh+=sentRecs.length?'</tbody>':`<tr><td colspan="5" style="text-align:center;color:var(--tl);padding:20px">No records sent to MOFA yet</td></tr></tbody>`;
+th+=todayRecs.length?'</tbody>':`<tr><td colspan="6" style="text-align:center;color:var(--tl);padding:20px">No records sent to MOFA today yet</td></tr></tbody>`;
+document.getElementById('mofaTodayTbl').innerHTML=th;
+// All sent table grouped by date
+const dateGroups={};
+sentRecs.forEach(r=>{const d=r.mofa_sent_date||'Unknown';if(!dateGroups[d])dateGroups[d]=[];dateGroups[d].push(r)});
+const sortedDates=Object.keys(dateGroups).sort().reverse();
+let sh='<thead><tr><th>S.No</th><th>#</th><th>Name</th><th>Passport</th><th>Border Entry</th><th>Sent Date</th></tr></thead><tbody>';
+let sno=0;
+sortedDates.forEach(dt=>{
+sh+=`<tr style="background:#e8f5e9"><td colspan="6" style="font-weight:700;color:var(--p);padding:8px 10px">Batch: ${dt} (${dateGroups[dt].length} records)</td></tr>`;
+dateGroups[dt].forEach(r=>{
+sno++;
+sh+=`<tr><td>${sno}</td><td>${r.id}</td><td>${r.name}</td><td>${r.passport}</td><td>${r.border_crossing||'-'}</td><td>${r.mofa_sent_date||'-'}</td></tr>`;
+});
+});
+sh+=sentRecs.length?'</tbody>':`<tr><td colspan="6" style="text-align:center;color:var(--tl);padding:20px">No records sent to MOFA yet</td></tr></tbody>`;
 document.getElementById('mofaSentTbl').innerHTML=sh;
 document.getElementById('mofaStats').style.display='none';
 document.getElementById('mofaTbl').innerHTML='';
@@ -2635,6 +2755,82 @@ const r=await resp.json();
 if(r&&r.success){toast(r.count+' records marked as Sent to MOFA');await loadMofaData();loadMofaPreview()}
 else{toast('Error: '+(r?.error||'Server returned error'));console.log('MOFA mark error:',r)}
 }catch(err){toast('Error: '+err.message);console.log('MOFA mark exception:',err)}
+}
+function printTodayMofa(){
+const tbl=document.getElementById('mofaTodayTbl');
+if(!tbl||tbl.rows.length<=1){toast('No records sent today to print');return}
+const today=new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
+const rows=tbl.querySelectorAll('tbody tr');
+let printRows='';
+rows.forEach(r=>{printRows+=r.outerHTML});
+const w=window.open('','_blank');
+w.document.write(`<!DOCTYPE html><html><head><title>MOFA Batch - ${today}</title><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;padding:30px;font-size:12pt}
+.hdr{text-align:center;margin-bottom:24px;border-bottom:3px double #006600;padding-bottom:16px}
+.hdr h1{font-size:14pt;color:#006600;margin-bottom:4px}
+.hdr h2{font-size:11pt;color:#333}
+.hdr p{font-size:10pt;color:#666;margin-top:6px}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th{background:#006600;color:#fff;padding:8px 10px;text-align:left;font-size:10pt}
+td{padding:7px 10px;border-bottom:1px solid #ddd;font-size:10pt}
+tr:nth-child(even){background:#f9f9f9}
+.footer{margin-top:30px;border-top:1px solid #ccc;padding-top:12px;font-size:9pt;color:#666;display:flex;justify-content:space-between}
+@media print{body{padding:15px}th{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style></head><body>
+<div class="hdr"><h1>Embassy of Pakistan, Kuwait</h1><h2>MOFA Saudi Transit Visa Request</h2><p>Batch Date: ${today} | Total: ${rows.length} persons</p></div>
+<table><thead><tr><th>S.No</th><th>#</th><th>Name</th><th>Passport Number</th><th>Border Entry Point</th><th>Sent Date</th></tr></thead><tbody>${printRows}</tbody></table>
+<div class="footer"><span>Generated by Citizen Support for Transit KSA System</span><span>Printed: ${new Date().toLocaleString()}</span></div>
+<script>window.print()</script></body></html>`);
+w.document.close();
+}
+function addImportBatch(){
+const area=document.getElementById('mofaImportArea');
+const div=document.createElement('div');
+div.className='mofa-import-batch';
+div.style.cssText='background:#f9f9f9;border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:10px';
+div.innerHTML=`<div style="display:flex;gap:12px;align-items:start;flex-wrap:wrap">
+<div class="fgp"><label style="font-size:.82em;font-weight:600">Batch Date</label><input type="date" class="import-date" style="padding:8px;border:1px solid var(--bd);border-radius:6px"></div>
+<div class="fgp" style="flex:1;min-width:250px"><label style="font-size:.82em;font-weight:600">Passport Numbers (one per line)</label><textarea class="import-passports" rows="4" style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:6px;font-family:monospace;font-size:.85em" placeholder="CE9459393&#10;BZ9459833"></textarea></div>
+<button onclick="this.closest('.mofa-import-batch').remove()" style="background:#ffebee;border:1px solid #ef9a9a;color:#c62828;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:.8em;margin-top:20px">Remove</button>
+</div>`;
+area.appendChild(div);
+}
+async function runMofaImport(){
+const batches=[];
+document.querySelectorAll('.mofa-import-batch').forEach(b=>{
+const date=b.querySelector('.import-date').value;
+const text=b.querySelector('.import-passports').value.trim();
+if(date&&text){
+const passports=text.split('\n').map(p=>p.trim()).filter(p=>p.length>0);
+if(passports.length>0)batches.push({date,passports});
+}
+});
+if(batches.length===0){toast('Please enter at least one batch with date and passport numbers');return}
+const total=batches.reduce((s,b)=>s+b.passports.length,0);
+if(!confirm(`Import ${total} passport numbers across ${batches.length} batch date(s)?`))return;
+try{
+const resp=await fetch('/api/mofa-import-historical',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batches})});
+const r=await resp.json();
+const resDiv=document.getElementById('mofaImportResult');
+resDiv.style.display='block';
+if(r.success){
+let html=`<div style="background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;padding:14px;margin-bottom:10px">
+<strong style="color:#1b5e20">Import Complete!</strong> Matched: ${r.total_matched} | Not Found: ${r.total_not_found}</div>`;
+r.details.forEach(d=>{
+html+=`<div style="background:#f9f9f9;border:1px solid #e0e0e0;border-radius:6px;padding:10px;margin-bottom:6px;font-size:.88em">
+<strong>Batch ${d.date}:</strong> ${d.matched} matched`;
+if(d.missing.length>0){
+html+=` | <span style="color:#c62828">${d.missing.length} not found: ${d.missing.join(', ')}</span>`;
+}
+html+='</div>';
+});
+resDiv.innerHTML=html;
+await loadMofaData();
+}else{
+resDiv.innerHTML=`<div style="background:#ffebee;border:1px solid #ef9a9a;border-radius:8px;padding:14px;color:#c62828"><strong>Error:</strong> ${r.error}</div>`;
+}
+}catch(err){toast('Error: '+err.message)}
 }
 
 // REPORT
