@@ -942,6 +942,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_html(REGISTER_SUCCESS_PAGE)
         elif path == '/embassy-registration/already-registered':
             self.send_html(ALREADY_REGISTERED_PAGE)
+        elif path in ('/embassy-registration/track', '/track'):
+            self.send_html(TRACK_STATUS_PAGE)
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
         elif path == '/':
@@ -1094,6 +1096,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         body = self.read_body()
+
+        if path == '/api/track-status':
+            # Public tracking — no auth needed
+            try:
+                data = json.loads(body)
+                tracking = data.get('tracking', '').strip().upper()
+                passport_q = data.get('passport', '').strip().upper()
+                db = get_db()
+                row = None
+                if tracking:
+                    import re as _re
+                    match = _re.match(r'^PKE-?(\d+)$', tracking)
+                    if not match:
+                        db.close()
+                        self.send_json({'success': False, 'error': 'Invalid tracking number format. Please use PKE-0001'}, 400)
+                        return
+                    rec_id = int(match.group(1))
+                    row = db.execute("""SELECT id, name, passport, travel_status, mofa_status, mofa_sent_date,
+                        visa_status, date_of_request, border_crossing, departure_date, dup_flag
+                        FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
+                elif passport_q:
+                    row = db.execute("""SELECT id, name, passport, travel_status, mofa_status, mofa_sent_date,
+                        visa_status, date_of_request, border_crossing, departure_date, dup_flag
+                        FROM evacuees WHERE UPPER(TRIM(passport)) = ? AND dup_flag='CLEAR'
+                        ORDER BY id DESC LIMIT 1""", [passport_q]).fetchone()
+                else:
+                    db.close()
+                    self.send_json({'success': False, 'error': 'Please enter a Tracking Number or Passport Number'}, 400)
+                    return
+                db.close()
+                if not row:
+                    self.send_json({'success': False, 'error': 'No record found with this tracking number'}, 404)
+                    return
+                r = dict(row)
+                # Determine step progress for the citizen
+                steps = []
+                steps.append({'label': 'Registered', 'label_ur': 'رجسٹرڈ', 'done': True})
+                mofa_sent = r.get('mofa_status') == 'Sent to MOFA'
+                steps.append({'label': 'Sent to MOFA', 'label_ur': 'موفا کو بھیجا گیا', 'done': mofa_sent})
+                visa_ok = r.get('visa_status') in ('Approved', 'Issued', 'Visa Obtained')
+                steps.append({'label': 'Visa Status', 'label_ur': 'ویزا کی صورتحال', 'done': visa_ok})
+                departed = r.get('travel_status') == 'Departed'
+                steps.append({'label': 'Departed', 'label_ur': 'روانگی', 'done': departed})
+                # Build safe response (no sensitive data)
+                tracking_id = 'PKE-' + str(r['id']).zfill(4)
+                self.send_json({
+                    'success': True,
+                    'tracking': tracking_id,
+                    'name': r['name'],
+                    'passport_masked': r['passport'][:2] + '***' + r['passport'][-2:] if r.get('passport') and len(r['passport']) > 4 else '***',
+                    'travel_status': r.get('travel_status', 'Pending'),
+                    'mofa_status': r.get('mofa_status', '') or 'Pending',
+                    'mofa_sent_date': r.get('mofa_sent_date', '') or '',
+                    'visa_status': r.get('visa_status', '') or 'Pending',
+                    'date_of_request': r.get('date_of_request', ''),
+                    'border_crossing': r.get('border_crossing', ''),
+                    'departure_date': r.get('departure_date', '') or '',
+                    'steps': steps
+                })
+            except Exception as e:
+                self.send_json({'success': False, 'error': str(e)}, 500)
+            return
 
         if path == '/api/public-register':
             # Public registration — no auth needed, but with spam protection
@@ -1542,6 +1606,10 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <svg width="70" height="70" viewBox="0 0 200 200" style="margin-bottom:8px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
 <h1>SAUDI TRANSIT VISA REGISTRATION</h1>
 <div class="sub">Pakistan Embassy Kuwait &mdash; Consular Services</div>
+<div style="margin-top:12px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+<a href="/embassy-registration" style="color:#fff;text-decoration:none;padding:8px 20px;border-radius:8px;font-size:.88em;font-weight:600;background:rgba(255,255,255,.25)">Register</a>
+<a href="/embassy-registration/track" style="color:#fff;text-decoration:none;padding:8px 20px;border-radius:8px;font-size:.88em;font-weight:600;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.4)">&#128270; Track Your Application</a>
+</div>
 </div>
 <div class="ctr">
 <div class="notice">
@@ -1662,11 +1730,15 @@ Please email a copy of your passport to:<br>
 </div>
 </div>
 <p style="font-size:.85em;color:#999">Please do not submit multiple times. If you need to update your information, contact the Embassy directly.<br>Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>Tel: (+965) 25327651, 25354073<br>Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
+<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:8px">
 <a href="/embassy-registration">Submit Another Registration</a>
+<a id="trackLink" href="/embassy-registration/track" style="background:#1565c0;display:none">&#128270; Track Your Application</a>
+</div>
 </div>
 <script>
 const tid=new URLSearchParams(window.location.search).get('tid');
-if(tid){document.getElementById('trackingNum').textContent=tid;document.getElementById('trackingBox').style.display='block'}
+if(tid){document.getElementById('trackingNum').textContent=tid;document.getElementById('trackingBox').style.display='block';
+const tl=document.getElementById('trackLink');tl.href='/embassy-registration/track?tid='+tid;tl.style.display='inline-block'}
 </script>
 </body></html>"""
 
@@ -1796,6 +1868,217 @@ function copyTracking(){
     });
   }
 }
+</script>
+</body></html>"""
+
+TRACK_STATUS_PAGE = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Track Your Application - Pakistan Embassy Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#f5f5f5 0%,#e8f5e9 100%);min-height:100vh;display:flex;flex-direction:column}
+.top-bar{background:linear-gradient(135deg,#006600,#004d00);padding:16px 24px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.top-bar .flag{font-size:2em}
+.top-bar .title{color:#fff;font-size:1.1em;font-weight:700}
+.top-bar .sub{color:rgba(255,255,255,.85);font-size:.8em}
+.top-bar-nav{display:flex;gap:10px;margin-left:auto}
+.top-bar-nav a{color:#fff;text-decoration:none;padding:8px 16px;border-radius:8px;font-size:.85em;font-weight:500;transition:all .2s}
+.top-bar-nav a:hover{background:rgba(255,255,255,.15)}
+.top-bar-nav a.active{background:rgba(255,255,255,.25)}
+.main{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{background:#fff;border-radius:20px;max-width:600px;width:95%;box-shadow:0 8px 40px rgba(0,0,0,.12);overflow:hidden;animation:slideUp .5s ease-out}
+@keyframes slideUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
+.card-header{background:linear-gradient(135deg,#006600,#004d00);padding:28px 32px;color:#fff;text-align:center}
+.card-header .icon{font-size:3em;margin-bottom:8px}
+.card-header h1{font-size:1.4em;font-weight:700;margin-bottom:4px}
+.card-header p{font-size:.88em;opacity:.9}
+.card-body{padding:28px 32px}
+.search-box{position:relative;margin-bottom:20px}
+.search-box input{width:100%;padding:16px 20px 16px 50px;border:2px solid #e0e0e0;border-radius:14px;font-size:1.1em;font-weight:600;letter-spacing:1px;text-transform:uppercase;transition:all .3s}
+.search-box input:focus{border-color:#006600;outline:none;box-shadow:0 0 0 4px rgba(0,102,0,.1)}
+.search-box input::placeholder{text-transform:none;font-weight:400;letter-spacing:0;color:#bbb}
+.search-box .search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:1.3em;color:#999}
+.search-btn{width:100%;padding:14px;background:linear-gradient(135deg,#006600,#004d00);color:#fff;border:none;border-radius:12px;font-size:1em;font-weight:700;cursor:pointer;transition:all .2s;letter-spacing:.5px}
+.search-btn:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,102,0,.3)}
+.search-btn:disabled{background:#999;cursor:not-allowed;transform:none;box-shadow:none}
+.or-text{text-align:center;color:#999;font-size:.85em;margin:16px 0;position:relative}
+.or-text::before,.or-text::after{content:'';position:absolute;top:50%;width:38%;height:1px;background:#e0e0e0}
+.or-text::before{left:0}.or-text::after{right:0}
+.error-msg{background:#ffebee;border:1px solid #ef9a9a;border-radius:10px;padding:14px;color:#c62828;font-size:.9em;margin-top:16px;display:none;text-align:center}
+.result{display:none;animation:fadeIn .4s ease-out}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.result-header{text-align:center;padding:20px 0 16px;border-bottom:1px solid #e8f5e9}
+.result-header .tracking{font-size:2em;font-weight:800;color:#006600;letter-spacing:2px}
+.result-header .name{font-size:1em;color:#555;margin-top:4px}
+.result-header .passport{font-size:.85em;color:#999}
+.steps-container{padding:24px 0;position:relative}
+.steps{display:flex;justify-content:space-between;position:relative;z-index:1}
+.step-line-bg{position:absolute;top:22px;left:12%;right:12%;height:4px;background:#e0e0e0;z-index:0;border-radius:2px}
+.step-line-fill{height:100%;background:linear-gradient(90deg,#006600,#2e7d32);border-radius:2px;transition:width .8s ease-out}
+.step{display:flex;flex-direction:column;align-items:center;flex:1;z-index:1}
+.step .dot{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1em;font-weight:700;color:#fff;margin-bottom:8px;transition:all .4s;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.step.done .dot{background:linear-gradient(135deg,#006600,#2e7d32)}
+.step.active .dot{background:linear-gradient(135deg,#e65100,#ff6d00);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 4px rgba(230,81,0,.3)}50%{box-shadow:0 0 16px rgba(230,81,0,.5)}}
+.step.waiting .dot{background:#ccc}
+.step .step-label{font-size:.72em;color:#555;font-weight:600;text-align:center;max-width:80px;line-height:1.3}
+.step .step-label-ur{font-size:.68em;color:#999;direction:rtl;max-width:80px;text-align:center;margin-top:2px}
+.detail-cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}
+.detail-card{background:#f8faf8;border:1px solid #e8f5e9;border-radius:10px;padding:12px 14px}
+.detail-card .dc-label{font-size:.7em;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+.detail-card .dc-value{font-size:.95em;font-weight:600;color:#333}
+.detail-card.highlight{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border-color:#a5d6a7}
+.detail-card.highlight .dc-value{color:#006600}
+.detail-card.warn{background:#fff8e1;border-color:#ffe082}
+.detail-card.warn .dc-value{color:#e65100}
+.info-banner{background:#e3f2fd;border:1px solid #90caf9;border-radius:10px;padding:14px;margin-top:16px;font-size:.85em;color:#1565c0;text-align:center;line-height:1.6}
+.info-banner .urdu{direction:rtl;text-align:right;margin-top:8px;padding-top:8px;border-top:1px dashed #90caf9;color:#333;line-height:2}
+.btn-row{display:flex;gap:10px;justify-content:center;margin-top:20px}
+a.btn{display:inline-flex;align-items:center;gap:6px;padding:12px 24px;text-decoration:none;border-radius:10px;font-weight:600;font-size:.9em;transition:all .2s}
+a.btn-green{background:#006600;color:#fff;box-shadow:0 2px 8px rgba(0,102,0,.2)}
+a.btn-green:hover{background:#004d00;transform:translateY(-1px)}
+a.btn-outline{background:transparent;color:#006600;border:2px solid #006600}
+a.btn-outline:hover{background:#e8f5e9}
+.footer{text-align:center;padding:16px;font-size:.75em;color:#999}
+@media(max-width:480px){.card-body{padding:20px 16px}.detail-cards{grid-template-columns:1fr}.steps .step .step-label{font-size:.65em;max-width:60px}}
+</style></head><body>
+<div class="top-bar">
+<div class="flag">&#127477;&#127472;</div>
+<div><div class="title">Embassy of Pakistan, Kuwait</div><div class="sub">Citizen Support for Transit KSA System</div></div>
+<div class="top-bar-nav">
+<a href="/embassy-registration">Register</a>
+<a href="/embassy-registration/track" class="active">Track Status</a>
+</div>
+</div>
+<div class="main">
+<div class="card">
+<div class="card-header">
+<div class="icon">&#128270;</div>
+<h1>Track Your Application</h1>
+<p>Enter your Tracking Number to check your application status</p>
+<p style="direction:rtl;margin-top:6px;font-size:.85em">&#1575;&#1662;&#1606;&#1740; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1705;&#1740; &#1589;&#1608;&#1585;&#1578;&#1581;&#1575;&#1604; &#1580;&#1575;&#1606;&#1606;&#1746; &#1705;&#1746; &#1604;&#1740;&#1746; &#1575;&#1662;&#1606;&#1575; &#1657;&#1585;&#1740;&#1705;&#1606;&#1711; &#1606;&#1605;&#1576;&#1585; &#1583;&#1585;&#1580; &#1705;&#1585;&#1740;&#1722;</p>
+</div>
+<div class="card-body">
+<div id="searchSection">
+<div class="search-box">
+<span class="search-icon">&#128270;</span>
+<input type="text" id="trackInput" placeholder="e.g. PKE-0042" maxlength="10" autofocus
+  onkeydown="if(event.key==='Enter')checkStatus()">
+</div>
+<button class="search-btn" id="searchBtn" onclick="checkStatus()">Check Status</button>
+<div class="or-text">or search by passport number</div>
+<div class="search-box">
+<span class="search-icon">&#128196;</span>
+<input type="text" id="passportInput" placeholder="Enter Passport Number" maxlength="12" style="text-transform:uppercase"
+  onkeydown="if(event.key==='Enter')checkByPassport()">
+</div>
+<button class="search-btn" style="background:linear-gradient(135deg,#1565c0,#0d47a1)" onclick="checkByPassport()">Search by Passport</button>
+</div>
+<div class="error-msg" id="errorMsg"></div>
+<div class="result" id="resultSection">
+<div class="result-header">
+<div class="tracking" id="resTracking"></div>
+<div class="name" id="resName"></div>
+<div class="passport" id="resPassport"></div>
+</div>
+<div class="steps-container">
+<div class="step-line-bg"><div class="step-line-fill" id="stepFill"></div></div>
+<div class="steps" id="stepsRow"></div>
+</div>
+<div class="detail-cards" id="detailCards"></div>
+<div class="info-banner">
+<strong>&#9888;&#65039; PLEASE DO NOT BUY TICKET UNLESS EMBASSY STAFF CONTACTS YOU TO DO SO</strong>
+<div class="urdu"><strong>&#1575;&#1729;&#1605;: &#1580;&#1576; &#1578;&#1705; &#1587;&#1601;&#1575;&#1585;&#1578;&#1582;&#1575;&#1606;&#1746; &#1705;&#1575; &#1593;&#1605;&#1604;&#1729; &#1570;&#1662; &#1587;&#1746; &#1585;&#1575;&#1576;&#1591;&#1729; &#1606;&#1729; &#1705;&#1585;&#1746;&#1548; &#1657;&#1705;&#1657; &#1582;&#1585;&#1740;&#1583;&#1606;&#1746; &#1587;&#1746; &#1711;&#1585;&#1740;&#1586; &#1705;&#1585;&#1740;&#1722;&#1748;</strong></div>
+</div>
+<div class="btn-row">
+<a class="btn btn-outline" href="#" onclick="document.getElementById('resultSection').style.display='none';document.getElementById('searchSection').style.display='block';document.getElementById('trackInput').focus();return false">&#8592; Search Again</a>
+<a class="btn btn-green" href="/embassy-registration">New Registration</a>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class="footer">Embassy of Pakistan, Kuwait &mdash; Citizen Support for Transit KSA System</div>
+<script>
+async function checkStatus(){
+const tid=document.getElementById('trackInput').value.trim();
+if(!tid){shakeInput('trackInput');return}
+await doTrack({tracking:tid.toUpperCase().startsWith('PKE')?tid:'PKE-'+tid});
+}
+async function checkByPassport(){
+const pp=document.getElementById('passportInput').value.trim();
+if(!pp){shakeInput('passportInput');return}
+await doTrack({passport:pp.toUpperCase()});
+}
+function shakeInput(id){
+const el=document.getElementById(id);
+el.style.borderColor='#c62828';
+el.style.animation='shake .4s';
+setTimeout(()=>{el.style.animation='';el.style.borderColor=''},600);
+}
+async function doTrack(payload){
+const btn=document.getElementById('searchBtn');
+btn.disabled=true;btn.textContent='Searching...';
+document.getElementById('errorMsg').style.display='none';
+document.getElementById('resultSection').style.display='none';
+try{
+const resp=await fetch('/api/track-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const d=await resp.json();
+btn.disabled=false;btn.textContent='Check Status';
+if(d.success){
+document.getElementById('searchSection').style.display='none';
+renderResult(d);
+}else{
+const err=document.getElementById('errorMsg');
+err.textContent=d.error||'No record found';
+err.style.display='block';
+}
+}catch(e){
+btn.disabled=false;btn.textContent='Check Status';
+document.getElementById('errorMsg').textContent='Network error. Please try again.';
+document.getElementById('errorMsg').style.display='block';
+}
+}
+function renderResult(d){
+document.getElementById('resTracking').textContent=d.tracking;
+document.getElementById('resName').textContent=d.name;
+document.getElementById('resPassport').textContent='Passport: '+d.passport_masked;
+// Steps
+const stepsRow=document.getElementById('stepsRow');
+stepsRow.innerHTML='';
+let doneCount=0;
+const icons=['&#10003;','&#9993;','&#128196;','&#9992;'];
+d.steps.forEach((s,i)=>{
+if(s.done)doneCount=i+1;
+});
+const activeIdx=doneCount;
+d.steps.forEach((s,i)=>{
+const cls=i<doneCount?'done':(i===doneCount?'active':'waiting');
+const div=document.createElement('div');
+div.className='step '+cls;
+div.innerHTML=`<div class="dot">${i<doneCount?icons[i]:(i+1)}</div><div class="step-label">${s.label}</div><div class="step-label-ur">${s.label_ur}</div>`;
+stepsRow.appendChild(div);
+});
+const pct=doneCount===0?0:((doneCount)/(d.steps.length-1)*100);
+document.getElementById('stepFill').style.width=Math.min(pct,100)+'%';
+// Detail cards
+const cards=document.getElementById('detailCards');
+let ch='';
+ch+=detailCard('Application Date',d.date_of_request||'--','highlight');
+ch+=detailCard('Travel Status',d.travel_status,'highlight');
+ch+=detailCard('MOFA Status',d.mofa_status==='Sent to MOFA'?'Sent to MOFA'+(d.mofa_sent_date?' ('+d.mofa_sent_date+')':''):(d.mofa_status||'Pending'),d.mofa_status==='Sent to MOFA'?'highlight':'');
+ch+=detailCard('Visa Status',d.visa_status||'Pending',d.visa_status==='Approved'?'highlight':'warn');
+ch+=detailCard('Border Crossing',d.border_crossing||'--','');
+ch+=detailCard('Departure Date',d.departure_date||'Not yet scheduled','');
+cards.innerHTML=ch;
+document.getElementById('resultSection').style.display='block';
+}
+function detailCard(label,value,cls){
+return `<div class="detail-card ${cls}"><div class="dc-label">${label}</div><div class="dc-value">${value}</div></div>`;
+}
+// Auto-fill from URL params
+const urlTid=new URLSearchParams(window.location.search).get('tid');
+if(urlTid){document.getElementById('trackInput').value=urlTid;checkStatus()}
 </script>
 </body></html>"""
 
@@ -2781,7 +3064,7 @@ tr:nth-child(even){background:#f9f9f9}
 <div class="hdr"><h1>Embassy of Pakistan, Kuwait</h1><h2>MOFA Saudi Transit Visa Request</h2><p>Batch Date: ${today} | Total: ${rows.length} persons</p></div>
 <table><thead><tr><th>S.No</th><th>#</th><th>Name</th><th>Passport Number</th><th>Border Entry Point</th><th>Sent Date</th></tr></thead><tbody>${printRows}</tbody></table>
 <div class="footer"><span>Generated by Citizen Support for Transit KSA System</span><span>Printed: ${new Date().toLocaleString()}</span></div>
-<script>window.print()</script></body></html>`);
+<scr'+'ipt>window.print()<\/scr'+'ipt></body></html>`);
 w.document.close();
 }
 function addImportBatch(){
