@@ -661,9 +661,28 @@ def api_save_record(data, user):
 
 def api_delete_record(rec_id, user):
     db = get_db()
+    # Before deleting, get the record's identifiers so we can re-evaluate its matches
+    deleted_rec = db.execute("SELECT passport, cnic, civil_id FROM evacuees WHERE id = ?", [rec_id]).fetchone()
     db.execute("DELETE FROM evacuees WHERE id = ?", [rec_id])
     db.execute("INSERT INTO audit_log (action, record_id, user) VALUES ('delete', ?, ?)", (rec_id, user))
-    db.commit(); db.close()
+    db.commit()
+
+    # Re-evaluate duplicate flags for records that matched the deleted record
+    # This ensures the original entry gets cleared and becomes eligible for MOFA
+    if deleted_rec:
+        cleared = 0
+        dups = db.execute("SELECT id FROM evacuees WHERE dup_flag = 'DUPLICATE'").fetchall()
+        for dup_row in dups:
+            rec = dict(db.execute("SELECT * FROM evacuees WHERE id = ?", [dup_row['id']]).fetchone())
+            new_flags = check_duplicates(db, rec, exclude_id=rec['id'])
+            if not new_flags:
+                db.execute("UPDATE evacuees SET dup_flag = 'CLEAR', updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?",
+                           [user, rec['id']])
+                cleared += 1
+        if cleared:
+            db.commit()
+
+    db.close()
     return {'success': True}
 
 def api_users_list():
@@ -904,6 +923,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_html(PUBLIC_REGISTER_PAGE)
         elif path in ('/embassy-registration/success', '/register/success'):
             self.send_html(REGISTER_SUCCESS_PAGE)
+        elif path == '/embassy-registration/already-registered':
+            self.send_html(ALREADY_REGISTERED_PAGE)
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
         elif path == '/':
@@ -1086,10 +1107,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 data['border_crossing'] = normalize_border(data['border_crossing'])
             if data.get('cnic'):
                 data['cnic'] = re.sub(r'[\s]', '', data['cnic'])
+            if data.get('civil_id'):
+                data['civil_id'] = data['civil_id'].strip()
             if not data.get('date_of_request'):
                 data['date_of_request'] = datetime.now().strftime('%Y-%m-%d')
             if not data.get('travel_status'):
                 data['travel_status'] = 'Pending'
+
+            # Block duplicate registrations by Passport, CNIC, or Civil ID
+            db = get_db()
+            existing = None
+            passport = data.get('passport', '')
+            cnic = re.sub(r'[\s\-]', '', data.get('cnic', ''))
+            civil_id = data.get('civil_id', '').strip()
+
+            if passport:
+                existing = db.execute("SELECT id FROM evacuees WHERE UPPER(TRIM(passport)) = ?", [passport]).fetchone()
+            if not existing and cnic:
+                existing = db.execute("SELECT id FROM evacuees WHERE REPLACE(REPLACE(cnic, '-', ''), ' ', '') = ?", [cnic]).fetchone()
+            if not existing and civil_id:
+                existing = db.execute("SELECT id FROM evacuees WHERE TRIM(civil_id) = ?", [civil_id]).fetchone()
+            db.close()
+
+            if existing:
+                tracking = 'PKE-' + str(existing['id']).zfill(4)
+                self.send_json({
+                    'success': False,
+                    'duplicate': True,
+                    'tracking': tracking,
+                    'error': 'already_registered'
+                }, 409)
+                return
 
             result = api_save_record(data, 'public')
             # Log for rate limiting
@@ -1483,6 +1531,8 @@ if(d.success){
     document.getElementById('dupWarning').style.display='block';
   }
   window.location='/embassy-registration/success?tid=PKE-'+String(d.id).padStart(4,'0');
+}else if(d.duplicate){
+  window.location='/embassy-registration/already-registered?tid='+d.tracking;
 }else{
   document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
   document.getElementById('errorMsg').style.display='block';
@@ -1541,6 +1591,51 @@ Please email a copy of your passport to:<br>
 <script>
 const tid=new URLSearchParams(window.location.search).get('tid');
 if(tid){document.getElementById('trackingNum').textContent=tid;document.getElementById('trackingBox').style.display='block'}
+</script>
+</body></html>"""
+
+ALREADY_REGISTERED_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Already Registered - Pakistan Embassy Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:16px;padding:40px;max-width:520px;width:90%;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.1)}
+.icon{font-size:3.5em;margin-bottom:12px}
+h1{color:#e65100;font-size:1.4em;margin-bottom:8px}
+p{color:#555;line-height:1.6;margin-bottom:16px}
+.tracking-box{background:#e8f5e9;border:2px solid #006600;border-radius:10px;padding:16px;margin:16px 0}
+.tracking-box .label{font-size:.8em;color:#555;text-transform:uppercase;letter-spacing:1px}
+.tracking-box .number{font-size:2em;font-weight:700;color:#006600;letter-spacing:2px;margin:4px 0}
+.info{background:#fff3e0;border:1px solid #ffcc80;border-radius:8px;padding:14px;font-size:.88em;color:#e65100;margin-bottom:16px;text-align:left}
+.info strong{display:block;margin-bottom:4px}
+a.btn{display:inline-block;padding:12px 24px;background:#006600;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;margin-top:8px}
+a.btn:hover{background:#004d00}
+.urdu{direction:rtl;text-align:right;font-size:.95em;color:#333;line-height:1.8;margin-top:10px;padding-top:10px;border-top:1px solid #eee}
+</style></head><body>
+<div class="card">
+<div class="icon">&#9888;&#65039;</div>
+<h1>You Have Already Registered</h1>
+<p>Our records show that a registration already exists with the same Passport Number, CNIC, or Civil ID that you entered.</p>
+<div class="tracking-box">
+<div class="label">Your Existing Tracking Number</div>
+<div class="number" id="trackingNum"></div>
+<div style="font-size:.75em;color:#888">Please save this number for future reference</div>
+</div>
+<div class="info">
+<strong>Your application is already being processed.</strong>
+There is no need to register again. You will be contacted on the mobile number you provided once there is an update on your Saudi transit visa status.
+<div class="urdu">آپ کی درخواست پہلے سے موجود ہے اور اس پر کارروائی ہو رہی ہے۔ دوبارہ رجسٹر کرنے کی ضرورت نہیں ہے۔ ویزا کی صورتحال کے بارے میں آپ سے آپ کے موبائل نمبر پر رابطہ کیا جائے گا۔</div>
+</div>
+<p style="font-size:.85em;color:#999">If you need to make changes to your application, please contact the Embassy directly.<br>
+Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
+Tel: (+965) 25327651, 25354073<br>
+Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
+<a class="btn" href="/embassy-registration">Back to Registration</a>
+</div>
+<script>
+const tid=new URLSearchParams(window.location.search).get('tid');
+if(tid){document.getElementById('trackingNum').textContent=tid}
 </script>
 </body></html>"""
 
