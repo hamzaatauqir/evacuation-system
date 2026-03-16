@@ -140,11 +140,26 @@ def init_db():
     for batch_date, passports in _historical_mofa:
         for pp in passports:
             pp_clean = pp.strip().upper().replace(' ', '')
-            row = db.execute("SELECT id FROM evacuees WHERE UPPER(REPLACE(TRIM(passport), ' ', '')) = ?", [pp_clean]).fetchone()
+            row = db.execute("SELECT id, mofa_status, mofa_sent_date FROM evacuees WHERE UPPER(REPLACE(TRIM(passport), ' ', '')) = ?", [pp_clean]).fetchone()
             if row:
-                db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?
-                    WHERE id=? AND (mofa_status IS NULL OR mofa_status='' OR mofa_status='New')""",
-                    [batch_date, row['id']])
+                # Set date for records that are already Sent to MOFA but have no date
+                if row['mofa_status'] == 'Sent to MOFA' and (not row['mofa_sent_date'] or row['mofa_sent_date'] == ''):
+                    db.execute("UPDATE evacuees SET mofa_sent_date=? WHERE id=?", [batch_date, row['id']])
+                # Also mark records that haven't been sent yet
+                elif row['mofa_status'] != 'Sent to MOFA':
+                    db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA', mofa_sent_date=?
+                        WHERE id=? AND (mofa_status IS NULL OR mofa_status='' OR mofa_status='New')""",
+                        [batch_date, row['id']])
+    db.commit()
+    # Backfill: any records marked 'Sent to MOFA' that STILL have no date — use updated_at date
+    db.execute("""UPDATE evacuees SET mofa_sent_date = DATE(updated_at)
+        WHERE mofa_status='Sent to MOFA' AND (mofa_sent_date IS NULL OR mofa_sent_date='')
+        AND updated_at IS NOT NULL AND updated_at != ''""")
+    # Final fallback: if still no date, use today
+    from datetime import datetime as _dt
+    _today = _dt.now().strftime('%Y-%m-%d')
+    db.execute("""UPDATE evacuees SET mofa_sent_date = ?
+        WHERE mofa_status='Sent to MOFA' AND (mofa_sent_date IS NULL OR mofa_sent_date='')""", [_today])
     db.commit()
     db.close()
 
@@ -1098,36 +1113,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self.read_body()
 
         if path == '/api/track-status':
-            # Public tracking — no auth needed
+            # Public tracking by passport number — no auth needed
             try:
                 data = json.loads(body)
-                tracking = data.get('tracking', '').strip().upper()
                 passport_q = data.get('passport', '').strip().upper()
-                db = get_db()
-                row = None
-                if tracking:
-                    import re as _re
-                    match = _re.match(r'^PKE-?(\d+)$', tracking)
-                    if not match:
-                        db.close()
-                        self.send_json({'success': False, 'error': 'Invalid tracking number format. Please use PKE-0001'}, 400)
-                        return
-                    rec_id = int(match.group(1))
-                    row = db.execute("""SELECT id, name, passport, travel_status, mofa_status, mofa_sent_date,
-                        visa_status, date_of_request, border_crossing, departure_date, dup_flag
-                        FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
-                elif passport_q:
-                    row = db.execute("""SELECT id, name, passport, travel_status, mofa_status, mofa_sent_date,
-                        visa_status, date_of_request, border_crossing, departure_date, dup_flag
-                        FROM evacuees WHERE UPPER(TRIM(passport)) = ? AND dup_flag='CLEAR'
-                        ORDER BY id DESC LIMIT 1""", [passport_q]).fetchone()
-                else:
-                    db.close()
-                    self.send_json({'success': False, 'error': 'Please enter a Tracking Number or Passport Number'}, 400)
+                if not passport_q or len(passport_q) < 4:
+                    self.send_json({'success': False, 'error': 'Please enter a valid Passport Number'}, 400)
                     return
+                db = get_db()
+                row = db.execute("""SELECT id, name, passport, travel_status, mofa_status, mofa_sent_date,
+                    visa_status, date_of_request, border_crossing, departure_date, dup_flag
+                    FROM evacuees WHERE UPPER(TRIM(passport)) = ? AND dup_flag='CLEAR'
+                    ORDER BY id DESC LIMIT 1""", [passport_q]).fetchone()
                 db.close()
                 if not row:
-                    self.send_json({'success': False, 'error': 'No record found with this tracking number'}, 404)
+                    self.send_json({'success': False, 'error': 'No record found with this passport number. If you recently registered, please wait a few minutes and try again.'}, 404)
                     return
                 r = dict(row)
                 # Determine step progress for the citizen
@@ -1136,7 +1136,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 mofa_sent = r.get('mofa_status') == 'Sent to MOFA'
                 steps.append({'label': 'Sent to MOFA', 'label_ur': 'موفا کو بھیجا گیا', 'done': mofa_sent})
                 visa_ok = r.get('visa_status') in ('Approved', 'Issued', 'Visa Obtained')
-                steps.append({'label': 'Visa Status', 'label_ur': 'ویزا کی صورتحال', 'done': visa_ok})
+                visa_label = 'Contact Embassy' if visa_ok else 'Visa Status'
+                visa_label_ur = 'سفارتخانے سے رابطہ کریں' if visa_ok else 'ویزا کی صورتحال'
+                steps.append({'label': visa_label, 'label_ur': visa_label_ur, 'done': visa_ok})
                 departed = r.get('travel_status') == 'Departed'
                 steps.append({'label': 'Departed', 'label_ur': 'روانگی', 'done': departed})
                 # Build safe response (no sensitive data)
@@ -1738,7 +1740,7 @@ Please email a copy of your passport to:<br>
 <script>
 const tid=new URLSearchParams(window.location.search).get('tid');
 if(tid){document.getElementById('trackingNum').textContent=tid;document.getElementById('trackingBox').style.display='block';
-const tl=document.getElementById('trackLink');tl.href='/embassy-registration/track?tid='+tid;tl.style.display='inline-block'}
+const tl=document.getElementById('trackLink');tl.href='/embassy-registration/track';tl.style.display='inline-block'}
 </script>
 </body></html>"""
 
@@ -1939,8 +1941,21 @@ a.btn-green{background:#006600;color:#fff;box-shadow:0 2px 8px rgba(0,102,0,.2)}
 a.btn-green:hover{background:#004d00;transform:translateY(-1px)}
 a.btn-outline{background:transparent;color:#006600;border:2px solid #006600}
 a.btn-outline:hover{background:#e8f5e9}
+.detail-card.visa-ready{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #006600;grid-column:1/-1}
+.detail-card.visa-ready .dc-label{color:#006600;font-weight:700;font-size:.8em}
+.detail-card.visa-ready .dc-value{color:#006600;font-size:1.05em;font-weight:700}
+.visa-contact-banner{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #006600;border-radius:14px;padding:20px;margin-top:16px;text-align:center;animation:fadeIn .4s ease-out}
+.vcb-header{font-size:1.3em;font-weight:800;color:#006600;margin-bottom:2px}
+.vcb-header-ur{font-size:1.1em;font-weight:700;color:#006600;direction:rtl;margin-bottom:10px}
+.vcb-msg{font-size:.92em;color:#333;margin-bottom:4px;line-height:1.5}
+.vcb-msg-ur{font-size:.88em;color:#555;direction:rtl;line-height:1.8;margin-bottom:14px;padding-bottom:12px;border-bottom:1px dashed #a5d6a7}
+.vcb-contacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:12px}
+.vcb-contact{background:#fff;border:1px solid #a5d6a7;border-radius:8px;padding:8px 12px;font-size:.88em;font-weight:500}
+.vcb-contact a{color:#006600;text-decoration:none;font-weight:600}
+.vcb-contact a:hover{text-decoration:underline}
+.vcb-visit{font-size:.85em;color:#555;margin-top:8px;padding:8px;background:rgba(255,255,255,.6);border-radius:6px}
 .footer{text-align:center;padding:16px;font-size:.75em;color:#999}
-@media(max-width:480px){.card-body{padding:20px 16px}.detail-cards{grid-template-columns:1fr}.steps .step .step-label{font-size:.65em;max-width:60px}}
+@media(max-width:480px){.card-body{padding:20px 16px}.detail-cards{grid-template-columns:1fr}.steps .step .step-label{font-size:.65em;max-width:60px}.vcb-contacts{grid-template-columns:1fr}}
 </style></head><body>
 <div class="top-bar">
 <div class="flag">&#127477;&#127472;</div>
@@ -1955,24 +1970,19 @@ a.btn-outline:hover{background:#e8f5e9}
 <div class="card-header">
 <div class="icon">&#128270;</div>
 <h1>Track Your Application</h1>
-<p>Enter your Tracking Number to check your application status</p>
-<p style="direction:rtl;margin-top:6px;font-size:.85em">&#1575;&#1662;&#1606;&#1740; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1705;&#1740; &#1589;&#1608;&#1585;&#1578;&#1581;&#1575;&#1604; &#1580;&#1575;&#1606;&#1606;&#1746; &#1705;&#1746; &#1604;&#1740;&#1746; &#1575;&#1662;&#1606;&#1575; &#1657;&#1585;&#1740;&#1705;&#1606;&#1711; &#1606;&#1605;&#1576;&#1585; &#1583;&#1585;&#1580; &#1705;&#1585;&#1740;&#1722;</p>
+<p>Enter your Passport Number to check your application status</p>
+<p style="direction:rtl;margin-top:6px;font-size:.85em">&#1575;&#1662;&#1606;&#1740; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1705;&#1740; &#1589;&#1608;&#1585;&#1578;&#1581;&#1575;&#1604; &#1580;&#1575;&#1606;&#1606;&#1746; &#1705;&#1746; &#1604;&#1740;&#1746; &#1575;&#1662;&#1606;&#1575; &#1662;&#1575;&#1587;&#1662;&#1608;&#1585;&#1657; &#1606;&#1605;&#1576;&#1585; &#1583;&#1585;&#1580; &#1705;&#1585;&#1740;&#1722;</p>
 </div>
 <div class="card-body">
 <div id="searchSection">
 <div class="search-box">
-<span class="search-icon">&#128270;</span>
-<input type="text" id="trackInput" placeholder="e.g. PKE-0042" maxlength="10" autofocus
+<span class="search-icon">&#128196;</span>
+<input type="text" id="passportInput" placeholder="Enter your Passport Number" maxlength="12" style="text-transform:uppercase" autofocus
   onkeydown="if(event.key==='Enter')checkStatus()">
 </div>
 <button class="search-btn" id="searchBtn" onclick="checkStatus()">Check Status</button>
-<div class="or-text">or search by passport number</div>
-<div class="search-box">
-<span class="search-icon">&#128196;</span>
-<input type="text" id="passportInput" placeholder="Enter Passport Number" maxlength="12" style="text-transform:uppercase"
-  onkeydown="if(event.key==='Enter')checkByPassport()">
-</div>
-<button class="search-btn" style="background:linear-gradient(135deg,#1565c0,#0d47a1)" onclick="checkByPassport()">Search by Passport</button>
+<p style="text-align:center;font-size:.82em;color:#999;margin-top:12px">Enter the passport number you used during registration</p>
+<p style="text-align:center;font-size:.82em;color:#999;direction:rtl;margin-top:4px">وہ پاسپورٹ نمبر درج کریں جو آپ نے رجسٹریشن کے وقت استعمال کیا تھا</p>
 </div>
 <div class="error-msg" id="errorMsg"></div>
 <div class="result" id="resultSection">
@@ -1986,12 +1996,26 @@ a.btn-outline:hover{background:#e8f5e9}
 <div class="steps" id="stepsRow"></div>
 </div>
 <div class="detail-cards" id="detailCards"></div>
+<div id="visaContactBanner" class="visa-contact-banner" style="display:none">
+<div class="vcb-header">&#127881; Your Visa is Ready!</div>
+<div class="vcb-header-ur">&#1570;&#1662; &#1705;&#1575; &#1608;&#1740;&#1586;&#1575; &#1578;&#1740;&#1575;&#1585; &#1729;&#1746;!</div>
+<div class="vcb-msg">Please contact the Embassy immediately for <strong>ticket booking</strong>. Do NOT buy tickets on your own.</div>
+<div class="vcb-msg-ur">&#1576;&#1585;&#1575;&#1729;&#1616; &#1705;&#1585;&#1605; &#1657;&#1705;&#1657; &#1705;&#1740; &#1576;&#1705;&#1606;&#1711; &#1705;&#1746; &#1604;&#1740;&#1746; &#1601;&#1608;&#1585;&#1740; &#1591;&#1608;&#1585; &#1662;&#1585; &#1587;&#1601;&#1575;&#1585;&#1578;&#1582;&#1575;&#1606;&#1746; &#1587;&#1746; &#1585;&#1575;&#1576;&#1591;&#1729; &#1705;&#1585;&#1740;&#1722;&#1748; &#1582;&#1608;&#1583; &#1587;&#1746; &#1657;&#1705;&#1657; &#1606;&#1729; &#1582;&#1585;&#1740;&#1583;&#1740;&#1722;&#1748;</div>
+<div class="vcb-contacts">
+<div class="vcb-contact"><span>&#128222;</span> <a href="tel:+96525327651">(+965) 25327651</a></div>
+<div class="vcb-contact"><span>&#128222;</span> <a href="tel:+96525354073">(+965) 25354073</a></div>
+<div class="vcb-contact"><span>&#128241;</span> Awais: <a href="tel:+96555977292">+965-55977292</a></div>
+<div class="vcb-contact"><span>&#128241;</span> Zahid: <a href="tel:+96555964923">+965-55964923</a></div>
+<div class="vcb-contact"><span>&#128241;</span> Shahid Khan: <a href="tel:+96566568265">+965-66568265</a></div>
+</div>
+<div class="vcb-visit">&#127971; Or visit: Villa 440, Street 108, Block 12, Jabriya, Kuwait</div>
+</div>
 <div class="info-banner">
 <strong>&#9888;&#65039; PLEASE DO NOT BUY TICKET UNLESS EMBASSY STAFF CONTACTS YOU TO DO SO</strong>
 <div class="urdu"><strong>&#1575;&#1729;&#1605;: &#1580;&#1576; &#1578;&#1705; &#1587;&#1601;&#1575;&#1585;&#1578;&#1582;&#1575;&#1606;&#1746; &#1705;&#1575; &#1593;&#1605;&#1604;&#1729; &#1570;&#1662; &#1587;&#1746; &#1585;&#1575;&#1576;&#1591;&#1729; &#1606;&#1729; &#1705;&#1585;&#1746;&#1548; &#1657;&#1705;&#1657; &#1582;&#1585;&#1740;&#1583;&#1606;&#1746; &#1587;&#1746; &#1711;&#1585;&#1740;&#1586; &#1705;&#1585;&#1740;&#1722;&#1748;</strong></div>
 </div>
 <div class="btn-row">
-<a class="btn btn-outline" href="#" onclick="document.getElementById('resultSection').style.display='none';document.getElementById('searchSection').style.display='block';document.getElementById('trackInput').focus();return false">&#8592; Search Again</a>
+<a class="btn btn-outline" href="#" onclick="document.getElementById('resultSection').style.display='none';document.getElementById('searchSection').style.display='block';document.getElementById('passportInput').focus();return false">&#8592; Search Again</a>
 <a class="btn btn-green" href="/embassy-registration">New Registration</a>
 </div>
 </div>
@@ -2001,28 +2025,19 @@ a.btn-outline:hover{background:#e8f5e9}
 <div class="footer">Embassy of Pakistan, Kuwait &mdash; Citizen Support for Transit KSA System</div>
 <script>
 async function checkStatus(){
-const tid=document.getElementById('trackInput').value.trim();
-if(!tid){shakeInput('trackInput');return}
-await doTrack({tracking:tid.toUpperCase().startsWith('PKE')?tid:'PKE-'+tid});
-}
-async function checkByPassport(){
 const pp=document.getElementById('passportInput').value.trim();
-if(!pp){shakeInput('passportInput');return}
-await doTrack({passport:pp.toUpperCase()});
-}
-function shakeInput(id){
-const el=document.getElementById(id);
-el.style.borderColor='#c62828';
-el.style.animation='shake .4s';
+if(!pp){
+const el=document.getElementById('passportInput');
+el.style.borderColor='#c62828';el.style.animation='shake .4s';
 setTimeout(()=>{el.style.animation='';el.style.borderColor=''},600);
+return;
 }
-async function doTrack(payload){
 const btn=document.getElementById('searchBtn');
 btn.disabled=true;btn.textContent='Searching...';
 document.getElementById('errorMsg').style.display='none';
 document.getElementById('resultSection').style.display='none';
 try{
-const resp=await fetch('/api/track-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const resp=await fetch('/api/track-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({passport:pp.toUpperCase()})});
 const d=await resp.json();
 btn.disabled=false;btn.textContent='Check Status';
 if(d.success){
@@ -2030,33 +2045,32 @@ document.getElementById('searchSection').style.display='none';
 renderResult(d);
 }else{
 const err=document.getElementById('errorMsg');
-err.textContent=d.error||'No record found';
+err.textContent=d.error||'No record found with this passport number';
 err.style.display='block';
 }
 }catch(e){
 btn.disabled=false;btn.textContent='Check Status';
-document.getElementById('errorMsg').textContent='Network error. Please try again.';
+document.getElementById('errorMsg').textContent='Network error. Please check your connection and try again.';
 document.getElementById('errorMsg').style.display='block';
 }
 }
 function renderResult(d){
-document.getElementById('resTracking').textContent=d.tracking;
-document.getElementById('resName').textContent=d.name;
+document.getElementById('resTracking').textContent=d.name;
+document.getElementById('resName').textContent='Tracking: '+d.tracking;
 document.getElementById('resPassport').textContent='Passport: '+d.passport_masked;
+// Determine if visa arrived
+const visaArrived=d.visa_status==='Approved'||d.visa_status==='Issued'||d.visa_status==='Visa Obtained';
 // Steps
 const stepsRow=document.getElementById('stepsRow');
 stepsRow.innerHTML='';
 let doneCount=0;
-const icons=['&#10003;','&#9993;','&#128196;','&#9992;'];
-d.steps.forEach((s,i)=>{
-if(s.done)doneCount=i+1;
-});
-const activeIdx=doneCount;
+const icons=['\u2713','\u2709','\u2713','\u2708'];
+d.steps.forEach((s,i)=>{if(s.done)doneCount=i+1});
 d.steps.forEach((s,i)=>{
 const cls=i<doneCount?'done':(i===doneCount?'active':'waiting');
 const div=document.createElement('div');
 div.className='step '+cls;
-div.innerHTML=`<div class="dot">${i<doneCount?icons[i]:(i+1)}</div><div class="step-label">${s.label}</div><div class="step-label-ur">${s.label_ur}</div>`;
+div.innerHTML='<div class="dot">'+(i<doneCount?icons[i]:(i+1))+'</div><div class="step-label">'+s.label+'</div><div class="step-label-ur">'+s.label_ur+'</div>';
 stepsRow.appendChild(div);
 });
 const pct=doneCount===0?0:((doneCount)/(d.steps.length-1)*100);
@@ -2066,19 +2080,32 @@ const cards=document.getElementById('detailCards');
 let ch='';
 ch+=detailCard('Application Date',d.date_of_request||'--','highlight');
 ch+=detailCard('Travel Status',d.travel_status,'highlight');
-ch+=detailCard('MOFA Status',d.mofa_status==='Sent to MOFA'?'Sent to MOFA'+(d.mofa_sent_date?' ('+d.mofa_sent_date+')':''):(d.mofa_status||'Pending'),d.mofa_status==='Sent to MOFA'?'highlight':'');
-ch+=detailCard('Visa Status',d.visa_status||'Pending',d.visa_status==='Approved'?'highlight':'warn');
+const mofaVal=d.mofa_status==='Sent to MOFA'?'Sent to MOFA'+(d.mofa_sent_date?' ('+d.mofa_sent_date+')':''):(d.mofa_status||'Pending');
+ch+=detailCard('MOFA Status',mofaVal,d.mofa_status==='Sent to MOFA'?'highlight':'');
+// Visa status — if arrived, show "Contact Embassy for Ticket Booking"
+if(visaArrived){
+ch+=detailCard('Visa Status','VISA READY - Contact Embassy for Ticket Booking','visa-ready');
+}else{
+ch+=detailCard('Visa Status',d.visa_status||'Pending','warn');
+}
 ch+=detailCard('Border Crossing',d.border_crossing||'--','');
 ch+=detailCard('Departure Date',d.departure_date||'Not yet scheduled','');
 cards.innerHTML=ch;
+// Show/hide the visa-ready contact banner
+const contactBanner=document.getElementById('visaContactBanner');
+if(visaArrived){
+contactBanner.style.display='block';
+}else{
+contactBanner.style.display='none';
+}
 document.getElementById('resultSection').style.display='block';
 }
 function detailCard(label,value,cls){
-return `<div class="detail-card ${cls}"><div class="dc-label">${label}</div><div class="dc-value">${value}</div></div>`;
+return '<div class="detail-card '+cls+'"><div class="dc-label">'+label+'</div><div class="dc-value">'+value+'</div></div>';
 }
 // Auto-fill from URL params
-const urlTid=new URLSearchParams(window.location.search).get('tid');
-if(urlTid){document.getElementById('trackInput').value=urlTid;checkStatus()}
+const urlPP=new URLSearchParams(window.location.search).get('pp');
+if(urlPP){document.getElementById('passportInput').value=urlPP;checkStatus()}
 </script>
 </body></html>"""
 
