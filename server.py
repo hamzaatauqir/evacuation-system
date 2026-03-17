@@ -1084,26 +1084,56 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/mofa-export':
             user = self.require_auth()
             if not user: return
-            from_id = int(params.get('from', 0))
-            to_id = int(params.get('to', 999999))
-            filter_type = params.get('filter', 'new')  # new, pending_mofa, all_sent
+            try:
+                from_id = int(params.get('from', 0) or 0)
+            except (ValueError, TypeError):
+                from_id = 0
+            try:
+                to_id = int(params.get('to', 999999) or 999999)
+            except (ValueError, TypeError):
+                to_id = 999999
+            filter_type = params.get('filter', 'new')  # new, pending_mofa, approved, all_sent
+            date_filter = params.get('date', '')  # optional: filter by mofa_sent_date
             db = get_db()
             if filter_type == 'pending_mofa':
-                rows = db.execute("""SELECT id, name, passport, border_crossing, mobile,
+                q = """SELECT id, name, passport, border_crossing,
                     COALESCE(mofa_letter_number,'') as mofa_letter_number,
                     COALESCE(mofa_letter_date,'') as mofa_letter_date,
                     COALESCE(mofa_sent_date,'') as mofa_sent_date
                     FROM evacuees
-                    WHERE mofa_status='Sent to MOFA' AND visa_status != 'Approved' AND dup_flag='CLEAR'
-                    ORDER BY id""").fetchall()
+                    WHERE mofa_status='Sent to MOFA' AND visa_status != 'Approved' AND dup_flag='CLEAR'"""
+                qparams = []
+                if date_filter:
+                    q += " AND mofa_sent_date = ?"
+                    qparams.append(date_filter)
+                q += " ORDER BY id"
+                rows = db.execute(q, qparams).fetchall()
+            elif filter_type == 'approved':
+                q = """SELECT id, name, passport, border_crossing, visa_status,
+                    COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                    COALESCE(mofa_letter_date,'') as mofa_letter_date,
+                    COALESCE(mofa_sent_date,'') as mofa_sent_date
+                    FROM evacuees
+                    WHERE mofa_status='Sent to MOFA' AND visa_status='Approved' AND dup_flag='CLEAR'"""
+                qparams = []
+                if date_filter:
+                    q += " AND mofa_sent_date = ?"
+                    qparams.append(date_filter)
+                q += " ORDER BY id"
+                rows = db.execute(q, qparams).fetchall()
             elif filter_type == 'all_sent':
-                rows = db.execute("""SELECT id, name, passport, border_crossing, mobile, visa_status,
+                q = """SELECT id, name, passport, border_crossing, visa_status,
                     COALESCE(mofa_letter_number,'') as mofa_letter_number,
                     COALESCE(mofa_letter_date,'') as mofa_letter_date,
                     COALESCE(mofa_sent_date,'') as mofa_sent_date
                     FROM evacuees
-                    WHERE mofa_status='Sent to MOFA' AND dup_flag='CLEAR'
-                    ORDER BY id""").fetchall()
+                    WHERE mofa_status='Sent to MOFA' AND dup_flag='CLEAR'"""
+                qparams = []
+                if date_filter:
+                    q += " AND mofa_sent_date = ?"
+                    qparams.append(date_filter)
+                q += " ORDER BY id"
+                rows = db.execute(q, qparams).fetchall()
             else:
                 rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
                     WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
@@ -1112,15 +1142,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             db.close()
             output = io.StringIO()
             writer = csv.writer(output)
-            if filter_type in ('pending_mofa', 'all_sent'):
+            if filter_type in ('pending_mofa', 'approved', 'all_sent'):
                 header = ['S.No', 'Record #', 'Name', 'Passport Number', 'Border Entry Point']
-                if filter_type == 'all_sent':
+                if filter_type in ('approved', 'all_sent'):
                     header.append('Visa Status')
                 header.extend(['MOFA Letter/Fax No.', 'Letter Date', 'Sent to MOFA Date'])
                 writer.writerow(header)
                 for i, r in enumerate(rows, 1):
                     row = [i, r['id'], r['name'], r['passport'], r['border_crossing']]
-                    if filter_type == 'all_sent':
+                    if filter_type in ('approved', 'all_sent'):
                         row.append(r.get('visa_status',''))
                     row.extend([r.get('mofa_letter_number',''), r.get('mofa_letter_date',''), r.get('mofa_sent_date','')])
                     writer.writerow(row)
@@ -1129,7 +1159,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 for i, r in enumerate(rows, 1):
                     writer.writerow([i, r['name'], r['passport'], r['border_crossing']])
             body = output.getvalue().encode('utf-8-sig')
-            fname = f'MOFA_{"pending_followup" if filter_type=="pending_mofa" else "visa_request"}_{datetime.now().strftime("%Y%m%d")}.csv'
+            fnames = {'pending_mofa': 'pending_followup', 'approved': 'approved_cases', 'all_sent': 'all_sent_cases'}
+            fname = f'MOFA_{fnames.get(filter_type, "visa_request")}_{datetime.now().strftime("%Y%m%d")}.csv'
             self.send_response(200)
             self.send_header('Content-Type', 'text/csv; charset=utf-8')
             self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
@@ -2251,13 +2282,18 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 
 <div class="fs" style="margin-top:16px;border-left:4px solid #e65100">
 <h3 style="color:#e65100">MOFA KSA Follow-up &mdash; Previously Sent Batches</h3>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:12px">Track all batches sent to MOFA KSA. Filter by status to identify pending cases for follow-up. Download printable lists with letter/fax reference numbers.</p>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:12px">Track all batches sent to MOFA KSA. Filter by status and date to identify pending cases for follow-up. Download printable lists with letter/fax reference numbers.</p>
 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
 <select id="mofaSentFilter" onchange="filterSentRecords()" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;font-size:.88em;min-width:220px">
 <option value="all">All Sent to MOFA</option>
 <option value="pending_mofa">Pending at MOFA KSA (Visa Not Yet Approved)</option>
 <option value="approved">Approved by MOFA KSA</option>
 </select>
+<div style="display:flex;align-items:center;gap:6px">
+<label style="font-size:.82em;font-weight:600;color:#e65100;white-space:nowrap">Sent Date:</label>
+<input type="date" id="mofaSentDateFilter" onchange="filterSentRecords()" style="padding:7px 10px;border:1px solid var(--bd);border-radius:7px;font-size:.88em">
+<button onclick="document.getElementById('mofaSentDateFilter').value='';filterSentRecords()" style="padding:6px 10px;border:1px solid var(--bd);border-radius:7px;background:#fff;cursor:pointer;font-size:.82em;color:#e65100" title="Clear date filter">&#10005; Clear</button>
+</div>
 <span id="mofaSentCount" style="font-size:.88em;color:var(--tl);font-weight:600"></span>
 </div>
 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
@@ -2943,13 +2979,17 @@ loadMofaBatches();
 }
 function filterSentRecords(){
 const filter=document.getElementById('mofaSentFilter').value;
+const dateFilter=document.getElementById('mofaSentDateFilter').value;
 let filtered=mofaSentRecords;
 if(filter==='pending_mofa'){
-filtered=mofaSentRecords.filter(r=>r.visa_status!=='Approved');
+filtered=filtered.filter(r=>r.visa_status!=='Approved');
 }else if(filter==='approved'){
-filtered=mofaSentRecords.filter(r=>r.visa_status==='Approved');
+filtered=filtered.filter(r=>r.visa_status==='Approved');
 }
-document.getElementById('mofaSentCount').textContent=filtered.length+' records';
+if(dateFilter){
+filtered=filtered.filter(r=>r.mofa_sent_date===dateFilter);
+}
+document.getElementById('mofaSentCount').textContent=filtered.length+' records'+(dateFilter?' (filtered by date: '+dateFilter+')':'');
 let sh='<thead><tr><th>#</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
 filtered.forEach((r,i)=>{
 const vs=r.visa_status==='Approved'?'<span class="bdg bdg-app">Approved</span>':'<span class="bdg bdg-pen">Pending</span>';
@@ -3012,19 +3052,27 @@ await loadMofaData();loadMofaPreview();
 }
 function downloadMofaPendingCSV(){
 const filter=document.getElementById('mofaSentFilter').value;
-const filterParam=filter==='pending_mofa'?'pending_mofa':filter==='approved'?'all_sent':'all_sent';
-window.open('/api/mofa-export?filter='+filterParam,'_blank');
+const dateFilter=document.getElementById('mofaSentDateFilter').value;
+const filterParam=filter==='pending_mofa'?'pending_mofa':filter==='approved'?'approved':'all_sent';
+let url='/api/mofa-export?filter='+filterParam;
+if(dateFilter) url+='&date='+encodeURIComponent(dateFilter);
+window.open(url,'_blank');
 }
 function printMofaPending(){
 const filter=document.getElementById('mofaSentFilter').value;
+const dateFilter=document.getElementById('mofaSentDateFilter').value;
 let filtered=mofaSentRecords;
 let title='All Records Sent to MOFA KSA';
 if(filter==='pending_mofa'){
-filtered=mofaSentRecords.filter(r=>r.visa_status!=='Approved');
+filtered=filtered.filter(r=>r.visa_status!=='Approved');
 title='Cases Pending at MOFA KSA - Follow-up Required';
 }else if(filter==='approved'){
-filtered=mofaSentRecords.filter(r=>r.visa_status==='Approved');
+filtered=filtered.filter(r=>r.visa_status==='Approved');
 title='Cases Approved by MOFA KSA';
+}
+if(dateFilter){
+filtered=filtered.filter(r=>r.mofa_sent_date===dateFilter);
+title+=' (Sent on: '+dateFilter+')';
 }
 let html='<html><head><title>'+title+'</title><style>';
 html+='body{font-family:Arial,sans-serif;padding:20px;font-size:12px}';
