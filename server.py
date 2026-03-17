@@ -1139,6 +1139,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
                     AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
                     ORDER BY id""", [from_id, to_id]).fetchall()
+            rows = [dict(r) for r in rows]
             db.close()
             output = io.StringIO()
             writer = csv.writer(output)
@@ -1149,7 +1150,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 header.extend(['MOFA Letter/Fax No.', 'Letter Date', 'Sent to MOFA Date'])
                 writer.writerow(header)
                 for i, r in enumerate(rows, 1):
-                    row = [i, r['id'], r['name'], r['passport'], r['border_crossing']]
+                    row = [i, r['id'], r['name'], r['passport'], r.get('border_crossing', '')]
                     if filter_type in ('approved', 'all_sent'):
                         row.append(r.get('visa_status',''))
                     row.extend([r.get('mofa_letter_number',''), r.get('mofa_letter_date',''), r.get('mofa_sent_date','')])
