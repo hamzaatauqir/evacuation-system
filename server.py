@@ -1215,6 +1215,74 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not data.get('travel_status'):
                 data['travel_status'] = 'Pending'
 
+            # ── DUPLICATE CHECK: Reject if passport, CNIC, or Civil ID already exists ──
+            db = get_db()
+            existing = None
+            match_field = ''
+
+            # Check passport
+            if data['passport']:
+                existing = db.execute(
+                    "SELECT id, name, passport, cnic, civil_id, visa_status, travel_status, mofa_status, mofa_sent_date, date_of_request FROM evacuees WHERE UPPER(TRIM(passport)) = ?",
+                    [data['passport']]).fetchone()
+                if existing:
+                    match_field = 'Passport Number'
+
+            # Check CNIC if no passport match
+            if not existing and data.get('cnic'):
+                clean_cnic = re.sub(r'[\s\-]', '', data['cnic'])
+                if clean_cnic:
+                    existing = db.execute(
+                        "SELECT id, name, passport, cnic, civil_id, visa_status, travel_status, mofa_status, mofa_sent_date, date_of_request FROM evacuees WHERE REPLACE(REPLACE(cnic, '-', ''), ' ', '') = ?",
+                        [clean_cnic]).fetchone()
+                    if existing:
+                        match_field = 'CNIC'
+
+            # Check Civil ID if no match yet
+            if not existing and data.get('civil_id'):
+                civil_id = data['civil_id'].strip()
+                if civil_id:
+                    existing = db.execute(
+                        "SELECT id, name, passport, cnic, civil_id, visa_status, travel_status, mofa_status, mofa_sent_date, date_of_request FROM evacuees WHERE TRIM(civil_id) = ?",
+                        [civil_id]).fetchone()
+                    if existing:
+                        match_field = 'Civil ID'
+
+            if existing:
+                existing = dict(existing)
+                tracking_number = 'PKE-' + str(existing['id']).zfill(4)
+                # Determine status
+                visa_status = existing.get('visa_status') or ''
+                mofa_status = existing.get('mofa_status') or ''
+                mofa_sent_date = existing.get('mofa_sent_date') or ''
+                travel_status = existing.get('travel_status') or ''
+                if visa_status == 'Approved':
+                    status_text = 'APPROVED'
+                elif mofa_status == 'Sent to MOFA' or mofa_sent_date:
+                    status_text = 'PENDING_MOFA'
+                elif travel_status == 'Departed':
+                    status_text = 'DEPARTED'
+                else:
+                    status_text = 'PROCESSING'
+
+                db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('duplicate_attempt', ?, ?, ?)",
+                           (existing['id'], client_ip, json.dumps({'name': data['name'], 'passport': data['passport'], 'matched_on': match_field})))
+                db.commit()
+                db.close()
+                self.send_json({
+                    'success': False,
+                    'duplicate': True,
+                    'tracking_number': tracking_number,
+                    'status': status_text,
+                    'matched_on': match_field,
+                    'registered_name': existing['name'],
+                    'registered_date': existing.get('date_of_request') or '',
+                    'mofa_sent_date': mofa_sent_date,
+                    'error': 'You have already registered. Your tracking number is ' + tracking_number
+                })
+                return
+            db.close()
+
             result = api_save_record(data, 'public')
             # Log for rate limiting
             db = get_db()
@@ -1559,7 +1627,36 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 .error{color:#c62828;font-size:.85em;margin-top:8px;display:none}
 .footer{text-align:center;padding:20px;font-size:.8em;color:#999}
 .dup-warning{background:#ffebee;border:1px solid #ef9a9a;border-radius:8px;padding:12px;margin-top:12px;display:none;color:#c62828;font-size:.88em}
-@media(max-width:600px){.fg{grid-template-columns:1fr}.ctr{padding:12px}}
+.dup-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:9999;justify-content:center;align-items:center;padding:20px}
+.dup-overlay.show{display:flex}
+.dup-card{background:#fff;border-radius:16px;max-width:540px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);animation:dupSlideIn .4s ease}
+@keyframes dupSlideIn{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
+.dup-header{background:linear-gradient(135deg,#c62828,#b71c1c);color:#fff;padding:24px;border-radius:16px 16px 0 0;text-align:center}
+.dup-header .dup-icon{font-size:3em;margin-bottom:8px}
+.dup-header h2{font-size:1.2em;margin-bottom:4px}
+.dup-header p{font-size:.85em;opacity:.9}
+.dup-body{padding:24px}
+.dup-info-box{background:#f5f5f5;border-radius:12px;padding:16px;margin-bottom:16px}
+.dup-info-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dashed #e0e0e0}
+.dup-info-row:last-child{border-bottom:none}
+.dup-info-row .lbl{font-size:.82em;color:#757575;font-weight:600}
+.dup-info-row .val{font-size:.95em;font-weight:700;color:#212121}
+.dup-tracking{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #4caf50;border-radius:12px;padding:16px;text-align:center;margin-bottom:16px}
+.dup-tracking .track-label{font-size:.82em;color:#2e7d32;font-weight:600;text-transform:uppercase;letter-spacing:1px}
+.dup-tracking .track-num{font-size:1.8em;font-weight:800;color:#1b5e20;margin:4px 0;letter-spacing:2px}
+.dup-status{border-radius:12px;padding:14px 16px;margin-bottom:16px;text-align:center;font-weight:700;font-size:.95em}
+.dup-status.approved{background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7}
+.dup-status.pending-mofa{background:#fff3e0;color:#e65100;border:1px solid #ffcc80}
+.dup-status.processing{background:#e3f2fd;color:#1565c0;border:1px solid #90caf9}
+.dup-status.departed{background:#f3e5f5;color:#7b1fa2;border:1px solid #ce93d8}
+.dup-urdu{text-align:right;direction:rtl;font-family:'Noto Nastaliq Urdu','Jameel Noori Nastaleeq',Tahoma,Arial,sans-serif;line-height:2;background:#fafafa;border-radius:10px;padding:14px;margin-bottom:16px;font-size:.92em;color:#424242;border:1px solid #e0e0e0}
+.dup-contacts{background:#e8eaf6;border:1px solid #9fa8da;border-radius:12px;padding:16px;margin-bottom:16px}
+.dup-contacts h4{font-size:.88em;color:#283593;margin-bottom:10px;text-align:center}
+.dup-contact-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:#fff;border:1px solid #c5cae9;border-radius:8px;color:#283593;text-decoration:none;font-size:.82em;font-weight:600;margin:4px;transition:.2s}
+.dup-contact-btn:hover{background:#c5cae9}
+.dup-close-btn{width:100%;padding:14px;background:#006600;color:#fff;border:none;border-radius:10px;font-size:1em;font-weight:700;cursor:pointer;transition:.2s}
+.dup-close-btn:hover{background:#004d00}
+@media(max-width:600px){.fg{grid-template-columns:1fr}.ctr{padding:12px}.dup-card{margin:10px}}
 </style></head><body>
 <div class="hdr">
 <svg width="70" height="70" viewBox="0 0 200 200" style="margin-bottom:8px"><circle cx="100" cy="100" r="96" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="4"/><circle cx="100" cy="100" r="88" fill="#006600"/><circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-width="1.5"/><text x="100" y="42" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">EMBASSY OF THE ISLAMIC</text><text x="100" y="55" text-anchor="middle" fill="#fff" font-size="11" font-family="Arial" font-weight="bold">REPUBLIC OF PAKISTAN</text><g transform="translate(100,105)"><circle cx="-8" cy="0" r="28" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="5" cy="-5" r="23" fill="#006600"/><polygon points="18,-12 20,-5 27,-5 21,-1 23,6 18,2 13,6 15,-1 9,-5 16,-5" fill="#fff"/></g><text x="100" y="168" text-anchor="middle" fill="#fff" font-size="16" font-family="Arial" font-weight="bold">KUWAIT</text></svg>
@@ -1614,27 +1711,99 @@ Tel: (+965) 25327651, 25354073 | Fax: (+965) 25327648, 25356594<br>
 <strong>Emergency Contacts:</strong> Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265<br><br>
 <strong style="color:#c62828">IMPORTANT:</strong> After registering, please send your passport copies to: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#006600;font-weight:600">parepkuwaitcwa37@gmail.com</a>
 </div>
+
+<!-- Duplicate Detection Overlay -->
+<div class="dup-overlay" id="dupOverlay">
+<div class="dup-card">
+<div class="dup-header">
+<div class="dup-icon">&#9888;&#65039;</div>
+<h2>Already Registered!</h2>
+<p>Our system found that you have already submitted an application</p>
+</div>
+<div class="dup-body">
+<div class="dup-tracking">
+<div class="track-label">Your Tracking Number</div>
+<div class="track-num" id="dupTrackNum"></div>
+</div>
+<div id="dupStatusBox" class="dup-status processing"></div>
+<div class="dup-info-box">
+<div class="dup-info-row"><span class="lbl">Registered Name</span><span class="val" id="dupName"></span></div>
+<div class="dup-info-row"><span class="lbl">Registration Date</span><span class="val" id="dupRegDate"></span></div>
+<div class="dup-info-row"><span class="lbl">Matched On</span><span class="val" id="dupMatchField"></span></div>
+<div class="dup-info-row" id="dupMofaRow" style="display:none"><span class="lbl">Sent to MOFA KSA</span><span class="val" id="dupMofaDate"></span></div>
+</div>
+<div class="dup-urdu" id="dupUrduMsg"></div>
+<div class="dup-contacts">
+<h4>&#128222; For Any Amendments, Contact Embassy Staff</h4>
+<div style="text-align:center">
+<a href="tel:+96555977292" class="dup-contact-btn">&#128222; Awais: +965-55977292</a>
+<a href="tel:+96555964923" class="dup-contact-btn">&#128222; Zahid: +965-55964923</a>
+<a href="tel:+96566568265" class="dup-contact-btn">&#128222; Shahid Khan: +965-66568265</a>
+<a href="tel:+96525327651" class="dup-contact-btn">&#128222; Embassy: +965-25327651</a>
+</div>
+<div style="text-align:center;margin-top:10px;font-size:.82em;color:#283593">
+Or email: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#283593;font-weight:600">parepkuwaitcwa37@gmail.com</a>
+</div>
+</div>
+<div style="text-align:center;margin-bottom:14px">
+<a href="/track-application" style="display:inline-block;padding:10px 24px;background:#1565c0;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:.9em">&#128270; Track Your Application Status</a>
+</div>
+<button class="dup-close-btn" onclick="closeDupOverlay()">Close &amp; Go Back</button>
+</div>
+</div>
+</div>
+
 <script>
+function closeDupOverlay(){
+document.getElementById('dupOverlay').classList.remove('show');
+document.getElementById('submitBtn').disabled=false;
+document.getElementById('submitBtn').textContent='Submit Registration';
+}
+function showDupOverlay(d){
+document.getElementById('dupTrackNum').textContent=d.tracking_number||'';
+document.getElementById('dupName').textContent=d.registered_name||'';
+document.getElementById('dupRegDate').textContent=d.registered_date||'N/A';
+document.getElementById('dupMatchField').textContent=d.matched_on||'';
+const statusBox=document.getElementById('dupStatusBox');
+const mofaRow=document.getElementById('dupMofaRow');
+const urduMsg=document.getElementById('dupUrduMsg');
+mofaRow.style.display='none';
+if(d.status==='APPROVED'){
+statusBox.className='dup-status approved';
+statusBox.innerHTML='&#9989; Visa APPROVED &mdash; Please contact the Embassy immediately for travel instructions';
+urduMsg.innerHTML='&#9989; <strong>آپ کی درخواست منظور ہوگئی ہے!</strong><br>براہ کرم فوری طور پر سفارتخانے سے رابطہ کریں اور سفری ہدایات حاصل کریں۔<br><br>&#9888; آپ پہلے سے رجسٹرڈ ہیں، دوبارہ رجسٹریشن کی ضرورت نہیں ہے۔ آپ کا ٹریکنگ نمبر <strong>'+d.tracking_number+'</strong> ہے۔ کسی بھی ترمیم کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
+}else if(d.status==='PENDING_MOFA'){
+statusBox.className='dup-status pending-mofa';
+statusBox.innerHTML='&#9203; Your case has been sent to MOFA KSA &mdash; Awaiting approval';
+if(d.mofa_sent_date){mofaRow.style.display='flex';document.getElementById('dupMofaDate').textContent=d.mofa_sent_date;}
+urduMsg.innerHTML='&#9203; <strong>آپ کی درخواست وزارت خارجہ سعودی عرب کو بھیجی جا چکی ہے</strong> اور منظوری کا انتظار ہے۔<br><br>&#9888; آپ پہلے سے رجسٹرڈ ہیں، دوبارہ رجسٹریشن کی ضرورت نہیں ہے۔ آپ کا ٹریکنگ نمبر <strong>'+d.tracking_number+'</strong> ہے۔ کسی بھی ترمیم کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
+}else if(d.status==='DEPARTED'){
+statusBox.className='dup-status departed';
+statusBox.innerHTML='&#9992;&#65039; You have already departed. No further registration needed.';
+urduMsg.innerHTML='&#9992;&#65039; <strong>آپ پہلے ہی روانہ ہو چکے ہیں۔</strong> مزید رجسٹریشن کی ضرورت نہیں ہے۔<br><br>کسی بھی مسئلے کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
+}else{
+statusBox.className='dup-status processing';
+statusBox.innerHTML='&#128338; Your application is being processed by the Embassy';
+urduMsg.innerHTML='&#128338; <strong>آپ کی درخواست سفارتخانے میں زیر کارروائی ہے۔</strong><br><br>&#9888; آپ پہلے سے رجسٹرڈ ہیں، دوبارہ رجسٹریشن کی ضرورت نہیں ہے۔ آپ کا ٹریکنگ نمبر <strong>'+d.tracking_number+'</strong> ہے۔ کسی بھی ترمیم کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
+}
+document.getElementById('dupOverlay').classList.add('show');
+}
 async function submitForm(e){
 e.preventDefault();
 const btn=document.getElementById('submitBtn');
 btn.disabled=true;btn.textContent='Submitting...';
 document.getElementById('errorMsg').style.display='none';
 document.getElementById('dupWarning').style.display='none';
-
 const fd=new FormData(e.target);const data={};
 fd.forEach((v,k)=>data[k]=v);
 data.travel_status='Pending';
-
 try{
 const r=await fetch('/api/public-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 const d=await r.json();
 if(d.success){
-  if(d.dup_details && d.dup_details.length > 0){
-    document.getElementById('dupWarning').innerHTML='<strong>&#9888; Note:</strong> Your record was saved but a possible duplicate was detected: '+d.dup_details.join('; ')+'. If you already registered, you do not need to register again.';
-    document.getElementById('dupWarning').style.display='block';
-  }
   window.location='/embassy-registration/success?tid=PKE-'+String(d.id).padStart(4,'0');
+}else if(d.duplicate){
+  showDupOverlay(d);
 }else{
   document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
   document.getElementById('errorMsg').style.display='block';
