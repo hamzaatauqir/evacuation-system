@@ -3259,7 +3259,9 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 <div class="fgp conditional" id="infantsWrap"><label>Infants (under 2)</label><input type="number" name="infants_count" min="0" value="0"></div>
 </div></div>
 
-<div class="fs"><h3>6. Registration Intent</h3>
+<div class="fs"><h3>6. Travel Planning Assessment</h3>
+<p style="font-size:.82em;color:#777;margin-bottom:12px;line-height:1.6">To assess operational feasibility and explore the most affordable travel arrangements, we kindly request the following information. This is purely for internal planning — it does not constitute a booking, fare quotation, or financial commitment of any kind.</p>
+<div dir="rtl" style="font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;font-size:.82em;color:#777;margin-bottom:14px;line-height:2;background:#fafafa;padding:10px;border-radius:6px">سفارتخانہ سفری انتظامات کی فزیبلٹی جانچنے کے لیے یہ معلومات جمع کر رہا ہے۔ یہ بکنگ، کرایہ، یا مالی وعدہ نہیں ہے۔</div>
 <div class="fg">
 <div class="fgp"><label>Level of Interest</label>
 <select name="interest_level">
@@ -3267,7 +3269,23 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 <option value="likely">Likely to travel if facilitated</option>
 <option value="ready">Ready to travel if arrangements are made</option>
 </select></div>
+<div class="fgp"><label>If a return flight is facilitated, what travel cost range (per person) would be manageable for you?</label>
+<select name="max_affordable_fare">
+<option value="">Prefer not to say</option>
+<option value="30">Up to 30 KWD</option>
+<option value="50">Up to 50 KWD</option>
+<option value="75">Up to 75 KWD</option>
+<option value="100">Up to 100 KWD</option>
+<option value="125">Up to 125 KWD</option>
+<option value="150">Up to 150 KWD</option>
+<option value="200">Up to 200 KWD</option>
+<option value="250">200+ KWD</option>
+<option value="0">I would need full Embassy/employer support</option>
+</select></div>
+<div class="fgp"><label>Would your employer contribute towards your return travel?</label>
+<select name="employer_sponsor"><option value="">Not sure</option><option value="yes">Yes — employer will support</option><option value="no">No</option><option value="maybe">Maybe / Under discussion</option></select></div>
 </div>
+<p style="font-size:.78em;color:#999;margin-top:10px;line-height:1.5">&#128712; This information is collected solely to understand what kind of travel arrangements may be feasible and sustainable. It does not constitute any financial obligation, fare confirmation, or ticket purchase.</p>
 </div>
 
 <div class="fs"><h3>6b. Ministry of Health (MOH) Kuwait</h3>
