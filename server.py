@@ -3200,59 +3200,59 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 <div class="fs"><h3>2. Personal Information / ذاتی معلومات</h3>
 <div class="fg">
 <div class="fgp"><label>Full Name (as on passport) <span class="req">*</span></label><input name="name" required placeholder="e.g. MUHAMMAD ALI KHAN"></div>
-<div class="fgp"><label>Father's Name</label><input name="father_name" required placeholder="Father's name"></div>
+<div class="fgp"><label>Father's Name <span class="req">*</span></label><input name="father_name" required placeholder="Father's name"></div>
 <div class="fgp"><label>Passport Number <span class="req">*</span></label><input name="passport" required placeholder="e.g. AB1234567" style="text-transform:uppercase"></div>
-<div class="fgp"><label>Passport Expiry</label><input type="date" name="passport_expiry"></div>
-<div class="fgp"><label>CNIC / NICOP</label><input name="cnic" placeholder="e.g. 3520212345678"></div>
+<div class="fgp"><label>Passport Expiry <span class="req">*</span></label><input type="date" name="passport_expiry" required></div>
+<div class="fgp"><label>CNIC / NICOP <span class="req">*</span></label><input name="cnic" required placeholder="e.g. 3520212345678"></div>
 <div class="fgp"><label>Gender <span class="req">*</span></label>
 <select name="gender" required><option value="">Select</option><option>Male</option><option>Female</option><option>Child</option></select></div>
-<div class="fgp"><label>Date of Birth</label><input type="date" name="dob"></div>
+<div class="fgp"><label>Date of Birth <span class="req">*</span></label><input type="date" name="dob" required></div>
 <div class="fgp"><label>Mobile Number <span class="req">*</span></label><input name="mobile" required placeholder="+965-XXXXXXXX or +92-XXXXXXXXXX"></div>
-<div class="fgp"><label>WhatsApp Number</label><input name="whatsapp" placeholder="If different from mobile"></div>
-<div class="fgp"><label>Email</label><input type="email" name="email" placeholder="your@email.com"></div>
+<div class="fgp"><label>WhatsApp Number <span class="req">*</span></label><input name="whatsapp" required placeholder="If different from mobile, otherwise same"></div>
+<div class="fgp"><label>Email <span class="req">*</span></label><input type="email" name="email" required placeholder="your@email.com"></div>
 </div></div>
 
 <div class="fg">
-<div class="fgp"><label>Area in Kuwait</label><input name="current_area_kuwait" placeholder="e.g. Farwaniya, Jleeb, Hawally"></div>
-<div class="fgp"><label>Kuwait Civil ID</label><input name="civil_id" placeholder="Civil ID number"></div>
-<div class="fgp"><label>Residency Status</label>
-<select name="residency_status"><option value="">Select</option><option value="valid">Valid Residency</option><option value="expired">Expired</option><option value="visit">Visit Visa</option><option value="other">Other</option></select></div>
-<div class="fgp"><label>Employer / Company in Kuwait</label><input name="employer_kw" placeholder="Company name"></div>
-<div class="fgp"><label>KSA Transit Visa Applied?</label>
-<select name="saudi_visa_applied"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
-<div class="fgp"><label>KSA Transit Visa Approved?</label>
-<select name="saudi_visa_approved"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option><option value="pending">Pending</option></select></div>
+<div class="fgp"><label>Area in Kuwait <span class="req">*</span></label><input name="current_area_kuwait" required placeholder="e.g. Farwaniya, Jleeb, Hawally"></div>
+<div class="fgp"><label>Kuwait Civil ID <span class="req">*</span></label><input name="civil_id" required placeholder="Civil ID number"></div>
+<div class="fgp"><label>Residency Status <span class="req">*</span></label>
+<select name="residency_status" required><option value="">Select</option><option value="valid">Valid Residency</option><option value="expired">Expired</option><option value="visit">Visit Visa</option><option value="other">Other</option></select></div>
+<div class="fgp"><label>Employer / Company in Kuwait <span class="req">*</span></label><input name="employer_kw" required placeholder="Company name"></div>
+<div class="fgp"><label>KSA Transit Visa Applied? <span class="req">*</span></label>
+<select name="saudi_visa_applied" required><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+<div class="fgp"><label>KSA Transit Visa Approved? <span class="req">*</span></label>
+<select name="saudi_visa_approved" required><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option><option value="pending">Pending</option></select></div>
 </div></div>
 
 <div class="fs" id="pkFields"><h3>3. Applicant Details in Pakistan</h3>
 <div class="fg">
-<div class="fgp"><label>Current City in Pakistan</label><input name="current_city_pk" placeholder="e.g. Lahore, Karachi, Islamabad"></div>
-<div class="fgp"><label>Province</label>
+<div class="fgp"><label>Current City in Pakistan <span class="req">*</span></label><input name="current_city_pk" required placeholder="e.g. Lahore, Karachi, Islamabad"></div>
+<div class="fgp"><label>Province <span class="req">*</span></label>
 <select name="province_pk" required><option value="">Select</option><option>Punjab</option><option>Sindh</option><option>KPK</option><option>Balochistan</option><option>Islamabad</option><option>AJK</option><option>GB</option></select></div>
-<div class="fgp"><label>Destination Area in Kuwait</label><input name="destination_area_kw" placeholder="e.g. Farwaniya, Salmiya"></div>
-<div class="fgp"><label>Valid Kuwait Civil ID?</label>
-<select name="has_valid_civil_id"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
-<div class="fgp"><label>Valid Kuwait Residency?</label>
-<select name="has_valid_residency"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+<div class="fgp"><label>Destination Area in Kuwait <span class="req">*</span></label><input name="destination_area_kw" required placeholder="e.g. Farwaniya, Salmiya"></div>
+<div class="fgp"><label>Valid Kuwait Civil ID? <span class="req">*</span></label>
+<select name="has_valid_civil_id" required><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+<div class="fgp"><label>Valid Kuwait Residency? <span class="req">*</span></label>
+<select name="has_valid_residency" required><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
 </div></div>
 
 <div class="fs"><h3>4. Destination &amp; Travel Preferences</h3>
 <div class="fg">
-<div class="fgp"><label>Destination Area in Kuwait</label><input name="destination_area_kw" placeholder="e.g. Farwaniya, Hawally, Salmiya"></div>
-<div class="fgp"><label>Preferred Departure Airport in Pakistan</label>
-<select name="preferred_airport_pk"><option value="">Select</option><option>Lahore (LHE)</option><option>Islamabad (ISB)</option><option>Karachi (KHI)</option><option>Peshawar (PEW)</option><option>Multan (MUX)</option><option>Quetta (UET)</option><option>Sialkot (SKT)</option><option>Faisalabad (LYP)</option><option>Other</option></select></div>
-<div class="fgp"><label>Travel Urgency</label>
-<select name="travel_urgency"><option value="general">General / Routine</option><option value="medical">Medical Emergency</option><option value="family">Family Emergency</option><option value="job">Job / Employment</option><option value="leave">Annual Leave Expiring</option><option value="student">Student / Education</option><option value="other">Other</option></select></div>
-<div class="fgp"><label>Earliest Possible Travel Date</label><input type="date" name="earliest_travel_date"></div>
-<div class="fgp"><label>Latest Acceptable Travel Date</label><input type="date" name="latest_travel_date"></div>
-<div class="fgp"><label>Travel Readiness</label>
-<select name="travel_readiness"><option value="flexible">Flexible</option><option value="24h">Ready within 24 hours</option><option value="48h">Ready within 48 hours</option><option value="72h">Ready within 72 hours</option><option value="1week">Ready within 1 week</option></select></div>
+<div class="fgp"><label>Destination Area in Kuwait <span class="req">*</span></label><input name="destination_area_kw" required placeholder="e.g. Farwaniya, Hawally, Salmiya"></div>
+<div class="fgp"><label>Preferred Departure Airport in Pakistan <span class="req">*</span></label>
+<select name="preferred_airport_pk" required><option value="">Select</option><option>Lahore (LHE)</option><option>Islamabad (ISB)</option><option>Karachi (KHI)</option><option>Peshawar (PEW)</option><option>Multan (MUX)</option><option>Quetta (UET)</option><option>Sialkot (SKT)</option><option>Faisalabad (LYP)</option><option>Other</option></select></div>
+<div class="fgp"><label>Travel Urgency <span class="req">*</span></label>
+<select name="travel_urgency" required><option value="">Select</option><option value="general">General / Routine</option><option value="medical">Medical Emergency</option><option value="family">Family Emergency</option><option value="job">Job / Employment</option><option value="leave">Annual Leave Expiring</option><option value="student">Student / Education</option><option value="other">Other</option></select></div>
+<div class="fgp"><label>Earliest Possible Travel Date <span class="req">*</span></label><input type="date" name="earliest_travel_date" required></div>
+<div class="fgp"><label>Latest Acceptable Travel Date <span class="req">*</span></label><input type="date" name="latest_travel_date" required></div>
+<div class="fgp"><label>Travel Readiness <span class="req">*</span></label>
+<select name="travel_readiness" required><option value="">Select</option><option value="flexible">Flexible</option><option value="24h">Ready within 24 hours</option><option value="48h">Ready within 48 hours</option><option value="72h">Ready within 72 hours</option><option value="1week">Ready within 1 week</option></select></div>
 </div></div>
 
 <div class="fs"><h3>5. Group / Family Details</h3>
 <div class="fg">
-<div class="fgp"><label>Traveling Alone or with Family?</label>
-<select name="traveling_alone" id="travelAlone" onchange="toggleGroup()"><option value="yes">Alone</option><option value="no">With Family / Group</option></select></div>
+<div class="fgp"><label>Traveling Alone or with Family? <span class="req">*</span></label>
+<select name="traveling_alone" id="travelAlone" required onchange="toggleGroup()"><option value="">Select</option><option value="yes">Alone</option><option value="no">With Family / Group</option></select></div>
 <div class="fgp conditional" id="groupSizeWrap"><label>Total Group Size (including yourself)</label><input type="number" name="group_size" min="1" value="1"></div>
 <div class="fgp conditional" id="adultsWrap"><label>Adults</label><input type="number" name="adults_count" min="1" value="1"></div>
 <div class="fgp conditional" id="childrenWrap"><label>Children (2-12)</label><input type="number" name="children_count" min="0" value="0"></div>
@@ -3263,15 +3263,16 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 <p style="font-size:.82em;color:#777;margin-bottom:12px;line-height:1.6">To assess operational feasibility and explore the most affordable travel arrangements, we kindly request the following information. This is purely for internal planning — it does not constitute a booking, fare quotation, or financial commitment of any kind.</p>
 <div dir="rtl" style="font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;font-size:.82em;color:#777;margin-bottom:14px;line-height:2;background:#fafafa;padding:10px;border-radius:6px">سفارتخانہ سفری انتظامات کی فزیبلٹی جانچنے کے لیے یہ معلومات جمع کر رہا ہے۔ یہ بکنگ، کرایہ، یا مالی وعدہ نہیں ہے۔</div>
 <div class="fg">
-<div class="fgp"><label>Level of Interest</label>
-<select name="interest_level">
+<div class="fgp"><label>Level of Interest <span class="req">*</span></label>
+<select name="interest_level" required>
+<option value="">Select</option>
 <option value="registering_interest">Registering interest only</option>
 <option value="likely">Likely to travel if facilitated</option>
 <option value="ready">Ready to travel if arrangements are made</option>
 </select></div>
-<div class="fgp"><label>If a return flight is facilitated, what travel cost range (per person) would be manageable for you?</label>
-<select name="max_affordable_fare">
-<option value="">Prefer not to say</option>
+<div class="fgp"><label>If a return flight is facilitated, what travel cost range (per person) would be manageable for you? <span class="req">*</span></label>
+<select name="max_affordable_fare" required>
+<option value="">Select</option>
 <option value="30">Up to 30 KWD</option>
 <option value="50">Up to 50 KWD</option>
 <option value="75">Up to 75 KWD</option>
@@ -3285,16 +3286,16 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 <option value="400">Up to 400 KWD</option>
 <option value="450">Up to 450 KWD</option>
 </select></div>
-<div class="fgp"><label>Would your employer contribute towards your return travel?</label>
-<select name="employer_sponsor"><option value="">Not sure</option><option value="yes">Yes — employer will support</option><option value="no">No</option><option value="maybe">Maybe / Under discussion</option></select></div>
+<div class="fgp"><label>Would your employer contribute towards your return travel? <span class="req">*</span></label>
+<select name="employer_sponsor" required><option value="">Select</option><option value="yes">Yes — employer will support</option><option value="no">No</option><option value="maybe">Maybe / Under discussion</option><option value="not_sure">Not sure</option></select></div>
 </div>
 <p style="font-size:.78em;color:#999;margin-top:10px;line-height:1.5">&#128712; This information is collected solely to understand what kind of travel arrangements may be feasible and sustainable. It does not constitute any financial obligation, fare confirmation, or ticket purchase.</p>
 </div>
 
 <div class="fs"><h3>6b. Ministry of Health (MOH) Kuwait</h3>
 <div class="fg">
-<div class="fgp"><label>Are you a Ministry of Health (MOH) Kuwait Employee?</label>
-<select name="is_moh_employee" id="mohSelect" onchange="toggleMoh()"><option value="no">No</option><option value="yes">Yes — I am an MOH Kuwait Employee</option></select></div>
+<div class="fgp"><label>Are you a Ministry of Health (MOH) Kuwait Employee? <span class="req">*</span></label>
+<select name="is_moh_employee" id="mohSelect" required onchange="toggleMoh()"><option value="">Select</option><option value="no">No</option><option value="yes">Yes — I am an MOH Kuwait Employee</option></select></div>
 <div class="fgp conditional" id="mohLeaveWrap"><label>When does your leave end? <span class="req">*</span></label><input type="date" name="moh_leave_end" id="mohLeaveEnd"></div>
 </div>
 <div id="mohNote" style="display:none;margin-top:8px;padding:10px;background:#e8f5e9;border-radius:6px;font-size:.85em;color:#1b5e20">
@@ -3305,9 +3306,9 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 
 <div class="fs"><h3>7. Emergency Contact</h3>
 <div class="fg">
-<div class="fgp"><label>Emergency Contact Name</label><input name="emergency_name"></div>
-<div class="fgp"><label>Relationship</label><input name="emergency_relation" placeholder="e.g. Spouse, Brother"></div>
-<div class="fgp"><label>Emergency Contact Phone</label><input name="emergency_phone"></div>
+<div class="fgp"><label>Emergency Contact Name <span class="req">*</span></label><input name="emergency_name" required></div>
+<div class="fgp"><label>Relationship <span class="req">*</span></label><input name="emergency_relation" required placeholder="e.g. Spouse, Brother"></div>
+<div class="fgp"><label>Emergency Contact Phone <span class="req">*</span></label><input name="emergency_phone" required></div>
 </div></div>
 
 <div style="margin-top:8px">
