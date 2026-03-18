@@ -203,6 +203,8 @@ def init_db():
         ticket_issued TEXT DEFAULT 'no',
         travel_completed TEXT DEFAULT 'no',
         cancellation_status TEXT DEFAULT 'active',
+        is_moh_employee TEXT DEFAULT 'no',
+        moh_leave_end TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP
     );
@@ -281,6 +283,13 @@ def init_db():
     # Normalize border crossing names
     db.execute("UPDATE evacuees SET border_crossing='Khafji Border' WHERE border_crossing IN ('Khafji Boarder','Khafji Crossing','khafji border','khafji')")
     db.execute("UPDATE evacuees SET border_crossing='Salmi Border' WHERE border_crossing IN ('Salmi Boarder','Salmi Crossing','salmi border','salmi')")
+    # Migrate charter_interest: add MOH columns if missing
+    for col, coltype in [('is_moh_employee', "TEXT DEFAULT 'no'"), ('moh_leave_end', 'TEXT')]:
+        try:
+            db.execute(f"ALTER TABLE charter_interest ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
     db.commit()
     db.close()
 
@@ -811,6 +820,9 @@ def api_returnees(params):
             ci.interest_level,
             ci.saudi_visa_applied,
             ci.saudi_visa_approved,
+            ci.dup_flag,
+            ci.is_moh_employee,
+            ci.moh_leave_end,
             ci.submission_timestamp,
             pm.full_name,
             pm.passport,
@@ -1195,6 +1207,8 @@ def api_charter_register(data, source_ip='unknown'):
         'extra_baggage': data.get('extra_baggage', 'no'),
         'extra_baggage_kg': float(data.get('extra_baggage_kg', 0) or 0),
         'source_channel': data.get('source_channel', 'web'),
+        'is_moh_employee': data.get('is_moh_employee', 'no'),
+        'moh_leave_end': data.get('moh_leave_end', ''),
         'status': 'Submitted'
     }
 
@@ -1288,6 +1302,220 @@ def api_charter_status_lookup(ref_or_passport):
         'direction': row['travel_direction'],
         'submitted': row['submission_timestamp']
     }
+
+
+def api_returnee_detail(ci_id):
+    db = get_db()
+    row = db.execute("""
+        SELECT ci.*, pm.full_name, pm.father_name, pm.passport, pm.passport_expiry,
+            pm.cnic, pm.civil_id, pm.mobile, pm.whatsapp, pm.alt_mobile,
+            pm.email, pm.gender, pm.date_of_birth, pm.nationality,
+            pm.emergency_name, pm.emergency_relation, pm.emergency_phone,
+            pm.evacuee_link_id
+        FROM charter_interest ci JOIN person_master pm ON pm.id = ci.person_id
+        WHERE ci.id = ?
+    """, [ci_id]).fetchone()
+    db.close()
+    if not row: return {'error': 'Record not found'}
+    return dict(row)
+
+
+def api_save_returnee(data, user):
+    ci_id = data.get('id')
+    if not ci_id: return {'success': False, 'error': 'Record ID required'}
+    db = get_db()
+    rec = db.execute("SELECT person_id FROM charter_interest WHERE id = ?", [ci_id]).fetchone()
+    if not rec: db.close(); return {'success': False, 'error': 'Record not found'}
+    person_id = rec['person_id']
+    pm_fields = ['full_name','father_name','gender','date_of_birth','passport','passport_expiry',
+                 'cnic','civil_id','mobile','whatsapp','alt_mobile','email',
+                 'emergency_name','emergency_relation','emergency_phone']
+    pm_up, pm_p = [], []
+    for f in pm_fields:
+        if f in data: pm_up.append(f"{f} = ?"); pm_p.append(data[f])
+    if pm_up:
+        pm_p.append(person_id)
+        db.execute(f"UPDATE person_master SET {', '.join(pm_up)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", pm_p)
+    ci_fields = ['travel_direction','current_area_kuwait','residency_status',
+                 'destination_city_pk','preferred_airport_pk','current_city_pk','province_pk',
+                 'has_valid_civil_id','has_valid_residency','saudi_visa_applied','saudi_visa_approved',
+                 'employer_kw','destination_area_kw','travel_urgency','earliest_travel_date',
+                 'latest_travel_date','travel_readiness','traveling_alone','group_size',
+                 'adults_count','children_count','infants_count','interest_level',
+                 'can_bear_cost','max_affordable_fare','deposit_ready',
+                 'status','verification_status','priority_category','embassy_remarks',
+                 'followup_status','allocation_status','dup_flag',
+                 'is_moh_employee','moh_leave_end']
+    ci_up, ci_p = [], []
+    for f in ci_fields:
+        if f in data: ci_up.append(f"{f} = ?"); ci_p.append(data[f])
+    if ci_up:
+        ci_p.append(ci_id)
+        db.execute(f"UPDATE charter_interest SET {', '.join(ci_up)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", ci_p)
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('returnee_update', ?, ?, ?)",
+               (ci_id, user, json.dumps(data)))
+    db.commit(); db.close()
+    return {'success': True, 'id': ci_id}
+
+
+def api_delete_returnee(ci_id, user):
+    db = get_db()
+    db.execute("UPDATE charter_interest SET cancellation_status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [ci_id])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('returnee_delete', ?, ?, 'Cancelled')", (ci_id, user))
+    db.commit(); db.close()
+    return {'success': True}
+
+
+def api_returnee_duplicates(ci_id):
+    db = get_db()
+    rec = db.execute("""
+        SELECT pm.passport, pm.cnic, pm.mobile, pm.full_name
+        FROM charter_interest ci JOIN person_master pm ON pm.id = ci.person_id WHERE ci.id = ?
+    """, [ci_id]).fetchone()
+    if not rec: db.close(); return {'duplicates': []}
+    passport = (rec['passport'] or '').strip().upper()
+    cnic = re.sub(r'[\s\-]', '', rec['cnic'] or '')
+    mobile = (rec['mobile'] or '').strip()
+    seen = set(); dupes = []
+    def add_rows(rows):
+        for r in rows:
+            if r['ci_id'] != ci_id and r['ci_id'] not in seen:
+                seen.add(r['ci_id']); dupes.append(dict(r))
+    q = """SELECT ci.id as ci_id, ci.reference_number, ci.status, ci.travel_direction,
+            ci.dup_flag, ci.submission_timestamp,
+            pm.full_name, pm.passport, pm.cnic, pm.mobile, pm.gender
+        FROM charter_interest ci JOIN person_master pm ON pm.id = ci.person_id
+        WHERE {cond} AND ci.cancellation_status = 'active'"""
+    if passport: add_rows(db.execute(q.format(cond="UPPER(TRIM(pm.passport)) = ?"), [passport]).fetchall())
+    if cnic: add_rows(db.execute(q.format(cond="REPLACE(REPLACE(pm.cnic,'-',''),' ','') = ?"), [cnic]).fetchall())
+    if mobile: add_rows(db.execute(q.format(cond="pm.mobile = ?"), [mobile]).fetchall())
+    db.close()
+    return {'main': dict(rec), 'duplicates': dupes}
+
+
+def api_export_returnees_csv():
+    db = get_db()
+    rows = db.execute("""
+        SELECT ci.id, ci.reference_number, ci.travel_direction, ci.status,
+            ci.current_city_pk, ci.province_pk, ci.destination_area_kw,
+            ci.employer_kw, ci.travel_urgency, ci.travel_readiness,
+            ci.traveling_alone, ci.group_size, ci.interest_level,
+            ci.saudi_visa_applied, ci.saudi_visa_approved,
+            ci.is_moh_employee, ci.moh_leave_end,
+            ci.verification_status, ci.dup_flag, ci.embassy_remarks,
+            ci.submission_timestamp, ci.created_at,
+            pm.full_name, pm.passport, pm.cnic, pm.civil_id,
+            pm.mobile, pm.whatsapp, pm.email, pm.gender
+        FROM charter_interest ci JOIN person_master pm ON pm.id = ci.person_id
+        WHERE ci.cancellation_status = 'active' ORDER BY ci.id
+    """).fetchall()
+    db.close()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['S.No','Reference','Direction','Status','Full Name','Passport','CNIC','Civil ID',
+                     'Gender','Mobile','WhatsApp','Email','Employer KW','City PK','Province','Dest Area KW',
+                     'Urgency','Readiness','Interest','Visa Applied','Visa Approved',
+                     'MOH Employee','Leave Ends','Dup Flag','Remarks','Submitted','Created'])
+    for i, r in enumerate(rows, 1):
+        writer.writerow([i, r['reference_number'], r['travel_direction'], r['status'],
+                        r['full_name'], r['passport'], r['cnic'], r['civil_id'],
+                        r['gender'], r['mobile'], r['whatsapp'], r['email'],
+                        r['employer_kw'], r['current_city_pk'], r['province_pk'], r['destination_area_kw'],
+                        r['travel_urgency'], r['travel_readiness'], r['interest_level'],
+                        r['saudi_visa_applied'], r['saudi_visa_approved'],
+                        r['is_moh_employee'], r['moh_leave_end'], r['dup_flag'],
+                        r['embassy_remarks'], r['submission_timestamp'], r['created_at']])
+    return output.getvalue()
+
+
+def import_returnees_csv(csv_text, user='system'):
+    """Import returnees from Google Forms CSV with auto column mapping."""
+    stats = {'imported': 0, 'skipped_dup': 0, 'updated': 0, 'errors': 0, 'details': []}
+    reader = csv.DictReader(io.StringIO(csv_text))
+    col_map = {}
+    for orig_col in (reader.fieldnames or []):
+        cl = orig_col.strip().lower()
+        if 'timestamp' in cl: col_map[orig_col] = 'timestamp'
+        elif cl.startswith('name') or cl == 'name': col_map[orig_col] = 'name'
+        elif 'passport' in cl: col_map[orig_col] = 'passport'
+        elif 'gender' in cl: col_map[orig_col] = 'gender'
+        elif 'country' in cl and 'resident' in cl: col_map[orig_col] = 'country'
+        elif 'civil id' in cl or 'civilid' in cl or 'civil_id' in cl: col_map[orig_col] = 'civil_id'
+        elif 'border' in cl: col_map[orig_col] = 'border_crossing'
+        elif 'mobile' in cl or 'phone' in cl: col_map[orig_col] = 'mobile'
+        elif 'profession' in cl or 'company' in cl or 'department' in cl: col_map[orig_col] = 'employer'
+        elif 'email' in cl: col_map[orig_col] = 'email'
+        elif 'cnic' in cl: col_map[orig_col] = 'cnic'
+    db = get_db()
+    row_num = 0
+    for row in reader:
+        row_num += 1
+        try:
+            rec = {}
+            for orig_col, field in col_map.items():
+                val = row.get(orig_col, '').strip()
+                if val: rec[field] = val
+            name = rec.get('name', '').strip()
+            passport = (rec.get('passport', '') or '').strip().upper().replace(' ', '')
+            if not name or not passport:
+                stats['errors'] += 1
+                stats['details'].append(f"Row {row_num}: Missing name or passport, skipped")
+                continue
+            cnic = re.sub(r'[\s\-]', '', rec.get('cnic', '') or '')
+            civil_id = rec.get('civil_id', '').strip()
+            mobile = rec.get('mobile', '').strip()
+            email = rec.get('email', '').strip()
+            employer = rec.get('employer', '').strip()
+            gender = rec.get('gender', '').strip()
+            country = rec.get('country', '').strip()
+            # Auto-detect MOH employee
+            is_moh = 'no'
+            emp_lower = employer.lower()
+            if any(kw in emp_lower for kw in ['ministry of health', 'moh', 'nurse']):
+                is_moh = 'yes'
+            # Check existing person_master
+            existing_person = db.execute(
+                "SELECT id FROM person_master WHERE UPPER(REPLACE(passport,' ','')) = ?", [passport]).fetchone()
+            if existing_person:
+                person_id = existing_person['id']
+                existing_ci = db.execute(
+                    "SELECT id, reference_number FROM charter_interest WHERE person_id = ? AND cancellation_status = 'active'",
+                    [person_id]).fetchone()
+                if existing_ci:
+                    stats['skipped_dup'] += 1
+                    stats['details'].append(f"Row {row_num}: {name} ({passport}) — already {existing_ci['reference_number']}")
+                    continue
+            else:
+                cur = db.execute(
+                    "INSERT INTO person_master (full_name, gender, passport, cnic, civil_id, mobile, email, created_at) VALUES (?,?,?,?,?,?,?, CURRENT_TIMESTAMP)",
+                    [name, gender, passport, cnic, civil_id, mobile, email])
+                person_id = cur.lastrowid
+            # Generate ref
+            while True:
+                num = secrets.randbelow(9000) + 1000
+                ref = f'TFR-{num}'
+                if not db.execute("SELECT 1 FROM charter_interest WHERE reference_number = ?", [ref]).fetchone():
+                    break
+            direction = 'pk_to_kw' if country.lower() in ('pakistan', 'pk') else 'kw_to_pk'
+            ts = rec.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            db.execute("""
+                INSERT INTO charter_interest
+                    (person_id, reference_number, travel_direction, employer_kw,
+                     is_moh_employee, status, source_channel, submission_timestamp)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, [person_id, ref, direction, employer, is_moh, 'Submitted', 'csv_import', ts])
+            stats['imported'] += 1
+            moh_tag = ' [MOH]' if is_moh == 'yes' else ''
+            stats['details'].append(f"Row {row_num}: {name} ({passport}) — {ref}{moh_tag}")
+        except Exception as e:
+            stats['errors'] += 1
+            stats['details'].append(f"Row {row_num}: Error — {str(e)}")
+    db.commit()
+    db.execute("INSERT INTO audit_log (action, user, details) VALUES (?, ?, ?)",
+               ('returnee_csv_import', user, f"Imported {stats['imported']}, skipped {stats['skipped_dup']}, errors {stats['errors']}"))
+    db.commit(); db.close()
+    return stats
+
 
 def api_delete_record(rec_id, user):
     db = get_db()
@@ -1627,6 +1855,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/returnees-stats':
             if not self.require_auth(): return
             self.send_json(api_returnees_stats())
+        elif path == '/api/returnee/detail':
+            if not self.require_auth(): return
+            rid = int(params.get('id', 0))
+            self.send_json(api_returnee_detail(rid))
+        elif path == '/api/returnee/duplicates':
+            if not self.require_auth(): return
+            rid = int(params.get('id', 0))
+            self.send_json(api_returnee_duplicates(rid))
+        elif path == '/api/returnees/export':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Only admin can export'}, 403); return
+            csv_data = api_export_returnees_csv()
+            body = csv_data.encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv')
+            self.send_header('Content-Disposition', f'attachment; filename="returnees_data_{datetime.now().strftime("%Y%m%d")}.csv"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == '/api/export':
             user = self.require_auth()
             if not user: return
@@ -2024,6 +2272,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Only admin or operator can delete records'}, 403); return
             data = json.loads(body)
             self.send_json(api_delete_record(data['id'], user['user']))
+
+        elif path == '/api/returnee/save':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_save_returnee(data, user['user']))
+
+        elif path == '/api/returnee/delete':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_delete_returnee(data['id'], user['user']))
+
+        elif path == '/api/upload-returnees-csv':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Unauthorized'}, 403); return
+            content_type = self.headers.get('Content-Type', '')
+            if 'multipart/form-data' in content_type:
+                boundary = content_type.split('boundary=')[1].strip()
+                parts = body.split(f'--{boundary}'.encode())
+                csv_data = None
+                for part in parts:
+                    part_str = part.decode('latin-1')
+                    if 'name="file"' in part_str:
+                        csv_data = part_str.split('\r\n\r\n', 1)[1].rsplit('\r\n', 1)[0]
+                if csv_data:
+                    stats = import_returnees_csv(csv_data, user['user'])
+                    self.send_json(stats)
+                else:
+                    self.send_json({'error': 'No CSV data found'}, 400)
+            else:
+                csv_data = body.decode('latin-1')
+                self.send_json(import_returnees_csv(csv_data, user['user']))
 
         elif path == '/api/upload-csv':
             user = self.require_auth()
@@ -2896,6 +3180,18 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 </div>
 </div>
 
+<div class="fs"><h3>6b. Ministry of Health (MOH) Kuwait</h3>
+<div class="fg">
+<div class="fgp"><label>Are you a Ministry of Health (MOH) Kuwait Employee?</label>
+<select name="is_moh_employee" id="mohSelect" onchange="toggleMoh()"><option value="no">No</option><option value="yes">Yes — I am an MOH Kuwait Employee</option></select></div>
+<div class="fgp conditional" id="mohLeaveWrap"><label>When does your leave end? <span class="req">*</span></label><input type="date" name="moh_leave_end" id="mohLeaveEnd"></div>
+</div>
+<div id="mohNote" style="display:none;margin-top:8px;padding:10px;background:#e8f5e9;border-radius:6px;font-size:.85em;color:#1b5e20">
+<strong>&#127973; MOH Employee noted.</strong> The Embassy will prioritize coordination for MOH staff who need to resume duties in Kuwait. Please ensure your leave end date is accurate.
+<div dir="rtl" style="margin-top:6px;font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif">وزارت صحت کویت کے ملازمین کو ترجیحی بنیادوں پر سہولت فراہم کی جائے گی۔</div>
+</div>
+</div>
+
 <div class="fs"><h3>7. Emergency Contact</h3>
 <div class="fg">
 <div class="fgp"><label>Emergency Contact Name</label><input name="emergency_name"></div>
@@ -2946,6 +3242,13 @@ const alone=document.getElementById('travelAlone').value==='yes';
 ['groupSizeWrap','adultsWrap','childrenWrap','infantsWrap'].forEach(id=>{
 document.getElementById(id).className='fgp conditional'+(alone?'':' show');
 });
+}
+function toggleMoh(){
+const isMoh=document.getElementById('mohSelect').value==='yes';
+document.getElementById('mohLeaveWrap').className='fgp conditional'+(isMoh?' show':'');
+document.getElementById('mohNote').style.display=isMoh?'block':'none';
+if(isMoh)document.getElementById('mohLeaveEnd').required=true;
+else{document.getElementById('mohLeaveEnd').required=false;document.getElementById('mohLeaveEnd').value='';}
 }
 function showDupOverlay(d){
 document.getElementById('dupRefNum').textContent=d.reference_number||'';
@@ -3303,9 +3606,47 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <select id="retProvinceF" onchange="loadReturnees()"><option value="">All Provinces</option><option>Punjab</option><option>Sindh</option><option>KPK</option><option>Balochistan</option><option>Islamabad</option><option>AJK</option><option>GB</option></select>
 <select id="retUrgencyF" onchange="loadReturnees()"><option value="">All Urgency</option><option value="general">General</option><option value="medical">Medical</option><option value="family">Family</option><option value="job">Job</option><option value="leave">Leave</option><option value="student">Student</option><option value="other">Other</option></select>
 <select id="retVisaF" onchange="loadReturnees()"><option value="">All Visa</option><option value="approved">Approved</option><option value="pending">Pending</option><option value="not_applied">Not Applied</option></select>
+<a href="/api/returnees/export" class="btn btn-i" style="text-decoration:none;color:#fff;padding:9px 16px" data-admin-only>Export CSV</a>
 </div>
 <div class="rc" id="retCount"></div>
 <div class="scroll-t"><table id="retTbl"></table></div>
+<div class="fs" style="margin-top:16px;border-left:3px solid #1565c0" data-admin-only>
+<h3>Import Returnees from Google Forms CSV</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Upload the CSV exported from Google Forms (KSA Transit Visa Request). Auto-maps columns, detects MOH employees, and skips duplicates.</p>
+<div class="fg" style="margin-bottom:14px">
+<div class="fgp"><label>CSV File</label><input type="file" id="retCsvFile" accept=".csv"></div>
+</div>
+<button class="btn btn-p" onclick="uploadRetCSV()">Upload &amp; Import Returnees</button>
+<div id="retImportResult" style="display:none;margin-top:12px"><div id="retImportStats" style="padding:10px;background:#e8f5e9;border-radius:6px;margin-bottom:8px"></div><div class="imp-result" id="retImportDetails" style="max-height:300px;overflow-y:auto;font-size:.82em;background:#f9f9f9;padding:10px;border-radius:6px"></div></div>
+</div>
+</div></div>
+
+<!-- RETURNEE VIEW/EDIT MODAL -->
+<div class="mo" id="retViewModal"><div class="ml" style="max-width:820px">
+<button class="cb" onclick="closeRetView()">&times;</button>
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+<h3 style="margin:0">Returnee Profile <span id="retViewRef" style="color:#006600"></span></h3>
+<span id="retViewBadges" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+</div>
+<div id="retViewBody"></div>
+<div class="bg" style="margin-top:14px">
+<button class="btn btn-i" id="retEditBtn" onclick="retToggleEdit()">Edit Record</button>
+<button class="btn btn-p" id="retSaveBtn" style="display:none" onclick="retSaveView()">Save Changes</button>
+<button class="btn btn-d" onclick="retDeleteView()">Delete</button>
+<button class="btn btn-w" id="retDupBtn" style="display:none" onclick="retShowDuplicates()">Compare Duplicates</button>
+<button class="btn" style="background:#eee" onclick="closeRetView()">Close</button>
+</div>
+</div></div>
+
+<!-- RETURNEE DUPLICATE COMPARE MODAL -->
+<div class="mo" id="retCompareModal"><div class="ml" style="max-width:950px">
+<button class="cb" onclick="document.getElementById('retCompareModal').classList.remove('show')">&times;</button>
+<h3>Returnee Duplicate Comparison</h3>
+<p style="font-size:.8em;color:#666;margin-bottom:10px">Review potential duplicates below.</p>
+<div id="retCompareBody" style="overflow-x:auto"></div>
+<div class="bg" style="margin-top:12px">
+<button class="btn" style="background:#eee" onclick="document.getElementById('retCompareModal').classList.remove('show')">Close</button>
+</div>
 </div></div>
 
 <!-- CSV IMPORT -->
@@ -4326,18 +4667,19 @@ a.download='SITREP_'+new Date().toISOString().slice(0,10)+'.docx';a.click();toas
 else toast('Generation failed')}
 
 // RETURNEES
+let retAllRows=[],retViewRec=null,retEditMode=false;
 async function loadReturneesStats(){
 const d=await api('/api/returnees-stats');if(!d||!d.kpi)return;
 const k=d.kpi;
 document.getElementById('retKpiGrid').innerHTML=`
-<div class="kc i"><div class="lb">Total Registered</div><div class="vl">${k.total}</div></div>
-<div class="kc" style="background:#e3f2fd"><div class="lb">Submitted</div><div class="vl">${k.submitted}</div></div>
-<div class="kc s"><div class="lb">Verified</div><div class="vl">${k.verified}</div></div>
-<div class="kc" style="background:#fff3e0"><div class="lb">Contacted</div><div class="vl">${k.contacted}</div></div>
-<div class="kc s"><div class="lb">Visa Approved</div><div class="vl">${k.approved_visa}</div></div>
-<div class="kc d"><div class="lb">Pending Visa</div><div class="vl">${k.pending_visa}</div></div>
-<div class="kc i"><div class="lb">With Family</div><div class="vl">${k.with_family}</div></div>
-<div class="kc s"><div class="lb">Ready to Travel</div><div class="vl">${k.ready_to_travel}</div></div>`;
+<div class="kc i"><div class="lb">TOTAL REGISTERED</div><div class="vl">${k.total}</div></div>
+<div class="kc" style="background:#e3f2fd"><div class="lb">SUBMITTED</div><div class="vl">${k.submitted}</div></div>
+<div class="kc s"><div class="lb">VERIFIED</div><div class="vl">${k.verified}</div></div>
+<div class="kc" style="background:#fff3e0"><div class="lb">CONTACTED</div><div class="vl">${k.contacted}</div></div>
+<div class="kc s"><div class="lb">VISA APPROVED</div><div class="vl">${k.approved_visa}</div></div>
+<div class="kc d"><div class="lb">PENDING VISA</div><div class="vl">${k.pending_visa}</div></div>
+<div class="kc i"><div class="lb">WITH FAMILY</div><div class="vl">${k.with_family}</div></div>
+<div class="kc s"><div class="lb">READY TO TRAVEL</div><div class="vl">${k.ready_to_travel}</div></div>`;
 }
 async function loadReturnees(){
 const p=new URLSearchParams();
@@ -4346,14 +4688,109 @@ const st=document.getElementById('retStatusF').value;if(st)p.set('status',st);
 const pr=document.getElementById('retProvinceF').value;if(pr)p.set('province',pr);
 const ur=document.getElementById('retUrgencyF').value;if(ur)p.set('urgency',ur);
 const vi=document.getElementById('retVisaF').value;if(vi)p.set('visa',vi);
-const rows=await api('/api/returnees?'+p.toString());if(!rows)return;
-document.getElementById('retCount').textContent='Showing '+rows.length+' returnee records';
-let h='<thead><tr><th>#</th><th>Ref</th><th>Name</th><th>Passport</th><th>Gender</th><th>Mobile</th><th>City (PK)</th><th>Province</th><th>Dest (KW)</th><th>Urgency</th><th>Alone</th><th>Group</th><th>Visa Applied</th><th>Visa Approved</th><th>Status</th><th>Submitted</th></tr></thead><tbody>';
-rows.forEach((r,i)=>{
+retAllRows=await api('/api/returnees?'+p.toString());if(!retAllRows)return;
+document.getElementById('retCount').textContent='Showing '+retAllRows.length+' returnee records';
+let h='<thead><tr><th>#</th><th>Ref</th><th>Name</th><th>Passport</th><th>Gender</th><th>Mobile</th><th>City (PK)</th><th>Province</th><th>Dest (KW)</th><th>Urgency</th><th>MOH</th><th>Dup</th><th>Status</th><th>Submitted</th><th>Actions</th></tr></thead><tbody>';
+retAllRows.forEach((r,i)=>{
 const sb=r.status==='Verified'?'bdg-app':r.status==='Submitted'?'bdg-pen':r.status==='Contacted'?'bdg-vis':'bdg-pen';
-const va=r.saudi_visa_approved==='yes'?'bdg-app':r.saudi_visa_approved==='pending'?'bdg-pen':'bdg-rej';
-h+=`<tr><td>${i+1}</td><td><strong>${r.reference_number||''}</strong></td><td>${r.full_name||''}</td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.mobile||''}</td><td>${r.current_city_pk||''}</td><td>${r.province_pk||''}</td><td>${r.destination_area_kw||''}</td><td>${r.travel_urgency||''}</td><td>${r.traveling_alone||''}</td><td>${r.group_size||1}</td><td>${r.saudi_visa_applied||'-'}</td><td><span class="bdg ${va}">${r.saudi_visa_approved||'-'}</span></td><td><span class="bdg ${sb}">${r.status||'-'}</span></td><td>${r.submission_timestamp?r.submission_timestamp.slice(0,10):'-'}</td></tr>`;
+const df=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
+const moh=r.is_moh_employee==='yes'?'<span class="bdg" style="background:#e8f5e9;color:#1b5e20;font-size:.7em">MOH</span>':'-';
+const dupBtn=r.dup_flag==='DUPLICATE'?` <button class="btn btn-d" style="padding:2px 6px;font-size:.7em" onclick="event.stopPropagation();openRetView(${r.id},true)">Compare</button>`:'';
+h+=`<tr><td>${i+1}</td><td><strong>${r.reference_number||''}</strong></td><td>${r.full_name||''}</td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.mobile||''}</td><td>${r.current_city_pk||''}</td><td>${r.province_pk||''}</td><td>${r.destination_area_kw||''}</td><td>${r.travel_urgency||''}</td><td>${moh}</td><td><span class="bdg ${df}">${r.dup_flag||'CLEAR'}</span>${dupBtn}</td><td><span class="bdg ${sb}">${r.status||'-'}</span></td><td>${r.submission_timestamp?r.submission_timestamp.slice(0,10):'-'}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openRetView(${r.id})">View</button></td></tr>`;
 });h+='</tbody>';document.getElementById('retTbl').innerHTML=h;
+}
+async function openRetView(id,showDups){
+const d=await api('/api/returnee/detail?id='+id);if(!d||d.error){toast(d?.error||'Not found');return}
+retViewRec=d;retEditMode=false;
+document.getElementById('retViewRef').textContent=d.reference_number||'#'+d.id;
+const stb=d.status==='Verified'?'bdg-app':d.status==='Submitted'?'bdg-pen':'bdg-vis';
+const vab=d.saudi_visa_approved==='yes'?'bdg-app':'bdg-pen';
+const dfb=(!d.dup_flag||d.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
+const mohb=d.is_moh_employee==='yes'?'<span class="bdg" style="background:#e8f5e9;color:#1b5e20">MOH Employee</span>':'';
+document.getElementById('retViewBadges').innerHTML=`<span class="bdg ${stb}">Status: ${d.status||'-'}</span><span class="bdg ${vab}">Visa: ${d.saudi_visa_approved||'-'}</span><span class="bdg ${dfb}">${d.dup_flag||'CLEAR'}</span>${mohb}`;
+document.getElementById('retDupBtn').style.display=(d.dup_flag==='DUPLICATE')?'inline-block':'none';
+const fields=[
+['Full Name','full_name'],['Father Name','father_name'],['Passport','passport'],['Passport Expiry','passport_expiry'],
+['CNIC','cnic'],['Civil ID','civil_id'],['Gender','gender'],['DOB','date_of_birth'],
+['Mobile','mobile'],['WhatsApp','whatsapp'],['Email','email'],
+['Direction','travel_direction'],['Area Kuwait','current_area_kuwait'],['Residency','residency_status'],
+['Employer KW','employer_kw'],['City PK','current_city_pk'],['Province','province_pk'],
+['Dest City PK','destination_city_pk'],['Preferred Airport','preferred_airport_pk'],['Dest Area KW','destination_area_kw'],
+['Urgency','travel_urgency'],['Readiness','travel_readiness'],['Earliest Date','earliest_travel_date'],['Latest Date','latest_travel_date'],
+['Alone','traveling_alone'],['Group Size','group_size'],['Adults','adults_count'],['Children','children_count'],['Infants','infants_count'],
+['Interest','interest_level'],['Can Bear Cost','can_bear_cost'],['Max Fare','max_affordable_fare'],['Deposit Ready','deposit_ready'],
+['Visa Applied','saudi_visa_applied'],['Visa Approved','saudi_visa_approved'],
+['MOH Employee','is_moh_employee'],['Leave Ends','moh_leave_end'],
+['Status','status'],['Verification','verification_status'],['Priority','priority_category'],
+['Followup','followup_status'],['Allocation','allocation_status'],['Dup Flag','dup_flag'],
+['Embassy Remarks','embassy_remarks'],['Emergency Name','emergency_name'],['Emergency Relation','emergency_relation'],['Emergency Phone','emergency_phone'],
+['Submitted','submission_timestamp']
+];
+let h='<div class="fg">';
+fields.forEach(([lbl,key])=>{
+const val=d[key]||'';
+h+=`<div class="fgp"><label>${lbl}</label><input data-ret-field="${key}" value="${String(val).replace(/"/g,'&quot;')}" readonly style="background:#f9f9f9"></div>`;
+});
+h+='</div>';
+document.getElementById('retViewBody').innerHTML=h;
+document.getElementById('retEditBtn').style.display='inline-block';
+document.getElementById('retSaveBtn').style.display='none';
+document.getElementById('retViewModal').classList.add('show');
+if(showDups&&d.dup_flag==='DUPLICATE')setTimeout(()=>retShowDuplicates(),300);
+}
+function closeRetView(){document.getElementById('retViewModal').classList.remove('show');retEditMode=false}
+function retToggleEdit(){
+retEditMode=!retEditMode;
+document.querySelectorAll('#retViewBody input[data-ret-field]').forEach(inp=>{
+inp.readOnly=!retEditMode;inp.style.background=retEditMode?'#fff':'#f9f9f9';
+if(retEditMode)inp.style.borderColor='#1565c0';else inp.style.borderColor='';
+});
+document.getElementById('retEditBtn').textContent=retEditMode?'Cancel Edit':'Edit Record';
+document.getElementById('retSaveBtn').style.display=retEditMode?'inline-block':'none';
+}
+async function retSaveView(){
+if(!retViewRec)return;
+const data={id:retViewRec.id};
+document.querySelectorAll('#retViewBody input[data-ret-field]').forEach(inp=>{data[inp.dataset.retField]=inp.value});
+try{
+const r=await api('/api/returnee/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+if(r&&r.success){toast('Returnee record saved');retToggleEdit();openRetView(retViewRec.id);loadReturnees();loadReturneesStats()}
+else toast('Error: '+(r?.error||'Save failed'));
+}catch(err){toast('Error: '+err.message)}
+}
+async function retDeleteView(){
+if(!retViewRec)return;
+if(!confirm('Cancel returnee record '+(retViewRec.reference_number||'#'+retViewRec.id)+'?'))return;
+await api('/api/returnee/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:retViewRec.id})});
+closeRetView();loadReturnees();loadReturneesStats();toast('Record cancelled');
+}
+async function retShowDuplicates(){
+if(!retViewRec)return;
+const d=await api('/api/returnee/duplicates?id='+retViewRec.id);
+if(!d||!d.duplicates||d.duplicates.length===0){toast('No duplicates found');return}
+let h='<table style="width:100%;border-collapse:collapse;font-size:.85em"><thead><tr style="background:#f5f5f5"><th style="padding:6px;border:1px solid #e0e0e0">Ref</th><th style="padding:6px;border:1px solid #e0e0e0">Name</th><th style="padding:6px;border:1px solid #e0e0e0">Passport</th><th style="padding:6px;border:1px solid #e0e0e0">Mobile</th><th style="padding:6px;border:1px solid #e0e0e0">Status</th><th style="padding:6px;border:1px solid #e0e0e0">Submitted</th><th style="padding:6px;border:1px solid #e0e0e0">Actions</th></tr></thead><tbody>';
+d.duplicates.forEach(dup=>{
+h+=`<tr><td style="padding:6px;border:1px solid #e0e0e0"><strong>${dup.reference_number||''}</strong></td><td style="padding:6px;border:1px solid #e0e0e0">${dup.full_name||''}</td><td style="padding:6px;border:1px solid #e0e0e0">${dup.passport||''}</td><td style="padding:6px;border:1px solid #e0e0e0">${dup.mobile||''}</td><td style="padding:6px;border:1px solid #e0e0e0">${dup.status||''}</td><td style="padding:6px;border:1px solid #e0e0e0">${dup.submission_timestamp?dup.submission_timestamp.slice(0,10):'-'}</td><td style="padding:6px;border:1px solid #e0e0e0"><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="document.getElementById('retCompareModal').classList.remove('show');openRetView(${dup.ci_id})">View</button> <button class="btn btn-d" style="padding:3px 8px;font-size:.75em" onclick="retDeleteDup(${dup.ci_id})">Cancel</button></td></tr>`;
+});h+='</tbody></table>';
+document.getElementById('retCompareBody').innerHTML=h;
+document.getElementById('retCompareModal').classList.add('show');
+}
+async function retDeleteDup(id){
+if(!confirm('Cancel duplicate #'+id+'?'))return;
+await api('/api/returnee/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});
+toast('Duplicate cancelled');if(retViewRec)retShowDuplicates();loadReturnees();loadReturneesStats();
+}
+async function uploadRetCSV(){
+const file=document.getElementById('retCsvFile').files[0];
+if(!file){toast('Select a CSV file');return}
+const fd=new FormData();fd.append('file',file);
+const r=await fetch('/api/upload-returnees-csv',{method:'POST',body:fd});
+const d=await r.json();
+if(d.error){toast(d.error);return}
+document.getElementById('retImportResult').style.display='block';
+document.getElementById('retImportStats').innerHTML=`<strong>Imported:</strong> ${d.imported} | <strong>Skipped (dup):</strong> ${d.skipped_dup} | <strong>Errors:</strong> ${d.errors}`;
+document.getElementById('retImportDetails').innerHTML=d.details?d.details.map(x=>'<div>'+x+'</div>').join(''):'';
+loadReturnees();loadReturneesStats();
 }
 
 // ROLE-BASED ACCESS CONTROL
