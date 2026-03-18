@@ -114,6 +114,143 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_travel_status ON evacuees(travel_status);
     CREATE INDEX IF NOT EXISTS idx_name ON evacuees(name);
     """)
+
+    # ── Travel Facilitation & Demand Assessment tables ──────────────
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS person_master (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        full_name TEXT NOT NULL,
+        father_name TEXT,
+        gender TEXT,
+        date_of_birth TEXT,
+        nationality TEXT DEFAULT 'Pakistani',
+        passport TEXT UNIQUE,
+        passport_expiry TEXT,
+        cnic TEXT,
+        civil_id TEXT,
+        mobile TEXT,
+        whatsapp TEXT,
+        alt_mobile TEXT,
+        email TEXT,
+        emergency_name TEXT,
+        emergency_relation TEXT,
+        emergency_phone TEXT,
+        evacuee_link_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS charter_interest (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id INTEGER NOT NULL REFERENCES person_master(id),
+        reference_number TEXT UNIQUE,
+        travel_direction TEXT NOT NULL DEFAULT 'kw_to_pk',
+        current_area_kuwait TEXT,
+        residency_status TEXT,
+        destination_city_pk TEXT,
+        preferred_airport_pk TEXT,
+        current_city_pk TEXT,
+        province_pk TEXT,
+        has_valid_civil_id TEXT,
+        has_valid_residency TEXT,
+        saudi_visa_applied TEXT,
+        saudi_visa_approved TEXT,
+        employer_kw TEXT,
+        destination_area_kw TEXT,
+        travel_urgency TEXT DEFAULT 'general',
+        earliest_travel_date TEXT,
+        latest_travel_date TEXT,
+        travel_readiness TEXT DEFAULT 'flexible',
+        traveling_alone TEXT DEFAULT 'yes',
+        group_size INTEGER DEFAULT 1,
+        adults_count INTEGER DEFAULT 1,
+        children_count INTEGER DEFAULT 0,
+        infants_count INTEGER DEFAULT 0,
+        must_travel_together TEXT DEFAULT 'yes',
+        interest_level TEXT DEFAULT 'registering_interest',
+        can_bear_cost TEXT,
+        max_affordable_fare REAL,
+        fare_currency TEXT DEFAULT 'KWD',
+        deposit_ready TEXT,
+        max_deposit_amount REAL,
+        preferred_payment TEXT,
+        employer_sponsor TEXT,
+        employer_name TEXT,
+        needs_installment TEXT,
+        flexible_date TEXT DEFAULT 'yes',
+        flexible_airport TEXT DEFAULT 'yes',
+        flexible_boarding TEXT DEFAULT 'yes',
+        flexible_charter_vs_scheduled TEXT DEFAULT 'yes',
+        flexible_baggage TEXT DEFAULT 'yes',
+        extra_baggage TEXT DEFAULT 'no',
+        extra_baggage_kg REAL,
+        source_channel TEXT DEFAULT 'web',
+        submission_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status TEXT DEFAULT 'Submitted',
+        dup_flag TEXT DEFAULT 'CLEAR',
+        verification_status TEXT DEFAULT 'unverified',
+        record_confidence INTEGER DEFAULT 0,
+        seriousness_score INTEGER DEFAULT 0,
+        priority_category TEXT DEFAULT 'medium',
+        embassy_remarks TEXT,
+        followup_status TEXT DEFAULT 'pending',
+        last_contact_date TEXT,
+        contact_outcome TEXT,
+        deposit_requested TEXT,
+        deposit_received TEXT,
+        deposit_amount REAL,
+        allocation_status TEXT DEFAULT 'unallocated',
+        ticket_issued TEXT DEFAULT 'no',
+        travel_completed TEXT DEFAULT 'no',
+        cancellation_status TEXT DEFAULT 'active',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS family_group (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        charter_interest_id INTEGER NOT NULL REFERENCES charter_interest(id),
+        group_label TEXT,
+        total_members INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS family_members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        family_group_id INTEGER NOT NULL REFERENCES family_group(id),
+        full_name TEXT NOT NULL,
+        passport TEXT,
+        gender TEXT,
+        date_of_birth TEXT,
+        relationship TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS cargo_interest (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id INTEGER NOT NULL REFERENCES person_master(id),
+        business_name TEXT,
+        cargo_type TEXT,
+        estimated_volume TEXT,
+        estimated_weight_kg REAL,
+        origin_city TEXT,
+        destination TEXT,
+        special_handling TEXT DEFAULT 'no',
+        special_handling_desc TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pm_passport ON person_master(passport);
+    CREATE INDEX IF NOT EXISTS idx_pm_cnic ON person_master(cnic);
+    CREATE INDEX IF NOT EXISTS idx_pm_civil_id ON person_master(civil_id);
+    CREATE INDEX IF NOT EXISTS idx_pm_mobile ON person_master(mobile);
+    CREATE INDEX IF NOT EXISTS idx_ci_person ON charter_interest(person_id);
+    CREATE INDEX IF NOT EXISTS idx_ci_direction ON charter_interest(travel_direction);
+    CREATE INDEX IF NOT EXISTS idx_ci_status ON charter_interest(status);
+    CREATE INDEX IF NOT EXISTS idx_ci_refnum ON charter_interest(reference_number);
+    CREATE INDEX IF NOT EXISTS idx_cargo_person ON cargo_interest(person_id);
+    """)
+
     # Default admin user
     pw_hash = hashlib.sha256('embassy2026'.encode()).hexdigest()
     try:
@@ -589,7 +726,6 @@ def api_records(params):
     qparams = []
     if params.get('search'):
         search_val = params['search'].strip()
-        # Support tracking number search (PKE-0001 format)
         tracking_match = re.match(r'^PKE-?(\d+)$', search_val, re.IGNORECASE)
         if tracking_match:
             rec_id = int(tracking_match.group(1))
@@ -600,20 +736,193 @@ def api_records(params):
             where.append("(name LIKE ? OR passport LIKE ? OR cnic LIKE ? OR mobile LIKE ? OR civil_id LIKE ?)")
             qparams.extend([s, s, s, s, s])
     if params.get('status'):
-        where.append("travel_status = ?"); qparams.append(params['status'])
+        where.append("travel_status = ?")
+        qparams.append(params['status'])
     if params.get('country'):
-        where.append("country = ?"); qparams.append(params['country'])
+        where.append("country = ?")
+        qparams.append(params['country'])
     if params.get('gender'):
-        where.append("gender = ?"); qparams.append(params['gender'])
+        where.append("gender = ?")
+        qparams.append(params['gender'])
     if params.get('visa'):
-        where.append("visa_status = ?"); qparams.append(params['visa'])
+        where.append("visa_status = ?")
+        qparams.append(params['visa'])
     if params.get('dup'):
-        where.append("dup_flag = ?"); qparams.append(params['dup'])
+        where.append("dup_flag = ?")
+        qparams.append(params['dup'])
 
     rows = db.execute(f"SELECT * FROM evacuees WHERE {' AND '.join(where)} ORDER BY id DESC", qparams).fetchall()
     result = [dict(r) for r in rows]
     db.close()
     return result
+
+def api_returnees(params):
+    db = get_db()
+    where = ["ci.cancellation_status = 'active'"]
+    qparams = []
+
+    if params.get('search'):
+        s = f"%{params['search'].strip()}%"
+        where.append("""(
+            pm.full_name LIKE ? OR
+            pm.passport LIKE ? OR
+            ci.reference_number LIKE ? OR
+            pm.mobile LIKE ? OR
+            pm.whatsapp LIKE ?
+        )""")
+        qparams.extend([s, s, s, s, s])
+
+    if params.get('status'):
+        where.append("ci.status = ?")
+        qparams.append(params['status'])
+
+    if params.get('province'):
+        where.append("ci.province_pk = ?")
+        qparams.append(params['province'])
+
+    if params.get('urgency'):
+        where.append("ci.travel_urgency = ?")
+        qparams.append(params['urgency'])
+
+    if params.get('visa'):
+        if params['visa'] == 'approved':
+            where.append("ci.saudi_visa_approved = 'yes'")
+        elif params['visa'] == 'pending':
+            where.append("(ci.saudi_visa_approved = 'pending' OR ci.saudi_visa_approved = '' OR ci.saudi_visa_approved IS NULL)")
+        elif params['visa'] == 'not_applied':
+            where.append("(ci.saudi_visa_applied = 'no' OR ci.saudi_visa_applied = '' OR ci.saudi_visa_applied IS NULL)")
+
+    rows = db.execute(f"""
+        SELECT
+            ci.id,
+            ci.reference_number,
+            ci.status,
+            ci.travel_direction,
+            ci.current_city_pk,
+            ci.province_pk,
+            ci.destination_area_kw,
+            ci.travel_urgency,
+            ci.travel_readiness,
+            ci.traveling_alone,
+            ci.group_size,
+            ci.adults_count,
+            ci.children_count,
+            ci.infants_count,
+            ci.interest_level,
+            ci.saudi_visa_applied,
+            ci.saudi_visa_approved,
+            ci.submission_timestamp,
+            pm.full_name,
+            pm.passport,
+            pm.mobile,
+            pm.whatsapp,
+            pm.gender
+        FROM charter_interest ci
+        JOIN person_master pm ON pm.id = ci.person_id
+        WHERE {" AND ".join(where)}
+        ORDER BY ci.id DESC
+    """, qparams).fetchall()
+
+    db.close()
+    return [dict(r) for r in rows]
+
+def api_returnees_stats():
+    db = get_db()
+
+    total = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active'
+    """).fetchone()['c']
+
+    submitted = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active' AND status = 'Submitted'
+    """).fetchone()['c']
+
+    verified = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active' AND verification_status = 'verified'
+    """).fetchone()['c']
+
+    contacted = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active' AND followup_status = 'contacted'
+    """).fetchone()['c']
+
+    approved_visa = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active' AND saudi_visa_approved = 'yes'
+    """).fetchone()['c']
+
+    pending_visa = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active' AND (
+            saudi_visa_approved = 'pending' OR
+            saudi_visa_approved = '' OR
+            saudi_visa_approved IS NULL
+        )
+    """).fetchone()['c']
+
+    with_family = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active' AND traveling_alone = 'no'
+    """).fetchone()['c']
+
+    ready_to_travel = db.execute("""
+        SELECT COUNT(*) c
+        FROM charter_interest
+        WHERE cancellation_status = 'active'
+          AND interest_level IN ('likely', 'ready')
+    """).fetchone()['c']
+
+    by_status = [dict(r) for r in db.execute("""
+        SELECT status, COUNT(*) count
+        FROM charter_interest
+        WHERE cancellation_status = 'active'
+        GROUP BY status
+        ORDER BY count DESC
+    """).fetchall()]
+
+    by_province = [dict(r) for r in db.execute("""
+        SELECT COALESCE(province_pk, 'Unknown') province, COUNT(*) count
+        FROM charter_interest
+        WHERE cancellation_status = 'active'
+        GROUP BY province_pk
+        ORDER BY count DESC
+    """).fetchall()]
+
+    by_urgency = [dict(r) for r in db.execute("""
+        SELECT COALESCE(travel_urgency, 'general') urgency, COUNT(*) count
+        FROM charter_interest
+        WHERE cancellation_status = 'active'
+        GROUP BY travel_urgency
+        ORDER BY count DESC
+    """).fetchall()]
+
+    db.close()
+
+    return {
+        'kpi': {
+            'total': total,
+            'submitted': submitted,
+            'verified': verified,
+            'contacted': contacted,
+            'approved_visa': approved_visa,
+            'pending_visa': pending_visa,
+            'with_family': with_family,
+            'ready_to_travel': ready_to_travel
+        },
+        'by_status': by_status,
+        'by_province': by_province,
+        'by_urgency': by_urgency
+    }
 
 def normalize_border(val):
     if not val: return val
@@ -674,6 +983,311 @@ def api_save_record(data, user):
                    (new_id, user, json.dumps(data)))
         db.commit(); db.close()
         return {'success': True, 'id': new_id, 'dup_flag': dup_flag, 'dup_details': dup_flags}
+
+# ═══════════════════════════════════════════════════════════════
+# TRAVEL FACILITATION — PERSON MASTER & CHARTER INTEREST LOGIC
+# ═══════════════════════════════════════════════════════════════
+
+def _normalize_passport(val):
+    """Strip, uppercase, remove spaces."""
+    if not val: return ''
+    return re.sub(r'\s+', '', val.strip().upper())
+
+def _normalize_cnic(val):
+    """Strip dashes, spaces."""
+    if not val: return ''
+    return re.sub(r'[\s\-]', '', val.strip())
+
+def _generate_charter_ref(db=None):
+    """Generate a unique TFR-XXXX reference number."""
+    close_after = False
+    if db is None:
+        db = get_db()
+        close_after = True
+    try:
+        while True:
+            num = secrets.randbelow(9000) + 1000
+            ref = f'TFR-{num}'
+            exists = db.execute("SELECT 1 FROM charter_interest WHERE reference_number = ?", [ref]).fetchone()
+            if not exists:
+                return ref
+    finally:
+        if close_after:
+            db.close()
+
+def find_or_create_person(db, data):
+    """
+    Passport-first identity resolution against person_master,
+    with fallback to CNIC and Civil ID. Links to existing evacuee
+    record if found. Returns person_master.id
+    """
+    passport = _normalize_passport(data.get('passport'))
+    cnic = _normalize_cnic(data.get('cnic'))
+    civil_id = (data.get('civil_id') or '').strip()
+    mobile = (data.get('mobile') or '').strip()
+
+    person = None
+
+    # Primary match: passport
+    if passport:
+        person = db.execute(
+            "SELECT id FROM person_master WHERE UPPER(REPLACE(passport,' ','')) = ?",
+            [passport]).fetchone()
+
+    # Secondary: CNIC
+    if not person and cnic:
+        person = db.execute(
+            "SELECT id FROM person_master WHERE REPLACE(REPLACE(cnic,'-',''),' ','') = ?",
+            [cnic]).fetchone()
+
+    # Secondary: Civil ID
+    if not person and civil_id:
+        person = db.execute(
+            "SELECT id FROM person_master WHERE TRIM(civil_id) = ?",
+            [civil_id]).fetchone()
+
+    if person:
+        return person['id']
+
+    # No match — create new person_master record
+    # Also try to link to existing evacuees table
+    evacuee_link = None
+    if passport:
+        ev = db.execute("SELECT id FROM evacuees WHERE UPPER(TRIM(passport)) = ?", [passport]).fetchone()
+        if ev:
+            evacuee_link = ev['id']
+    if not evacuee_link and cnic:
+        ev = db.execute("SELECT id FROM evacuees WHERE REPLACE(REPLACE(cnic,'-',''),' ','') = ?", [cnic]).fetchone()
+        if ev:
+            evacuee_link = ev['id']
+
+    cur = db.execute("""
+        INSERT INTO person_master
+            (full_name, father_name, gender, date_of_birth, nationality,
+             passport, passport_expiry, cnic, civil_id,
+             mobile, whatsapp, alt_mobile, email,
+             emergency_name, emergency_relation, emergency_phone,
+             evacuee_link_id, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+    """, [
+        data.get('name') or data.get('full_name') or '',
+        data.get('father_name', ''),
+        data.get('gender', ''),
+        data.get('dob') or data.get('date_of_birth', ''),
+        data.get('nationality', 'Pakistani'),
+        passport,
+        data.get('passport_expiry', ''),
+        cnic,
+        civil_id,
+        mobile,
+        data.get('whatsapp', ''),
+        data.get('alt_mobile', ''),
+        data.get('email', ''),
+        data.get('emergency_name', ''),
+        data.get('emergency_relation', ''),
+        data.get('emergency_phone', ''),
+        evacuee_link
+    ])
+    return cur.lastrowid
+
+
+def api_charter_register(data, source_ip='unknown'):
+    """
+    Public-facing charter/travel interest registration.
+    1) Validates required fields
+    2) Resolves or creates person_master record (with evacuee linkage)
+    3) Checks for duplicate charter_interest by same person+direction
+    4) Inserts charter_interest row
+    5) Optionally inserts family_group + family_members
+    6) Optionally inserts cargo_interest
+    7) Returns reference number
+    """
+    # Required field validation
+    name = (data.get('name') or data.get('full_name') or '').strip()
+    passport = _normalize_passport(data.get('passport'))
+    mobile = (data.get('mobile') or '').strip()
+    direction = data.get('travel_direction', 'kw_to_pk')
+
+    if not name or not passport or not mobile:
+        return {'success': False, 'error': 'Full name, passport number, and mobile number are required.'}
+
+    if direction not in ('kw_to_pk', 'pk_to_kw', 'both'):
+        direction = 'kw_to_pk'
+
+    db = get_db()
+
+    # Rate limiting: max 10 submissions per IP per hour
+    one_hour_ago = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+    recent = db.execute(
+        "SELECT COUNT(*) c FROM audit_log WHERE user = ? AND action = 'charter_register' AND created_at > ?",
+        [source_ip, one_hour_ago]).fetchone()['c']
+    if recent >= 10:
+        db.close()
+        return {'success': False, 'error': 'Too many submissions from this device. Please try again later.'}
+
+    # Resolve identity
+    person_id = find_or_create_person(db, data)
+
+    # Duplicate check: same person + same direction already active
+    existing = db.execute(
+        "SELECT id, reference_number, status FROM charter_interest WHERE person_id = ? AND travel_direction = ? AND cancellation_status = 'active'",
+        [person_id, direction]).fetchone()
+
+    if existing:
+        existing = dict(existing)
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('charter_dup_attempt', ?, ?, ?)",
+                   (existing['id'], source_ip, json.dumps({'name': name, 'passport': passport})))
+        db.commit()
+        db.close()
+        return {
+            'success': False,
+            'duplicate': True,
+            'reference_number': existing['reference_number'],
+            'status': existing['status'],
+            'error': f"You have already registered for this travel direction. Your reference is {existing['reference_number']}."
+        }
+
+    # Generate reference
+    ref = _generate_charter_ref(db)
+
+    # Insert charter_interest
+    ci_fields = {
+        'person_id': person_id,
+        'reference_number': ref,
+        'travel_direction': direction,
+        'current_area_kuwait': data.get('current_area_kuwait', ''),
+        'residency_status': data.get('residency_status', ''),
+        'destination_city_pk': data.get('destination_city_pk', ''),
+        'preferred_airport_pk': data.get('preferred_airport_pk', ''),
+        'current_city_pk': data.get('current_city_pk', ''),
+        'province_pk': data.get('province_pk', ''),
+        'has_valid_civil_id': data.get('has_valid_civil_id', ''),
+        'has_valid_residency': data.get('has_valid_residency', ''),
+        'saudi_visa_applied': data.get('saudi_visa_applied', ''),
+        'saudi_visa_approved': data.get('saudi_visa_approved', ''),
+        'employer_kw': data.get('employer_kw', ''),
+        'destination_area_kw': data.get('destination_area_kw', ''),
+        'travel_urgency': data.get('travel_urgency', 'general'),
+        'earliest_travel_date': data.get('earliest_travel_date', ''),
+        'latest_travel_date': data.get('latest_travel_date', ''),
+        'travel_readiness': data.get('travel_readiness', 'flexible'),
+        'traveling_alone': data.get('traveling_alone', 'yes'),
+        'group_size': int(data.get('group_size', 1) or 1),
+        'adults_count': int(data.get('adults_count', 1) or 1),
+        'children_count': int(data.get('children_count', 0) or 0),
+        'infants_count': int(data.get('infants_count', 0) or 0),
+        'must_travel_together': data.get('must_travel_together', 'yes'),
+        'interest_level': data.get('interest_level', 'registering_interest'),
+        'can_bear_cost': data.get('can_bear_cost', ''),
+        'max_affordable_fare': float(data.get('max_affordable_fare', 0) or 0),
+        'fare_currency': data.get('fare_currency', 'KWD'),
+        'deposit_ready': data.get('deposit_ready', ''),
+        'max_deposit_amount': float(data.get('max_deposit_amount', 0) or 0),
+        'preferred_payment': data.get('preferred_payment', ''),
+        'employer_sponsor': data.get('employer_sponsor', ''),
+        'employer_name': data.get('employer_name', ''),
+        'needs_installment': data.get('needs_installment', ''),
+        'flexible_date': data.get('flexible_date', 'yes'),
+        'flexible_airport': data.get('flexible_airport', 'yes'),
+        'flexible_boarding': data.get('flexible_boarding', 'yes'),
+        'flexible_charter_vs_scheduled': data.get('flexible_charter_vs_scheduled', 'yes'),
+        'flexible_baggage': data.get('flexible_baggage', 'yes'),
+        'extra_baggage': data.get('extra_baggage', 'no'),
+        'extra_baggage_kg': float(data.get('extra_baggage_kg', 0) or 0),
+        'source_channel': data.get('source_channel', 'web'),
+        'status': 'Submitted'
+    }
+
+    cols = list(ci_fields.keys())
+    vals = [ci_fields[c] for c in cols]
+    placeholders = ', '.join(['?'] * len(cols))
+    cur = db.execute(f"INSERT INTO charter_interest ({', '.join(cols)}) VALUES ({placeholders})", vals)
+    ci_id = cur.lastrowid
+
+    # Family members (if group)
+    if ci_fields['traveling_alone'] == 'no' and data.get('family_members'):
+        fg_cur = db.execute(
+            "INSERT INTO family_group (charter_interest_id, group_label, total_members) VALUES (?, ?, ?)",
+            [ci_id, f"{name} family", ci_fields['group_size']])
+        fg_id = fg_cur.lastrowid
+        for mem in data['family_members']:
+            if isinstance(mem, dict) and mem.get('full_name'):
+                db.execute(
+                    "INSERT INTO family_members (family_group_id, full_name, passport, gender, date_of_birth, relationship) VALUES (?,?,?,?,?,?)",
+                    [fg_id, mem.get('full_name',''), _normalize_passport(mem.get('passport','')),
+                     mem.get('gender',''), mem.get('date_of_birth',''), mem.get('relationship','')])
+
+    # Cargo interest (optional)
+    if data.get('has_cargo') == 'yes' and data.get('cargo_type'):
+        db.execute("""
+            INSERT INTO cargo_interest
+                (person_id, business_name, cargo_type, estimated_volume,
+                 estimated_weight_kg, origin_city, destination,
+                 special_handling, special_handling_desc)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, [person_id, data.get('business_name',''), data.get('cargo_type',''),
+              data.get('estimated_volume',''), float(data.get('estimated_weight_kg',0) or 0),
+              data.get('origin_city',''), data.get('cargo_destination',''),
+              data.get('special_handling','no'), data.get('special_handling_desc','')])
+
+    # Audit log
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('charter_register', ?, ?, ?)",
+               (ci_id, source_ip, json.dumps({'name': name, 'passport': passport, 'direction': direction, 'ref': ref})))
+    db.commit()
+    db.close()
+
+    return {
+        'success': True,
+        'reference_number': ref,
+        'id': ci_id,
+        'person_id': person_id
+    }
+
+
+def api_charter_status_lookup(ref_or_passport):
+    """
+    Public status lookup by reference number (TFR-XXXX) or passport.
+    Returns only safe, non-admin fields.
+    """
+    val = (ref_or_passport or '').strip().upper()
+    if not val:
+        return {'success': False, 'error': 'Please enter your reference number or passport number.'}
+
+    db = get_db()
+    row = None
+
+    if val.startswith('TFR-'):
+        row = db.execute("""
+            SELECT ci.reference_number, ci.status, ci.travel_direction,
+                   ci.submission_timestamp, pm.full_name
+            FROM charter_interest ci
+            JOIN person_master pm ON pm.id = ci.person_id
+            WHERE ci.reference_number = ? AND ci.cancellation_status = 'active'
+        """, [val]).fetchone()
+    else:
+        row = db.execute("""
+            SELECT ci.reference_number, ci.status, ci.travel_direction,
+                   ci.submission_timestamp, pm.full_name
+            FROM charter_interest ci
+            JOIN person_master pm ON pm.id = ci.person_id
+            WHERE UPPER(REPLACE(pm.passport,' ','')) = ? AND ci.cancellation_status = 'active'
+            ORDER BY ci.created_at DESC LIMIT 1
+        """, [val]).fetchone()
+
+    db.close()
+
+    if not row:
+        return {'success': False, 'error': 'No active registration found. Please check your reference number or passport number.'}
+
+    row = dict(row)
+    return {
+        'success': True,
+        'reference_number': row['reference_number'],
+        'name': row['full_name'],
+        'status': row['status'],
+        'direction': row['travel_direction'],
+        'submitted': row['submission_timestamp']
+    }
 
 def api_delete_record(rec_id, user):
     db = get_db()
@@ -963,6 +1577,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json({'success': False, 'error': 'No application found with this information. Please check your passport number or tracking number and try again.'})
             return
+        elif path in ('/travel-interest', '/travel-interest/register'):
+            db = get_db()
+            enabled = db.execute("SELECT value FROM settings WHERE key='charter_registration'").fetchone()
+            db.close()
+            if enabled and enabled['value'] == 'disabled':
+                self.send_html('<html><body style="font-family:Arial;text-align:center;padding:60px"><h1>Registration Closed</h1><p>Travel interest registration is currently closed. Please contact the Embassy directly.</p></body></html>')
+            else:
+                self.send_html(CHARTER_REGISTER_PAGE)
+        elif path == '/travel-interest/success':
+            self.send_html(CHARTER_SUCCESS_PAGE)
+        elif path == '/travel-interest/track':
+            self.send_html(CHARTER_TRACKING_PAGE)
+        elif path == '/api/public-charter-track':
+            search_val = params.get('q', '').strip()
+            if not search_val:
+                self.send_json({'success': False, 'error': 'Please enter your reference number or passport number.'}, 400)
+                return
+            self.send_json(api_charter_status_lookup(search_val))
+            return
         elif path in ('/embassy-registration', '/register'):
             # Public registration page — no login needed
             db = get_db()
@@ -988,6 +1621,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/records':
             if not self.require_auth(): return
             self.send_json(api_records(params))
+        elif path == '/api/returnees':
+            if not self.require_auth(): return
+            self.send_json(api_returnees(params))
+        elif path == '/api/returnees-stats':
+            if not self.require_auth(): return
+            self.send_json(api_returnees_stats())
         elif path == '/api/export':
             user = self.require_auth()
             if not user: return
@@ -1322,6 +1961,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                        (result.get('id'), client_ip, json.dumps({'name': data['name'], 'passport': data['passport']})))
             db.commit()
             db.close()
+            self.send_json(result)
+            return
+        
+        elif path == '/api/public-charter-register':
+            db = get_db()
+            enabled = db.execute("SELECT value FROM settings WHERE key='charter_registration'").fetchone()
+            if enabled and enabled['value'] == 'disabled':
+                db.close()
+                self.send_json({'success': False, 'error': 'Travel interest registration is currently closed.'}, 403)
+                return
+            db.close()
+
+            client_ip = self.client_address[0]
+
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request data.'}, 400)
+                return
+
+            data['source_channel'] = 'web'
+            result = api_charter_register(data, source_ip=client_ip)
             self.send_json(result)
             return
 
@@ -1700,6 +2361,19 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <span style="font-size:1.4em">&#128270;</span> Already Registered? Track Your Application Status Here
 <span style="background:rgba(255,255,255,.25);padding:4px 12px;border-radius:20px;font-size:.85em;margin-left:8px">Check Now &rarr;</span></a>
 </div>
+<div style="background:linear-gradient(135deg,#006600,#004d00);padding:16px 20px;text-align:center">
+<a href="/travel-interest" style="color:#fff;text-decoration:none;display:block">
+<div style="display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap">
+<span style="font-size:1.8em">&#9992;&#65039;</span>
+<div style="text-align:left">
+<div style="font-weight:700;font-size:1.05em">Want to Return to Kuwait from Pakistan?</div>
+<div style="font-size:.85em;opacity:.9">Register your travel interest for Pakistan &rarr; Kuwait facilitation</div>
+</div>
+<span style="background:rgba(255,255,255,.2);padding:8px 18px;border-radius:25px;font-weight:700;font-size:.9em;border:1px solid rgba(255,255,255,.3)">Register Here &rarr;</span>
+</div>
+<div dir="rtl" style="margin-top:8px;font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;font-size:.88em;opacity:.9">کیا آپ پاکستان سے کویت واپس آنا چاہتے ہیں؟ اپنی سفری دلچسپی یہاں رجسٹر کریں</div>
+</a>
+</div>
 <div class="ctr">
 <div class="notice">
 <strong>&#9888;&#65039; Important Information</strong>
@@ -2072,6 +2746,397 @@ if(tid){document.getElementById('trackingNum').textContent=tid;document.getEleme
 </body></html>"""
 
 # ═══════════════════════════════════════════════════════════════
+# TRAVEL INTEREST REGISTRATION PAGE (public, no login required)
+# ═══════════════════════════════════════════════════════════════
+CHARTER_REGISTER_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Travel Interest Registration - Embassy of Pakistan, Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
+.hdr{background:linear-gradient(135deg,#006600,#004d00);color:#fff;padding:24px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.hdr h1{font-size:1.4em;margin-bottom:4px;letter-spacing:.5px}.hdr .sub{font-size:.85em;opacity:.9}
+.ctr{max-width:720px;margin:0 auto;padding:20px}
+.notice{background:linear-gradient(135deg,#fff3e0,#ffe0b2);border:1px solid #ffcc80;border-radius:10px;padding:16px;margin-bottom:16px;font-size:.88em;line-height:1.7}
+.fs{background:#fff;border-radius:10px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.08);margin-bottom:16px}
+.fs h3{margin-bottom:14px;padding-bottom:6px;border-bottom:2px solid #e8f5e9;color:#006600;font-size:1em}
+.fg{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.fgp{display:flex;flex-direction:column}.fgp label{font-size:.8em;font-weight:600;margin-bottom:3px;color:#555}
+.fgp input,.fgp select,.fgp textarea{padding:9px 10px;border:1px solid #e0e0e0;border-radius:7px;font-size:.88em}
+.fgp input:focus,.fgp select:focus,.fgp textarea:focus{border-color:#006600;outline:none;box-shadow:0 0 0 3px rgba(0,102,0,.1)}
+.req{color:#c62828}
+.btn{padding:14px 28px;border:none;border-radius:8px;cursor:pointer;font-weight:700;font-size:1em;transition:.2s}
+.btn-p{background:linear-gradient(135deg,#006600,#004d00);color:#fff;width:100%}.btn-p:hover{background:#004d00}
+.btn-p:disabled{background:#999;cursor:not-allowed}
+.error{color:#c62828;font-size:.85em;margin-top:10px;display:none;padding:10px;background:#ffebee;border-radius:6px}
+.conditional{display:none}
+.conditional.show{display:block}
+.footer{text-align:center;padding:24px;font-size:.82em;color:#777;line-height:1.8}
+.track-link{display:block;text-align:center;margin:10px 0;padding:12px;background:linear-gradient(135deg,#1565c0,#0d47a1);color:#fff;text-decoration:none;border-radius:8px;font-weight:600}
+.dup-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:20px}
+.dup-overlay.show{display:flex}
+.dup-card{background:#fff;border-radius:16px;max-width:500px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.dup-header{background:linear-gradient(135deg,#c62828,#b71c1c);color:#fff;padding:24px;border-radius:16px 16px 0 0;text-align:center}
+.dup-body{padding:24px}
+.dup-ref{background:#e8f5e9;border:2px solid #006600;border-radius:10px;padding:14px;text-align:center;margin-bottom:14px}
+.dup-ref .num{font-size:1.6em;font-weight:800;color:#006600;letter-spacing:2px}
+</style></head><body>
+<div class="hdr">
+<div>&#127477;&#127472;</div>
+<h1>RETURNEES TRAVEL FACILITATION FROM PAKISTAN TO KUWAIT</h1>
+<div class="sub">Embassy of Pakistan, Kuwait &mdash; Returnees Travel Facilitation from Pakistan to Kuwait</div>
+</div>
+<a class="track-link" href="/travel-interest/track">Already registered for return to Kuwait? Check your status here &rarr;</a>
+<div style="background:linear-gradient(135deg,#e65100,#bf360c);padding:14px 20px;text-align:center;margin:0">
+<a href="/embassy-registration" style="color:#fff;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
+<span style="font-size:1.5em">&#127477;&#127472;</span>
+<span style="font-weight:700;font-size:.95em">Want to Travel from Kuwait to Pakistan? Register for Saudi Transit Visa Facilitation</span>
+<span style="background:rgba(255,255,255,.2);padding:6px 14px;border-radius:20px;font-size:.85em;border:1px solid rgba(255,255,255,.3)">Register &rarr;</span>
+</a>
+</div>
+<div class="ctr">
+<div class="notice">
+<strong>&#9888;&#65039; Important Notice / اہم نوٹس</strong><br>
+This registration is being conducted by the Embassy of Pakistan, Kuwait to assess and facilitate, where feasible, the return of Pakistani nationals currently in Pakistan who wish to travel back to Kuwait.<br><br>
+
+The purpose of this exercise is to support possible facilitation for the issuance of required <strong>Saudi transit visas</strong> and to organize return travel arrangements, particularly for Pakistani workers and employees who are required to resume their duties in Kuwait, including those serving in the <strong>Ministry of Health and other government sectors</strong> who are presently on leave in Pakistan.<br><br>
+
+This service is being planned to assist Pakistani workers in returning to Kuwait in an organized and efficient manner. Subject to operational approvals, visa clearances, and logistical feasibility, efforts may be made to facilitate travel in a <strong>single coordinated group</strong>, including possible arrangements through <strong>special flights from Pakistan to Kuwait via Saudi Arabia</strong>, in coordination with relevant authorities and local airlines.<br>
+
+<hr style="border:none;border-top:1px solid #ffcc80;margin:10px 0">
+
+<div dir="rtl" style="text-align:right;font-family:'Noto Nastaliq Urdu',Tahoma,Arial,sans-serif;line-height:2;font-size:.92em">
+یہ رجسٹریشن سفارت خانہ پاکستان، کویت کی جانب سے اُن پاکستانی شہریوں کے لیے کی جا رہی ہے جو اس وقت پاکستان میں موجود ہیں اور کویت واپس جانا چاہتے ہیں، تاکہ ان کی واپسی کے لیے ممکنہ سہولت کا جائزہ لیا جا سکے اور جہاں ممکن ہو وہاں معاونت فراہم کی جا سکے۔<br><br>
+
+اس عمل کا مقصد مطلوبہ <strong>سعودی ٹرانزٹ ویزا</strong> کے حصول میں ممکنہ سہولت فراہم کرنا اور کویت واپسی کے سفری انتظامات میں معاونت کرنا ہے، خاص طور پر اُن پاکستانی کارکنوں اور ملازمین کے لیے جنہیں کویت میں اپنی ڈیوٹی دوبارہ جوائن کرنی ہے، بشمول <strong>وزارتِ صحت اور دیگر سرکاری شعبوں</strong> کے وہ ملازمین جو اس وقت پاکستان میں رخصت پر موجود ہیں۔<br><br>
+
+یہ سہولت اس غرض سے منصوبہ بندی کے تحت لائی جا رہی ہے تاکہ پاکستانی کارکنوں کی کویت واپسی کو منظم اور مؤثر انداز میں ممکن بنایا جا سکے۔ آپریشنل منظوری، ویزا کلیئرنس، اور لاجسٹک فزیبلٹی سے مشروط، کوشش کی جا سکتی ہے کہ ایسے کارکنوں کی واپسی <strong>ایک مربوط گروپ</strong> کی صورت میں ممکن بنائی جائے، جس میں <strong>پاکستان سے کویت کے لیے سعودی عرب کے ذریعے خصوصی پرواز</strong> کے انتظامات بھی شامل ہو سکتے ہیں، متعلقہ حکام اور مقامی ایئر لائنز کے تعاون سے۔
+</div>
+</div>
+<form id="charterForm" onsubmit="return submitCharter(event)">
+<div class="fs"><h3>1. Travel Direction / سفر کی سمت</h3>
+<div class="fg">
+<div class="fgp">
+<label>Travel route <span class="req">*</span></label>
+<input type="text" value="Pakistan → Kuwait (پاکستان سے کویت)" readonly>
+<input type="hidden" name="travel_direction" id="travelDir" value="pk_to_kw">
+</div>
+</div></div>
+
+<div class="fs"><h3>2. Personal Information / ذاتی معلومات</h3>
+<div class="fg">
+<div class="fgp"><label>Full Name (as on passport) <span class="req">*</span></label><input name="name" required placeholder="e.g. MUHAMMAD ALI KHAN"></div>
+<div class="fgp"><label>Father's Name</label><input name="father_name" required placeholder="Father's name"></div>
+<div class="fgp"><label>Passport Number <span class="req">*</span></label><input name="passport" required placeholder="e.g. AB1234567" style="text-transform:uppercase"></div>
+<div class="fgp"><label>Passport Expiry</label><input type="date" name="passport_expiry"></div>
+<div class="fgp"><label>CNIC / NICOP</label><input name="cnic" placeholder="e.g. 3520212345678"></div>
+<div class="fgp"><label>Gender <span class="req">*</span></label>
+<select name="gender" required><option value="">Select</option><option>Male</option><option>Female</option><option>Child</option></select></div>
+<div class="fgp"><label>Date of Birth</label><input type="date" name="dob"></div>
+<div class="fgp"><label>Mobile Number <span class="req">*</span></label><input name="mobile" required placeholder="+965-XXXXXXXX or +92-XXXXXXXXXX"></div>
+<div class="fgp"><label>WhatsApp Number</label><input name="whatsapp" placeholder="If different from mobile"></div>
+<div class="fgp"><label>Email</label><input type="email" name="email" placeholder="your@email.com"></div>
+</div></div>
+
+<div class="fg">
+<div class="fgp"><label>Area in Kuwait</label><input name="current_area_kuwait" placeholder="e.g. Farwaniya, Jleeb, Hawally"></div>
+<div class="fgp"><label>Kuwait Civil ID</label><input name="civil_id" placeholder="Civil ID number"></div>
+<div class="fgp"><label>Residency Status</label>
+<select name="residency_status"><option value="">Select</option><option value="valid">Valid Residency</option><option value="expired">Expired</option><option value="visit">Visit Visa</option><option value="other">Other</option></select></div>
+<div class="fgp"><label>Employer / Company in Kuwait</label><input name="employer_kw" placeholder="Company name"></div>
+<div class="fgp"><label>KSA Transit Visa Applied?</label>
+<select name="saudi_visa_applied"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+<div class="fgp"><label>KSA Transit Visa Approved?</label>
+<select name="saudi_visa_approved"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option><option value="pending">Pending</option></select></div>
+</div></div>
+
+<div class="fs" id="pkFields"><h3>3. Applicant Details in Pakistan</h3>
+<div class="fg">
+<div class="fgp"><label>Current City in Pakistan</label><input name="current_city_pk" placeholder="e.g. Lahore, Karachi, Islamabad"></div>
+<div class="fgp"><label>Province</label>
+<select name="province_pk" required><option value="">Select</option><option>Punjab</option><option>Sindh</option><option>KPK</option><option>Balochistan</option><option>Islamabad</option><option>AJK</option><option>GB</option></select></div>
+<div class="fgp"><label>Destination Area in Kuwait</label><input name="destination_area_kw" placeholder="e.g. Farwaniya, Salmiya"></div>
+<div class="fgp"><label>Valid Kuwait Civil ID?</label>
+<select name="has_valid_civil_id"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+<div class="fgp"><label>Valid Kuwait Residency?</label>
+<select name="has_valid_residency"><option value="">Select</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+</div></div>
+
+<div class="fs"><h3>4. Destination &amp; Travel Preferences</h3>
+<div class="fg">
+<div class="fgp"><label>Destination Area in Kuwait</label><input name="destination_area_kw" placeholder="e.g. Farwaniya, Hawally, Salmiya"></div>
+<div class="fgp"><label>Preferred Departure Airport in Pakistan</label>
+<select name="preferred_airport_pk"><option value="">Select</option><option>Lahore (LHE)</option><option>Islamabad (ISB)</option><option>Karachi (KHI)</option><option>Peshawar (PEW)</option><option>Multan (MUX)</option><option>Quetta (UET)</option><option>Sialkot (SKT)</option><option>Faisalabad (LYP)</option><option>Other</option></select></div>
+<div class="fgp"><label>Travel Urgency</label>
+<select name="travel_urgency"><option value="general">General / Routine</option><option value="medical">Medical Emergency</option><option value="family">Family Emergency</option><option value="job">Job / Employment</option><option value="leave">Annual Leave Expiring</option><option value="student">Student / Education</option><option value="other">Other</option></select></div>
+<div class="fgp"><label>Earliest Possible Travel Date</label><input type="date" name="earliest_travel_date"></div>
+<div class="fgp"><label>Latest Acceptable Travel Date</label><input type="date" name="latest_travel_date"></div>
+<div class="fgp"><label>Travel Readiness</label>
+<select name="travel_readiness"><option value="flexible">Flexible</option><option value="24h">Ready within 24 hours</option><option value="48h">Ready within 48 hours</option><option value="72h">Ready within 72 hours</option><option value="1week">Ready within 1 week</option></select></div>
+</div></div>
+
+<div class="fs"><h3>5. Group / Family Details</h3>
+<div class="fg">
+<div class="fgp"><label>Traveling Alone or with Family?</label>
+<select name="traveling_alone" id="travelAlone" onchange="toggleGroup()"><option value="yes">Alone</option><option value="no">With Family / Group</option></select></div>
+<div class="fgp conditional" id="groupSizeWrap"><label>Total Group Size (including yourself)</label><input type="number" name="group_size" min="1" value="1"></div>
+<div class="fgp conditional" id="adultsWrap"><label>Adults</label><input type="number" name="adults_count" min="1" value="1"></div>
+<div class="fgp conditional" id="childrenWrap"><label>Children (2-12)</label><input type="number" name="children_count" min="0" value="0"></div>
+<div class="fgp conditional" id="infantsWrap"><label>Infants (under 2)</label><input type="number" name="infants_count" min="0" value="0"></div>
+</div></div>
+
+<div class="fs"><h3>6. Registration Intent</h3>
+<div class="fg">
+<div class="fgp"><label>Level of Interest</label>
+<select name="interest_level">
+<option value="registering_interest">Registering interest only</option>
+<option value="likely">Likely to travel if facilitated</option>
+<option value="ready">Ready to travel if arrangements are made</option>
+</select></div>
+</div>
+</div>
+
+<div class="fs"><h3>7. Emergency Contact</h3>
+<div class="fg">
+<div class="fgp"><label>Emergency Contact Name</label><input name="emergency_name"></div>
+<div class="fgp"><label>Relationship</label><input name="emergency_relation" placeholder="e.g. Spouse, Brother"></div>
+<div class="fgp"><label>Emergency Contact Phone</label><input name="emergency_phone"></div>
+</div></div>
+
+<div style="margin-top:8px">
+<button type="submit" class="btn btn-p" id="submitBtn">Submit Travel Interest Registration</button>
+<div class="error" id="errorMsg"></div>
+</div>
+</form>
+</div>
+
+<div class="footer">
+<strong style="color:#333">Embassy of Pakistan, Kuwait</strong><br>
+Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
+Tel: (+965) 25327651, 25354073 | Fax: (+965) 25327648, 25356594<br>
+<strong>Emergency Contacts:</strong> Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265
+</div>
+
+<!-- Duplicate Overlay -->
+<div class="dup-overlay" id="dupOverlay">
+<div class="dup-card">
+<div class="dup-header">
+<div style="font-size:3em">&#9888;&#65039;</div>
+<h2>Already Registered</h2>
+<p style="font-size:.85em;opacity:.9">You have already submitted a travel interest registration</p>
+</div>
+<div class="dup-body">
+<div class="dup-ref">
+<div style="font-size:.78em;color:#555;text-transform:uppercase;letter-spacing:1px">Your Reference Number</div>
+<div class="num" id="dupRefNum"></div>
+</div>
+<div id="dupStatusMsg" style="background:#e3f2fd;border-radius:8px;padding:14px;text-align:center;font-size:.92em;margin-bottom:14px"></div>
+<div dir="rtl" style="text-align:right;font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;line-height:2;font-size:.88em;background:#fafafa;border-radius:8px;padding:12px;margin-bottom:14px">
+آپ پہلے سے رجسٹرڈ ہیں۔ دوبارہ رجسٹریشن کی ضرورت نہیں۔ اپنا ریفرنس نمبر محفوظ رکھیں۔
+</div>
+<a href="/travel-interest/track" style="display:block;text-align:center;padding:12px;background:#006600;color:#fff;text-decoration:none;border-radius:8px;font-weight:600">Track Your Registration</a>
+<button onclick="document.getElementById('dupOverlay').classList.remove('show')" style="width:100%;margin-top:8px;padding:10px;border:1px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:.9em">Close</button>
+</div>
+</div></div>
+
+<script>
+function toggleDirection(){}
+function toggleGroup(){
+const alone=document.getElementById('travelAlone').value==='yes';
+['groupSizeWrap','adultsWrap','childrenWrap','infantsWrap'].forEach(id=>{
+document.getElementById(id).className='fgp conditional'+(alone?'':' show');
+});
+}
+function showDupOverlay(d){
+document.getElementById('dupRefNum').textContent=d.reference_number||'';
+document.getElementById('dupStatusMsg').innerHTML='Status: <strong>'+(d.status||'Submitted')+'</strong>';
+document.getElementById('dupOverlay').classList.add('show');
+}
+async function submitCharter(e){
+e.preventDefault();
+const btn=document.getElementById('submitBtn');
+btn.disabled=true;btn.textContent='Submitting...';
+document.getElementById('errorMsg').style.display='none';
+const fd=new FormData(e.target);const data={};
+fd.forEach((v,k)=>data[k]=v);
+try{
+const r=await fetch('/api/public-charter-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+const d=await r.json();
+if(d.success){
+  window.location='/travel-interest/success?ref='+encodeURIComponent(d.reference_number);
+}else if(d.duplicate){
+  showDupOverlay(d);
+  btn.disabled=false;btn.textContent='Submit Travel Interest Registration';
+}else{
+  document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
+  document.getElementById('errorMsg').style.display='block';
+  btn.disabled=false;btn.textContent='Submit Travel Interest Registration';
+}
+}catch(err){
+document.getElementById('errorMsg').textContent='Network error. Please check your connection and try again.';
+document.getElementById('errorMsg').style.display='block';
+btn.disabled=false;btn.textContent='Submit Travel Interest Registration';
+}return false}
+</script></body></html>"""
+
+# ═══════════════════════════════════════════════════════════════
+# TRAVEL INTEREST SUCCESS PAGE
+# ═══════════════════════════════════════════════════════════════
+CHARTER_SUCCESS_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Registration Successful - Embassy of Pakistan, Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:16px;padding:40px;max-width:520px;width:90%;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.1)}
+.check{font-size:4em;margin-bottom:12px}
+h1{color:#2e7d32;font-size:1.5em;margin-bottom:8px}
+p{color:#555;line-height:1.6;margin-bottom:16px}
+.ref-box{background:#e8f5e9;border:2px solid #006600;border-radius:10px;padding:16px;margin:12px 0;display:none}
+.ref-box .label{font-size:.78em;color:#555;text-transform:uppercase;letter-spacing:1px}
+.ref-box .num{font-size:1.8em;font-weight:800;color:#006600;letter-spacing:2px;margin:4px 0}
+.ref-box .hint{font-size:.75em;color:#888}
+.info{background:#e8f5e9;border-radius:8px;padding:14px;font-size:.88em;color:#1b5e20;margin-bottom:16px;text-align:left}
+.info strong{display:block;margin-bottom:4px}
+a{display:inline-block;padding:12px 24px;background:#006600;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;margin-top:8px}
+a:hover{background:#004d00}
+.urdu{direction:rtl;text-align:right;font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;line-height:2;background:#fafafa;border-radius:8px;padding:12px;margin:12px 0;font-size:.88em;color:#424242}
+</style></head><body>
+<div class="card">
+<div class="check">&#9989;</div>
+<h1>Travel Interest Registered</h1>
+<div class="ref-box" id="refBox">
+<div class="label">Your Reference Number</div>
+<div class="num" id="refNum"></div>
+<div class="hint">Please save this number for future reference / یہ نمبر محفوظ رکھیں</div>
+</div>
+<div class="info">
+<strong>What happens next?</strong>
+The Embassy will review registrations and assess operational feasibility for return travel facilitation from Pakistan to Kuwait. Where possible, further guidance regarding Saudi transit visa processing and coordinated travel arrangements will be shared with registered applicants.
+</div>
+<div class="info">
+<strong>What happens next?</strong>
+The Embassy will assess overall demand and operational feasibility. If sufficient verified interest exists, further steps will be communicated. Registration does not guarantee a seat, visa, ticket, or flight.
+</div>
+<div class="urdu">
+آپ کی رجسٹریشن سفارت خانہ پاکستان، کویت میں پاکستان سے کویت واپسی کی ممکنہ سفری سہولت کے لیے موصول ہو گئی ہے۔ یہ معلومات طلب، آپریشنل فزیبلٹی، سعودی ٹرانزٹ ویزا معاونت، اور ممکنہ واپسی انتظامات کے جائزے کے لیے استعمال کی جائیں گی۔
+</div>
+<p style="font-size:.82em;color:#777">If you need to update your information, contact the Embassy directly.<br>Embassy of Pakistan: Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>Tel: (+965) 25327651, 25354073<br>Emergency: Awais: +965-55977292 | Zahid: +965-55964923 | Shahid Khan: +965-66568265</p>
+<a href="/travel-interest">Submit Another Registration</a>
+<a href="/travel-interest/track" style="background:#1565c0;margin-left:8px">Track Your Registration</a>
+</div>
+<script>
+const ref=new URLSearchParams(window.location.search).get('ref');
+if(ref){document.getElementById('refNum').textContent=ref;document.getElementById('refBox').style.display='block'}
+</script>
+</body></html>"""
+
+# ═══════════════════════════════════════════════════════════════
+# TRAVEL INTEREST TRACKING PAGE (public, no login required)
+# ═══════════════════════════════════════════════════════════════
+CHARTER_TRACKING_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Track Travel Interest - Embassy of Pakistan, Kuwait</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
+.hdr{background:linear-gradient(135deg,#006600,#004d00);color:#fff;padding:24px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.hdr h1{font-size:1.5em;margin-bottom:4px;letter-spacing:.5px}.hdr .sub{font-size:.85em;opacity:.9}
+.ctr{max-width:620px;margin:0 auto;padding:20px}
+.card{background:#fff;border-radius:14px;padding:28px;box-shadow:0 4px 16px rgba(0,0,0,.08);margin-bottom:16px}
+.search-wrap{position:relative}
+.search-wrap input{width:100%;padding:16px 16px 16px 48px;border:2px solid #e0e0e0;border-radius:12px;font-size:1.1em;text-transform:uppercase;letter-spacing:1px;transition:all .3s}
+.search-wrap input:focus{border-color:#006600;outline:none;box-shadow:0 0 0 4px rgba(0,102,0,.12)}
+.search-wrap .icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:1.3em;color:#999}
+.btn{width:100%;padding:16px;border:none;border-radius:12px;cursor:pointer;font-weight:700;font-size:1.05em;transition:all .3s;margin-top:14px}
+.btn-p{background:linear-gradient(135deg,#006600,#004d00);color:#fff}.btn-p:hover{background:linear-gradient(135deg,#004d00,#003300);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,102,0,.3)}
+.btn-p:disabled{background:#999;cursor:not-allowed;transform:none;box-shadow:none}
+.loader{display:none;text-align:center;padding:24px}
+.loader .spin{display:inline-block;width:40px;height:40px;border:4px solid #e0e0e0;border-top:4px solid #006600;border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.err{display:none;background:#ffebee;color:#c62828;padding:14px;border-radius:10px;text-align:center;margin-top:14px;font-size:.92em}
+.result{display:none;margin-top:16px}
+.result .ref{background:#e8f5e9;border:2px solid #006600;border-radius:10px;padding:14px;text-align:center;margin-bottom:14px}
+.result .ref .num{font-size:1.4em;font-weight:800;color:#006600;letter-spacing:2px}
+.result .info-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px dashed #e0e0e0}
+.result .info-row:last-child{border-bottom:none}
+.result .info-row .lbl{font-size:.82em;color:#757575;font-weight:600}
+.result .info-row .val{font-size:.95em;font-weight:700}
+.status-badge{display:inline-block;padding:6px 14px;border-radius:20px;font-weight:700;font-size:.85em}
+.status-badge.submitted{background:#e3f2fd;color:#1565c0}
+.status-badge.verified{background:#e8f5e9;color:#2e7d32}
+.status-badge.contacted{background:#fff3e0;color:#e65100}
+.status-badge.confirmed{background:#e8f5e9;color:#006600}
+.footer{text-align:center;padding:20px;font-size:.8em;color:#999}
+</style></head><body>
+<div class="hdr">
+<div>&#127477;&#127472;</div>
+<h1>TRACK YOUR TRAVEL INTEREST</h1>
+<div class="sub">Embassy of Pakistan, Kuwait &mdash; Travel Facilitation</div>
+</div>
+<div class="ctr">
+<div class="card">
+<h2 style="font-size:1.1em;margin-bottom:4px">Check Registration Status</h2>
+<p style="font-size:.85em;color:#777;margin-bottom:16px">Enter your reference number (TFR-XXXX) or passport number</p>
+<div class="search-wrap">
+<span class="icon">&#128270;</span>
+<input id="searchInput" placeholder="TFR-1234 or AB1234567" autofocus>
+</div>
+<button class="btn btn-p" id="trackBtn" onclick="doTrack()">Track Status</button>
+<div class="loader" id="loader"><div class="spin"></div><p style="margin-top:10px;color:#777;font-size:.88em">Searching records...</p></div>
+<div class="err" id="errMsg"></div>
+<div class="result" id="resultBox">
+<div class="ref"><div style="font-size:.72em;color:#555;text-transform:uppercase;letter-spacing:1px">Reference Number</div><div class="num" id="resRef"></div></div>
+<div class="info-row"><span class="lbl">Name</span><span class="val" id="resName"></span></div>
+<div class="info-row"><span class="lbl">Direction</span><span class="val" id="resDir"></span></div>
+<div class="info-row"><span class="lbl">Status</span><span class="val" id="resStatus"></span></div>
+<div class="info-row"><span class="lbl">Submitted</span><span class="val" id="resDate"></span></div>
+<div dir="rtl" style="text-align:right;font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;line-height:2;font-size:.85em;color:#424242;background:#fafafa;border-radius:8px;padding:12px;margin-top:14px">
+آپ کی رجسٹریشن موجود ہے۔ سفارتخانہ مجموعی طلب کا جائزہ لے رہا ہے۔ مزید اقدامات کی صورت میں آپ سے رابطہ کیا جائے گا۔ رجسٹریشن سیٹ یا ٹکٹ کی ضمانت نہیں دیتی۔
+</div>
+</div>
+</div>
+<a href="/travel-interest" style="display:block;text-align:center;padding:14px;background:#006600;color:#fff;text-decoration:none;border-radius:10px;font-weight:600">Register Travel Interest</a>
+</div>
+<div class="footer">Embassy of Pakistan, Kuwait | Villa 440, Street 108, Block 12, Jabriya</div>
+<script>
+const dirMap={kw_to_pk:'Kuwait → Pakistan',pk_to_kw:'Pakistan → Kuwait',both:'Both Directions'};
+async function doTrack(){
+const val=document.getElementById('searchInput').value.trim();
+if(!val){document.getElementById('errMsg').textContent='Please enter a reference number or passport number.';document.getElementById('errMsg').style.display='block';return}
+document.getElementById('trackBtn').disabled=true;
+document.getElementById('loader').style.display='block';
+document.getElementById('errMsg').style.display='none';
+document.getElementById('resultBox').style.display='none';
+try{
+const r=await fetch('/api/public-charter-track?q='+encodeURIComponent(val));
+const d=await r.json();
+document.getElementById('loader').style.display='none';
+document.getElementById('trackBtn').disabled=false;
+if(d.success){
+document.getElementById('resRef').textContent=d.reference_number;
+document.getElementById('resName').textContent=d.name||'';
+document.getElementById('resDir').textContent=dirMap[d.direction]||d.direction||'';
+const st=d.status||'Submitted';
+const cls=st.toLowerCase().replace(/[^a-z]/g,'');
+document.getElementById('resStatus').innerHTML='<span class="status-badge '+cls+'">'+st+'</span>';
+document.getElementById('resDate').textContent=d.submitted?new Date(d.submitted).toLocaleDateString():'';
+document.getElementById('resultBox').style.display='block';
+}else{
+document.getElementById('errMsg').innerHTML=(d.error||'Not found')+'<br><span dir="rtl" style="font-family:Tahoma,sans-serif;font-size:.9em">اس نمبر سے کوئی رجسٹریشن نہیں ملی</span>';
+document.getElementById('errMsg').style.display='block';
+}
+}catch(err){
+document.getElementById('loader').style.display='none';
+document.getElementById('trackBtn').disabled=false;
+document.getElementById('errMsg').textContent='Network error. Please try again.';
+document.getElementById('errMsg').style.display='block';
+}
+}
+document.getElementById('searchInput').addEventListener('keypress',e=>{if(e.key==='Enter')doTrack()});
+</script></body></html>"""
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN APPLICATION (single-page app)
 # ═══════════════════════════════════════════════════════════════
 MAIN_APP = r"""<!DOCTYPE html>
@@ -2145,6 +3210,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <button class="active" onclick="go('dash',this)">Dashboard</button>
 <button onclick="go('reg',this)">New Registration</button>
 <button onclick="go('recs',this)">All Records</button>
+<button onclick="go('returnees',this)">Returnees</button>
 <button onclick="go('mofa',this)">MOFA Export</button>
 <button onclick="go('csv',this)">CSV Import</button>
 <button onclick="go('report',this)">SITREP Report</button>
@@ -2155,7 +3221,12 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <!-- DASHBOARD -->
 <div id="tab-dash" class="tab active"><div class="ctr">
 <div class="alert" id="alertBar"><span>&#9888;&#65039;</span><span id="alertText"></span></div>
+<h3 style="color:#006600;font-size:1em;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #e8f5e9">Evacuees (Kuwait &rarr; Pakistan)</h3>
 <div class="kg" id="kpiGrid"></div>
+<div style="margin-top:18px;margin-bottom:16px">
+<h3 style="color:#006600;font-size:1em;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #e8f5e9">Returnees (Pakistan &rarr; Kuwait)</h3>
+<div class="kg" id="dashRetKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px"></div>
+</div>
 <div class="cc" style="margin-bottom:16px"><h3>Transit Flow Map</h3><div id="transitMap" style="display:flex;justify-content:center"></div></div>
 <div class="cg"><div class="cc"><h3>Status Breakdown</h3><canvas id="c1"></canvas></div><div class="cc"><h3>Country Distribution</h3><canvas id="c2"></canvas></div></div>
 <div class="cg"><div class="cc"><h3>Gender Breakdown</h3><canvas id="c3"></canvas></div><div class="cc"><h3>Daily Requests &amp; Cumulative</h3><canvas id="c4"></canvas></div></div>
@@ -2222,6 +3293,20 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="rc" id="recCount"></div>
 <div class="scroll-t"><table id="recTbl"></table></div>
 </div></div></div>
+
+<!-- RETURNEES (Pakistan → Kuwait) -->
+<div id="tab-returnees" class="tab"><div class="ctr">
+<div id="retKpiGrid" class="kg" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px"></div>
+<div class="sb">
+<input id="retSearch" placeholder="Search name, passport, reference, mobile..." oninput="loadReturnees()">
+<select id="retStatusF" onchange="loadReturnees()"><option value="">All Statuses</option><option>Submitted</option><option>Under Review</option><option>Verified</option><option>Contacted</option><option>Confirmed</option><option>Allocated</option><option>Travel Completed</option></select>
+<select id="retProvinceF" onchange="loadReturnees()"><option value="">All Provinces</option><option>Punjab</option><option>Sindh</option><option>KPK</option><option>Balochistan</option><option>Islamabad</option><option>AJK</option><option>GB</option></select>
+<select id="retUrgencyF" onchange="loadReturnees()"><option value="">All Urgency</option><option value="general">General</option><option value="medical">Medical</option><option value="family">Family</option><option value="job">Job</option><option value="leave">Leave</option><option value="student">Student</option><option value="other">Other</option></select>
+<select id="retVisaF" onchange="loadReturnees()"><option value="">All Visa</option><option value="approved">Approved</option><option value="pending">Pending</option><option value="not_applied">Not Applied</option></select>
+</div>
+<div class="rc" id="retCount"></div>
+<div class="scroll-t"><table id="retTbl"></table></div>
+</div></div>
 
 <!-- CSV IMPORT -->
 <div id="tab-csv" class="tab"><div class="ctr">
@@ -2559,7 +3644,7 @@ document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
 document.getElementById('tab-'+tab).classList.add('active');
 btn.classList.add('active');
-if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();
+if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}
 }
 
 async function api(url,opts){const r=await fetch(url,opts);if(r.status===302||r.redirected){window.location='/login';return null}return r.json()}
@@ -2642,6 +3727,19 @@ mkChart('c6','bar',{labels:d.by_border.map(b=>b.border_crossing),datasets:[{labe
 let thtml='<thead><tr><th>Country</th><th>Total</th><th>Departed</th><th>Visa</th><th>Pending</th><th>M</th><th>F</th><th>Ch</th><th>%</th></tr></thead><tbody>';
 cn.forEach(c=>{thtml+=`<tr><td><strong>${c.country||'?'}</strong></td><td>${c.total}</td><td>${c.departed}</td><td>${c.visa_obtained}</td><td>${c.pending}</td><td>${c.males}</td><td>${c.females}</td><td>${c.children}</td><td>${(c.total/k.total*100).toFixed(1)}%</td></tr>`});
 thtml+='</tbody>';document.getElementById('countryTbl').innerHTML=thtml;
+// Returnees KPI on dashboard
+const rd=await api('/api/returnees-stats');
+if(rd&&rd.kpi){const rk=rd.kpi;
+document.getElementById('dashRetKpi').innerHTML=`
+<div class="kc i"><div class="lb">TOTAL REGISTERED</div><div class="vl">${rk.total}</div></div>
+<div class="kc" style="background:#e3f2fd"><div class="lb">SUBMITTED</div><div class="vl">${rk.submitted}</div></div>
+<div class="kc s"><div class="lb">VERIFIED</div><div class="vl">${rk.verified}</div></div>
+<div class="kc" style="background:#fff3e0"><div class="lb">CONTACTED</div><div class="vl">${rk.contacted}</div></div>
+<div class="kc s"><div class="lb">VISA APPROVED</div><div class="vl">${rk.approved_visa}</div></div>
+<div class="kc d"><div class="lb">PENDING VISA</div><div class="vl">${rk.pending_visa}</div></div>
+<div class="kc i"><div class="lb">WITH FAMILY</div><div class="vl">${rk.with_family}</div></div>
+<div class="kc s"><div class="lb">READY TO TRAVEL</div><div class="vl">${rk.ready_to_travel}</div></div>`;
+}
 }
 function mkChart(id,type,data,opts){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),{type,data,options:{responsive:true,...opts}})}
 
@@ -3226,6 +4324,37 @@ const r=await fetch('/api/generate-sitrep-docx',{method:'POST',headers:{'Content
 if(r.ok){const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);
 a.download='SITREP_'+new Date().toISOString().slice(0,10)+'.docx';a.click();toast('SITREP downloaded')}
 else toast('Generation failed')}
+
+// RETURNEES
+async function loadReturneesStats(){
+const d=await api('/api/returnees-stats');if(!d||!d.kpi)return;
+const k=d.kpi;
+document.getElementById('retKpiGrid').innerHTML=`
+<div class="kc i"><div class="lb">Total Registered</div><div class="vl">${k.total}</div></div>
+<div class="kc" style="background:#e3f2fd"><div class="lb">Submitted</div><div class="vl">${k.submitted}</div></div>
+<div class="kc s"><div class="lb">Verified</div><div class="vl">${k.verified}</div></div>
+<div class="kc" style="background:#fff3e0"><div class="lb">Contacted</div><div class="vl">${k.contacted}</div></div>
+<div class="kc s"><div class="lb">Visa Approved</div><div class="vl">${k.approved_visa}</div></div>
+<div class="kc d"><div class="lb">Pending Visa</div><div class="vl">${k.pending_visa}</div></div>
+<div class="kc i"><div class="lb">With Family</div><div class="vl">${k.with_family}</div></div>
+<div class="kc s"><div class="lb">Ready to Travel</div><div class="vl">${k.ready_to_travel}</div></div>`;
+}
+async function loadReturnees(){
+const p=new URLSearchParams();
+const sv=document.getElementById('retSearch').value.trim();if(sv)p.set('search',sv);
+const st=document.getElementById('retStatusF').value;if(st)p.set('status',st);
+const pr=document.getElementById('retProvinceF').value;if(pr)p.set('province',pr);
+const ur=document.getElementById('retUrgencyF').value;if(ur)p.set('urgency',ur);
+const vi=document.getElementById('retVisaF').value;if(vi)p.set('visa',vi);
+const rows=await api('/api/returnees?'+p.toString());if(!rows)return;
+document.getElementById('retCount').textContent='Showing '+rows.length+' returnee records';
+let h='<thead><tr><th>#</th><th>Ref</th><th>Name</th><th>Passport</th><th>Gender</th><th>Mobile</th><th>City (PK)</th><th>Province</th><th>Dest (KW)</th><th>Urgency</th><th>Alone</th><th>Group</th><th>Visa Applied</th><th>Visa Approved</th><th>Status</th><th>Submitted</th></tr></thead><tbody>';
+rows.forEach((r,i)=>{
+const sb=r.status==='Verified'?'bdg-app':r.status==='Submitted'?'bdg-pen':r.status==='Contacted'?'bdg-vis':'bdg-pen';
+const va=r.saudi_visa_approved==='yes'?'bdg-app':r.saudi_visa_approved==='pending'?'bdg-pen':'bdg-rej';
+h+=`<tr><td>${i+1}</td><td><strong>${r.reference_number||''}</strong></td><td>${r.full_name||''}</td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.mobile||''}</td><td>${r.current_city_pk||''}</td><td>${r.province_pk||''}</td><td>${r.destination_area_kw||''}</td><td>${r.travel_urgency||''}</td><td>${r.traveling_alone||''}</td><td>${r.group_size||1}</td><td>${r.saudi_visa_applied||'-'}</td><td><span class="bdg ${va}">${r.saudi_visa_approved||'-'}</span></td><td><span class="bdg ${sb}">${r.status||'-'}</span></td><td>${r.submission_timestamp?r.submission_timestamp.slice(0,10):'-'}</td></tr>`;
+});h+='</tbody>';document.getElementById('retTbl').innerHTML=h;
+}
 
 // ROLE-BASED ACCESS CONTROL
 const USER_ROLE='__USER_ROLE__';
