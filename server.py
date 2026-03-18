@@ -3279,8 +3279,11 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 <option value="125">Up to 125 KWD</option>
 <option value="150">Up to 150 KWD</option>
 <option value="200">Up to 200 KWD</option>
-<option value="250">200+ KWD</option>
-<option value="0">I would need full Embassy/employer support</option>
+<option value="250">Up to 250 KWD</option>
+<option value="300">Up to 300 KWD</option>
+<option value="350">Up to 350 KWD</option>
+<option value="400">Up to 400 KWD</option>
+<option value="450">Up to 450 KWD</option>
 </select></div>
 <div class="fgp"><label>Would your employer contribute towards your return travel?</label>
 <select name="employer_sponsor"><option value="">Not sure</option><option value="yes">Yes — employer will support</option><option value="no">No</option><option value="maybe">Maybe / Under discussion</option></select></div>
