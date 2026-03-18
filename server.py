@@ -1140,23 +1140,113 @@ def api_charter_register(data, source_ip='unknown'):
     # Resolve identity
     person_id = find_or_create_person(db, data)
 
-    # Duplicate check: same person + same direction already active
+    # Check for existing active charter_interest for same person + direction
     existing = db.execute(
-        "SELECT id, reference_number, status FROM charter_interest WHERE person_id = ? AND travel_direction = ? AND cancellation_status = 'active'",
+        "SELECT id, reference_number, status, source_channel FROM charter_interest WHERE person_id = ? AND travel_direction = ? AND cancellation_status = 'active'",
         [person_id, direction]).fetchone()
 
     if existing:
         existing = dict(existing)
-        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('charter_dup_attempt', ?, ?, ?)",
-                   (existing['id'], source_ip, json.dumps({'name': name, 'passport': passport})))
+        ci_id = existing['id']
+        ref = existing['reference_number']
+
+        # UPDATE person_master with richer data (only fill empty or update with new non-empty values)
+        pm_fields = ['full_name','father_name','gender','date_of_birth','passport_expiry',
+                     'cnic','civil_id','mobile','whatsapp','alt_mobile','email',
+                     'emergency_name','emergency_relation','emergency_phone']
+        pm_map = {'full_name': data.get('name') or data.get('full_name',''),
+                  'father_name': data.get('father_name',''),
+                  'gender': data.get('gender',''),
+                  'date_of_birth': data.get('dob') or data.get('date_of_birth',''),
+                  'passport_expiry': data.get('passport_expiry',''),
+                  'cnic': _normalize_cnic(data.get('cnic','')),
+                  'civil_id': (data.get('civil_id') or '').strip(),
+                  'mobile': (data.get('mobile') or '').strip(),
+                  'whatsapp': data.get('whatsapp',''),
+                  'alt_mobile': data.get('alt_mobile',''),
+                  'email': data.get('email',''),
+                  'emergency_name': data.get('emergency_name',''),
+                  'emergency_relation': data.get('emergency_relation',''),
+                  'emergency_phone': data.get('emergency_phone','')}
+        pm_updates, pm_params = [], []
+        for f in pm_fields:
+            new_val = pm_map.get(f, '').strip() if pm_map.get(f) else ''
+            if new_val:
+                # Update: overwrite with latest non-empty value
+                pm_updates.append(f"{f} = ?")
+                pm_params.append(new_val)
+        if pm_updates:
+            pm_params.append(person_id)
+            db.execute(f"UPDATE person_master SET {', '.join(pm_updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", pm_params)
+
+        # UPDATE charter_interest with all new detailed fields (overwrite with non-empty)
+        ci_update_fields = {
+            'current_area_kuwait': data.get('current_area_kuwait', ''),
+            'residency_status': data.get('residency_status', ''),
+            'destination_city_pk': data.get('destination_city_pk', ''),
+            'preferred_airport_pk': data.get('preferred_airport_pk', ''),
+            'current_city_pk': data.get('current_city_pk', ''),
+            'province_pk': data.get('province_pk', ''),
+            'has_valid_civil_id': data.get('has_valid_civil_id', ''),
+            'has_valid_residency': data.get('has_valid_residency', ''),
+            'saudi_visa_applied': data.get('saudi_visa_applied', ''),
+            'saudi_visa_approved': data.get('saudi_visa_approved', ''),
+            'employer_kw': data.get('employer_kw', ''),
+            'destination_area_kw': data.get('destination_area_kw', ''),
+            'travel_urgency': data.get('travel_urgency', ''),
+            'earliest_travel_date': data.get('earliest_travel_date', ''),
+            'latest_travel_date': data.get('latest_travel_date', ''),
+            'travel_readiness': data.get('travel_readiness', ''),
+            'traveling_alone': data.get('traveling_alone', ''),
+            'group_size': data.get('group_size', ''),
+            'adults_count': data.get('adults_count', ''),
+            'children_count': data.get('children_count', ''),
+            'infants_count': data.get('infants_count', ''),
+            'must_travel_together': data.get('must_travel_together', ''),
+            'interest_level': data.get('interest_level', ''),
+            'can_bear_cost': data.get('can_bear_cost', ''),
+            'max_affordable_fare': data.get('max_affordable_fare', ''),
+            'fare_currency': data.get('fare_currency', ''),
+            'deposit_ready': data.get('deposit_ready', ''),
+            'max_deposit_amount': data.get('max_deposit_amount', ''),
+            'preferred_payment': data.get('preferred_payment', ''),
+            'employer_sponsor': data.get('employer_sponsor', ''),
+            'employer_name': data.get('employer_name', ''),
+            'needs_installment': data.get('needs_installment', ''),
+            'flexible_date': data.get('flexible_date', ''),
+            'flexible_airport': data.get('flexible_airport', ''),
+            'flexible_boarding': data.get('flexible_boarding', ''),
+            'flexible_charter_vs_scheduled': data.get('flexible_charter_vs_scheduled', ''),
+            'flexible_baggage': data.get('flexible_baggage', ''),
+            'extra_baggage': data.get('extra_baggage', ''),
+            'extra_baggage_kg': data.get('extra_baggage_kg', ''),
+            'is_moh_employee': data.get('is_moh_employee', ''),
+            'moh_leave_end': data.get('moh_leave_end', ''),
+        }
+        ci_ups, ci_ps = [], []
+        for f, v in ci_update_fields.items():
+            sv = str(v).strip() if v else ''
+            if sv:
+                ci_ups.append(f"{f} = ?")
+                ci_ps.append(sv)
+        if ci_ups:
+            # Mark as updated via web (richer data now)
+            ci_ups.append("source_channel = ?")
+            ci_ps.append('web_update')
+            ci_ps.append(ci_id)
+            db.execute(f"UPDATE charter_interest SET {', '.join(ci_ups)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", ci_ps)
+
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('charter_update_via_form', ?, ?, ?)",
+                   (ci_id, source_ip, json.dumps({'name': name, 'passport': passport, 'updated_fields': len(ci_ups)})))
         db.commit()
         db.close()
         return {
-            'success': False,
-            'duplicate': True,
-            'reference_number': existing['reference_number'],
-            'status': existing['status'],
-            'error': f"You have already registered for this travel direction. Your reference is {existing['reference_number']}."
+            'success': True,
+            'updated': True,
+            'reference_number': ref,
+            'id': ci_id,
+            'person_id': person_id,
+            'message': f'Your registration {ref} has been updated with the latest information.'
         }
 
     # Generate reference
@@ -3266,7 +3356,8 @@ try{
 const r=await fetch('/api/public-charter-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 const d=await r.json();
 if(d.success){
-  window.location='/travel-interest/success?ref='+encodeURIComponent(d.reference_number);
+  const upd=d.updated?'&updated=1':'';
+  window.location='/travel-interest/success?ref='+encodeURIComponent(d.reference_number)+upd;
 }else if(d.duplicate){
   showDupOverlay(d);
   btn.disabled=false;btn.textContent='Submit Travel Interest Registration';
@@ -3307,19 +3398,21 @@ a:hover{background:#004d00}
 </style></head><body>
 <div class="card">
 <div class="check">&#9989;</div>
-<h1>Travel Interest Registered</h1>
+<h1 id="successTitle">Travel Interest Registered</h1>
 <div class="ref-box" id="refBox">
 <div class="label">Your Reference Number</div>
 <div class="num" id="refNum"></div>
 <div class="hint">Please save this number for future reference / یہ نمبر محفوظ رکھیں</div>
 </div>
-<div class="info">
-<strong>What happens next?</strong>
-The Embassy will review registrations and assess operational feasibility for return travel facilitation from Pakistan to Kuwait. Where possible, further guidance regarding Saudi transit visa processing and coordinated travel arrangements will be shared with registered applicants.
+<div id="updatedBanner" style="display:none;background:linear-gradient(135deg,#e3f2fd,#bbdefb);border:2px solid #1565c0;border-radius:10px;padding:16px;margin-bottom:14px;text-align:center">
+<div style="font-size:1.3em;margin-bottom:4px">&#128260;</div>
+<strong style="color:#1565c0">Your registration has been updated!</strong>
+<p style="font-size:.88em;color:#555;margin-top:4px">We found your previous registration and have updated it with your latest information. Your reference number remains the same.</p>
+<div dir="rtl" style="font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;margin-top:6px;font-size:.85em;color:#424242">آپ کی پہلے سے موجود رجسٹریشن جدید ترین معلومات کے ساتھ اپ ڈیٹ کر دی گئی ہے۔</div>
 </div>
-<div class="info">
+<div class="info" id="newRegInfo">
 <strong>What happens next?</strong>
-The Embassy will assess overall demand and operational feasibility. If sufficient verified interest exists, further steps will be communicated. Registration does not guarantee a seat, visa, ticket, or flight.
+The Embassy will review registrations and assess operational feasibility for return travel facilitation from Pakistan to Kuwait. Where possible, further guidance regarding Saudi transit visa processing and coordinated travel arrangements will be shared with registered applicants. Registration does not guarantee a seat, visa, ticket, or flight.
 </div>
 <div class="urdu">
 آپ کی رجسٹریشن سفارت خانہ پاکستان، کویت میں پاکستان سے کویت واپسی کی ممکنہ سفری سہولت کے لیے موصول ہو گئی ہے۔ یہ معلومات طلب، آپریشنل فزیبلٹی، سعودی ٹرانزٹ ویزا معاونت، اور ممکنہ واپسی انتظامات کے جائزے کے لیے استعمال کی جائیں گی۔
@@ -3330,7 +3423,9 @@ The Embassy will assess overall demand and operational feasibility. If sufficien
 </div>
 <script>
 const ref=new URLSearchParams(window.location.search).get('ref');
+const updated=new URLSearchParams(window.location.search).get('updated');
 if(ref){document.getElementById('refNum').textContent=ref;document.getElementById('refBox').style.display='block'}
+if(updated){document.getElementById('updatedBanner').style.display='block';document.getElementById('successTitle').textContent='Registration Updated Successfully'}
 </script>
 </body></html>"""
 
