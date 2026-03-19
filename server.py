@@ -1607,6 +1607,64 @@ def import_returnees_csv(csv_text, user='system'):
     return stats
 
 
+def import_visa_approvals_csv(csv_text, user='system'):
+    """Import visa approval CSV (Name + Passport columns). Auto-maps columns, updates visa_status to Approved."""
+    stats = {'approved': 0, 'not_found': 0, 'already_approved': 0, 'errors': 0, 'details': []}
+    reader = csv.DictReader(io.StringIO(csv_text))
+    col_map = {}
+    for orig_col in (reader.fieldnames or []):
+        cl = orig_col.strip().lower()
+        if 'name' in cl and 'file' not in cl: col_map[orig_col] = 'name'
+        elif 'passport' in cl: col_map[orig_col] = 'passport'
+    if 'passport' not in col_map.values():
+        return {'approved': 0, 'not_found': 0, 'errors': 1, 'details': ['Could not find a Passport column in CSV']}
+    db = get_db()
+    row_num = 0
+    for row in reader:
+        row_num += 1
+        try:
+            rec = {}
+            for orig_col, field in col_map.items():
+                val = row.get(orig_col, '').strip()
+                if val: rec[field] = val
+            passport = (rec.get('passport', '') or '').strip().upper().replace(' ', '')
+            name = rec.get('name', '').strip()
+            if not passport:
+                stats['errors'] += 1
+                stats['details'].append(f"Row {row_num}: No passport, skipped")
+                continue
+            existing = db.execute(
+                "SELECT id, name, visa_status, travel_status FROM evacuees WHERE UPPER(TRIM(passport)) = ?",
+                [passport]).fetchone()
+            if not existing:
+                stats['not_found'] += 1
+                stats['details'].append(f"Row {row_num}: {name} ({passport}) — NOT FOUND in system")
+                continue
+            if existing['visa_status'] == 'Approved':
+                stats['already_approved'] += 1
+                stats['details'].append(f"Row {row_num}: {existing['name']} ({passport}) — already Approved")
+                continue
+            # Update visa to Approved and trigger workflow
+            db.execute("""UPDATE evacuees SET visa_status='Approved', updated_at=CURRENT_TIMESTAMP, updated_by=?
+                WHERE id = ?""", [user, existing['id']])
+            # Auto-update travel_status via workflow
+            if existing['travel_status'] == 'Pending':
+                db.execute("""UPDATE evacuees SET travel_status='Visa Obtained', updated_at=CURRENT_TIMESTAMP, updated_by=?
+                    WHERE id = ?""", [user, existing['id']])
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('visa_csv_approve', ?, ?, ?)",
+                       (existing['id'], user, f"Visa approved via CSV upload for {existing['name']} ({passport})"))
+            stats['approved'] += 1
+            stats['details'].append(f"Row {row_num}: {existing['name']} ({passport}) — APPROVED ✓")
+        except Exception as e:
+            stats['errors'] += 1
+            stats['details'].append(f"Row {row_num}: Error — {str(e)}")
+    db.commit()
+    db.execute("INSERT INTO audit_log (action, user, details) VALUES (?, ?, ?)",
+               ('visa_csv_import', user, f"Approved {stats['approved']}, not found {stats['not_found']}, already {stats['already_approved']}"))
+    db.commit(); db.close()
+    return stats
+
+
 def api_delete_record(rec_id, user):
     db = get_db()
     db.execute("DELETE FROM evacuees WHERE id = ?", [rec_id])
@@ -1749,6 +1807,13 @@ def generate_sitrep_docx(data):
 
     body += make_section('8', 'Status of Evacuation', data.get('evac_status', ''))
     body += make_para('', size=10)
+
+    # Returnees section
+    returnees_data = data.get('returnees_status', '')
+    if returnees_data:
+        body += make_para('8b. Returnees — Pakistan to Kuwait', bold=True, size=24, space_after=60)
+        body += make_multiline(returnees_data, size=22)
+        body += make_para('', size=10)
 
     body += make_section('9', 'Risks & Challenges', data.get('risks', ''))
     body += make_para('', size=10)
@@ -2027,7 +2092,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     COALESCE(mofa_sent_date,'') as mofa_sent_date,
                     COALESCE(mofa_batch_id,'') as mofa_batch_id
                     FROM evacuees
-                    WHERE dup_flag='CLEAR' AND (travel_status='Pending' OR mofa_status='Sent to MOFA')
+                    WHERE dup_flag='CLEAR' AND (
+                        (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New'))
+                        OR mofa_status='Sent to MOFA'
+                    )
                     ORDER BY id""").fetchall()
             else:
                 rows = db.execute("""SELECT id, name, passport, border_crossing, visa_status, mobile FROM evacuees
@@ -2581,11 +2649,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     [letter_number, letter_date, sent_date, user['user'], from_id or 0, to_id or 0, count])
                 batch_id = batch_cur.lastrowid
-                # Update batch_id on records
+                # Update batch_id on records — both range and id-based
                 if from_id is not None and to_id is not None:
                     db.execute("""UPDATE evacuees SET mofa_batch_id=? WHERE id >= ? AND id <= ?
-                        AND mofa_status='Sent to MOFA' AND mofa_sent_date=?""",
-                        [batch_id, from_id, to_id, sent_date])
+                        AND mofa_status='Sent to MOFA' AND mofa_sent_date LIKE ?""",
+                        [batch_id, from_id, to_id, sent_date[:10] + '%'])
+                elif ids and len(ids) > 0:
+                    id_ph = ','.join(['?'] * len(ids))
+                    db.execute(f"""UPDATE evacuees SET mofa_batch_id=? WHERE id IN ({id_ph})
+                        AND mofa_status='Sent to MOFA'""",
+                        [batch_id] + [int(i) for i in ids])
                 db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_batch_sent', 0, ?, ?)",
                           [user['user'], f'Marked {count} records as Sent to MOFA | Letter: {letter_number} | Date: {letter_date}'])
                 db.commit()
@@ -2604,6 +2677,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 passports = [p.strip() for p in re.split(r'[,\n;]+', passports) if p.strip()]
             result = bulk_update_visa_status(passports, status, user['user'])
             self.send_json(result)
+
+        elif path == '/api/upload-visa-approvals':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Only admin can upload visa approvals'}, 403); return
+            content_type = self.headers.get('Content-Type', '')
+            if 'multipart/form-data' in content_type:
+                boundary = content_type.split('boundary=')[1].strip()
+                parts = body.split(f'--{boundary}'.encode())
+                csv_data = None
+                for part in parts:
+                    part_str = part.decode('latin-1')
+                    if 'name="file"' in part_str:
+                        csv_data = part_str.split('\r\n\r\n', 1)[1].rsplit('\r\n', 1)[0]
+                if csv_data:
+                    stats = import_visa_approvals_csv(csv_data, user['user'])
+                    self.send_json(stats)
+                else:
+                    self.send_json({'error': 'No CSV data found'}, 400)
+            else:
+                csv_data = body.decode('latin-1')
+                self.send_json(import_visa_approvals_csv(csv_data, user['user']))
 
         elif path == '/api/backup':
             user = self.require_auth()
@@ -3943,6 +4038,11 @@ Airlines and Pakistani community representatives</textarea>
 <div id="sr_evac_status" style="padding:10px;background:#f8f9fa;border-radius:6px;font-size:.88em"></div>
 </div>
 
+<div class="fs" style="border-left:3px solid #006600"><h3>8b. Returnees — Pakistan to Kuwait (Auto-populated)</h3>
+<p style="font-size:.82em;color:var(--tl);margin-bottom:8px">Travel interest registrations from Pakistani nationals in Pakistan seeking to return to Kuwait.</p>
+<div id="sr_returnees_status" style="padding:10px;background:#f0f7f0;border-radius:6px;font-size:.88em"></div>
+</div>
+
 <div class="fs"><h3>9. Risks &amp; Challenges</h3>
 <textarea id="sr_risks" rows="3" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.88em">Airspace disruption affecting outbound travel.
 No deterioration in ground security situation.</textarea>
@@ -3996,6 +4096,18 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <button class="btn btn-p" onclick="bulkVisaUpdate()">Update All</button>
 <div id="bulkResult" style="display:none;margin-top:12px"><div id="bulkStats"></div><div class="imp-result" id="bulkDetails"></div></div>
+</div>
+<div class="fs" style="border-left:3px solid #2e7d32">
+<h3>Upload Visa Approvals from CSV/Excel</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Upload a CSV or Excel export containing <strong>Name</strong> and <strong>Passport Number</strong> columns. The system will auto-match passports and mark them as <strong>Approved</strong>. Travel status will auto-update to "Visa Obtained" where applicable.</p>
+<div class="fg" style="margin-bottom:14px">
+<div class="fgp"><label>CSV File (Name + Passport columns)</label><input type="file" id="visaCsvFile" accept=".csv"></div>
+</div>
+<button class="btn btn-p" onclick="uploadVisaCSV()">Upload &amp; Approve</button>
+<div id="visaCsvResult" style="display:none;margin-top:12px">
+<div id="visaCsvStats" style="padding:10px;background:#e8f5e9;border-radius:6px;margin-bottom:8px"></div>
+<div id="visaCsvDetails" class="imp-result" style="max-height:300px;overflow-y:auto;font-size:.82em;background:#f9f9f9;padding:10px;border-radius:6px"></div>
+</div>
 </div>
 <div class="fs" style="border-left:3px solid var(--s)">
 <h3>Backup &amp; Recovery</h3>
@@ -4544,7 +4656,7 @@ filtered=filtered.filter(r=>r.visa_status!=='Approved');
 filtered=filtered.filter(r=>r.visa_status==='Approved');
 }
 if(dateFilter){
-filtered=filtered.filter(r=>r.mofa_sent_date===dateFilter);
+filtered=filtered.filter(r=>(r.mofa_sent_date||'').startsWith(dateFilter));
 }
 document.getElementById('mofaSentCount').textContent=filtered.length+' records'+(dateFilter?' (filtered by date: '+dateFilter+')':'');
 let sh='<thead><tr><th>#</th><th>Rec#</th><th>Name</th><th>Passport</th><th>Border</th><th>Visa Status</th><th>MOFA Letter/Fax</th><th>Letter Date</th><th>Sent Date</th></tr></thead><tbody>';
@@ -4744,6 +4856,21 @@ document.getElementById('bulkStats').innerHTML=`<span class="stat-box stat-ok">U
 document.getElementById('bulkDetails').textContent=(r.details||[]).join('\n');
 loadDash();toast(`Updated ${r.updated} records`)}}
 
+async function uploadVisaCSV(){
+const file=document.getElementById('visaCsvFile').files[0];
+if(!file){toast('Select a CSV file');return}
+const fd=new FormData();fd.append('file',file);
+try{
+const r=await fetch('/api/upload-visa-approvals',{method:'POST',body:fd});
+const d=await r.json();
+if(d.error){toast(d.error);return}
+document.getElementById('visaCsvResult').style.display='block';
+document.getElementById('visaCsvStats').innerHTML=`<strong style="color:#2e7d32">Approved:</strong> ${d.approved||0} | <strong>Not Found:</strong> ${d.not_found||0} | <strong>Already Approved:</strong> ${d.already_approved||0} | <strong style="color:#c62828">Errors:</strong> ${d.errors||0}`;
+document.getElementById('visaCsvDetails').innerHTML=d.details?d.details.map(x=>'<div>'+x+'</div>').join(''):'';
+loadDash();loadRecords();toast(`${d.approved} visas approved via CSV`);
+}catch(err){toast('Upload error: '+err.message)}
+}
+
 // BACKUP
 async function createBackup(){const r=await api('/api/backup',{method:'POST'});if(r?.success){toast('Backup created');loadBackups()}}
 async function loadBackups(){const r=await api('/api/backups');if(!r||r.error)return;
@@ -4765,6 +4892,14 @@ let evac='Total Registered: '+k.total+'\nDeparted: '+k.departed+'\nVisa Obtained
 d.by_country.forEach(c=>{evac+=c.country+': '+c.total+' (Departed: '+c.departed+', Pending: '+c.pending+')\n'});
 evac+='\nGender:\n';d.by_gender.forEach(g=>{evac+=g.gender+': '+g.count+' (Departed: '+g.departed+')\n'});
 document.getElementById('sr_evac_status').innerText=evac;
+// Returnees data for SITREP
+const rd=await api('/api/returnees-stats');
+if(rd&&rd.kpi){const rk=rd.kpi;
+let retText='Total Registered (Pakistan → Kuwait): '+rk.total+'\nSubmitted: '+rk.submitted+'\nVerified: '+rk.verified+'\nContacted: '+rk.contacted+'\nSaudi Visa Approved: '+rk.approved_visa+'\nPending Visa: '+rk.pending_visa+'\nWith Family: '+rk.with_family+'\nReady to Travel: '+rk.ready_to_travel;
+if(rd.by_province&&rd.by_province.length>0){retText+='\n\nBy Province:\n';rd.by_province.forEach(p=>{retText+=p.province+': '+p.count+'\n'})}
+if(rd.by_urgency&&rd.by_urgency.length>0){retText+='\nBy Urgency:\n';rd.by_urgency.forEach(u=>{retText+=u.urgency+': '+u.count+'\n'})}
+document.getElementById('sr_returnees_status').innerText=retText;
+}
 toast('SITREP data refreshed')}
 
 async function downloadSitrepDocx(){
@@ -4777,6 +4912,7 @@ airport:document.getElementById('sr_airport').value,notam:document.getElementByI
 land:document.getElementById('sr_land').value,facilitation:document.getElementById('sr_facilitation').value,
 coordination:document.getElementById('sr_coordination').value,evac_air:document.getElementById('sr_evac_air').value,
 evac_land:document.getElementById('sr_evac_land').value,evac_status:document.getElementById('sr_evac_status').innerText,
+returnees_status:document.getElementById('sr_returnees_status').innerText,
 risks:document.getElementById('sr_risks').value,assessment:document.getElementById('sr_assessment').value};
 const r=await fetch('/api/generate-sitrep-docx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 if(r.ok){const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);
