@@ -2149,8 +2149,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     WHERE mofa_status='Sent to MOFA' AND visa_status != 'Approved' AND dup_flag='CLEAR'"""
                 qparams = []
                 if date_filter:
-                    q += " AND mofa_sent_date = ?"
-                    qparams.append(date_filter)
+                    q += " AND mofa_sent_date LIKE ?"
+                    qparams.append(date_filter + '%')
                 q += " ORDER BY id"
                 rows = db.execute(q, qparams).fetchall()
             elif filter_type == 'approved':
@@ -2162,8 +2162,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     WHERE mofa_status='Sent to MOFA' AND visa_status='Approved' AND dup_flag='CLEAR'"""
                 qparams = []
                 if date_filter:
-                    q += " AND mofa_sent_date = ?"
-                    qparams.append(date_filter)
+                    q += " AND mofa_sent_date LIKE ?"
+                    qparams.append(date_filter + '%')
                 q += " ORDER BY id"
                 rows = db.execute(q, qparams).fetchall()
             elif filter_type == 'all_sent':
@@ -2175,8 +2175,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     WHERE mofa_status='Sent to MOFA' AND dup_flag='CLEAR'"""
                 qparams = []
                 if date_filter:
-                    q += " AND mofa_sent_date = ?"
-                    qparams.append(date_filter)
+                    q += " AND mofa_sent_date LIKE ?"
+                    qparams.append(date_filter + '%')
                 q += " ORDER BY id"
                 rows = db.execute(q, qparams).fetchall()
             else:
@@ -4723,6 +4723,19 @@ function downloadMofaPendingCSV(){
 const filter=document.getElementById('mofaSentFilter').value;
 const dateFilter=document.getElementById('mofaSentDateFilter').value;
 const filterParam=filter==='pending_mofa'?'pending_mofa':filter==='approved'?'approved':'all_sent';
+if(dateFilter){
+let filtered=mofaSentRecords;
+if(filter==='pending_mofa'){
+filtered=filtered.filter(r=>r.visa_status!=='Approved');
+}else if(filter==='approved'){
+filtered=filtered.filter(r=>r.visa_status==='Approved');
+}
+filtered=filtered.filter(r=>(r.mofa_sent_date||'').startsWith(dateFilter));
+if(filtered.length===0){
+toast('No records found for selected date. Please choose another date.');
+return;
+}
+}
 let url='/api/mofa-export?filter='+filterParam;
 if(dateFilter) url+='&date='+encodeURIComponent(dateFilter);
 window.open(url,'_blank');
@@ -4740,8 +4753,12 @@ filtered=filtered.filter(r=>r.visa_status==='Approved');
 title='Cases Approved by MOFA KSA';
 }
 if(dateFilter){
-filtered=filtered.filter(r=>r.mofa_sent_date===dateFilter);
+filtered=filtered.filter(r=>(r.mofa_sent_date||'').startsWith(dateFilter));
 title+=' (Sent on: '+dateFilter+')';
+}
+if(dateFilter&&filtered.length===0){
+toast('No records found for selected date. Please choose another date.');
+return;
 }
 let html='<html><head><title>'+title+'</title><style>';
 html+='body{font-family:Arial,sans-serif;padding:20px;font-size:12px}';
