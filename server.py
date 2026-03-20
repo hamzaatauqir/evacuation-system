@@ -4068,7 +4068,7 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Username</label><input id="nu_user"></div>
 <div class="fgp"><label>Password</label><input id="nu_pass" type="password"></div>
 <div class="fgp"><label>Full Name</label><input id="nu_name"></div>
-<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>admin</option><option>viewer</option></select></div>
+<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>admin</option><option>viewer</option><option>other</option></select></div>
 </div>
 <button class="btn btn-p" onclick="createUser()">Create User</button>
 <div style="margin-top:14px"><table id="usersTbl"></table></div>
@@ -4892,7 +4892,7 @@ if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</t
 u.forEach(x=>{
 h+=`<tr><td><strong>${x.username}</strong></td><td>${x.full_name||'-'}</td>
 <td><select onchange="updateUserRole(${x.id},this.value)" style="padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:.85em">
-<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='viewer'?' selected':''}>viewer</option></select></td>
+<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='other'?' selected':''}>other</option></select></td>
 <td style="font-size:.8em">${x.created_at}</td>
 <td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminResetPw(${x.id},'${x.username}')">Reset PW</button><button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="adminDeleteUser(${x.id},'${x.username}')">Delete</button></td></tr>`});
 h+='</tbody>';document.getElementById('usersTbl').innerHTML=h}
@@ -5146,6 +5146,19 @@ const USER_ROLE='__USER_ROLE__';
 const USER_NAME='__USER_NAME__';
 function applyRoleRestrictions(){
 document.getElementById('userDisplay').textContent=USER_NAME+' ('+USER_ROLE+')';
+// Other: dashboard-only view for third-party transportation display
+if(USER_ROLE==='other'){
+const navButtons=[...document.querySelectorAll('.nav button')];
+navButtons.forEach(b=>{
+if(b.textContent.trim()!=='Dashboard') b.style.display='none';
+});
+document.querySelectorAll('.tab').forEach(t=>{
+if(t.id!=='tab-dash') t.style.display='none';
+});
+const dashBtn=navButtons.find(b=>b.textContent.trim()==='Dashboard');
+if(dashBtn) go('dash',dashBtn);
+return;
+}
 // Viewer: can only see dashboard and reports
 if(USER_ROLE==='viewer'){
 document.querySelectorAll('.nav button').forEach(b=>{
