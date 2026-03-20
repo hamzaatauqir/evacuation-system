@@ -7,11 +7,13 @@ Access: http://localhost:8080
 Default login: admin / embassy2026
 """
 
-import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading, base64
+import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading, base64, smtplib, ssl
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta
 from pathlib import Path
+from queue import Queue
+from email.message import EmailMessage
 
 PORT = int(os.environ.get('PORT', 8080))
 
@@ -394,11 +396,13 @@ def bulk_update_visa_status(passport_list, new_status, user='system'):
     for pp in passport_list:
         pp = pp.strip().upper()
         if not pp: continue
-        rec = db.execute("SELECT id, name, visa_status, travel_status FROM evacuees WHERE UPPER(TRIM(passport)) = ?", [pp]).fetchone()
+        rec = db.execute("SELECT id, name, passport, email, visa_status, travel_status FROM evacuees WHERE UPPER(TRIM(passport)) = ?", [pp]).fetchone()
         if rec:
             db.execute("UPDATE evacuees SET visa_status = ?, updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?",
                        [new_status, user, rec['id']])
             workflow = apply_workflow_rules(db, rec['id'], 'visa_status', new_status, user)
+            if rec['visa_status'] != 'Approved' and new_status == 'Approved':
+                _queue_visa_approved_email(dict(rec), user)
             results['updated'] += 1
             results['details'].append(f"{rec['name']} ({pp}): visa → {new_status}" + (f" | {'; '.join(workflow)}" if workflow else ""))
             results['workflow_changes'].extend(workflow)
@@ -448,6 +452,131 @@ def decrypt_pw(enc):
         return '(encrypted)'
 
 def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
+
+# ═══════════════════════════════════════════════════════════════
+# EMAIL NOTIFICATIONS (SAFE BACKGROUND WORKER)
+# ═══════════════════════════════════════════════════════════════
+EMAIL_QUEUE = Queue()
+EMAIL_WORKER_STARTED = False
+
+def _get_setting(db, key, default=''):
+    row = db.execute("SELECT value FROM settings WHERE key = ?", [key]).fetchone()
+    return row['value'] if row and row['value'] is not None else default
+
+def _is_valid_email(addr):
+    if not addr: return False
+    return re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', addr.strip()) is not None
+
+def _load_email_config(db=None):
+    close_after = False
+    if db is None:
+        db = get_db()
+        close_after = True
+    try:
+        cfg = {
+            'enabled': _get_setting(db, 'smtp_enabled', 'disabled') == 'enabled',
+            'from_email': _get_setting(db, 'smtp_gmail_address', '').strip(),
+            'app_password_enc': _get_setting(db, 'smtp_gmail_app_password', ''),
+            'embassy_contact': _get_setting(db, 'smtp_embassy_contact', '+965-55977292').strip(),
+            'embassy_hours': _get_setting(db, 'smtp_embassy_hours', 'Embassy opening hours').strip(),
+            'embassy_name': _get_setting(db, 'smtp_embassy_staff_name', 'Awais').strip()
+        }
+        return cfg
+    finally:
+        if close_after:
+            db.close()
+
+def _send_email_smtp(to_email, subject, body_text):
+    db = get_db()
+    try:
+        cfg = _load_email_config(db)
+        if not cfg['enabled']:
+            return False, 'SMTP disabled'
+        if not cfg['from_email'] or not cfg['app_password_enc']:
+            return False, 'SMTP not configured'
+        app_password = decrypt_pw(cfg['app_password_enc'])
+        if not app_password or app_password == '(encrypted)':
+            return False, 'Invalid SMTP app password'
+
+        msg = EmailMessage()
+        msg['From'] = cfg['from_email']
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.set_content(body_text)
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context, timeout=25) as server:
+            server.login(cfg['from_email'], app_password)
+            server.send_message(msg)
+        return True, 'sent'
+    except Exception as e:
+        return False, str(e)
+    finally:
+        db.close()
+
+def _queue_visa_approved_email(record, changed_by='system'):
+    email = (record.get('email') or '').strip()
+    if not _is_valid_email(email):
+        return
+    EMAIL_QUEUE.put({
+        'type': 'visa_approved',
+        'to': email,
+        'name': (record.get('name') or 'Applicant').strip(),
+        'passport': (record.get('passport') or '').strip(),
+        'record_id': record.get('id'),
+        'changed_by': changed_by
+    })
+
+def _recipient_salutation(name):
+    nm = (name or '').strip()
+    if not nm:
+        return 'Dear Sir/Madam,'
+    low = nm.lower()
+    if low.startswith(('mr ', 'mr.', 'mrs ', 'mrs.', 'ms ', 'ms.', 'dr ', 'dr.')):
+        return f'Dear Sir {nm},'
+    return f'Dear Sir Mr. {nm},'
+
+def _email_worker_loop():
+    while True:
+        job = EMAIL_QUEUE.get()
+        try:
+            if job.get('type') == 'visa_approved':
+                db = get_db()
+                cfg = _load_email_config(db)
+                db.close()
+                subject = "Transit Visa Approved by MOFA KSA"
+                salutation = _recipient_salutation(job.get('name', ''))
+                body = (
+                    f"{salutation}\n\n"
+                    "Your Transit Visa has been approved by MOFA KSA.\n"
+                    f"You are requested to contact Embassy staff {cfg['embassy_name']} at {cfg['embassy_contact']} "
+                    "or visit the Embassy during opening hours for further instructions and border crossing.\n\n"
+                    f"Embassy Hours: {cfg['embassy_hours']}\n\n"
+                    "Pakistan Embassy Kuwait\n"
+                    "Citizen Support for Transit KSA System"
+                )
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_visa_approved', ?, ?, ?)",
+                    [job.get('record_id'), job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                db.commit()
+                db.close()
+        except Exception:
+            # Never crash worker loop
+            pass
+        finally:
+            EMAIL_QUEUE.task_done()
+
+def start_email_worker():
+    global EMAIL_WORKER_STARTED
+    if EMAIL_WORKER_STARTED:
+        return
+    t = threading.Thread(target=_email_worker_loop, daemon=True)
+    t.start()
+    EMAIL_WORKER_STARTED = True
 
 def esc(val):
     """Escape HTML to prevent XSS"""
@@ -979,6 +1108,11 @@ def api_save_record(data, user):
             if old_val != new_val:
                 wf = apply_workflow_rules(db, rec_id, field, new_val, user)
                 workflow_changes.extend(wf)
+
+        # Auto-email when visa status transitions to Approved
+        if old_rec.get('visa_status') != 'Approved' and data.get('visa_status') == 'Approved':
+            updated = dict(db.execute("SELECT id, name, passport, email FROM evacuees WHERE id = ?", [rec_id]).fetchone())
+            _queue_visa_approved_email(updated, user)
 
         db.commit(); db.close()
         return {'success': True, 'id': rec_id, 'dup_flag': dup_flag, 'dup_details': dup_flags, 'workflow': workflow_changes}
@@ -1634,7 +1768,7 @@ def import_visa_approvals_csv(csv_text, user='system'):
                 stats['details'].append(f"Row {row_num}: No passport, skipped")
                 continue
             existing = db.execute(
-                "SELECT id, name, visa_status, travel_status FROM evacuees WHERE UPPER(TRIM(passport)) = ?",
+                "SELECT id, name, passport, email, visa_status, travel_status FROM evacuees WHERE UPPER(TRIM(passport)) = ?",
                 [passport]).fetchone()
             if not existing:
                 stats['not_found'] += 1
@@ -1653,6 +1787,7 @@ def import_visa_approvals_csv(csv_text, user='system'):
                     WHERE id = ?""", [user, existing['id']])
             db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('visa_csv_approve', ?, ?, ?)",
                        (existing['id'], user, f"Visa approved via CSV upload for {existing['name']} ({passport})"))
+            _queue_visa_approved_email(dict(existing), user)
             stats['approved'] += 1
             stats['details'].append(f"Row {row_num}: {existing['name']} ({passport}) — APPROVED ✓")
         except Exception as e:
@@ -2228,6 +2363,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(list_backups())
+        elif path == '/api/email-config':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            db = get_db()
+            cfg = _load_email_config(db)
+            db.close()
+            self.send_json({
+                'enabled': cfg['enabled'],
+                'from_email': cfg['from_email'],
+                'has_app_password': bool(cfg['app_password_enc']),
+                'embassy_contact': cfg['embassy_contact'],
+                'embassy_hours': cfg['embassy_hours'],
+                'embassy_staff_name': cfg['embassy_name']
+            })
         elif path == '/logout':
             cookie_str = self.headers.get('Cookie', '')
             c = SimpleCookie(); c.load(cookie_str)
@@ -2573,6 +2723,73 @@ class Handler(http.server.BaseHTTPRequestHandler):
                        (hash_pw(data['new_password']), encrypt_pw(data['new_password']), target_user))
             db.commit(); db.close()
             self.send_json({'success': True})
+
+        elif path == '/api/email-config':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            db = get_db()
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('smtp_enabled', ?)",
+                       ['enabled' if data.get('enabled') else 'disabled'])
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('smtp_gmail_address', ?)",
+                       [(data.get('from_email') or '').strip()])
+            if data.get('app_password'):
+                db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('smtp_gmail_app_password', ?)",
+                           [encrypt_pw((data.get('app_password') or '').strip())])
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('smtp_embassy_contact', ?)",
+                       [(data.get('embassy_contact') or '+965-55977292').strip()])
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('smtp_embassy_hours', ?)",
+                       [(data.get('embassy_hours') or 'Embassy opening hours').strip()])
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('smtp_embassy_staff_name', ?)",
+                       [(data.get('embassy_staff_name') or 'Awais').strip()])
+            db.commit()
+            db.execute("INSERT INTO audit_log (action, user, details) VALUES ('email_config_update', ?, ?)",
+                       [user['user'], json.dumps({'enabled': bool(data.get('enabled')), 'from_email': data.get('from_email', '')})])
+            db.commit()
+            db.close()
+            self.send_json({'success': True})
+
+        elif path == '/api/email-test':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            to_email = (data.get('to_email') or '').strip()
+            if not _is_valid_email(to_email):
+                self.send_json({'error': 'Valid recipient email is required'}, 400); return
+            subject = "Test Email - Transit Visa Notification Setup"
+            body_txt = (
+                "This is a test email from Citizen Support for Transit KSA System.\n\n"
+                "If you received this message, Gmail SMTP integration is working."
+            )
+            ok, detail = _send_email_smtp(to_email, subject, body_txt)
+            self.send_json({'success': ok, 'detail': detail}, 200 if ok else 500)
+
+        elif path == '/api/email-resend-approved':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            db = get_db()
+            rows = db.execute("""
+                SELECT id, name, passport, email
+                FROM evacuees
+                WHERE visa_status = 'Approved'
+            """).fetchall()
+            queued = 0
+            invalid_email = 0
+            for r in rows:
+                rec = dict(r)
+                if _is_valid_email((rec.get('email') or '').strip()):
+                    _queue_visa_approved_email(rec, user['user'])
+                    queued += 1
+                else:
+                    invalid_email += 1
+            db.execute("INSERT INTO audit_log (action, user, details) VALUES ('email_resend_approved_bulk', ?, ?)",
+                       [user['user'], json.dumps({'approved_total': len(rows), 'queued': queued, 'invalid_email': invalid_email})])
+            db.commit()
+            db.close()
+            self.send_json({'success': True, 'approved_total': len(rows), 'queued': queued, 'invalid_email': invalid_email})
 
         elif path == '/api/setting':
             user = self.require_auth()
@@ -4115,6 +4332,27 @@ No deterioration in ground security situation so far.</textarea>
 <div id="visaCsvDetails" class="imp-result" style="max-height:300px;overflow-y:auto;font-size:.82em;background:#f9f9f9;padding:10px;border-radius:6px"></div>
 </div>
 </div>
+<div class="fs" style="border-left:3px solid #6a1b9a">
+<h3>Auto Email Notifications (Visa Approved)</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Connect Gmail SMTP using an <strong>App Password</strong>. When visa status changes to <strong>Approved</strong>, emails are sent automatically in the background.</p>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Enable</label><select id="smtpEnabled"><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></div>
+<div class="fgp"><label>Gmail Address</label><input id="smtpFromEmail" placeholder="youremail@gmail.com"></div>
+<div class="fgp"><label>Gmail App Password</label><input id="smtpAppPassword" type="password" placeholder="16-character app password"></div>
+</div>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Embassy Staff Name</label><input id="smtpStaffName" value="Awais"></div>
+<div class="fgp"><label>Contact Number</label><input id="smtpContact" value="+965-55977292"></div>
+<div class="fgp"><label>Embassy Hours</label><input id="smtpHours" value="Embassy opening hours"></div>
+</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn btn-p" onclick="saveEmailConfig()">Save Email Config</button>
+<input id="smtpTestTo" placeholder="test recipient email" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;min-width:240px">
+<button class="btn btn-w" onclick="sendTestEmail()">Send Test Email</button>
+<button class="btn btn-i" onclick="resendApprovedEmails()">Re-send to All Approved Visa Holders</button>
+</div>
+<div id="smtpStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
+</div>
 <div class="fs" style="border-left:3px solid var(--s)">
 <h3>Backup &amp; Recovery</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Database is automatically backed up every 2 hours and on server start/stop. You can also create manual backups and restore from any point.</p>
@@ -4900,7 +5138,7 @@ const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
 a.slice(0,50).forEach(x=>{h+=`<tr><td>${x.created_at}</td><td>${x.action}</td><td>${x.user||'-'}</td><td>${x.record_id||'-'}</td></tr>`});
 h+='</tbody>';document.getElementById('auditTbl').innerHTML=h}
-loadBackups()}
+loadBackups();loadEmailConfig()}
 async function createUser(){
 const data={username:document.getElementById('nu_user').value,password:document.getElementById('nu_pass').value,
 full_name:document.getElementById('nu_name').value,role:document.getElementById('nu_role').value};
@@ -4964,6 +5202,47 @@ document.getElementById('visaCsvStats').innerHTML=`<strong style="color:#2e7d32"
 document.getElementById('visaCsvDetails').innerHTML=d.details?d.details.map(x=>'<div>'+x+'</div>').join(''):'';
 loadDash();loadRecords();toast(`${d.approved} visas approved via CSV`);
 }catch(err){toast('Upload error: '+err.message)}
+}
+
+async function loadEmailConfig(){
+const r=await api('/api/email-config');
+if(!r||r.error)return;
+document.getElementById('smtpEnabled').value=r.enabled?'enabled':'disabled';
+document.getElementById('smtpFromEmail').value=r.from_email||'';
+document.getElementById('smtpStaffName').value=r.embassy_staff_name||'Awais';
+document.getElementById('smtpContact').value=r.embassy_contact||'+965-55977292';
+document.getElementById('smtpHours').value=r.embassy_hours||'Embassy opening hours';
+document.getElementById('smtpStatus').textContent='Saved config loaded'+(r.has_app_password?' (app password stored)':' (no app password saved)');
+}
+async function saveEmailConfig(){
+const payload={
+enabled:document.getElementById('smtpEnabled').value==='enabled',
+from_email:document.getElementById('smtpFromEmail').value.trim(),
+app_password:document.getElementById('smtpAppPassword').value.trim(),
+embassy_staff_name:document.getElementById('smtpStaffName').value.trim(),
+embassy_contact:document.getElementById('smtpContact').value.trim(),
+embassy_hours:document.getElementById('smtpHours').value.trim()
+};
+const r=await api('/api/email-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+if(r?.success){
+document.getElementById('smtpAppPassword').value='';
+toast('Email config saved');
+loadEmailConfig();
+}else toast('Error saving email config');
+}
+async function sendTestEmail(){
+const toEmail=document.getElementById('smtpTestTo').value.trim();
+if(!toEmail){toast('Enter test recipient email');return}
+const r=await api('/api/email-test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to_email:toEmail})});
+if(r?.success){toast('Test email sent successfully')}
+else toast('Test email failed: '+(r?.detail||r?.error||'unknown'));
+}
+async function resendApprovedEmails(){
+if(!confirm('Queue email notifications for ALL visa-approved applicants? This may send many emails.')) return;
+const r=await api('/api/email-resend-approved',{method:'POST'});
+if(r?.success){
+toast(`Queued ${r.queued} emails (Approved: ${r.approved_total}, Invalid email: ${r.invalid_email})`);
+}else toast('Bulk resend failed: '+(r?.error||'unknown'));
 }
 
 // BACKUP
@@ -5198,6 +5477,7 @@ if __name__ == '__main__':
     # Start auto-backup thread
     backup_thread = threading.Thread(target=auto_backup_scheduler, daemon=True)
     backup_thread.start()
+    start_email_worker()
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║   CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM                          ║
