@@ -527,6 +527,43 @@ def _queue_visa_approved_email(record, changed_by='system'):
         'changed_by': changed_by
     })
 
+def _tracking_no(record_id):
+    try:
+        return 'PKE-' + str(int(record_id)).zfill(4)
+    except Exception:
+        return 'PKE-0000'
+
+def _queue_registration_email(record, changed_by='system'):
+    email = (record.get('email') or '').strip()
+    if not _is_valid_email(email):
+        return
+    EMAIL_QUEUE.put({
+        'type': 'registration_success',
+        'to': email,
+        'name': (record.get('name') or 'Applicant').strip(),
+        'passport': (record.get('passport') or '').strip(),
+        'tracking_number': _tracking_no(record.get('id')),
+        'record_id': record.get('id'),
+        'changed_by': changed_by
+    })
+
+def _queue_mofa_sent_email(record, changed_by='system'):
+    email = (record.get('email') or '').strip()
+    if not _is_valid_email(email):
+        return
+    EMAIL_QUEUE.put({
+        'type': 'mofa_sent',
+        'to': email,
+        'name': (record.get('name') or 'Applicant').strip(),
+        'passport': (record.get('passport') or '').strip(),
+        'tracking_number': _tracking_no(record.get('id')),
+        'border_crossing': (record.get('border_crossing') or '').strip(),
+        'mofa_letter_number': (record.get('mofa_letter_number') or '').strip(),
+        'mofa_letter_date': (record.get('mofa_letter_date') or '').strip(),
+        'record_id': record.get('id'),
+        'changed_by': changed_by
+    })
+
 def _recipient_salutation(name):
     nm = (name or '').strip()
     if not nm:
@@ -536,25 +573,123 @@ def _recipient_salutation(name):
         return f'Dear Sir {nm},'
     return f'Dear Sir Mr. {nm},'
 
+DEFAULT_EMAIL_TEMPLATES = {
+    'registration_success': (
+        "{salutation}\n\n"
+        "You have successfully registered with Pakistan Embassy Kuwait for Transit KSA support.\n\n"
+        "Your tracking details are as follows:\n"
+        "Tracking Number: {tracking_number}\n"
+        "Name: {name}\n"
+        "Passport: {passport}\n\n"
+        "Please keep your tracking number for future follow-up.\n\n"
+        "Pakistan Embassy Kuwait\n"
+        "Citizen Support for Transit KSA System"
+    ),
+    'mofa_sent': (
+        "{salutation}\n\n"
+        "Your case has been sent to MOFA KSA for processing.\n\n"
+        "Current details:\n"
+        "Tracking Number: {tracking_number}\n"
+        "Name: {name}\n"
+        "Passport: {passport}\n"
+        "Border Crossing: {border_crossing}\n"
+        "MOFA Letter/Fax: {mofa_letter_number}\n"
+        "Letter Date: {mofa_letter_date}\n\n"
+        "You will be notified again once MOFA approval is received.\n\n"
+        "Pakistan Embassy Kuwait\n"
+        "Citizen Support for Transit KSA System"
+    ),
+    'visa_approved': (
+        "{salutation}\n\n"
+        "Your Transit Visa has been approved by MOFA KSA.\n"
+        "You are requested to contact Embassy staff {embassy_name} at {embassy_contact} "
+        "or visit the Embassy during opening hours for further instructions and border crossing.\n\n"
+        "Embassy Hours: {embassy_hours}\n\n"
+        "Pakistan Embassy Kuwait\n"
+        "Citizen Support for Transit KSA System"
+    )
+}
+
+def _load_email_templates(db=None):
+    close_after = False
+    if db is None:
+        db = get_db()
+        close_after = True
+    try:
+        out = {}
+        for key, default_val in DEFAULT_EMAIL_TEMPLATES.items():
+            out[key] = _get_setting(db, f'email_template_{key}', default_val)
+        return out
+    finally:
+        if close_after:
+            db.close()
+
+def _render_email_template(template_text, vars_map):
+    out = template_text or ''
+    for k, v in vars_map.items():
+        out = out.replace('{' + k + '}', str(v if v is not None else ''))
+    return out
+
 def _email_worker_loop():
     while True:
         job = EMAIL_QUEUE.get()
         try:
-            if job.get('type') == 'visa_approved':
+            if job.get('type') == 'registration_success':
+                subject = "Registration Successful - Transit KSA Tracking Number"
+                salutation = _recipient_salutation(job.get('name', ''))
+                templates = _load_email_templates()
+                body = _render_email_template(templates.get('registration_success', ''), {
+                    'salutation': salutation,
+                    'tracking_number': job.get('tracking_number', ''),
+                    'name': job.get('name', ''),
+                    'passport': job.get('passport', '')
+                })
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_registration_success', ?, ?, ?)",
+                    [job.get('record_id'), job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'mofa_sent':
+                subject = "Application Sent to MOFA KSA - Status Update"
+                salutation = _recipient_salutation(job.get('name', ''))
+                templates = _load_email_templates()
+                body = _render_email_template(templates.get('mofa_sent', ''), {
+                    'salutation': salutation,
+                    'tracking_number': job.get('tracking_number', ''),
+                    'name': job.get('name', ''),
+                    'passport': job.get('passport', ''),
+                    'border_crossing': job.get('border_crossing', ''),
+                    'mofa_letter_number': job.get('mofa_letter_number', '-') or '-',
+                    'mofa_letter_date': job.get('mofa_letter_date', '-') or '-'
+                })
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_mofa_sent', ?, ?, ?)",
+                    [job.get('record_id'), job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'visa_approved':
                 db = get_db()
                 cfg = _load_email_config(db)
                 db.close()
                 subject = "Transit Visa Approved by MOFA KSA"
                 salutation = _recipient_salutation(job.get('name', ''))
-                body = (
-                    f"{salutation}\n\n"
-                    "Your Transit Visa has been approved by MOFA KSA.\n"
-                    f"You are requested to contact Embassy staff {cfg['embassy_name']} at {cfg['embassy_contact']} "
-                    "or visit the Embassy during opening hours for further instructions and border crossing.\n\n"
-                    f"Embassy Hours: {cfg['embassy_hours']}\n\n"
-                    "Pakistan Embassy Kuwait\n"
-                    "Citizen Support for Transit KSA System"
-                )
+                templates = _load_email_templates()
+                body = _render_email_template(templates.get('visa_approved', ''), {
+                    'salutation': salutation,
+                    'name': job.get('name', ''),
+                    'passport': job.get('passport', ''),
+                    'embassy_name': cfg['embassy_name'],
+                    'embassy_contact': cfg['embassy_contact'],
+                    'embassy_hours': cfg['embassy_hours']
+                })
                 ok, detail = _send_email_smtp(job['to'], subject, body)
                 db = get_db()
                 db.execute(
@@ -1125,6 +1260,8 @@ def api_save_record(data, user):
         placeholders = ', '.join(['?'] * (len(fields) + 1))
         cur = db.execute(f"INSERT INTO evacuees ({', '.join(fields)}, dup_flag) VALUES ({placeholders})", vals)
         new_id = cur.lastrowid
+        new_rec = dict(db.execute("SELECT id, name, passport, email FROM evacuees WHERE id = ?", [new_id]).fetchone())
+        _queue_registration_email(new_rec, user)
         db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('create', ?, ?, ?)",
                    (new_id, user, json.dumps(data)))
         db.commit(); db.close()
@@ -2378,6 +2515,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'embassy_hours': cfg['embassy_hours'],
                 'embassy_staff_name': cfg['embassy_name']
             })
+        elif path == '/api/email-templates':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            db = get_db()
+            templates = _load_email_templates(db)
+            db.close()
+            self.send_json({'success': True, 'templates': templates})
         elif path == '/logout':
             cookie_str = self.headers.get('Cookie', '')
             c = SimpleCookie(); c.load(cookie_str)
@@ -2750,6 +2895,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             db.close()
             self.send_json({'success': True})
 
+        elif path == '/api/email-templates':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            templates = data.get('templates') or {}
+            db = get_db()
+            for key in DEFAULT_EMAIL_TEMPLATES.keys():
+                val = templates.get(key)
+                if isinstance(val, str) and val.strip():
+                    db.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                        [f'email_template_{key}', val]
+                    )
+            db.execute("INSERT INTO audit_log (action, user, details) VALUES ('email_templates_update', ?, ?)",
+                       [user['user'], json.dumps({'updated_keys': list(DEFAULT_EMAIL_TEMPLATES.keys())})])
+            db.commit()
+            db.close()
+            self.send_json({'success': True})
+
         elif path == '/api/email-test':
             user = self.require_auth()
             if not user: return
@@ -2878,6 +3043,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         [batch_id] + [int(i) for i in ids])
                 db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('mofa_batch_sent', 0, ?, ?)",
                           [user['user'], f'Marked {count} records as Sent to MOFA | Letter: {letter_number} | Date: {letter_date}'])
+                # Queue MOFA status emails for updated records (async, non-blocking)
+                updated_rows = db.execute("""
+                    SELECT id, name, passport, email, border_crossing, mofa_letter_number, mofa_letter_date
+                    FROM evacuees
+                    WHERE mofa_status='Sent to MOFA' AND mofa_sent_date=? AND updated_by=?
+                """, [sent_date, user['user']]).fetchall()
+                for rr in updated_rows:
+                    _queue_mofa_sent_email(dict(rr), user['user'])
                 db.commit()
                 db.close()
                 self.send_json({'success': True, 'count': count, 'batch_id': batch_id})
@@ -4353,6 +4526,21 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div id="smtpStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
 </div>
+<div class="fs" style="border-left:3px solid #8e24aa">
+<h3>Email Message Templates</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Use placeholders like <code>{salutation}</code>, <code>{name}</code>, <code>{passport}</code>, <code>{tracking_number}</code>, <code>{border_crossing}</code>, <code>{mofa_letter_number}</code>, <code>{mofa_letter_date}</code>, <code>{embassy_name}</code>, <code>{embassy_contact}</code>, <code>{embassy_hours}</code>.</p>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Registration Success Template</label><textarea id="tplRegistration" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
+<div class="fgp"><label>Sent to MOFA KSA Template</label><textarea id="tplMofaSent" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
+</div>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Visa Approved Template</label><textarea id="tplVisaApproved" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
+</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn btn-p" onclick="saveEmailTemplates()">Save Templates</button>
+</div>
+<div id="tplStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
+</div>
 <div class="fs" style="border-left:3px solid var(--s)">
 <h3>Backup &amp; Recovery</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Database is automatically backed up every 2 hours and on server start/stop. You can also create manual backups and restore from any point.</p>
@@ -5138,7 +5326,7 @@ const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
 a.slice(0,50).forEach(x=>{h+=`<tr><td>${x.created_at}</td><td>${x.action}</td><td>${x.user||'-'}</td><td>${x.record_id||'-'}</td></tr>`});
 h+='</tbody>';document.getElementById('auditTbl').innerHTML=h}
-loadBackups();loadEmailConfig()}
+loadBackups();loadEmailConfig();loadEmailTemplates()}
 async function createUser(){
 const data={username:document.getElementById('nu_user').value,password:document.getElementById('nu_pass').value,
 full_name:document.getElementById('nu_name').value,role:document.getElementById('nu_role').value};
@@ -5243,6 +5431,25 @@ const r=await api('/api/email-resend-approved',{method:'POST'});
 if(r?.success){
 toast(`Queued ${r.queued} emails (Approved: ${r.approved_total}, Invalid email: ${r.invalid_email})`);
 }else toast('Bulk resend failed: '+(r?.error||'unknown'));
+}
+async function loadEmailTemplates(){
+const r=await api('/api/email-templates');
+if(!r||r.error)return;
+const t=r.templates||{};
+document.getElementById('tplRegistration').value=t.registration_success||'';
+document.getElementById('tplMofaSent').value=t.mofa_sent||'';
+document.getElementById('tplVisaApproved').value=t.visa_approved||'';
+document.getElementById('tplStatus').textContent='Templates loaded.';
+}
+async function saveEmailTemplates(){
+const payload={templates:{
+registration_success:document.getElementById('tplRegistration').value,
+mofa_sent:document.getElementById('tplMofaSent').value,
+visa_approved:document.getElementById('tplVisaApproved').value
+}};
+const r=await api('/api/email-templates',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+if(r?.success){document.getElementById('tplStatus').textContent='Templates saved successfully.';toast('Email templates saved')}
+else{document.getElementById('tplStatus').textContent='Error saving templates.';toast('Error saving templates')}
 }
 
 // BACKUP
