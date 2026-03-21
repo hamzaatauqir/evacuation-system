@@ -2222,7 +2222,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status_info['action_required'] = True
                 elif r['mofa_status'] == 'Sent to MOFA':
                     status_info['status'] = 'PENDING_MOFA'
-                    status_info['status_detail'] = 'Your application has been sent to MOFA KSA and is pending approval.'
+                    status_info['status_detail'] = (
+                        'Your application has been forwarded to the Embassy of Pakistan, Riyadh, for compilation and '
+                        'onward submission to the Ministry of Foreign Affairs of the Kingdom of Saudi Arabia for final '
+                        'approval. Applicants will be notified by email once approval is received.'
+                    )
+                    status_info['status_detail_ur'] = (
+                        'آپ کی درخواست کو پاکستان کے سفارت خانہ، ریاض، کو بھیجا گیا ہے تاکہ اسے مرتب کیا جا سکے اور '
+                        'مملکت سعودی عرب کی وزارت خارجہ کو حتمی منظوری کے لیے پیش کیا جا سکے۔ منظوری موصول ہونے پر '
+                        'درخواست دہندگان کو ای میل کے ذریعے اطلاع دے دی جائے گی۔'
+                    )
                     status_info['action_required'] = False
                 else:
                     status_info['status'] = 'PROCESSING'
@@ -3520,7 +3529,7 @@ document.getElementById('statusBox').innerHTML=`
 <div class="status-icon">${icon}</div>
 <div class="status-label">${label}</div>
 <div class="status-detail">${s.status_detail}</div>
-<div class="status-detail-ur">${labelUr}</div>
+<div class="status-detail-ur">${s.status_detail_ur||labelUr}</div>
 </div>`;
 // Timeline
 let tl='<div class="timeline">';
