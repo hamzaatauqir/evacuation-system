@@ -367,6 +367,21 @@ def init_db():
     db.execute("""UPDATE evacuees SET mofa_submission_batch_id = CAST(mofa_batch_id AS TEXT)
         WHERE mofa_batch_id IS NOT NULL AND mofa_submission_batch_id IS NULL""")
 
+    # ── Backfill: mark existing unreviewed suspects as pending review ──
+    # This ensures records that match suspect heuristics but were created before
+    # the review workflow existed are held from MOFA until staff reviews them
+    db.execute("""UPDATE evacuees SET review_status = 'pending',
+        flag_reason = COALESCE(NULLIF(flag_reason,''), 'Auto-flagged: matches route suspect heuristics')
+        WHERE (review_status IS NULL OR review_status = '')
+        AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+        AND (route_mismatch = 0 OR route_mismatch IS NULL)
+        AND dup_flag = 'CLEAR'
+        AND (
+            LOWER(COALESCE(country,'')) LIKE '%pakistan%'
+            OR (civil_id IS NULL OR civil_id = '')
+            OR mobile LIKE '+92%' OR mobile LIKE '03%' OR mobile LIKE '92%'
+        )""")
+
     db.commit()
     db.close()
 
@@ -2692,7 +2707,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         COALESCE(mofa_letter_number,'') as mofa_letter_number,
                         date_of_request, created_at,
                         COALESCE(effective_route,'kw_to_pk') as effective_route,
-                        COALESCE(route_mismatch,0) as route_mismatch
+                        COALESCE(route_mismatch,0) as route_mismatch,
+                        COALESCE(review_status,'') as review_status
                         FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
             else:
                 passport = search_val.upper().strip()
@@ -2701,7 +2717,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     COALESCE(mofa_letter_number,'') as mofa_letter_number,
                     date_of_request, created_at,
                     COALESCE(effective_route,'kw_to_pk') as effective_route,
-                    COALESCE(route_mismatch,0) as route_mismatch
+                    COALESCE(route_mismatch,0) as route_mismatch,
+                    COALESCE(review_status,'') as review_status
                     FROM evacuees WHERE UPPER(TRIM(passport)) = ?""", [passport]).fetchone()
             db.close()
             if rec:
@@ -2716,7 +2733,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # If route was corrected, show the correct route context
                 if r.get('route_mismatch') == 1 and r.get('effective_route') == 'pk_to_kw':
                     status_info['route_note'] = 'Your registration is being processed under the Pakistan to Kuwait transit route.'
-                if r['visa_status'] == 'Approved':
+
+                # Check if record is held for route review (pending/under_review/needs_followup)
+                review_held = r.get('review_status', '') in ('pending', 'under_review', 'needs_followup')
+
+                if review_held and r['visa_status'] != 'Approved' and r['mofa_status'] != 'Sent to MOFA':
+                    status_info['status'] = 'ROUTE_HOLD'
+                    status_info['status_detail'] = 'Your application has been flagged due to a travel route clarity issue. Please contact Mr. Awais immediately at +965 55977292 to confirm your correct travel route. Your application cannot be processed further until this is resolved.'
+                    status_info['action_required'] = True
+                elif r['visa_status'] == 'Approved':
                     status_info['status'] = 'APPROVED'
                     status_info['status_detail'] = 'Your transit visa has been APPROVED by MOFA KSA. Kindly contact Pakistan Embassy Kuwait staff for coordination and further guidance on crossing border. Awais: +965-55977292.'
                     status_info['action_required'] = True
@@ -2866,7 +2891,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     FROM evacuees
                     WHERE dup_flag='CLEAR' AND (
                         (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
-                         AND (route_mismatch = 0 OR route_mismatch IS NULL))
+                         AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                         AND (
+                             review_status = 'finalized'
+                             OR (
+                                 (review_status IS NULL OR review_status = '')
+                                 AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+                                 AND COALESCE(civil_id,'') != ''
+                                 AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                             )
+                         ))
                         OR mofa_status='Sent to MOFA'
                     )
                     ORDER BY id""").fetchall()
@@ -2956,6 +2990,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
                     WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
                     AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                    AND (
+                        review_status = 'finalized'
+                        OR (
+                            (review_status IS NULL OR review_status = '')
+                            AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+                            AND COALESCE(civil_id,'') != ''
+                            AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                        )
+                    )
                     AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
                     ORDER BY id""", [from_id, to_id]).fetchall()
             rows = [dict(r) for r in rows]
@@ -3554,6 +3597,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
                         AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                        AND (
+                            review_status = 'finalized'
+                            OR (
+                                (review_status IS NULL OR review_status = '')
+                                AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+                                AND COALESCE(civil_id,'') != ''
+                                AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                            )
+                        )
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
                         [letter_number, letter_date, sent_date, user['user'], from_id, to_id])
                     count = cur.rowcount
@@ -3566,6 +3618,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id IN ({placeholders})
                         AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                        AND (
+                            review_status = 'finalized'
+                            OR (
+                                (review_status IS NULL OR review_status = '')
+                                AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+                                AND COALESCE(civil_id,'') != ''
+                                AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                            )
+                        )
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
                         [letter_number, letter_date, sent_date, user['user']] + [int(i) for i in ids])
                     count = cur.rowcount
@@ -3918,6 +3979,11 @@ urduMsg.innerHTML='&#9203; <strong>آپ کی درخواست وزارت خارج�
 statusBox.className='dup-status departed';
 statusBox.innerHTML='&#9992;&#65039; You have already departed. No further registration needed.';
 urduMsg.innerHTML='&#9992;&#65039; <strong>آپ پہلے ہی روانہ ہو چکے ہیں۔</strong> مزید رجسٹریشن کی ضرورت نہیں ہے۔<br><br>کسی بھی مسئلے کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
+}else if(d.status==='ROUTE_HOLD'){
+statusBox.className='dup-status pending-mofa';
+statusBox.style.background='#fff3e0';statusBox.style.color='#e65100';statusBox.style.borderColor='#ffcc80';
+statusBox.innerHTML='&#9888;&#65039; <strong>ACTION REQUIRED:</strong> Your application is on hold due to a travel route clarity issue. Please contact Mr. Awais immediately at <a href="tel:+96555977292" style="color:#c62828;font-weight:700">+965 55977292</a> to resolve this.';
+urduMsg.innerHTML='&#9888; <strong>آپ کی درخواست سفری راستے کی وضاحت کے مسئلے کی وجہ سے روک دی گئی ہے۔</strong><br>براہ کرم فوری طور پر جناب اویس سے رابطہ کریں: <a href="tel:+96555977292" style="color:#c62828;font-weight:700">+965 55977292</a><br>جب تک یہ مسئلہ حل نہیں ہوتا آپ کی درخواست پر مزید کارروائی نہیں ہو سکتی۔';
 }else{
 statusBox.className='dup-status processing';
 statusBox.innerHTML='&#128338; Your application is being processed by the Embassy';
@@ -4094,6 +4160,7 @@ let statusClass='status-processing',icon='&#128338;',label='Being Processed',lab
 let step1='done',step2='wait',step3='wait';
 if(s.status==='APPROVED'){statusClass='status-approved';icon='&#9989;';label='VISA APPROVED';labelUr='ویزا منظور ہو گیا۔ براہ کرم بارڈر کراسنگ سے متعلق رہنمائی اور مزید رابطہ کاری کے لیے سفارت خانہ پاکستان کویت کے عملے سے رابطہ کریں۔ اویس: +965-55977292';step1='done';step2='done';step3='done'}
 else if(s.status==='PENDING_MOFA'){statusClass='status-pending';icon='&#9203;';label='Pending MOFA KSA Approval';labelUr='سعودی وزارت خارجہ سے منظوری زیر التوا';step1='done';step2='active';step3='wait'}
+else if(s.status==='ROUTE_HOLD'){statusClass='status-pending';icon='&#9888;&#65039;';label='ACTION REQUIRED \u2014 Route Clarification Needed';labelUr='آپ کی درخواست سفری راستے کی وضاحت کے مسئلے کی وجہ سے روک دی گئی ہے۔ براہ کرم فوری طور پر جناب اویس سے رابطہ کریں: +965-55977292';step1='done';step2='wait';step3='wait'}
 document.getElementById('statusBox').innerHTML=`
 <div class="status-box ${statusClass}">
 <div class="status-icon">${icon}</div>
@@ -4120,7 +4187,7 @@ grid+=`<div class="info-item" style="grid-column:1/-1;background:#fff3e0;border-
 }
 grid+='</div>';
 document.getElementById('infoGrid').innerHTML=grid;
-document.getElementById('emergencySection').style.display=s.status==='APPROVED'?'block':'none';
+document.getElementById('emergencySection').style.display=(s.status==='APPROVED'||s.status==='ROUTE_HOLD')?'block':'none';
 document.getElementById('resultBox').style.display='block';
 }else{
 document.getElementById('errMsg').innerHTML=(d.error||'Not found')+'<br><span dir="rtl" style="font-family:Tahoma,sans-serif;font-size:.9em">اس پاسپورٹ نمبر سے کوئی درخواست نہیں ملی</span>';
