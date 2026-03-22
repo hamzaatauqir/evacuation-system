@@ -4056,6 +4056,8 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 .status-approved{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border:2px solid #2e7d32}
 .status-pending{background:linear-gradient(135deg,#fff3e0,#ffe0b2);border:2px solid #e65100}
 .status-processing{background:linear-gradient(135deg,#e3f2fd,#bbdefb);border:2px solid #1565c0}
+.status-hold{background:linear-gradient(135deg,#ffebee,#ffcdd2);border:3px solid #c62828;animation:holdPulse 2s infinite}
+@keyframes holdPulse{0%,100%{box-shadow:0 0 0 0 rgba(198,40,40,.3)}50%{box-shadow:0 0 0 12px rgba(198,40,40,0)}}
 .status-icon{font-size:3.5em;margin-bottom:10px}
 .status-label{font-size:1.4em;font-weight:800;margin-bottom:6px}
 .status-detail{font-size:.92em;color:#555;line-height:1.6}
@@ -4160,8 +4162,20 @@ let statusClass='status-processing',icon='&#128338;',label='Being Processed',lab
 let step1='done',step2='wait',step3='wait';
 if(s.status==='APPROVED'){statusClass='status-approved';icon='&#9989;';label='VISA APPROVED';labelUr='ویزا منظور ہو گیا۔ براہ کرم بارڈر کراسنگ سے متعلق رہنمائی اور مزید رابطہ کاری کے لیے سفارت خانہ پاکستان کویت کے عملے سے رابطہ کریں۔ اویس: +965-55977292';step1='done';step2='done';step3='done'}
 else if(s.status==='PENDING_MOFA'){statusClass='status-pending';icon='&#9203;';label='Pending MOFA KSA Approval';labelUr='سعودی وزارت خارجہ سے منظوری زیر التوا';step1='done';step2='active';step3='wait'}
-else if(s.status==='ROUTE_HOLD'){statusClass='status-pending';icon='&#9888;&#65039;';label='ACTION REQUIRED \u2014 Route Clarification Needed';labelUr='آپ کی درخواست سفری راستے کی وضاحت کے مسئلے کی وجہ سے روک دی گئی ہے۔ براہ کرم فوری طور پر جناب اویس سے رابطہ کریں: +965-55977292';step1='done';step2='wait';step3='wait'}
+else if(s.status==='ROUTE_HOLD'){statusClass='status-hold';icon='&#9888;&#65039;';label='APPLICATION ON HOLD \u2014 Urgent Action Required';labelUr='آپ کی درخواست سفری راستے کی وضاحت نہ ہونے کی وجہ سے روک دی گئی ہے۔ براہ کرم فوری طور پر جناب اویس سے رابطہ کریں: +965-55977292';step1='done';step2='wait';step3='wait'}
 document.getElementById('statusBox').innerHTML=`
+${s.status==='ROUTE_HOLD'?`<div style="background:#c62828;color:#fff;padding:16px 20px;border-radius:12px;margin-bottom:14px;text-align:center">
+<div style="font-size:2em;margin-bottom:6px">&#9888;&#65039;</div>
+<div style="font-size:1.1em;font-weight:700;margin-bottom:8px">YOUR APPLICATION IS ON HOLD</div>
+<div style="font-size:.92em;margin-bottom:10px">Your application has been placed on hold due to travel route direction being under suspicion.</div>
+<div style="font-size:.95em;font-weight:600;margin-bottom:10px">Kindly contact Embassy Staff <strong>Mr. Awais</strong> urgently:</div>
+<a href="tel:+96555977292" style="display:inline-block;padding:12px 28px;background:#fff;color:#c62828;border-radius:8px;font-weight:800;font-size:1.1em;text-decoration:none;margin:4px">&#128222; +965 55977292</a>
+<div dir="rtl" style="margin-top:12px;font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;font-size:.92em;line-height:1.8">
+آپ کی درخواست سفری راستے کی سمت مشکوک ہونے کی وجہ سے روک دی گئی ہے۔<br>
+براہ کرم فوری طور پر سفارتخانے کے عملے <strong>جناب اویس</strong> سے رابطہ کریں:<br>
+<a href="tel:+96555977292" style="color:#fff;font-weight:700">+965 55977292</a>
+</div>
+</div>`:''}`+`
 <div class="status-box ${statusClass}">
 <div class="status-icon">${icon}</div>
 <div class="status-label">${label}</div>
@@ -4172,7 +4186,7 @@ document.getElementById('statusBox').innerHTML=`
 let tl='<div class="timeline">';
 tl+=`<div class="tl-step"><div class="tl-dot ${step1}">1</div><div class="tl-text"><div class="tl-title">Application Registered / درخواست درج ہو گئی</div><div class="tl-sub">${s.registered_date||'Submitted'}</div></div></div>`;
 tl+=`<div class="tl-line ${step1==='done'?'done':''}"></div>`;
-tl+=`<div class="tl-step"><div class="tl-dot ${step2}">2</div><div class="tl-text"><div class="tl-title">Sent to MOFA KSA / سعودی وزارت خارجہ کو بھیج دیا گیا</div><div class="tl-sub">${s.mofa_sent_date||'Awaiting'}</div></div></div>`;
+tl+=`<div class="tl-step"><div class="tl-dot ${step2}">2</div><div class="tl-text"><div class="tl-title">${s.status==='ROUTE_HOLD'?'<span style="color:#c62828">&#9888; ON HOLD \u2014 Route Under Review / روک دیا گیا \u2014 راستے کی جانچ</span>':'Sent to MOFA KSA / سعودی وزارت خارجہ کو بھیج دیا گیا'}</div><div class="tl-sub">${s.status==='ROUTE_HOLD'?'<span style="color:#c62828;font-weight:700">Contact Mr. Awais: +965 55977292</span>':s.mofa_sent_date||'Awaiting'}</div></div></div>`;
 tl+=`<div class="tl-line ${step2==='done'?'done':''}"></div>`;
 tl+=`<div class="tl-step"><div class="tl-dot ${step3}">3</div><div class="tl-text"><div class="tl-title">Visa Decision / ویزا فیصلہ</div><div class="tl-sub">${s.status==='APPROVED'?'Approved - Contact Embassy':'Pending'}</div></div></div>`;
 tl+='</div>';
@@ -4182,6 +4196,9 @@ let grid=`<div class="info-grid">
 <div class="info-item"><div class="lbl">Name</div><div class="val">${s.name}</div></div>
 <div class="info-item"><div class="lbl">Passport</div><div class="val">${s.passport}</div></div>
 <div class="info-item"><div class="lbl">Registered On</div><div class="val">${s.registered_date||'N/A'}</div></div>`;
+if(s.status==='ROUTE_HOLD'){
+grid+=`<div class="info-item" style="grid-column:1/-1;background:#ffebee;border-color:#ef9a9a"><div class="lbl" style="color:#c62828">&#9888; Application Status</div><div class="val" style="color:#c62828;font-weight:700">ON HOLD \u2014 Travel route direction under suspicion. Contact Embassy Staff Mr. Awais urgently at +965 55977292</div></div>`;
+}
 if(s.mofa_sent_date){
 grid+=`<div class="info-item" style="grid-column:1/-1;background:#fff3e0;border-color:#ffe0b2"><div class="lbl">Sent to MOFA KSA On</div><div class="val" style="color:#e65100">${s.mofa_sent_date}</div></div>`;
 }
