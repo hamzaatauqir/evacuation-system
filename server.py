@@ -664,6 +664,23 @@ def _queue_route_clarification_email(record, changed_by='system', trigger_source
         'trigger_source': trigger_source
     })
 
+
+def _queue_route_cleared_email(record, changed_by='system'):
+    """Queue a route-cleared notification email when staff finalizes/clears a flagged case."""
+    email = (record.get('email') or '').strip()
+    rec_id = record.get('id')
+    if not _is_valid_email(email):
+        return
+    EMAIL_QUEUE.put({
+        'type': 'route_cleared',
+        'to': email,
+        'name': (record.get('name') or 'Applicant').strip(),
+        'passport': (record.get('passport') or '').strip(),
+        'tracking_number': _tracking_no(rec_id),
+        'record_id': rec_id,
+        'changed_by': changed_by
+    })
+
 def _recipient_salutation(name):
     nm = (name or '').strip()
     if not nm:
@@ -714,6 +731,14 @@ DEFAULT_EMAIL_TEMPLATES = {
         "In order to proceed further with processing, you are requested to immediately contact "
         "Mr. Awais at +965 55977292 and confirm your correct travel route.\n\n"
         "Please note that further action on your application may be delayed until this clarification is received.\n\n"
+        "Regards,\n"
+        "Pakistan Embassy Kuwait"
+    ),
+    'route_cleared': (
+        "Dear Applicant,\n\n"
+        "We are pleased to inform you that your travel route has been verified and your case has been cleared.\n\n"
+        "Your application is now being processed and will be sent to MOFA KSA for transit visa processing.\n\n"
+        "You will be notified once there is a further update on your application status.\n\n"
         "Regards,\n"
         "Pakistan Embassy Kuwait"
     )
@@ -839,6 +864,20 @@ def _email_worker_loop():
                     "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_route_clarification', ?, ?, ?)",
                     [rec_id, sent_by,
                      json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'trigger': trigger_source})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'route_cleared':
+                subject = "Your Application Route Has Been Verified"
+                templates = _load_email_templates()
+                body = templates.get('route_cleared', '')
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                rec_id = job.get('record_id')
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_route_cleared', ?, ?, ?)",
+                    [rec_id, job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
                 )
                 db.commit()
                 db.close()
@@ -2368,20 +2407,31 @@ def api_route_review_action(data, user):
 
     db.commit()
 
-    # ── Auto-send route clarification email on contact-required decisions ──
-    send_email = False
-    if decision == 'needs_contact':
-        send_email = True
-    elif decision in ('correct_to_pk_to_kw', 'annotate_only'):
-        # Send only if never sent before
-        if not rec.get('clarification_email_sent') or rec.get('clarification_email_sent') == 0:
-            send_email = True
+    # ── Auto-send emails based on review decision ──
+    send_clarification = False
+    send_cleared = False
 
-    if send_email:
-        # Re-fetch record for email fields
+    if decision == 'needs_contact':
+        # Staff says contact needed — send clarification email
+        send_clarification = True
+    elif decision in ('keep_kw_to_pk', 'reject_mismatch', 'correct_to_pk_to_kw'):
+        # Route has been cleared/finalized — inform applicant their case is moving forward
+        send_cleared = True
+    elif decision == 'annotate_only':
+        # Annotate only (MOFA-locked) — send clarification if never sent, otherwise cleared
+        if not rec.get('clarification_email_sent') or rec.get('clarification_email_sent') == 0:
+            send_clarification = True
+        else:
+            send_cleared = True
+
+    if send_clarification:
         fresh = db.execute("SELECT id, name, email, passport FROM evacuees WHERE id = ?", [rec_id]).fetchone()
         if fresh:
-            _queue_route_clarification_email(dict(fresh), user)
+            _queue_route_clarification_email(dict(fresh), user, trigger_source='review_decision')
+    elif send_cleared:
+        fresh = db.execute("SELECT id, name, email, passport FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+        if fresh:
+            _queue_route_cleared_email(dict(fresh), changed_by=user)
 
     db.close()
     return {'success': True, 'id': rec_id, 'decision': decision, 'review_status': new_review_status}
@@ -2406,7 +2456,11 @@ def api_route_flag_record(data, user):
     db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('route_flag', ?, ?, ?)",
         (rec_id, user, f'Flagged for route review: {flag_reason}'))
     db.commit()
+    # Auto-send clarification email on manual flag
+    fresh = db.execute("SELECT id, name, email, passport FROM evacuees WHERE id = ?", [rec_id]).fetchone()
     db.close()
+    if fresh:
+        _queue_route_clarification_email(dict(fresh), changed_by=user, trigger_source='manual_flag')
     return {'success': True, 'id': rec_id}
 
 
@@ -3136,7 +3190,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         flag_reason = COALESCE(NULLIF(flag_reason,''), ?)
                     WHERE id = ? AND (review_status IS NULL OR review_status = '')""",
                     [ip_review_reason, new_id])
-                db2.commit(); db2.close()
+                db2.commit()
+                # Auto-send clarification email if flagged at registration
+                if ip_review_flag == 1:
+                    fresh = db2.execute("SELECT id, name, email, passport FROM evacuees WHERE id = ?", [new_id]).fetchone()
+                    db2.close()
+                    if fresh:
+                        _queue_route_clarification_email(dict(fresh), changed_by='system', trigger_source='auto_flag_registration')
+                else:
+                    db2.close()
             # Log for rate limiting
             db = get_db()
             db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('public_register', ?, ?, ?)",
