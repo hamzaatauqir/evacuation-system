@@ -292,6 +292,63 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass
+
+    # ── Route Mismatch Correction Migration ──────────────────────
+    for col, coltype in [
+        ('original_form_source', "TEXT DEFAULT 'kw_to_pk'"),
+        ('effective_route', "TEXT DEFAULT 'kw_to_pk'"),
+        ('route_mismatch', 'INTEGER DEFAULT 0'),
+        ('physical_location', "TEXT DEFAULT 'unknown'"),
+        ('mofa_submitted', 'INTEGER DEFAULT 0'),
+        ('mofa_submission_batch_id', 'TEXT'),
+        ('record_locked', 'INTEGER DEFAULT 0'),
+        ('admin_override_by', 'TEXT'),
+        ('admin_override_at', 'TIMESTAMP'),
+        ('admin_override_notes', 'TEXT'),
+        ('review_status', 'TEXT'),
+        ('review_decision', 'TEXT'),
+        ('review_assigned_to', 'TEXT'),
+        ('reviewed_by', 'TEXT'),
+        ('reviewed_at', 'TIMESTAMP'),
+        ('review_notes', 'TEXT'),
+        ('flag_reason', 'TEXT'),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    # Indexes for route mismatch queries
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ev_mismatch ON evacuees(route_mismatch)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ev_effective_route ON evacuees(effective_route)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ev_review_status ON evacuees(review_status)")
+
+    # ── Route clarification email tracking columns ───────────────
+    for col, coltype in [
+        ('clarification_email_sent', 'INTEGER DEFAULT 0'),
+        ('clarification_email_sent_at', 'TIMESTAMP'),
+        ('clarification_email_count', 'INTEGER DEFAULT 0'),
+        ('clarification_email_last_error', 'TEXT'),
+        ('clarification_email_last_status', 'TEXT'),
+        ('clarification_email_last_trigger_source', 'TEXT'),
+        ('clarification_email_last_sent_by', 'TEXT'),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # ── Backfill existing records ────────────────────────────────
+    db.execute("UPDATE evacuees SET original_form_source = 'kw_to_pk' WHERE original_form_source IS NULL")
+    db.execute("UPDATE evacuees SET effective_route = 'kw_to_pk' WHERE effective_route IS NULL")
+    db.execute("UPDATE evacuees SET physical_location = 'unknown' WHERE physical_location IS NULL")
+    db.execute("""UPDATE evacuees SET mofa_submitted = 1, record_locked = 1
+        WHERE (mofa_status = 'Sent to MOFA' OR mofa_batch_id IS NOT NULL OR mofa_sent_date IS NOT NULL)
+        AND mofa_submitted = 0""")
+    db.execute("""UPDATE evacuees SET mofa_submission_batch_id = CAST(mofa_batch_id AS TEXT)
+        WHERE mofa_batch_id IS NOT NULL AND mofa_submission_batch_id IS NULL""")
+
     db.commit()
     db.close()
 
@@ -564,6 +621,31 @@ def _queue_mofa_sent_email(record, changed_by='system'):
         'changed_by': changed_by
     })
 
+def _queue_route_clarification_email(record, changed_by='system', trigger_source='auto_review'):
+    """Queue a route-clarification email. Updates tracking columns on the evacuees row."""
+    email = (record.get('email') or '').strip()
+    rec_id = record.get('id')
+    if not _is_valid_email(email):
+        db = get_db()
+        db.execute("""UPDATE evacuees SET
+            clarification_email_last_error = 'No valid email address on record',
+            clarification_email_last_status = 'skipped',
+            clarification_email_last_trigger_source = ?,
+            clarification_email_last_sent_by = ?
+            WHERE id = ?""", [trigger_source, changed_by, rec_id])
+        db.commit(); db.close()
+        return
+    EMAIL_QUEUE.put({
+        'type': 'route_clarification',
+        'to': email,
+        'name': (record.get('name') or 'Applicant').strip(),
+        'passport': (record.get('passport') or '').strip(),
+        'tracking_number': _tracking_no(rec_id),
+        'record_id': rec_id,
+        'changed_by': changed_by,
+        'trigger_source': trigger_source
+    })
+
 def _recipient_salutation(name):
     nm = (name or '').strip()
     if not nm:
@@ -607,6 +689,15 @@ DEFAULT_EMAIL_TEMPLATES = {
         "Embassy Hours: {embassy_hours}\n\n"
         "Pakistan Embassy Kuwait\n"
         "Citizen Support for Transit KSA System"
+    ),
+    'route_clarification': (
+        "Dear Applicant,\n\n"
+        "Your application has been flagged as the travel route provided in your submission is unclear.\n\n"
+        "In order to proceed further with processing, you are requested to immediately contact "
+        "Mr. Awais at +965 55977292 and confirm your correct travel route.\n\n"
+        "Please note that further action on your application may be delayed until this clarification is received.\n\n"
+        "Regards,\n"
+        "Pakistan Embassy Kuwait"
     )
 }
 
@@ -696,6 +787,40 @@ def _email_worker_loop():
                     "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_visa_approved', ?, ?, ?)",
                     [job.get('record_id'), job.get('changed_by', 'system'),
                      json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'route_clarification':
+                subject = "Clarification Required for Processing of Your Application"
+                templates = _load_email_templates()
+                body = templates.get('route_clarification', '')
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                db = get_db()
+                rec_id = job.get('record_id')
+                trigger_source = job.get('trigger_source', 'auto_review')
+                sent_by = job.get('changed_by', 'system')
+                if ok:
+                    db.execute("""UPDATE evacuees SET
+                        clarification_email_sent = 1,
+                        clarification_email_sent_at = ?,
+                        clarification_email_count = COALESCE(clarification_email_count, 0) + 1,
+                        clarification_email_last_error = NULL,
+                        clarification_email_last_status = 'sent',
+                        clarification_email_last_trigger_source = ?,
+                        clarification_email_last_sent_by = ?
+                    WHERE id = ?""", [now, trigger_source, sent_by, rec_id])
+                else:
+                    db.execute("""UPDATE evacuees SET
+                        clarification_email_last_error = ?,
+                        clarification_email_last_status = 'failed',
+                        clarification_email_last_trigger_source = ?,
+                        clarification_email_last_sent_by = ?
+                    WHERE id = ?""", [detail[:500], trigger_source, sent_by, rec_id])
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_route_clarification', ?, ?, ?)",
+                    [rec_id, sent_by,
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'trigger': trigger_source})]
                 )
                 db.commit()
                 db.close()
@@ -934,24 +1059,28 @@ def import_csv_data(csv_text, user='system', mode='smart'):
 # ═══════════════════════════════════════════════════════════════
 def api_dashboard_stats():
     db = get_db()
-    total_all = db.execute("SELECT COUNT(*) c FROM evacuees").fetchone()['c']
-    total = db.execute("SELECT COUNT(*) c FROM evacuees WHERE dup_flag='CLEAR'").fetchone()['c']
-    departed = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND dup_flag='CLEAR'").fetchone()['c']
-    visa_obtained = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Visa Obtained' AND dup_flag='CLEAR'").fetchone()['c']
-    pending = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Pending' AND dup_flag='CLEAR'").fetchone()['c']
-    visa_approved = db.execute("SELECT COUNT(*) c FROM evacuees WHERE visa_status='Approved' AND dup_flag='CLEAR'").fetchone()['c']
-    iraq_entries = db.execute("SELECT COUNT(*) c FROM evacuees WHERE country='Iraq' AND dup_flag='CLEAR'").fetchone()['c']
-    returned = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND dup_flag='CLEAR'").fetchone()['c']
+    # ── Evacuees KPIs: only operationally KW→PK records ──
+    EV_BASE = "FROM evacuees WHERE dup_flag='CLEAR' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
+    EV_ALL  = "FROM evacuees WHERE (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
 
-    # Today's live counts (based on departure_date field)
-    departed_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Departed' AND departure_date=date('now') AND dup_flag='CLEAR'").fetchone()['c']
-    entered_today = departed_today  # Departing Kuwait = Entering KSA same day
-    returned_today = db.execute("SELECT COUNT(*) c FROM evacuees WHERE travel_status='Returned' AND departure_date=date('now') AND dup_flag='CLEAR'").fetchone()['c']
+    total_all = db.execute(f"SELECT COUNT(*) c {EV_ALL}").fetchone()['c']
+    total = db.execute(f"SELECT COUNT(*) c {EV_BASE}").fetchone()['c']
+    departed = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed'").fetchone()['c']
+    visa_obtained = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Visa Obtained'").fetchone()['c']
+    pending = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Pending'").fetchone()['c']
+    visa_approved = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND visa_status='Approved'").fetchone()['c']
+    iraq_entries = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND country='Iraq'").fetchone()['c']
+    returned = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned'").fetchone()['c']
 
-    # Pre-database Jazeera Airways passengers (departed before system was set up)
+    # Today's live counts
+    departed_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed' AND departure_date=date('now')").fetchone()['c']
+    entered_today = departed_today
+    returned_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned' AND departure_date=date('now')").fetchone()['c']
+
+    # Pre-database Jazeera Airways passengers
     jazeera_departed = 120
 
-    by_country = [dict(r) for r in db.execute("""
+    by_country = [dict(r) for r in db.execute(f"""
         SELECT country, COUNT(*) total,
         SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
         SUM(CASE WHEN travel_status='Visa Obtained' THEN 1 ELSE 0 END) visa_obtained,
@@ -959,28 +1088,33 @@ def api_dashboard_stats():
         SUM(CASE WHEN gender='Male' THEN 1 ELSE 0 END) males,
         SUM(CASE WHEN gender='Female' THEN 1 ELSE 0 END) females,
         SUM(CASE WHEN gender='Child' THEN 1 ELSE 0 END) children
-        FROM evacuees GROUP BY country ORDER BY COUNT(*) DESC
+        {EV_ALL} GROUP BY country ORDER BY COUNT(*) DESC
     """).fetchall()]
 
-    by_gender = [dict(r) for r in db.execute("""
+    by_gender = [dict(r) for r in db.execute(f"""
         SELECT gender, COUNT(*) count,
         SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed
-        FROM evacuees GROUP BY gender
+        {EV_ALL} GROUP BY gender
     """).fetchall()]
 
-    by_date = [dict(r) for r in db.execute("""
+    by_date = [dict(r) for r in db.execute(f"""
         SELECT date_of_request date, COUNT(*) new_requests,
         SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
         SUM(CASE WHEN travel_status='Visa Obtained' THEN 1 ELSE 0 END) visa_obtained,
         SUM(CASE WHEN travel_status='Pending' THEN 1 ELSE 0 END) pending
-        FROM evacuees WHERE date_of_request IS NOT NULL AND date_of_request != ''
+        {EV_ALL} AND date_of_request IS NOT NULL AND date_of_request != ''
         GROUP BY date_of_request ORDER BY date_of_request
     """).fetchall()]
 
-    by_visa = [dict(r) for r in db.execute("SELECT COALESCE(visa_status,'Not Set') status, COUNT(*) count FROM evacuees GROUP BY visa_status").fetchall()]
-    by_border = [dict(r) for r in db.execute("SELECT border_crossing, COUNT(*) count FROM evacuees WHERE border_crossing != '' GROUP BY border_crossing").fetchall()]
+    by_visa = [dict(r) for r in db.execute(f"SELECT COALESCE(visa_status,'Not Set') status, COUNT(*) count {EV_ALL} GROUP BY visa_status").fetchall()]
+    by_border = [dict(r) for r in db.execute(f"SELECT border_crossing, COUNT(*) count {EV_ALL} AND border_crossing != '' GROUP BY border_crossing").fetchall()]
 
-    duplicates = db.execute("SELECT COUNT(*) c FROM evacuees WHERE dup_flag='DUPLICATE'").fetchone()['c']
+    duplicates = db.execute("SELECT COUNT(*) c FROM evacuees WHERE dup_flag='DUPLICATE' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)").fetchone()['c']
+
+    # ── Route mismatch summary for dashboard ──
+    mismatch_total = db.execute("SELECT COUNT(*) c FROM evacuees WHERE route_mismatch = 1").fetchone()['c']
+    mismatch_pending_review = db.execute("SELECT COUNT(*) c FROM evacuees WHERE review_status IN ('pending','under_review','needs_followup')").fetchone()['c']
+    corrected_to_pk = db.execute("SELECT COUNT(*) c FROM evacuees WHERE effective_route = 'pk_to_kw' AND route_mismatch = 1").fetchone()['c']
 
     db.close()
     return {
@@ -988,7 +1122,9 @@ def api_dashboard_stats():
                 'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates,
                 'departed_today': departed_today, 'entered_today': entered_today,
                 'returned': returned, 'returned_today': returned_today,
-                'jazeera_departed': jazeera_departed},
+                'jazeera_departed': jazeera_departed,
+                'mismatch_total': mismatch_total, 'mismatch_pending_review': mismatch_pending_review,
+                'corrected_to_pk': corrected_to_pk},
         'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
         'by_visa': by_visa, 'by_border': by_border
     }
@@ -1023,6 +1159,16 @@ def api_records(params):
     if params.get('dup'):
         where.append("dup_flag = ?")
         qparams.append(params['dup'])
+    # ── Route mismatch filters ──
+    if params.get('effective_route'):
+        where.append("effective_route = ?")
+        qparams.append(params['effective_route'])
+    if params.get('route_mismatch') == '1':
+        where.append("route_mismatch = 1")
+    elif params.get('route_mismatch') == '0':
+        where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
+    if params.get('hide_mismatch') == '1':
+        where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
 
     rows = db.execute(f"SELECT * FROM evacuees WHERE {' AND '.join(where)} ORDER BY id DESC", qparams).fetchall()
     result = [dict(r) for r in rows]
@@ -1182,6 +1328,12 @@ def api_returnees_stats():
         ORDER BY count DESC
     """).fetchall()]
 
+    # ── Corrected evacuees now operationally PK→KW ──
+    corrected_from_evacuees = db.execute("""
+        SELECT COUNT(*) c FROM evacuees
+        WHERE effective_route = 'pk_to_kw' AND route_mismatch = 1
+    """).fetchone()['c']
+
     db.close()
 
     return {
@@ -1193,7 +1345,8 @@ def api_returnees_stats():
             'approved_visa': approved_visa,
             'pending_visa': pending_visa,
             'with_family': with_family,
-            'ready_to_travel': ready_to_travel
+            'ready_to_travel': ready_to_travel,
+            'corrected_from_evacuees': corrected_from_evacuees
         },
         'by_status': by_status,
         'by_province': by_province,
@@ -1222,6 +1375,16 @@ def api_save_record(data, user):
     if rec_id:  # Update
         # Get old record to detect changes
         old_rec = dict(db.execute("SELECT * FROM evacuees WHERE id = ?", [rec_id]).fetchone())
+
+        # ── Record Locking: prevent edits to core fields if locked ──
+        LOCKED_FIELDS = {'name','passport','cnic','gender','country','civil_id',
+                         'visa_status','travel_status','mofa_status','dob',
+                         'border_crossing','departure_airport','destination_country'}
+        if old_rec.get('record_locked') == 1 or old_rec.get('record_locked') == '1':
+            changed_locked = [f for f in LOCKED_FIELDS if str(data.get(f, '')) != str(old_rec.get(f, ''))]
+            if changed_locked:
+                db.close()
+                return {'success': False, 'error': f'Record is locked (sent to MOFA KSA). Cannot edit: {", ".join(changed_locked)}'}
 
         sets = [f"{f} = ?" for f in fields]
         vals = [data.get(f, '') for f in fields]
@@ -1972,7 +2135,10 @@ def api_export_csv():
                      'Departure Airport','Destination Country','Date of Request','Email','DOB',
                      'Emergency Contact','Medical','Family Group','Dependents','Accommodation',
                      'Priority','Remarks','Planned Departure','Saudi City',
-                     'Traveling with Family','Confirm KSA 3-Days','Departure Date','Duplicate Flag','Created At'])
+                     'Traveling with Family','Confirm KSA 3-Days','Departure Date','Duplicate Flag',
+                     'Original Form Source','Effective Route','Route Mismatch','Physical Location',
+                     'MOFA Submitted','Record Locked','Review Status','Review Decision',
+                     'Reviewed By','Flag Reason','Created At'])
     def safe_get(row, key, default=''):
         try:
             return row[key]
@@ -1989,8 +2155,245 @@ def api_export_csv():
                         safe_get(r,'planned_departure'), safe_get(r,'saudi_city'),
                         safe_get(r,'traveling_with_family'), safe_get(r,'confirm_ksa_3days'),
                         safe_get(r,'departure_date'),
-                        r['dup_flag'], r['created_at']])
+                        r['dup_flag'],
+                        safe_get(r,'original_form_source'), safe_get(r,'effective_route'),
+                        safe_get(r,'route_mismatch'), safe_get(r,'physical_location'),
+                        safe_get(r,'mofa_submitted'), safe_get(r,'record_locked'),
+                        safe_get(r,'review_status'), safe_get(r,'review_decision'),
+                        safe_get(r,'reviewed_by'), safe_get(r,'flag_reason'),
+                        r['created_at']])
     return output.getvalue()
+
+# ═══════════════════════════════════════════════════════════════
+# ROUTE MISMATCH REVIEW QUEUE
+# ═══════════════════════════════════════════════════════════════
+
+def api_route_review_queue(params):
+    """Return candidates for route mismatch review.
+    Includes: heuristic suspects, manually flagged, under review, needs followup.
+    Supports search by passport, tracking number (PKE-XXXX), or mobile."""
+    db = get_db()
+    filter_type = params.get('filter', 'all')  # all, suspects, flagged, pending, finalized
+    search_val = (params.get('search', '') or '').strip()
+
+    # Build search clause if provided
+    search_clause = ''
+    search_params = []
+    if search_val:
+        tracking_match = re.match(r'^PKE-?(\d+)$', search_val, re.IGNORECASE)
+        if tracking_match:
+            search_clause = ' AND id = ?'
+            search_params = [int(tracking_match.group(1))]
+        else:
+            s = f'%{search_val}%'
+            search_clause = ' AND (UPPER(passport) LIKE UPPER(?) OR mobile LIKE ? OR name LIKE ? OR cnic LIKE ?)'
+            search_params = [s, s, s, s]
+
+    if filter_type == 'suspects':
+        rows = db.execute("""SELECT id, name, passport, cnic, country, civil_id, mobile, email,
+            border_crossing, mofa_status, mofa_submitted, record_locked,
+            route_mismatch, effective_route, original_form_source, physical_location,
+            review_status, review_decision, flag_reason, review_assigned_to,
+            reviewed_by, reviewed_at, review_notes, admin_override_notes,
+            visa_status, travel_status, created_at,
+            clarification_email_sent, clarification_email_sent_at,
+            clarification_email_count, clarification_email_last_error,
+            clarification_email_last_status, clarification_email_last_trigger_source,
+            clarification_email_last_sent_by
+            FROM evacuees
+            WHERE (route_mismatch = 0 OR route_mismatch IS NULL)
+            AND (review_status IS NULL OR review_status = '' OR review_status = 'pending')
+            AND (
+                LOWER(COALESCE(country,'')) LIKE '%pakistan%'
+                OR (civil_id IS NULL OR civil_id = '')
+                OR mobile LIKE '+92%'
+                OR mobile LIKE '03%'
+                OR mobile LIKE '92%'
+            )""" + search_clause + """
+            ORDER BY id DESC""", search_params).fetchall()
+    elif filter_type == 'flagged':
+        rows = db.execute("""SELECT * FROM evacuees
+            WHERE route_mismatch = 1""" + search_clause + """
+            ORDER BY id DESC""", search_params).fetchall()
+    elif filter_type == 'pending':
+        rows = db.execute("""SELECT * FROM evacuees
+            WHERE review_status IN ('pending', 'under_review', 'needs_followup')""" + search_clause + """
+            ORDER BY id DESC""", search_params).fetchall()
+    elif filter_type == 'finalized':
+        rows = db.execute("""SELECT * FROM evacuees
+            WHERE review_status = 'finalized'""" + search_clause + """
+            ORDER BY reviewed_at DESC LIMIT 200""", search_params).fetchall()
+    else:
+        rows = db.execute("""SELECT * FROM evacuees
+            WHERE (route_mismatch = 1
+            OR review_status IN ('pending', 'under_review', 'needs_followup')
+            OR (
+                (route_mismatch = 0 OR route_mismatch IS NULL)
+                AND (review_status IS NULL OR review_status = '' OR review_status = 'pending')
+                AND (
+                    LOWER(COALESCE(country,'')) LIKE '%pakistan%'
+                    OR (civil_id IS NULL OR civil_id = '')
+                    OR mobile LIKE '+92%'
+                    OR mobile LIKE '03%'
+                    OR mobile LIKE '92%'
+                )
+            ))""" + search_clause + """
+            ORDER BY id DESC""", search_params).fetchall()
+
+    result = [dict(r) for r in rows]
+    db.close()
+    return result
+
+
+def api_route_review_action(data, user):
+    """Process a staff review decision on a route mismatch case."""
+    db = get_db()
+    rec_id = data.get('id')
+    if not rec_id:
+        db.close()
+        return {'success': False, 'error': 'No record ID provided'}
+
+    rec = db.execute("SELECT * FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+    if not rec:
+        db.close()
+        return {'success': False, 'error': 'Record not found'}
+    rec = dict(rec)
+
+    decision = data.get('review_decision', '')
+    valid_decisions = ['keep_kw_to_pk', 'correct_to_pk_to_kw', 'annotate_only', 'needs_contact', 'reject_mismatch']
+    if decision not in valid_decisions:
+        db.close()
+        return {'success': False, 'error': f'Invalid decision. Must be one of: {", ".join(valid_decisions)}'}
+
+    review_notes = data.get('review_notes', '')
+    flag_reason = data.get('flag_reason', rec.get('flag_reason', ''))
+    physical_location = data.get('physical_location', rec.get('physical_location', 'unknown'))
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # Determine effective_route and route_mismatch based on decision
+    if decision == 'correct_to_pk_to_kw':
+        new_effective_route = 'pk_to_kw'
+        new_route_mismatch = 1
+        new_review_status = 'finalized'
+    elif decision == 'keep_kw_to_pk':
+        new_effective_route = 'kw_to_pk'
+        new_route_mismatch = 0
+        new_review_status = 'finalized'
+    elif decision == 'annotate_only':
+        # For MOFA-submitted records: mark mismatch but keep effective route annotation
+        new_effective_route = data.get('effective_route', 'pk_to_kw')
+        new_route_mismatch = 1
+        new_review_status = 'finalized'
+    elif decision == 'needs_contact':
+        new_effective_route = rec.get('effective_route', 'kw_to_pk')
+        new_route_mismatch = rec.get('route_mismatch', 0)
+        new_review_status = 'needs_followup'
+    elif decision == 'reject_mismatch':
+        new_effective_route = 'kw_to_pk'
+        new_route_mismatch = 0
+        new_review_status = 'finalized'
+    else:
+        new_effective_route = rec.get('effective_route', 'kw_to_pk')
+        new_route_mismatch = rec.get('route_mismatch', 0)
+        new_review_status = 'pending'
+
+    db.execute("""UPDATE evacuees SET
+        effective_route = ?,
+        route_mismatch = ?,
+        physical_location = ?,
+        review_status = ?,
+        review_decision = ?,
+        reviewed_by = ?,
+        reviewed_at = ?,
+        review_notes = ?,
+        flag_reason = ?,
+        admin_override_by = ?,
+        admin_override_at = ?,
+        admin_override_notes = ?,
+        updated_at = CURRENT_TIMESTAMP,
+        updated_by = ?
+    WHERE id = ?""",
+    [new_effective_route, new_route_mismatch, physical_location,
+     new_review_status, decision, user, now, review_notes, flag_reason,
+     user, now, data.get('admin_override_notes', review_notes),
+     user, rec_id])
+
+    db.execute("""INSERT INTO audit_log (action, record_id, user, details) VALUES ('route_review', ?, ?, ?)""",
+        (rec_id, user, json.dumps({
+            'decision': decision,
+            'effective_route': new_effective_route,
+            'route_mismatch': new_route_mismatch,
+            'physical_location': physical_location,
+            'review_notes': review_notes,
+            'flag_reason': flag_reason,
+            'was_locked': rec.get('record_locked', 0)
+        })))
+
+    db.commit()
+
+    # ── Auto-send route clarification email on contact-required decisions ──
+    send_email = False
+    if decision == 'needs_contact':
+        send_email = True
+    elif decision in ('correct_to_pk_to_kw', 'annotate_only'):
+        # Send only if never sent before
+        if not rec.get('clarification_email_sent') or rec.get('clarification_email_sent') == 0:
+            send_email = True
+
+    if send_email:
+        # Re-fetch record for email fields
+        fresh = db.execute("SELECT id, name, email, passport FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+        if fresh:
+            _queue_route_clarification_email(dict(fresh), user)
+
+    db.close()
+    return {'success': True, 'id': rec_id, 'decision': decision, 'review_status': new_review_status}
+
+
+def api_route_flag_record(data, user):
+    """Manually flag a record for route review (from All Records tab)."""
+    db = get_db()
+    rec_id = data.get('id')
+    flag_reason = data.get('flag_reason', 'Manually flagged by staff')
+    if not rec_id:
+        db.close()
+        return {'success': False, 'error': 'No record ID'}
+
+    db.execute("""UPDATE evacuees SET
+        review_status = 'pending',
+        flag_reason = ?,
+        admin_override_by = ?,
+        admin_override_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP, updated_by = ?
+    WHERE id = ?""", [flag_reason, user, user, rec_id])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('route_flag', ?, ?, ?)",
+        (rec_id, user, f'Flagged for route review: {flag_reason}'))
+    db.commit()
+    db.close()
+    return {'success': True, 'id': rec_id}
+
+
+def api_resend_clarification_email(data, user):
+    """Manual admin resend of route clarification email."""
+    db = get_db()
+    rec_id = data.get('id')
+    if not rec_id:
+        db.close()
+        return {'success': False, 'error': 'No record ID'}
+    rec = db.execute("SELECT id, name, email, passport FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+    if not rec:
+        db.close()
+        return {'success': False, 'error': 'Record not found'}
+    rec = dict(rec)
+    email = (rec.get('email') or '').strip()
+    if not _is_valid_email(email):
+        db.close()
+        return {'success': False, 'error': f'No valid email on record for PKE-{str(rec_id).zfill(4)}'}
+    db.close()
+    _queue_route_clarification_email(rec, changed_by=user, trigger_source='manual_resend')
+    return {'success': True, 'id': rec_id, 'email': email, 'message': f'Clarification email queued to {email}'}
+
 
 def api_audit_log():
     db = get_db()
@@ -2197,14 +2600,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     rec = db.execute("""SELECT id, name, passport, mofa_status, visa_status, travel_status,
                         COALESCE(mofa_sent_date,'') as mofa_sent_date,
                         COALESCE(mofa_letter_number,'') as mofa_letter_number,
-                        date_of_request, created_at
+                        date_of_request, created_at,
+                        COALESCE(effective_route,'kw_to_pk') as effective_route,
+                        COALESCE(route_mismatch,0) as route_mismatch
                         FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
             else:
                 passport = search_val.upper().strip()
                 rec = db.execute("""SELECT id, name, passport, mofa_status, visa_status, travel_status,
                     COALESCE(mofa_sent_date,'') as mofa_sent_date,
                     COALESCE(mofa_letter_number,'') as mofa_letter_number,
-                    date_of_request, created_at
+                    date_of_request, created_at,
+                    COALESCE(effective_route,'kw_to_pk') as effective_route,
+                    COALESCE(route_mismatch,0) as route_mismatch
                     FROM evacuees WHERE UPPER(TRIM(passport)) = ?""", [passport]).fetchone()
             db.close()
             if rec:
@@ -2216,22 +2623,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 status_info['passport'] = r['passport'][:3] + '****' + r['passport'][-2:] if r['passport'] and len(r['passport']) > 5 else '****'
                 status_info['registered_date'] = r['date_of_request'] or r['created_at'] or ''
                 status_info['mofa_sent_date'] = r['mofa_sent_date'] or ''
+                # If route was corrected, show the correct route context
+                if r.get('route_mismatch') == 1 and r.get('effective_route') == 'pk_to_kw':
+                    status_info['route_note'] = 'Your registration is being processed under the Pakistan to Kuwait transit route.'
                 if r['visa_status'] == 'Approved':
                     status_info['status'] = 'APPROVED'
                     status_info['status_detail'] = 'Your transit visa has been APPROVED by MOFA KSA. Kindly contact Pakistan Embassy Kuwait staff for coordination and further guidance on crossing border. Awais: +965-55977292.'
                     status_info['action_required'] = True
                 elif r['mofa_status'] == 'Sent to MOFA':
                     status_info['status'] = 'PENDING_MOFA'
-                    status_info['status_detail'] = (
-                        'Your application has been forwarded to the Embassy of Pakistan, Riyadh, for compilation and '
-                        'onward submission to the Ministry of Foreign Affairs of the Kingdom of Saudi Arabia for final '
-                        'approval. Applicants will be notified by email once approval is received.'
-                    )
-                    status_info['status_detail_ur'] = (
-                        'آپ کی درخواست کو پاکستان کے سفارت خانہ، ریاض، کو بھیجا گیا ہے تاکہ اسے مرتب کیا جا سکے اور '
-                        'مملکت سعودی عرب کی وزارت خارجہ کو حتمی منظوری کے لیے پیش کیا جا سکے۔ منظوری موصول ہونے پر '
-                        'درخواست دہندگان کو ای میل کے ذریعے اطلاع دے دی جائے گی۔'
-                    )
+                    status_info['status_detail'] = 'Your application has been sent to MOFA KSA and is pending approval.'
                     status_info['action_required'] = False
                 else:
                     status_info['status'] = 'PROCESSING'
@@ -2374,7 +2775,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     COALESCE(mofa_batch_id,'') as mofa_batch_id
                     FROM evacuees
                     WHERE dup_flag='CLEAR' AND (
-                        (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New'))
+                        (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+                         AND (route_mismatch = 0 OR route_mismatch IS NULL))
                         OR mofa_status='Sent to MOFA'
                     )
                     ORDER BY id""").fetchall()
@@ -2463,6 +2865,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
                     WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                    AND (route_mismatch = 0 OR route_mismatch IS NULL)
                     AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
                     ORDER BY id""", [from_id, to_id]).fetchall()
             rows = [dict(r) for r in rows]
@@ -2499,6 +2902,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_users_list())
+        elif path == '/api/route-review-queue':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_route_review_queue(params))
         elif path == '/api/audit':
             user = self.require_auth()
             if not user: return
@@ -3016,8 +3423,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     to_id = int(to_id)
                     cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA',
                         mofa_letter_number=?, mofa_letter_date=?, mofa_sent_date=?,
+                        mofa_submitted=1, record_locked=1,
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                        AND (route_mismatch = 0 OR route_mismatch IS NULL)
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
                         [letter_number, letter_date, sent_date, user['user'], from_id, to_id])
                     count = cur.rowcount
@@ -3026,8 +3435,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     placeholders = ','.join(['?'] * len(ids))
                     cur = db.execute(f"""UPDATE evacuees SET mofa_status='Sent to MOFA',
                         mofa_letter_number=?, mofa_letter_date=?, mofa_sent_date=?,
+                        mofa_submitted=1, record_locked=1,
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
-                        WHERE id IN ({placeholders}) AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
+                        WHERE id IN ({placeholders})
+                        AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                        AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
                         [letter_number, letter_date, sent_date, user['user']] + [int(i) for i in ids])
                     count = cur.rowcount
                     db.commit()
@@ -3065,6 +3477,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'success': True, 'count': count, 'batch_id': batch_id})
             except Exception as e:
                 self.send_json({'success': False, 'error': str(e)}, 500)
+
+        elif path == '/api/route-review-action':
+            user = self.require_auth()
+            if not user: return
+            data = json.loads(body)
+            result = api_route_review_action(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+
+        elif path == '/api/route-flag-record':
+            user = self.require_auth()
+            if not user: return
+            data = json.loads(body)
+            result = api_route_flag_record(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+
+        elif path == '/api/resend-clarification-email':
+            user = self.require_auth()
+            if not user: return
+            data = json.loads(body)
+            result = api_resend_clarification_email(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
 
         elif path == '/api/bulk-visa-update':
             user = self.require_auth()
@@ -3170,9 +3603,7 @@ PUBLIC_REGISTER_PAGE = """<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 .hdr{background:linear-gradient(135deg,#006600,#004d00);color:#fff;padding:20px 24px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,.2)}
-.hdr h1{font-size:1.4em;margin-bottom:4px;letter-spacing:.4px}.hdr .sub{font-size:.9em;opacity:.95}
-.route-chip{display:inline-flex;align-items:center;gap:8px;margin-top:12px;padding:8px 16px;border-radius:999px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.45);font-weight:800;letter-spacing:1.2px;text-transform:uppercase}
-.route-chip .dot{width:8px;height:8px;border-radius:50%;background:#ffeb3b;box-shadow:0 0 10px #ffeb3b}
+.hdr h1{font-size:1.4em;margin-bottom:4px}.hdr .sub{font-size:.85em;opacity:.9}
 .hdr .flag{font-size:2em;margin-bottom:6px}.hdr .flag-img{width:108px;height:72px;object-fit:cover;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.45)}
 .ctr{max-width:700px;margin:0 auto;padding:20px}
 .notice{background:#fff3e0;border:1px solid #ffcc80;border-radius:10px;padding:14px 18px;margin-bottom:18px;font-size:.88em;color:#e65100;line-height:1.5}
@@ -3225,14 +3656,13 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;color:#212121}
 <span class="brand-pair" style="display:inline-flex;align-items:center;gap:10px;justify-content:center"><img class="flag-img" src="data:image/jpeg;base64,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" alt="Pakistan Flag" style="margin-bottom:8px"><img class="embassy-logo-img" src="data:image/png;base64,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" alt="Embassy of Pakistan Kuwait Logo" style="width:72px;height:72px;object-fit:contain;border-radius:50%;background:#fff;padding:2px;border:1px solid rgba(255,255,255,.45);box-shadow:0 4px 14px rgba(0,0,0,.24)"></span>
 <h1>SAUDI TRANSIT VISA REGISTRATION</h1>
 <div class="sub">Pakistan Embassy Kuwait &mdash; Community Welfare Wing (CWA Kuwait)</div>
-<div class="route-chip"><span class="dot"></span>KUWAIT TO PAKISTAN</div>
 </div>
 <div style="background:linear-gradient(135deg,#1565c0,#0d47a1);padding:14px 20px;text-align:center">
 <a href="/track-application" style="color:#fff;text-decoration:none;font-weight:700;font-size:1.05em;display:inline-flex;align-items:center;gap:8px">
 <span style="font-size:1.4em">&#128270;</span> Already Registered? Track Your Application Status Here
 <span style="background:rgba(255,255,255,.25);padding:4px 12px;border-radius:20px;font-size:.85em;margin-left:8px">Check Now &rarr;</span></a>
 </div>
-<div style="background:linear-gradient(135deg,#7b1fa2,#4a148c);padding:16px 20px;text-align:center">
+<div style="background:linear-gradient(135deg,#006600,#004d00);padding:16px 20px;text-align:center">
 <a href="/travel-interest" style="color:#fff;text-decoration:none;display:block">
 <div style="display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap">
 <span style="font-size:1.8em">&#9992;&#65039;</span>
@@ -3529,7 +3959,7 @@ document.getElementById('statusBox').innerHTML=`
 <div class="status-icon">${icon}</div>
 <div class="status-label">${label}</div>
 <div class="status-detail">${s.status_detail}</div>
-<div class="status-detail-ur">${s.status_detail_ur||labelUr}</div>
+<div class="status-detail-ur">${labelUr}</div>
 </div>`;
 // Timeline
 let tl='<div class="timeline">';
@@ -4129,6 +4559,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <button onclick="go('recs',this)">All Records</button>
 <button onclick="go('returnees',this)">Returnees</button>
 <button onclick="go('mofa',this)">MOFA Export</button>
+<button onclick="go('review',this)" style="color:#e65100">Route Review</button>
 <button onclick="go('csv',this)">CSV Import</button>
 <button onclick="go('report',this)">SITREP Report</button>
 <button onclick="go('sitrep',this)">SITREP Editor</button>
@@ -4354,6 +4785,76 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <h3 style="color:#1565c0">Batch History</h3>
 <p style="font-size:.88em;color:var(--tl);margin-bottom:10px">All MOFA batches sent with letter/fax reference numbers for follow-up.</p>
 <div class="scroll-t"><table id="mofaBatchTbl" style="font-size:.85em"></table></div>
+</div>
+</div></div>
+
+
+<!-- ROUTE REVIEW QUEUE -->
+<div id="tab-review" class="tab"><div class="ctr">
+<div class="fs">
+<h3 style="color:#e65100">Route Review Queue</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Review suspected route mismatches. Some users in Pakistan registered through the Kuwait&rarr;Pakistan form instead of Pakistan&rarr;Kuwait. Review each case and make a decision.</p>
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+<select id="reviewFilter" onchange="loadReviewQueue()" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;font-size:.88em;min-width:200px">
+<option value="all">All Cases</option>
+<option value="suspects">Heuristic Suspects</option>
+<option value="flagged">Confirmed Mismatches</option>
+<option value="pending">Pending / Under Review</option>
+<option value="finalized">Finalized Archive</option>
+</select>
+<div style="position:relative;flex:1;min-width:220px"><span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#999;font-size:1.1em">&#128269;</span><input id="reviewSearch" placeholder="Search passport, tracking # or mobile..." onkeydown="if(event.key==='Enter')loadReviewQueue()" style="width:100%;padding:8px 12px 8px 38px;border:1px solid var(--bd);border-radius:7px;font-size:.88em"></div>
+<span id="reviewCount" style="font-size:.88em;color:var(--tl);font-weight:600"></span>
+<button class="btn btn-p" style="padding:8px 16px;font-size:.85em" onclick="loadReviewQueue()">Refresh</button>
+<button style="padding:8px 12px;font-size:.82em;border:1px solid var(--bd);border-radius:7px;background:#fff;cursor:pointer;color:#e65100" onclick="document.getElementById('reviewSearch').value='';loadReviewQueue()">&#10005; Clear</button>
+</div>
+
+<div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap">
+<span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80">&#9888; Route Mismatch</span>
+<span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#ffebee;color:#c62828;border:1px solid #ef9a9a">&#128274; MOFA Locked</span>
+<span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9">&#9989; Finalized</span>
+<span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">&#10004; PK Location</span>
+</div>
+
+<div class="scroll-t"><table id="reviewTbl" style="font-size:.85em"></table></div>
+</div>
+
+<!-- Review Decision Modal -->
+<div id="reviewModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9999;justify-content:center;align-items:center">
+<div style="background:#fff;border-radius:12px;padding:24px;max-width:600px;width:95%;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.3)">
+<h3 style="color:#e65100;margin-bottom:12px">Review Route Case <span id="reviewModalId"></span></h3>
+<div id="reviewModalInfo" style="margin-bottom:14px;font-size:.88em;background:#f5f5f5;padding:12px;border-radius:8px"></div>
+<div class="fgp" style="margin-bottom:10px">
+<label style="font-size:.82em;font-weight:600">Decision <span style="color:#c62828">*</span></label>
+<select id="reviewDecision" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;width:100%">
+<option value="">-- Select Decision --</option>
+<option value="correct_to_pk_to_kw">Correct to Pakistan &rarr; Kuwait (mark mismatch)</option>
+<option value="keep_kw_to_pk">Keep as Kuwait &rarr; Pakistan (no mismatch)</option>
+<option value="annotate_only">Annotate Only (MOFA locked, mark mismatch)</option>
+<option value="needs_contact">Needs Contact (insufficient evidence)</option>
+<option value="reject_mismatch">Reject Mismatch (suspicion was incorrect)</option>
+</select>
+</div>
+<div class="fgp" style="margin-bottom:10px">
+<label style="font-size:.82em;font-weight:600">Physical Location</label>
+<select id="reviewLocation" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;width:100%">
+<option value="unknown">Unknown</option>
+<option value="pakistan">Pakistan</option>
+<option value="kuwait">Kuwait</option>
+</select>
+</div>
+<div class="fgp" style="margin-bottom:10px">
+<label style="font-size:.82em;font-weight:600">Flag Reason</label>
+<input id="reviewFlagReason" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;width:100%" placeholder="Why this record was flagged...">
+</div>
+<div class="fgp" style="margin-bottom:14px">
+<label style="font-size:.82em;font-weight:600">Review Notes</label>
+<textarea id="reviewNotesInput" rows="3" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;width:100%;resize:vertical" placeholder="Additional notes about this decision..."></textarea>
+</div>
+<div style="display:flex;gap:10px;justify-content:flex-end">
+<button class="btn" style="padding:10px 20px;background:#f5f5f5;color:#333;border:1px solid #ccc" onclick="closeReviewModal()">Cancel</button>
+<button class="btn btn-p" style="padding:10px 20px" onclick="submitReviewDecision()">Submit Decision</button>
+</div>
+</div>
 </div>
 </div></div>
 
@@ -4658,7 +5159,7 @@ document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
 document.getElementById('tab-'+tab).classList.add('active');
 btn.classList.add('active');
-if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}
+if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}if(tab==='review')loadReviewQueue();
 }
 
 async function api(url,opts){const r=await fetch(url,opts);if(r.status===302||r.redirected){window.location='/login';return null}return r.json()}
@@ -4677,7 +5178,9 @@ document.getElementById('kpiGrid').innerHTML=`
 <div class="kc s"><div class="lb">KSA Approved</div><div class="vl">${k.visa_approved}</div><div class="su">Mission KSA</div></div>
 <div class="kc w"><div class="lb">Iraq Entries</div><div class="vl">${k.iraq_entries}</div><div class="su">Cross-border</div></div>
 ${k.returned > 0 ? '<div class="kc d"><div class="lb">Returned</div><div class="vl">'+k.returned+'</div><div class="su">'+k.returned_today+' today</div></div>' : ''}
-<div class="kc s" style="background:#fff3e0;border-color:#e65100"><div class="lb" style="color:#e65100">Today Live</div><div class="vl" style="color:#e65100">${k.departed_today}</div><div class="su" style="color:#bf360c">${k.departed_today} departed | ${k.entered_today} entered KSA</div></div>`;
+<div class="kc s" style="background:#fff3e0;border-color:#e65100"><div class="lb" style="color:#e65100">Today Live</div><div class="vl" style="color:#e65100">${k.departed_today}</div><div class="su" style="color:#bf360c">${k.departed_today} departed | ${k.entered_today} entered KSA</div></div>
+${k.mismatch_total>0?'<div class="kc w" style="background:#fff8e1;border-color:#ff8f00"><div class="lb" style="color:#e65100">Route Mismatches</div><div class="vl" style="color:#e65100">'+k.mismatch_total+'</div><div class="su" style="color:#bf360c">'+k.corrected_to_pk+' corrected to PK\u2192KW | '+(k.mismatch_pending_review||0)+' pending review</div></div>':''}
+`;
 if(k.pending>k.visa_approved){document.getElementById('alertBar').style.display='flex';document.getElementById('alertText').textContent=`ALERT: Pending (${k.pending}) outpacing resolved (${k.visa_approved}) — urgent KSA action needed`}
 else document.getElementById('alertBar').style.display='none';
 
@@ -4752,7 +5255,9 @@ document.getElementById('dashRetKpi').innerHTML=`
 <div class="kc s"><div class="lb">VISA APPROVED</div><div class="vl">${rk.approved_visa}</div></div>
 <div class="kc d"><div class="lb">PENDING VISA</div><div class="vl">${rk.pending_visa}</div></div>
 <div class="kc i"><div class="lb">WITH FAMILY</div><div class="vl">${rk.with_family}</div></div>
-<div class="kc s"><div class="lb">READY TO TRAVEL</div><div class="vl">${rk.ready_to_travel}</div></div>`;
+<div class="kc s"><div class="lb">READY TO TRAVEL</div><div class="vl">${rk.ready_to_travel}</div></div>
+${rk.corrected_from_evacuees>0?'<div class="kc w" style="background:#fff8e1;border-color:#ff8f00"><div class="lb" style="color:#e65100">CORRECTED FROM KW\u2192PK</div><div class="vl" style="color:#e65100">'+rk.corrected_from_evacuees+'</div><div class="su" style="font-size:.72em;color:#bf360c">Route-corrected evacuees</div></div>':''}
+`;
 }
 }
 function mkChart(id,type,data,opts){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),{type,data,options:{responsive:true,...opts}})}
@@ -4767,14 +5272,19 @@ const ge=document.getElementById('fGender').value;if(ge)p.set('gender',ge);
 const du=document.getElementById('fDup').value;if(du)p.set('dup',du);
 allRecords=await api('/api/records?'+p.toString());if(!allRecords)return;
 document.getElementById('recCount').textContent=`Showing ${allRecords.length} records`;
-let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>Actions</th></tr></thead><tbody>';
+let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>Route</th><th>Actions</th></tr></thead><tbody>';
 allRecords.forEach((r,i)=>{
 const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':r.travel_status==='Returned'?'bdg-rej':'bdg-vis';
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
 const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
 const ms=r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20;font-size:.7em">Sent</span>':'-';
 const cmpBtn=r.dup_flag==='DUPLICATE'?`<button class="btn btn-d" style="padding:2px 6px;font-size:.7em;margin-left:4px" onclick="compareDup(${r.id})">Compare</button>`:'';
-h+=`<tr><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button></td></tr>`;
+let routeBdg='';
+if(r.route_mismatch==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#fff3e0;color:#e65100;border:1px solid #ffcc80">MISMATCH</span> ';
+if(r.record_locked==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#ffebee;color:#c62828;border:1px solid #ef9a9a">\ud83d\udd12</span> ';
+if(!routeBdg)routeBdg='<span style="color:#bbb;font-size:.75em">-</span>';
+const rowBg=r.route_mismatch==1?'style="background:#fff8e1"':'';
+h+=`<tr ${rowBg}><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td>${routeBdg}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button> <button style="padding:2px 6px;font-size:.68em;border:1px solid #ffcc80;background:#fff8e1;color:#e65100;border-radius:5px;cursor:pointer" onclick="flagForRouteReview(${r.id})" title="Flag for route review">\u2691</button></td></tr>`;
 });h+='</tbody>';document.getElementById('recTbl').innerHTML=h;
 }
 
@@ -4791,20 +5301,34 @@ const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
 const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
 document.getElementById('viewBadges').innerHTML=`
-<span class="bdg ${vb}">Visa: ${r.visa_status||'—'}</span>
-<span class="bdg ${sb}">Status: ${r.travel_status||'—'}</span>
+<span class="bdg ${vb}">Visa: ${r.visa_status||'\u2014'}</span>
+<span class="bdg ${sb}">Status: ${r.travel_status||'\u2014'}</span>
 <span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>
 ${r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20">MOFA Sent</span>':''}
-${r.priority&&r.priority!=='Normal'?'<span class="bdg" style="background:#fff3e0;color:#e65100">Priority: '+r.priority+'</span>':''}`;
+${r.priority&&r.priority!=='Normal'?'<span class="bdg" style="background:#fff3e0;color:#e65100">Priority: '+r.priority+'</span>':''}
+${r.route_mismatch==1?'<span class="bdg" style="background:#fff3e0;color:#e65100;border:1px solid #ffcc80">\u26a0 ROUTE MISMATCH</span>':''}
+${r.record_locked==1?'<span class="bdg" style="background:#ffebee;color:#c62828;border:1px solid #ef9a9a">\ud83d\udd12 MOFA LOCKED</span>':''}`;
 // Build profile sections
 const sec=(title,fields)=>{
 let s=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#006600;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #e8f5e9;margin-bottom:8px">${title}</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px">`;
 fields.forEach(([label,val])=>{
-s+=`<div style="font-size:.85em"><span style="color:#888;display:block;font-size:.85em">${label}</span><strong style="color:#333">${val||'—'}</strong></div>`;
+s+=`<div style="font-size:.85em"><span style="color:#888;display:block;font-size:.85em">${label}</span><strong style="color:#333">${val||'\u2014'}</strong></div>`;
 });
 return s+'</div></div>';
 };
-let html=sec('Personal Information',[
+const routeMap={kw_to_pk:'Kuwait \u2192 Pakistan',pk_to_kw:'Pakistan \u2192 Kuwait'};
+let html='';
+if(r.route_mismatch==1){
+html+=`<div style="margin-bottom:14px;padding:12px;background:#fff3e0;border:1px solid #ffcc80;border-radius:8px;font-size:.88em">
+<strong style="color:#e65100">\u26a0 Route Mismatch Detected</strong><br>
+This person registered through the <strong>${routeMap[r.original_form_source]||'KW\u2192PK'}</strong> form but actually belongs to the <strong>${routeMap[r.effective_route]||r.effective_route}</strong> transit route.
+Physical location: <strong>${(r.physical_location||'unknown').toUpperCase()}</strong>.
+${r.record_locked==1?'<br><span style="color:#c62828">Record is MOFA-locked \u2014 core fields cannot be edited.</span>':''}
+${r.reviewed_by?'<br>Reviewed by: <strong>'+r.reviewed_by+'</strong> on '+(r.reviewed_at||'')+'. Decision: <strong>'+(r.review_decision||'-')+'</strong>':''}
+${r.admin_override_notes?'<br>Notes: '+r.admin_override_notes:''}
+</div>`;
+}
+html+=sec('Personal Information',[
 ['Full Name',r.name],['Passport Number',r.passport],['CNIC',r.cnic],['Gender',r.gender],
 ['Date of Birth',r.dob],['Country',r.country],['Civil ID',r.civil_id],['Email',r.email],
 ['Mobile',r.mobile],['Company',r.company]
@@ -4818,8 +5342,31 @@ html+=sec('Travel Details',[
 ]);
 html+=sec('Status & Processing',[
 ['KSA Visa Status',r.visa_status],['Travel Status',r.travel_status],
-['MOFA Status',r.mofa_status||'—'],['Duplicate Flag',r.dup_flag],
+['MOFA Status',r.mofa_status||'\u2014'],['Duplicate Flag',r.dup_flag],
 ['Priority',r.priority],['Date of Request',r.date_of_request]
+]);
+html+=sec('Route & Review',[
+['Original Form Source',routeMap[r.original_form_source]||r.original_form_source||'KW\u2192PK'],
+['Effective Route',routeMap[r.effective_route]||r.effective_route||'KW\u2192PK'],
+['Route Mismatch',r.route_mismatch==1?'YES':'No'],
+['Physical Location',(r.physical_location||'unknown').toUpperCase()],
+['MOFA Submitted',r.mofa_submitted==1?'Yes':'No'],
+['Record Locked',r.record_locked==1?'LOCKED':'Editable'],
+['Review Status',r.review_status||'\u2014'],
+['Review Decision',r.review_decision||'\u2014'],
+['Reviewed By',r.reviewed_by||'\u2014'],
+['Reviewed At',r.reviewed_at||'\u2014'],
+['Flag Reason',r.flag_reason||'\u2014'],
+['Override Notes',r.admin_override_notes||'\u2014']
+]);
+html+=sec('Clarification Email',[
+['Email Sent',r.clarification_email_sent==1?'Yes':'No'],
+['Send Count',r.clarification_email_count||'0'],
+['Last Sent At',r.clarification_email_sent_at||'\u2014'],
+['Last Status',r.clarification_email_last_status||'\u2014'],
+['Last Trigger',r.clarification_email_last_trigger_source||'\u2014'],
+['Sent By',r.clarification_email_last_sent_by||'\u2014'],
+['Last Error',r.clarification_email_last_error||'\u2014']
 ]);
 html+=sec('Additional',[
 ['Emergency Contact',r.emergency_contact],['Medical',r.medical],
@@ -5684,6 +6231,171 @@ setTimeout(loadSitrepData,1000);
 
 // Auto-refresh dashboard every 30s
 setInterval(()=>{if(document.getElementById('tab-dash').classList.contains('active'))loadDash()},30000);
+
+// ═══════════════════════════════════════════════════════════════
+// ROUTE REVIEW QUEUE
+// ═══════════════════════════════════════════════════════════════
+let _reviewCurrentId=null;
+
+async function loadReviewQueue(){
+const f=document.getElementById('reviewFilter').value;
+const s=document.getElementById('reviewSearch').value.trim();
+let url='/api/route-review-queue?filter='+f;
+if(s)url+='&search='+encodeURIComponent(s);
+const data=await api(url);
+if(!data)return;
+const rows=Array.isArray(data)?data:[];
+document.getElementById('reviewCount').textContent=rows.length+' records';
+const tbl=document.getElementById('reviewTbl');
+let h='<tr style="background:var(--pl)"><th>#</th><th>Name</th><th>Passport</th><th>Country</th><th>Contact</th><th>Civil ID</th><th>Badges</th><th>Effective Route</th><th>Physical Loc.</th><th>MOFA</th><th>Review</th><th>Decision</th><th>Actions</th></tr>';
+rows.forEach(r=>{
+const isMismatch=r.route_mismatch==1;
+const isLocked=r.record_locked==1||r.mofa_submitted==1;
+const isPk=(r.physical_location||'').toLowerCase()==='pakistan';
+const isFinalized=r.review_status==='finalized';
+let badges='';
+if(isMismatch)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#fff3e0;color:#e65100;border:1px solid #ffcc80;margin:1px">MISMATCH</span> ';
+if(isLocked)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#ffebee;color:#c62828;border:1px solid #ef9a9a;margin:1px">LOCKED</span> ';
+if(isPk)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7;margin:1px">IN PK</span> ';
+if(isFinalized)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9;margin:1px">DONE</span> ';
+const routeMap={kw_to_pk:'KW\u2192PK',pk_to_kw:'PK\u2192KW'};
+const decMap={correct_to_pk_to_kw:'Corrected\u2192PK\u2192KW',keep_kw_to_pk:'Kept KW\u2192PK',annotate_only:'Annotated',needs_contact:'Needs Contact',reject_mismatch:'Rejected'};
+const mofaStr=r.mofa_submitted==1?'<span style="color:#c62828;font-weight:600">Sent</span>':'<span style="color:#9e9e9e">Not Sent</span>';
+const revStatus=r.review_status||'<span style="color:#9e9e9e">-</span>';
+const decStr=r.review_decision?decMap[r.review_decision]||r.review_decision:'<span style="color:#9e9e9e">-</span>';
+const canReview=r.review_status!=='finalized';
+let contactHtml='';
+if(r.mobile)contactHtml+=`<a href="tel:${r.mobile}" style="color:#1565c0;text-decoration:none;font-size:.82em;display:block" title="Call">\ud83d\udcf1 ${r.mobile}</a>`;
+if(r.mobile)contactHtml+=`<a href="https://wa.me/${(r.mobile||'').replace(/[^0-9]/g,'')}" target="_blank" style="color:#25d366;text-decoration:none;font-size:.78em" title="WhatsApp">\ud83d\udcac WA</a> `;
+if(r.email)contactHtml+=`<a href="mailto:${r.email}" style="color:#1565c0;text-decoration:none;font-size:.78em;display:block" title="Email">\u2709 ${r.email}</a>`;
+if(!contactHtml)contactHtml='<span style="color:#999;font-size:.78em">No contact</span>';
+h+=`<tr style="${isMismatch?'background:#fff8e1;':''}">
+<td>PKE-${String(r.id).padStart(4,'0')}</td>
+<td><strong>${r.name||''}</strong></td>
+<td>${r.passport||''}</td>
+<td>${r.country||''}</td>
+<td style="white-space:nowrap">${contactHtml}</td>
+<td>${r.civil_id||'<span style="color:#e65100;font-style:italic">empty</span>'}</td>
+<td>${badges||'-'}</td>
+<td>${routeMap[r.effective_route]||r.effective_route||'-'}</td>
+<td>${(r.physical_location||'unknown').toUpperCase()}</td>
+<td>${mofaStr}</td>
+<td>${revStatus}</td>
+<td>${decStr}</td>
+<td>${canReview?'<button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="openReviewModal('+r.id+')">Review</button>':'<span style="color:#9e9e9e;font-size:.8em">Done</span>'}</td>
+</tr>`;
+});
+tbl.innerHTML=h;
+}
+
+function openReviewModal(id){
+_reviewCurrentId=id;
+document.getElementById('reviewModal').style.display='flex';
+document.getElementById('reviewModalId').textContent='PKE-'+String(id).padStart(4,'0');
+// Load record details
+fetch('/api/records?search='+id).then(r=>r.json()).then(data=>{
+const recs=Array.isArray(data)?data:[];
+const r=recs.find(x=>x.id===id)||recs[0]||{};
+const routeMap={kw_to_pk:'Kuwait \u2192 Pakistan',pk_to_kw:'Pakistan \u2192 Kuwait'};
+document.getElementById('reviewModalInfo').innerHTML=`
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+<div><strong>Name:</strong> ${r.name||'-'}</div>
+<div><strong>Passport:</strong> ${r.passport||'-'}</div>
+<div><strong>Country:</strong> ${r.country||'-'}</div>
+<div><strong>Civil ID:</strong> ${r.civil_id||'<em style="color:#e65100">empty</em>'}</div>
+<div><strong>Original Form:</strong> ${routeMap[r.original_form_source]||r.original_form_source||'KW\u2192PK'}</div>
+<div><strong>Current Effective Route:</strong> ${routeMap[r.effective_route]||r.effective_route||'KW\u2192PK'}</div>
+<div><strong>MOFA Status:</strong> ${r.mofa_status||'Not sent'}</div>
+<div><strong>Record Locked:</strong> ${r.record_locked==1?'<span style="color:#c62828;font-weight:600">YES</span>':'No'}</div>
+<div><strong>Visa Status:</strong> ${r.visa_status||'-'}</div>
+<div><strong>Travel Status:</strong> ${r.travel_status||'-'}</div>
+<div><strong>Border:</strong> ${r.border_crossing||'-'}</div>
+<div><strong>CNIC:</strong> ${r.cnic||'-'}</div>
+</div>
+<div style="margin-top:10px;padding:10px;background:#e3f2fd;border:1px solid #90caf9;border-radius:8px">
+<div style="font-weight:700;font-size:.85em;color:#1565c0;margin-bottom:6px">\ud83d\udcde Contact Information (for location verification)</div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+${r.mobile?'<a href="tel:'+r.mobile+'" style="display:inline-flex;align-items:center;gap:4px;padding:6px 12px;background:#fff;border:1px solid #90caf9;border-radius:6px;color:#1565c0;text-decoration:none;font-weight:600;font-size:.88em">\ud83d\udcf1 '+r.mobile+'</a>':'<span style="color:#999;font-size:.88em">No mobile</span>'}
+${r.mobile?'<a href="https://wa.me/'+r.mobile.replace(/[^0-9]/g,'')+'" target="_blank" style="display:inline-flex;align-items:center;gap:4px;padding:6px 12px;background:#25d366;border:1px solid #25d366;border-radius:6px;color:#fff;text-decoration:none;font-weight:600;font-size:.88em">\ud83d\udcac WhatsApp</a>':''}
+${r.email?'<a href="mailto:'+r.email+'" style="display:inline-flex;align-items:center;gap:4px;padding:6px 12px;background:#fff;border:1px solid #90caf9;border-radius:6px;color:#1565c0;text-decoration:none;font-weight:600;font-size:.88em">\u2709 '+r.email+'</a>':'<span style="color:#999;font-size:.88em">No email</span>'}
+</div>
+</div>
+${r.record_locked==1?'<div style="margin-top:8px;padding:8px;background:#ffebee;border:1px solid #ef9a9a;border-radius:6px;font-size:.85em;color:#c62828"><strong>\u26a0 This record is MOFA-locked.</strong> Core fields cannot be changed. You can annotate the mismatch and physical location.</div>':''}
+${r.flag_reason?'<div style="margin-top:6px;font-size:.85em"><strong>Flag reason:</strong> '+r.flag_reason+'</div>':''}
+${r.review_notes?'<div style="margin-top:4px;font-size:.85em"><strong>Previous notes:</strong> '+r.review_notes+'</div>':''}
+<div style="margin-top:10px;padding:10px;background:${r.clarification_email_sent==1?'#e8f5e9':'#f5f5f5'};border:1px solid ${r.clarification_email_sent==1?'#a5d6a7':'#e0e0e0'};border-radius:8px">
+<div style="font-weight:700;font-size:.85em;color:#333;margin-bottom:6px">\u2709 Clarification Email Status</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:.82em">
+<div><strong>Sent:</strong> ${r.clarification_email_sent==1?'<span style="color:#2e7d32;font-weight:600">Yes</span>':'<span style="color:#999">No</span>'}</div>
+<div><strong>Count:</strong> ${r.clarification_email_count||0}</div>
+<div><strong>Last sent:</strong> ${r.clarification_email_sent_at||'-'}</div>
+<div><strong>Status:</strong> ${r.clarification_email_last_status||'-'}</div>
+<div><strong>Trigger:</strong> ${r.clarification_email_last_trigger_source||'-'}</div>
+<div><strong>Sent by:</strong> ${r.clarification_email_last_sent_by||'-'}</div>
+${r.clarification_email_last_error?'<div style="grid-column:1/-1;color:#c62828"><strong>Error:</strong> '+r.clarification_email_last_error+'</div>':''}
+</div>
+<div style="margin-top:8px"><button style="padding:6px 14px;font-size:.82em;border:1px solid #1565c0;background:#e3f2fd;color:#1565c0;border-radius:6px;cursor:pointer;font-weight:600" onclick="resendClarificationEmail(${r.id})">${r.clarification_email_sent==1?'\u21bb Resend':'\u2709 Send'} Clarification Email</button>${!r.email?'<span style="color:#c62828;font-size:.78em;margin-left:8px">\u26a0 No email on record</span>':''}</div>
+</div>
+`;
+// Pre-fill physical location if known
+if(r.physical_location&&r.physical_location!=='unknown'){
+document.getElementById('reviewLocation').value=r.physical_location;
+}else{
+// Heuristic: if country contains 'pakistan', suggest pakistan
+if((r.country||'').toLowerCase().includes('pakistan'))document.getElementById('reviewLocation').value='pakistan';
+else document.getElementById('reviewLocation').value='unknown';
+}
+if(r.flag_reason)document.getElementById('reviewFlagReason').value=r.flag_reason;
+else document.getElementById('reviewFlagReason').value='';
+document.getElementById('reviewNotesInput').value='';
+document.getElementById('reviewDecision').value='';
+});
+}
+
+function closeReviewModal(){
+document.getElementById('reviewModal').style.display='none';
+_reviewCurrentId=null;
+}
+
+async function submitReviewDecision(){
+if(!_reviewCurrentId)return;
+const decision=document.getElementById('reviewDecision').value;
+if(!decision){toast('Please select a decision');return}
+const payload={
+id:_reviewCurrentId,
+review_decision:decision,
+physical_location:document.getElementById('reviewLocation').value,
+flag_reason:document.getElementById('reviewFlagReason').value,
+review_notes:document.getElementById('reviewNotesInput').value,
+};
+const r=await fetch('/api/route-review-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const d=await r.json();
+if(d.success){
+toast('Review submitted: '+decision);
+closeReviewModal();
+loadReviewQueue();
+}else{
+toast('Error: '+(d.error||'Unknown'));
+}
+}
+
+// Flag record from All Records table
+async function flagForRouteReview(id){
+const reason=prompt('Reason for flagging this record for route review:','Suspected wrong form submission');
+if(!reason)return;
+const r=await fetch('/api/route-flag-record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,flag_reason:reason})});
+const d=await r.json();
+if(d.success){toast('Record PKE-'+String(id).padStart(4,'0')+' flagged for route review')}
+else{toast('Error: '+(d.error||'Unknown'))}
+}
+
+async function resendClarificationEmail(id){
+if(!confirm('Send/resend route clarification email to this applicant?'))return;
+const r=await fetch('/api/resend-clarification-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});
+const d=await r.json();
+if(d.success){toast(d.message||'Email queued');if(_reviewCurrentId===id)openReviewModal(id)}
+else{toast('Error: '+(d.error||'Unknown'))}
+}
 </script></body></html>"""
 
 # ═══════════════════════════════════════════════════════════════
