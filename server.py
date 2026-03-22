@@ -2276,7 +2276,7 @@ def api_route_review_queue(params):
             search_params = [int(tracking_match.group(1))]
         else:
             s = f'%{search_val}%'
-            search_clause = ' AND (UPPER(passport) LIKE UPPER(?) OR mobile LIKE ? OR name LIKE ? OR cnic LIKE ?)'
+            search_clause = ' AND (UPPER(passport) LIKE UPPER(?) OR mobile LIKE ? OR UPPER(name) LIKE UPPER(?) OR cnic LIKE ?)'
             search_params = [s, s, s, s]
 
     if filter_type == 'suspects':
@@ -5027,7 +5027,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <option value="pending">Pending / Under Review</option>
 <option value="finalized">Finalized Archive</option>
 </select>
-<div style="position:relative;flex:1;min-width:220px"><span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#999;font-size:1.1em">&#128269;</span><input id="reviewSearch" placeholder="Search passport, tracking # or mobile..." onkeydown="if(event.key==='Enter')loadReviewQueue()" style="width:100%;padding:8px 12px 8px 38px;border:1px solid var(--bd);border-radius:7px;font-size:.88em"></div>
+<div style="position:relative;flex:1;min-width:220px"><span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#999;font-size:1.1em">&#128269;</span><input id="reviewSearch" placeholder="Search by name, passport, tracking #, mobile or CNIC..." onkeydown="if(event.key==='Enter')loadReviewQueue()" style="width:100%;padding:8px 12px 8px 38px;border:1px solid var(--bd);border-radius:7px;font-size:.88em"></div>
 <span id="reviewCount" style="font-size:.88em;color:var(--tl);font-weight:600"></span>
 <button class="btn btn-p" style="padding:8px 16px;font-size:.85em" onclick="loadReviewQueue()">Refresh</button>
 <button style="padding:8px 12px;font-size:.82em;border:1px solid var(--bd);border-radius:7px;background:#fff;cursor:pointer;color:#e65100" onclick="document.getElementById('reviewSearch').value='';loadReviewQueue()">&#10005; Clear</button>
@@ -5075,7 +5075,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <label style="font-size:.82em;font-weight:600">Review Notes</label>
 <textarea id="reviewNotesInput" rows="3" style="padding:8px 12px;border:1px solid var(--bd);border-radius:7px;width:100%;resize:vertical" placeholder="Additional notes about this decision..."></textarea>
 </div>
-<div style="display:flex;gap:10px;justify-content:flex-end">
+<div id="reviewModalButtons" style="display:flex;gap:10px;justify-content:flex-end">
 <button class="btn" style="padding:10px 20px;background:#f5f5f5;color:#333;border:1px solid #ccc" onclick="closeReviewModal()">Cancel</button>
 <button class="btn btn-p" style="padding:10px 20px" onclick="submitReviewDecision()">Submit Decision</button>
 </div>
@@ -6472,6 +6472,7 @@ setInterval(()=>{if(document.getElementById('tab-dash').classList.contains('acti
 // ROUTE REVIEW QUEUE
 // ═══════════════════════════════════════════════════════════════
 let _reviewCurrentId=null;
+let _reviewQueueIds=[];
 
 async function loadReviewQueue(){
 const f=document.getElementById('reviewFilter').value;
@@ -6481,6 +6482,7 @@ if(s)url+='&search='+encodeURIComponent(s);
 const data=await api(url);
 if(!data)return;
 const rows=Array.isArray(data)?data:[];
+_reviewQueueIds=rows.filter(r=>r.review_status!=='finalized').map(r=>r.id);
 document.getElementById('reviewCount').textContent=rows.length+' records';
 const tbl=document.getElementById('reviewTbl');
 let h='<tr style="background:var(--pl)"><th>#</th><th>Name</th><th>Passport</th><th>Country</th><th>Contact</th><th>Civil ID</th><th>Badges</th><th>Effective Route</th><th>Physical Loc.</th><th>MOFA</th><th>Review</th><th>Decision</th><th>Actions</th></tr>';
@@ -6527,13 +6529,50 @@ tbl.innerHTML=h;
 function openReviewModal(id){
 _reviewCurrentId=id;
 document.getElementById('reviewModal').style.display='flex';
-document.getElementById('reviewModalId').textContent='PKE-'+String(id).padStart(4,'0');
+// Immediately show loading state and clear old content
+document.getElementById('reviewModalInfo').innerHTML='<div style="text-align:center;padding:20px;color:#999">Loading case details...</div>';
+// Restore form fields visibility (may have been hidden by success screen)
+document.querySelectorAll('#reviewModal .fgp').forEach(el=>el.style.display='block');
+document.getElementById('reviewModalButtons').style.display='flex';
+// Reset form fields
+document.getElementById('reviewDecision').value='';
+document.getElementById('reviewLocation').value='unknown';
+document.getElementById('reviewFlagReason').value='';
+document.getElementById('reviewNotesInput').value='';
+// Show position in queue
+const posInQueue=_reviewQueueIds.indexOf(id);
+const queueTotal=_reviewQueueIds.length;
+document.getElementById('reviewModalId').innerHTML='PKE-'+String(id).padStart(4,'0')+(queueTotal>0?' <span style="font-size:.7em;color:#666;font-weight:400">('+(posInQueue>=0?posInQueue+1:'?')+' of '+queueTotal+')</span>':'');
 // Load record details
 fetch('/api/records?search='+id).then(r=>r.json()).then(data=>{
 const recs=Array.isArray(data)?data:[];
 const r=recs.find(x=>x.id===id)||recs[0]||{};
 const routeMap={kw_to_pk:'Kuwait \u2192 Pakistan',pk_to_kw:'Pakistan \u2192 Kuwait'};
-document.getElementById('reviewModalInfo').innerHTML=`
+// Build detected inconsistencies list
+let inconsistencies=[];
+const country=(r.country||'').toLowerCase();
+const mobile=r.mobile||'';
+const civilId=r.civil_id||'';
+const origRoute=r.original_form_source||'kw_to_pk';
+const physLoc=(r.physical_location||'').toLowerCase();
+const locReviewReason=r.location_review_reason||'';
+const flagReason=r.flag_reason||'';
+if(country.includes('pakistan') && origRoute==='kw_to_pk') inconsistencies.push('\ud83d\udea9 Country is <strong>Pakistan</strong> but registered on <strong>Kuwait\u2192Pakistan</strong> form \u2014 may actually be in Pakistan wanting to come to Kuwait');
+if(!civilId || civilId.trim()==='') inconsistencies.push('\u26a0 <strong>No Civil ID</strong> provided \u2014 person may not be currently residing in Kuwait');
+if(mobile.startsWith('+92') || mobile.startsWith('03') || mobile.startsWith('92')) inconsistencies.push('\ud83d\udcf1 Mobile number starts with <strong>'+mobile.substring(0,4)+'...</strong> (Pakistan format) \u2014 suggests person may be in Pakistan');
+if(locReviewReason) inconsistencies.push('\ud83d\udccd ' + locReviewReason);
+if(physLoc==='pakistan' && origRoute==='kw_to_pk') inconsistencies.push('\ud83c\udf0d Physical location is <strong>Pakistan</strong> but form is Kuwait\u2192Pakistan');
+if(flagReason && !inconsistencies.some(i=>i.includes(flagReason))) inconsistencies.push('\ud83d\udccc Flagged: <strong>' + flagReason + '</strong>');
+let inconsistencyHtml='';
+if(inconsistencies.length>0){
+inconsistencyHtml=`<div style="margin-bottom:10px;padding:12px;background:#fff3e0;border:2px solid #ff9800;border-radius:8px">
+<div style="font-weight:700;font-size:.88em;color:#e65100;margin-bottom:8px">\ud83d\udd0d Why This Was Flagged (${inconsistencies.length} issue${inconsistencies.length!==1?'s':''})</div>
+${inconsistencies.map(i=>'<div style="font-size:.84em;padding:4px 0;border-bottom:1px solid #ffe0b2;color:#333">\u2022 '+i+'</div>').join('')}
+</div>`;
+} else {
+inconsistencyHtml=`<div style="margin-bottom:10px;padding:10px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;font-size:.85em;color:#2e7d32">\u2705 No specific inconsistencies detected \u2014 may have been manually flagged by staff</div>`;
+}
+document.getElementById('reviewModalInfo').innerHTML=inconsistencyHtml+`
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
 <div><strong>Name:</strong> ${r.name||'-'}</div>
 <div><strong>Passport:</strong> ${r.passport||'-'}</div>
@@ -6607,8 +6646,26 @@ review_notes:document.getElementById('reviewNotesInput').value,
 const r=await fetch('/api/route-review-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
 const d=await r.json();
 if(d.success){
-toast('Review submitted: '+decision);
-closeReviewModal();
+const justReviewedId=_reviewCurrentId;
+// Remove the just-reviewed ID from the queue list
+_reviewQueueIds=_reviewQueueIds.filter(x=>x!==justReviewedId);
+const nextId=_reviewQueueIds.length>0?_reviewQueueIds[0]:null;
+// Show success with Next Review option
+const modalInfo=document.getElementById('reviewModalInfo');
+modalInfo.innerHTML=`
+<div style="text-align:center;padding:20px">
+<div style="font-size:2.5em;margin-bottom:8px">\u2705</div>
+<div style="font-size:1.1em;font-weight:700;color:#2e7d32;margin-bottom:6px">Review Submitted Successfully</div>
+<div style="font-size:.88em;color:#555;margin-bottom:4px">PKE-${String(justReviewedId).padStart(4,'0')} \u2014 Decision: <strong>${decision.replace(/_/g,' ')}</strong></div>
+<div style="font-size:.82em;color:#999;margin-bottom:16px">${_reviewQueueIds.length} case${_reviewQueueIds.length!==1?'s':''} remaining in queue</div>
+${nextId?`<button class="btn btn-p" style="padding:12px 28px;font-size:1em;font-weight:700" onclick="openReviewModal(${nextId})">Next Review \u27a1 PKE-${String(nextId).padStart(4,'0')}</button>
+<div style="margin-top:8px"><button class="btn" style="padding:8px 16px;background:#f5f5f5;color:#333;border:1px solid #ccc;font-size:.85em" onclick="closeReviewModal();loadReviewQueue()">Back to Queue</button></div>`
+:`<div style="font-size:.95em;color:#2e7d32;font-weight:600;margin-bottom:10px">\ud83c\udf89 All reviews complete!</div>
+<button class="btn" style="padding:8px 16px;background:#f5f5f5;color:#333;border:1px solid #ccc;font-size:.85em" onclick="closeReviewModal();loadReviewQueue()">Back to Queue</button>`}
+</div>`;
+// Hide the form fields since we're showing the success screen
+document.querySelectorAll('#reviewModal .fgp').forEach(el=>el.style.display='none');
+document.getElementById('reviewModalButtons').style.display='none';
 loadReviewQueue();
 }else{
 toast('Error: '+(d.error||'Unknown'));
