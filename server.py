@@ -2747,7 +2747,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status_info['action_required'] = True
                 elif r['mofa_status'] == 'Sent to MOFA':
                     status_info['status'] = 'PENDING_MOFA'
-                    status_info['status_detail'] = 'Your application has been sent to MOFA KSA and is pending approval.'
+                    status_info['status_detail'] = 'Your application has been forwarded to the Embassy of Pakistan, Riyadh, which will compile it and submit it to the Ministry of Foreign Affairs of the Kingdom of Saudi Arabia for final approval.'
                     status_info['action_required'] = False
                 else:
                     status_info['status'] = 'PROCESSING'
@@ -3972,9 +3972,9 @@ statusBox.innerHTML='&#9989; Visa APPROVED &mdash; Please contact the Embassy im
 urduMsg.innerHTML='&#9989; <strong>آپ کی درخواست منظور ہوگئی ہے!</strong><br>براہ کرم فوری طور پر سفارتخانے سے رابطہ کریں اور سفری ہدایات حاصل کریں۔<br><br>&#9888; آپ پہلے سے رجسٹرڈ ہیں، دوبارہ رجسٹریشن کی ضرورت نہیں ہے۔ آپ کا ٹریکنگ نمبر <strong>'+d.tracking_number+'</strong> ہے۔ کسی بھی ترمیم کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
 }else if(d.status==='PENDING_MOFA'){
 statusBox.className='dup-status pending-mofa';
-statusBox.innerHTML='&#9203; Your case has been sent to MOFA KSA &mdash; Awaiting approval';
+statusBox.innerHTML='&#9203; Your application has been forwarded to the Embassy of Pakistan, Riyadh &mdash; Awaiting MOFA KSA approval';
 if(d.mofa_sent_date){mofaRow.style.display='flex';document.getElementById('dupMofaDate').textContent=d.mofa_sent_date;}
-urduMsg.innerHTML='&#9203; <strong>آپ کی درخواست وزارت خارجہ سعودی عرب کو بھیجی جا چکی ہے</strong> اور منظوری کا انتظار ہے۔<br><br>&#9888; آپ پہلے سے رجسٹرڈ ہیں، دوبارہ رجسٹریشن کی ضرورت نہیں ہے۔ آپ کا ٹریکنگ نمبر <strong>'+d.tracking_number+'</strong> ہے۔ کسی بھی ترمیم کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
+urduMsg.innerHTML='&#9203; <strong>آپ کی درخواست سفارت خانہ پاکستان، ریاض کو ارسال کر دی گئی ہے، جہاں اسے مرتب کرنے کے بعد حتمی منظوری کے لیے سعودی عرب کی وزارتِ خارجہ کو بھیجا جائے گا۔</strong><br><br>&#9888; آپ پہلے سے رجسٹرڈ ہیں، دوبارہ رجسٹریشن کی ضرورت نہیں ہے۔ آپ کا ٹریکنگ نمبر <strong>'+d.tracking_number+'</strong> ہے۔ کسی بھی ترمیم کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
 }else if(d.status==='DEPARTED'){
 statusBox.className='dup-status departed';
 statusBox.innerHTML='&#9992;&#65039; You have already departed. No further registration needed.';
@@ -4161,7 +4161,7 @@ const s=d.data;
 let statusClass='status-processing',icon='&#128338;',label='Being Processed',labelUr='پروسیسنگ جاری ہے';
 let step1='done',step2='wait',step3='wait';
 if(s.status==='APPROVED'){statusClass='status-approved';icon='&#9989;';label='VISA APPROVED';labelUr='ویزا منظور ہو گیا۔ براہ کرم بارڈر کراسنگ سے متعلق رہنمائی اور مزید رابطہ کاری کے لیے سفارت خانہ پاکستان کویت کے عملے سے رابطہ کریں۔ اویس: +965-55977292';step1='done';step2='done';step3='done'}
-else if(s.status==='PENDING_MOFA'){statusClass='status-pending';icon='&#9203;';label='Pending MOFA KSA Approval';labelUr='سعودی وزارت خارجہ سے منظوری زیر التوا';step1='done';step2='active';step3='wait'}
+else if(s.status==='PENDING_MOFA'){statusClass='status-pending';icon='&#9203;';label='Pending MOFA KSA Approval';labelUr='آپ کی درخواست سفارت خانہ پاکستان، ریاض کو ارسال کر دی گئی ہے، جہاں اسے مرتب کرنے کے بعد حتمی منظوری کے لیے سعودی عرب کی وزارتِ خارجہ کو بھیجا جائے گا۔';step1='done';step2='active';step3='wait'}
 else if(s.status==='ROUTE_HOLD'){statusClass='status-hold';icon='&#9888;&#65039;';label='APPLICATION ON HOLD \u2014 Urgent Action Required';labelUr='آپ کی درخواست سفری راستے کی وضاحت نہ ہونے کی وجہ سے روک دی گئی ہے۔ براہ کرم فوری طور پر جناب اویس سے رابطہ کریں: +965-55977292';step1='done';step2='wait';step3='wait'}
 document.getElementById('statusBox').innerHTML=`
 ${s.status==='ROUTE_HOLD'?`<div style="background:#c62828;color:#fff;padding:16px 20px;border-radius:12px;margin-bottom:14px;text-align:center">
@@ -4186,7 +4186,7 @@ ${s.status==='ROUTE_HOLD'?`<div style="background:#c62828;color:#fff;padding:16p
 let tl='<div class="timeline">';
 tl+=`<div class="tl-step"><div class="tl-dot ${step1}">1</div><div class="tl-text"><div class="tl-title">Application Registered / درخواست درج ہو گئی</div><div class="tl-sub">${s.registered_date||'Submitted'}</div></div></div>`;
 tl+=`<div class="tl-line ${step1==='done'?'done':''}"></div>`;
-tl+=`<div class="tl-step"><div class="tl-dot ${step2}">2</div><div class="tl-text"><div class="tl-title">${s.status==='ROUTE_HOLD'?'<span style="color:#c62828">&#9888; ON HOLD \u2014 Route Under Review / روک دیا گیا \u2014 راستے کی جانچ</span>':'Sent to MOFA KSA / سعودی وزارت خارجہ کو بھیج دیا گیا'}</div><div class="tl-sub">${s.status==='ROUTE_HOLD'?'<span style="color:#c62828;font-weight:700">Contact Mr. Awais: +965 55977292</span>':s.mofa_sent_date||'Awaiting'}</div></div></div>`;
+tl+=`<div class="tl-step"><div class="tl-dot ${step2}">2</div><div class="tl-text"><div class="tl-title">${s.status==='ROUTE_HOLD'?'<span style="color:#c62828">&#9888; ON HOLD \u2014 Route Under Review / روک دیا گیا \u2014 راستے کی جانچ</span>':'Forwarded to Embassy of Pakistan, Riyadh \u2192 MOFA KSA / سفارت خانہ پاکستان ریاض کو ارسال \u2192 سعودی وزارت خارجہ'}</div><div class="tl-sub">${s.status==='ROUTE_HOLD'?'<span style="color:#c62828;font-weight:700">Contact Mr. Awais: +965 55977292</span>':s.mofa_sent_date||'Awaiting'}</div></div></div>`;
 tl+=`<div class="tl-line ${step2==='done'?'done':''}"></div>`;
 tl+=`<div class="tl-step"><div class="tl-dot ${step3}">3</div><div class="tl-text"><div class="tl-title">Visa Decision / ویزا فیصلہ</div><div class="tl-sub">${s.status==='APPROVED'?'Approved - Contact Embassy':'Pending'}</div></div></div>`;
 tl+='</div>';
