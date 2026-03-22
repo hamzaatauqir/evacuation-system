@@ -339,6 +339,24 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+    # ── Applicant current location & IP tracking columns ─────────
+    for col, coltype in [
+        ('current_country', 'TEXT'),
+        ('current_city_pakistan', 'TEXT'),
+        ('current_area_kuwait', 'TEXT'),
+        ('applicant_ip', 'TEXT'),
+        ('applicant_ip_country', 'TEXT'),
+        ('ip_location_status', 'TEXT'),
+        ('location_review_flag', 'INTEGER DEFAULT 0'),
+        ('location_review_reason', 'TEXT'),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ev_location_flag ON evacuees(location_review_flag)")
+
     # ── Backfill existing records ────────────────────────────────
     db.execute("UPDATE evacuees SET original_form_source = 'kw_to_pk' WHERE original_form_source IS NULL")
     db.execute("UPDATE evacuees SET effective_route = 'kw_to_pk' WHERE effective_route IS NULL")
@@ -1169,6 +1187,14 @@ def api_records(params):
         where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
     if params.get('hide_mismatch') == '1':
         where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
+    if params.get('location_review_flag') == '1':
+        where.append("location_review_flag = 1")
+    if params.get('current_country'):
+        where.append("current_country = ?")
+        qparams.append(params['current_country'])
+    if params.get('ip_location_status'):
+        where.append("ip_location_status = ?")
+        qparams.append(params['ip_location_status'])
 
     rows = db.execute(f"SELECT * FROM evacuees WHERE {' AND '.join(where)} ORDER BY id DESC", qparams).fetchall()
     result = [dict(r) for r in rows]
@@ -1370,7 +1396,8 @@ def api_save_record(data, user):
               'departure_airport','destination_country','date_of_request','email',
               'dob','emergency_contact','medical','family_group_id','dependents',
               'accommodation','priority','remarks','planned_departure','saudi_city',
-              'traveling_with_family','confirm_ksa_3days','departure_date']
+              'traveling_with_family','confirm_ksa_3days','departure_date',
+              'current_country','current_city_pakistan','current_area_kuwait']
 
     if rec_id:  # Update
         # Get old record to detect changes
@@ -2138,7 +2165,11 @@ def api_export_csv():
                      'Traveling with Family','Confirm KSA 3-Days','Departure Date','Duplicate Flag',
                      'Original Form Source','Effective Route','Route Mismatch','Physical Location',
                      'MOFA Submitted','Record Locked','Review Status','Review Decision',
-                     'Reviewed By','Flag Reason','Created At'])
+                     'Reviewed By','Flag Reason',
+                     'Current Country','City Pakistan','Area Kuwait',
+                     'Applicant IP','IP Country','IP Location Status',
+                     'Location Review Flag','Location Review Reason',
+                     'Created At'])
     def safe_get(row, key, default=''):
         try:
             return row[key]
@@ -2161,6 +2192,11 @@ def api_export_csv():
                         safe_get(r,'mofa_submitted'), safe_get(r,'record_locked'),
                         safe_get(r,'review_status'), safe_get(r,'review_decision'),
                         safe_get(r,'reviewed_by'), safe_get(r,'flag_reason'),
+                        safe_get(r,'current_country'), safe_get(r,'current_city_pakistan'),
+                        safe_get(r,'current_area_kuwait'),
+                        safe_get(r,'applicant_ip'), safe_get(r,'applicant_ip_country'),
+                        safe_get(r,'ip_location_status'),
+                        safe_get(r,'location_review_flag'), safe_get(r,'location_review_reason'),
                         r['created_at']])
     return output.getvalue()
 
@@ -3072,6 +3108,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             db.close()
 
             result = api_save_record(data, 'public')
+            # ── Capture IP and set location review flags ──
+            if result.get('success') and result.get('id'):
+                new_id = result['id']
+                db2 = get_db()
+                declared_country = (data.get('current_country') or '').strip().lower()
+                ip_review_flag = 0
+                ip_review_reason = ''
+                ip_location_status = 'unknown'
+                # Basic declared-vs-route consistency check
+                if declared_country == 'pakistan' and data.get('effective_route', 'kw_to_pk') == 'kw_to_pk':
+                    ip_review_flag = 1
+                    ip_review_reason = 'Declared Pakistan but registered in KW→PK form'
+                    ip_location_status = 'needs_review'
+                elif declared_country:
+                    ip_location_status = 'matches_declared_country'
+                db2.execute("""UPDATE evacuees SET
+                    applicant_ip = ?,
+                    ip_location_status = ?,
+                    location_review_flag = ?,
+                    location_review_reason = ?
+                WHERE id = ?""", [client_ip, ip_location_status, ip_review_flag, ip_review_reason or None, new_id])
+                # If flagged, also set review_status for the route review queue
+                if ip_review_flag == 1:
+                    db2.execute("""UPDATE evacuees SET
+                        review_status = COALESCE(NULLIF(review_status,''), 'pending'),
+                        flag_reason = COALESCE(NULLIF(flag_reason,''), ?)
+                    WHERE id = ? AND (review_status IS NULL OR review_status = '')""",
+                    [ip_review_reason, new_id])
+                db2.commit(); db2.close()
             # Log for rate limiting
             db = get_db()
             db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('public_register', ?, ?, ?)",
@@ -3692,6 +3757,9 @@ The situation in Kuwait remains stable and under control. This registration faci
 </div></div>
 <div class="fs"><h3>Residence &amp; Location</h3>
 <div class="fg">
+<div class="fgp"><label>Where are you currently located? <span class="req">*</span></label><select name="current_country" id="currentCountry" required onchange="toggleLocationFields()"><option value="">Select Current Country</option><option value="pakistan">Pakistan</option><option value="kuwait">Kuwait</option></select></div>
+<div class="fgp" id="cityPkField" style="display:none"><label>Current City in Pakistan <span class="req">*</span></label><input name="current_city_pakistan" id="currentCityPk" placeholder="e.g. Karachi, Lahore, Islamabad"></div>
+<div class="fgp" id="areaKwField" style="display:none"><label>Current Area in Kuwait <span class="req">*</span></label><input name="current_area_kuwait" id="currentAreaKw" placeholder="e.g. Farwaniya, Jleeb, Hawally"></div>
 <div class="fgp"><label>Country of Residence <span class="req">*</span></label><select name="country" required><option value="">Select Country</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>KSA</option><option>US</option><option>Bahrain</option><option>Qatar</option><option>Oman</option><option>UAE</option></select></div>
 <div class="fgp"><label>Kuwaiti Civil ID Number (if any)</label><input name="civil_id" placeholder="Ignore if on visit visa"></div>
 <div class="fgp"><label>Border Crossing Area <span class="req">*</span></label><select name="border_crossing" required><option value="">Select Crossing</option><option>Khafji Border</option><option>Salmi Border</option></select></div>
@@ -3794,6 +3862,16 @@ statusBox.innerHTML='&#128338; Your application is being processed by the Embass
 urduMsg.innerHTML='&#128338; <strong>آپ کی درخواست سفارتخانے میں زیر کارروائی ہے۔</strong><br><br>&#9888; آپ پہلے سے رجسٹرڈ ہیں، دوبارہ رجسٹریشن کی ضرورت نہیں ہے۔ آپ کا ٹریکنگ نمبر <strong>'+d.tracking_number+'</strong> ہے۔ کسی بھی ترمیم کے لیے سفارتخانے کے عملے سے رابطہ کریں۔';
 }
 document.getElementById('dupOverlay').classList.add('show');
+}
+function toggleLocationFields(){
+const v=document.getElementById('currentCountry').value;
+const pkF=document.getElementById('cityPkField');
+const kwF=document.getElementById('areaKwField');
+const pkI=document.getElementById('currentCityPk');
+const kwI=document.getElementById('currentAreaKw');
+if(v==='pakistan'){pkF.style.display='';kwF.style.display='none';pkI.required=true;kwI.required=false;kwI.value=''}
+else if(v==='kuwait'){pkF.style.display='none';kwF.style.display='';pkI.required=false;kwI.required=true;pkI.value=''}
+else{pkF.style.display='none';kwF.style.display='none';pkI.required=false;kwI.required=false}
 }
 async function submitForm(e){
 e.preventDefault();
@@ -4122,6 +4200,7 @@ This service is being planned to assist Pakistani workers in returning to Kuwait
 <input type="text" value="Pakistan → Kuwait (پاکستان سے کویت)" readonly>
 <input type="hidden" name="travel_direction" id="travelDir" value="pk_to_kw">
 </div>
+<div class="fgp"><label>Where are you currently located? <span class="req">*</span></label><select name="current_country" required><option value="">Select Current Country</option><option value="pakistan">Pakistan</option><option value="kuwait">Kuwait</option></select></div>
 </div></div>
 
 <div class="fs"><h3>2. Personal Information / ذاتی معلومات</h3>
@@ -5282,6 +5361,7 @@ const cmpBtn=r.dup_flag==='DUPLICATE'?`<button class="btn btn-d" style="padding:
 let routeBdg='';
 if(r.route_mismatch==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#fff3e0;color:#e65100;border:1px solid #ffcc80">MISMATCH</span> ';
 if(r.record_locked==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#ffebee;color:#c62828;border:1px solid #ef9a9a">\ud83d\udd12</span> ';
+if(r.location_review_flag==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9">\ud83c\udf10 IP</span> ';
 if(!routeBdg)routeBdg='<span style="color:#bbb;font-size:.75em">-</span>';
 const rowBg=r.route_mismatch==1?'style="background:#fff8e1"':'';
 h+=`<tr ${rowBg}><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td>${routeBdg}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button> <button style="padding:2px 6px;font-size:.68em;border:1px solid #ffcc80;background:#fff8e1;color:#e65100;border-radius:5px;cursor:pointer" onclick="flagForRouteReview(${r.id})" title="Flag for route review">\u2691</button></td></tr>`;
@@ -5358,6 +5438,16 @@ html+=sec('Route & Review',[
 ['Reviewed At',r.reviewed_at||'\u2014'],
 ['Flag Reason',r.flag_reason||'\u2014'],
 ['Override Notes',r.admin_override_notes||'\u2014']
+]);
+html+=sec('Applicant Location & IP',[
+['Current Country',(r.current_country||'\u2014').toUpperCase()],
+['City in Pakistan',r.current_city_pakistan||'\u2014'],
+['Area in Kuwait',r.current_area_kuwait||'\u2014'],
+['Applicant IP',r.applicant_ip||'\u2014'],
+['IP Country',r.applicant_ip_country||'\u2014'],
+['IP Location Status',r.ip_location_status||'\u2014'],
+['Location Review Flag',r.location_review_flag==1?'<span style="color:#c62828;font-weight:600">YES</span>':'No'],
+['Location Review Reason',r.location_review_reason||'\u2014']
 ]);
 html+=sec('Clarification Email',[
 ['Email Sent',r.clarification_email_sent==1?'Yes':'No'],
