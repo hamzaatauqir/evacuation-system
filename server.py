@@ -2291,6 +2291,11 @@ def api_route_review_queue(params):
             search_clause = ' AND (UPPER(passport) LIKE UPPER(?) OR mobile LIKE ? OR UPPER(name) LIKE UPPER(?) OR cnic LIKE ?)'
             search_params = [s, s, s, s]
 
+    # ── Shared exclusion: never show MOFA-locked/submitted records in review queue ──
+    mofa_exclusion = """
+            AND (record_locked IS NULL OR record_locked = 0 OR record_locked = '0')
+            AND (mofa_status IS NULL OR mofa_status = '' OR LOWER(mofa_status) NOT IN ('sent', 'submitted', 'approved', 'received'))"""
+
     if filter_type == 'suspects':
         rows = db.execute("""SELECT id, name, passport, cnic, country, civil_id, mobile, email,
             border_crossing, mofa_status, mofa_submitted, record_locked,
@@ -2306,20 +2311,21 @@ def api_route_review_queue(params):
             WHERE (route_mismatch = 0 OR route_mismatch IS NULL)
             AND (review_status IS NULL OR review_status = '' OR review_status = 'pending')
             AND (
-                LOWER(COALESCE(country,'')) LIKE '%pakistan%'
-                OR (civil_id IS NULL OR civil_id = '')
-                OR mobile LIKE '+92%'
-                OR mobile LIKE '03%'
-                OR mobile LIKE '92%'
-            )""" + search_clause + """
+                (LOWER(COALESCE(country,'')) LIKE '%pakistan%'
+                    AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
+                OR ((mobile LIKE '+92%%' OR mobile LIKE '03%%' OR mobile LIKE '92%%')
+                    AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
+                OR (LOWER(COALESCE(physical_location,'')) = 'pakistan'
+                    AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
+            )""" + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'flagged':
         rows = db.execute("""SELECT * FROM evacuees
-            WHERE route_mismatch = 1""" + search_clause + """
+            WHERE route_mismatch = 1""" + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'pending':
         rows = db.execute("""SELECT * FROM evacuees
-            WHERE review_status IN ('pending', 'under_review', 'needs_followup')""" + search_clause + """
+            WHERE review_status IN ('pending', 'under_review', 'needs_followup')""" + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'finalized':
         rows = db.execute("""SELECT * FROM evacuees
@@ -2333,13 +2339,14 @@ def api_route_review_queue(params):
                 (route_mismatch = 0 OR route_mismatch IS NULL)
                 AND (review_status IS NULL OR review_status = '' OR review_status = 'pending')
                 AND (
-                    LOWER(COALESCE(country,'')) LIKE '%pakistan%'
-                    OR (civil_id IS NULL OR civil_id = '')
-                    OR mobile LIKE '+92%'
-                    OR mobile LIKE '03%'
-                    OR mobile LIKE '92%'
+                    (LOWER(COALESCE(country,'')) LIKE '%pakistan%'
+                        AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
+                    OR ((mobile LIKE '+92%%' OR mobile LIKE '03%%' OR mobile LIKE '92%%')
+                        AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
+                    OR (LOWER(COALESCE(physical_location,'')) = 'pakistan'
+                        AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
                 )
-            ))""" + search_clause + """
+            ))""" + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
 
     result = [dict(r) for r in rows]
@@ -6570,8 +6577,8 @@ const physLoc=(r.physical_location||'').toLowerCase();
 const locReviewReason=r.location_review_reason||'';
 const flagReason=r.flag_reason||'';
 if(country.includes('pakistan') && origRoute==='kw_to_pk') inconsistencies.push('\ud83d\udea9 Country is <strong>Pakistan</strong> but registered on <strong>Kuwait\u2192Pakistan</strong> form \u2014 may actually be in Pakistan wanting to come to Kuwait');
-if(!civilId || civilId.trim()==='') inconsistencies.push('\u26a0 <strong>No Civil ID</strong> provided \u2014 person may not be currently residing in Kuwait');
-if(mobile.startsWith('+92') || mobile.startsWith('03') || mobile.startsWith('92')) inconsistencies.push('\ud83d\udcf1 Mobile number starts with <strong>'+mobile.substring(0,4)+'...</strong> (Pakistan format) \u2014 suggests person may be in Pakistan');
+if(origRoute==='kw_to_pk' && (!civilId || civilId.trim()==='')) inconsistencies.push('\u26a0 <strong>No Civil ID</strong> provided \u2014 person may not be currently residing in Kuwait');
+if(origRoute==='kw_to_pk' && (mobile.startsWith('+92') || mobile.startsWith('03') || mobile.startsWith('92'))) inconsistencies.push('\ud83d\udcf1 Mobile number starts with <strong>'+mobile.substring(0,4)+'...</strong> (Pakistan format) \u2014 suggests person may be in Pakistan');
 if(locReviewReason) inconsistencies.push('\ud83d\udccd ' + locReviewReason);
 if(physLoc==='pakistan' && origRoute==='kw_to_pk') inconsistencies.push('\ud83c\udf0d Physical location is <strong>Pakistan</strong> but form is Kuwait\u2192Pakistan');
 if(flagReason && !inconsistencies.some(i=>i.includes(flagReason))) inconsistencies.push('\ud83d\udccc Flagged: <strong>' + flagReason + '</strong>');
