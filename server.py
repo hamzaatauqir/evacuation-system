@@ -1462,10 +1462,12 @@ def api_save_record(data, user):
         # (e.g. viewSave sends ~30 fields but the full list has 33+)
         update_fields = [f for f in fields if f in data]
 
-        # ── Record Locking: prevent edits to core fields if locked ──
+        # ── Record Locking: prevent edits to IDENTITY fields if locked ──
+        # Only lock fields that were submitted to MOFA (identity & routing).
+        # Operational fields (visa_status, travel_status, departure_airport,
+        # airline, ticket_number, etc.) must remain editable for workflow.
         LOCKED_FIELDS = {'name','passport','cnic','gender','country','civil_id',
-                         'visa_status','travel_status','mofa_status','dob',
-                         'border_crossing','departure_airport','destination_country'}
+                         'dob','border_crossing','destination_country'}
         if old_rec.get('record_locked') == 1 or old_rec.get('record_locked') == '1':
             # Only check fields actually being submitted, not all fields
             changed_locked = [f for f in LOCKED_FIELDS if f in data and str(data.get(f, '')) != str(old_rec.get(f, ''))]
