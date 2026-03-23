@@ -1457,19 +1457,30 @@ def api_save_record(data, user):
         # Get old record to detect changes
         old_rec = dict(db.execute("SELECT * FROM evacuees WHERE id = ?", [rec_id]).fetchone())
 
+        # ── Only update fields actually present in the incoming data ──
+        # This prevents blanking out fields not included in the request
+        # (e.g. viewSave sends ~30 fields but the full list has 33+)
+        update_fields = [f for f in fields if f in data]
+
         # ── Record Locking: prevent edits to core fields if locked ──
         LOCKED_FIELDS = {'name','passport','cnic','gender','country','civil_id',
                          'visa_status','travel_status','mofa_status','dob',
                          'border_crossing','departure_airport','destination_country'}
         if old_rec.get('record_locked') == 1 or old_rec.get('record_locked') == '1':
-            changed_locked = [f for f in LOCKED_FIELDS if str(data.get(f, '')) != str(old_rec.get(f, ''))]
+            # Only check fields actually being submitted, not all fields
+            changed_locked = [f for f in LOCKED_FIELDS if f in data and str(data.get(f, '')) != str(old_rec.get(f, ''))]
             if changed_locked:
                 db.close()
                 return {'success': False, 'error': f'Record is locked (sent to MOFA KSA). Cannot edit: {", ".join(changed_locked)}'}
 
-        sets = [f"{f} = ?" for f in fields]
-        vals = [data.get(f, '') for f in fields]
-        dup_flags = check_duplicates(db, data, exclude_id=rec_id)
+        sets = [f"{f} = ?" for f in update_fields]
+        vals = [data.get(f, '') for f in update_fields]
+
+        # Build a merged view of old + new data for duplicate checking
+        merged_data = {f: old_rec.get(f, '') for f in fields}
+        merged_data.update({f: data[f] for f in update_fields})
+
+        dup_flags = check_duplicates(db, merged_data, exclude_id=rec_id)
         dup_flag = 'DUPLICATE' if dup_flags else 'CLEAR'
         sets.append("dup_flag = ?"); vals.append(dup_flag)
         sets.append("updated_at = CURRENT_TIMESTAMP")
@@ -1479,17 +1490,18 @@ def api_save_record(data, user):
         db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('update', ?, ?, ?)",
                    (rec_id, user, json.dumps(data)))
 
-        # Apply workflow rules for changed fields
+        # Apply workflow rules only for fields actually sent and changed
         workflow_changes = []
         for field in ['visa_status', 'ticket_number']:
-            old_val = old_rec.get(field, '')
-            new_val = data.get(field, '')
-            if old_val != new_val:
-                wf = apply_workflow_rules(db, rec_id, field, new_val, user)
-                workflow_changes.extend(wf)
+            if field in data:
+                old_val = old_rec.get(field, '')
+                new_val = data.get(field, '')
+                if old_val != new_val:
+                    wf = apply_workflow_rules(db, rec_id, field, new_val, user)
+                    workflow_changes.extend(wf)
 
         # Auto-email when visa status transitions to Approved
-        if old_rec.get('visa_status') != 'Approved' and data.get('visa_status') == 'Approved':
+        if 'visa_status' in data and old_rec.get('visa_status') != 'Approved' and data.get('visa_status') == 'Approved':
             updated = dict(db.execute("SELECT id, name, passport, email FROM evacuees WHERE id = ?", [rec_id]).fetchone())
             _queue_visa_approved_email(updated, user)
 
