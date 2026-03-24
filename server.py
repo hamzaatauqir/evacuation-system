@@ -157,12 +157,103 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_iraq_app_passport ON iraq_applicants(passport_number);
     """)
 
+    # ── Iraq Public Intake Workflow (fully separate from main portal) ──
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS iraq_public_submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reference_number TEXT UNIQUE,
+        full_name TEXT NOT NULL,
+        passport_number TEXT,
+        nationality TEXT DEFAULT '',
+        date_of_birth TEXT DEFAULT '',
+        gender TEXT DEFAULT '',
+        phone TEXT DEFAULT '',
+        whatsapp TEXT DEFAULT '',
+        email TEXT DEFAULT '',
+        current_city TEXT DEFAULT '',
+        employer TEXT DEFAULT '',
+        travel_route TEXT DEFAULT '',
+        travel_purpose TEXT DEFAULT '',
+        remarks TEXT DEFAULT '',
+        passport_file_path TEXT DEFAULT '',
+        supporting_file_path TEXT DEFAULT '',
+        status TEXT DEFAULT 'Submitted',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at TIMESTAMP,
+        reviewed_by TEXT DEFAULT '',
+        linked_batch_id INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS iraq_batches_public (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        letter_number TEXT,
+        letter_date TEXT,
+        created_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        remarks TEXT DEFAULT '',
+        status TEXT DEFAULT 'Draft',
+        sent_to_embassy_at TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS iraq_batch_applicants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL REFERENCES iraq_batches_public(id),
+        public_submission_id INTEGER NOT NULL REFERENCES iraq_public_submissions(id),
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(batch_id, public_submission_id)
+    );
+    CREATE TABLE IF NOT EXISTS iraq_mofa_dispatches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        note_verbale_number TEXT,
+        note_verbale_date TEXT,
+        sent_date TEXT,
+        remarks TEXT DEFAULT '',
+        status TEXT DEFAULT 'Draft',
+        created_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS iraq_dispatch_applicants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dispatch_id INTEGER NOT NULL REFERENCES iraq_mofa_dispatches(id),
+        batch_id INTEGER REFERENCES iraq_batches_public(id),
+        public_submission_id INTEGER NOT NULL REFERENCES iraq_public_submissions(id),
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(dispatch_id, public_submission_id)
+    );
+    CREATE TABLE IF NOT EXISTS iraq_applicant_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        public_submission_id INTEGER NOT NULL REFERENCES iraq_public_submissions(id),
+        decision TEXT DEFAULT 'Pending',
+        decision_date TEXT,
+        remarks TEXT DEFAULT '',
+        decided_by TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_iraq_public_status ON iraq_public_submissions(status);
+    CREATE INDEX IF NOT EXISTS idx_iraq_public_passport ON iraq_public_submissions(passport_number);
+    CREATE INDEX IF NOT EXISTS idx_iraq_public_batch ON iraq_public_submissions(linked_batch_id);
+    CREATE INDEX IF NOT EXISTS idx_iraq_pub_batch_status ON iraq_batches_public(status);
+    CREATE INDEX IF NOT EXISTS idx_iraq_dispatch_status ON iraq_mofa_dispatches(status);
+    """)
+    # Migration: add CNIC to iraq_public_submissions if missing
+    try:
+        db.execute("ALTER TABLE iraq_public_submissions ADD COLUMN cnic TEXT DEFAULT ''")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
+    for col, coltype in [('mofa_kw_portal_visible', 'INTEGER DEFAULT 0'), ('mofa_kw_portal_sent_at', 'TIMESTAMP')]:
+        try:
+            db.execute(f"ALTER TABLE iraq_public_submissions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+
     # Migrate iraq_applicants: add new columns if they don't exist
     for col, coltype in [('mobile_number', "TEXT DEFAULT ''"),
                          ('email_address', "TEXT DEFAULT ''"),
                          ('expected_travel_date', "TEXT DEFAULT ''"),
                          ('visa_status', "TEXT DEFAULT 'Pending'"),
-                         ('visa_approved_date', "TEXT DEFAULT ''")]:
+                         ('visa_approved_date', "TEXT DEFAULT ''"),
+                         ('ksa_mofa_status', "TEXT DEFAULT 'Pending'"),
+                         ('movement_status', "TEXT DEFAULT ''")]:
         try:
             db.execute(f"ALTER TABLE iraq_applicants ADD COLUMN {col} {coltype}")
             db.commit()
@@ -617,6 +708,21 @@ def _is_valid_email(addr):
     if not addr: return False
     return re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', addr.strip()) is not None
 
+def _is_valid_email_loose(addr):
+    """Advisory/broadcast: accept common real-world addresses (labels with dots, +tags, longer TLDs)."""
+    if not addr:
+        return False
+    s = addr.strip()
+    if len(s) < 5 or s.count('@') != 1:
+        return False
+    local, domain = s.split('@', 1)
+    local, domain = local.strip(), domain.strip()
+    if not local or not domain or '.' not in domain:
+        return False
+    if domain.startswith('.') or domain.endswith('.') or '..' in domain:
+        return False
+    return True
+
 def _load_email_config(db=None):
     close_after = False
     if db is None:
@@ -755,6 +861,132 @@ def _queue_route_cleared_email(record, changed_by='system'):
         'record_id': rec_id,
         'changed_by': changed_by
     })
+
+ADVISORY_EMAIL_FOOTER = (
+    "\n\n---\nPakistan Embassy Kuwait\n"
+    "Citizen Support for Transit KSA System"
+)
+ADVISORY_MAX_SUBJECT_LEN = 500
+ADVISORY_MAX_BODY_LEN = 50000
+ADVISORY_MAX_RECIPIENTS = 5000
+
+def collect_admin_advisory_recipients(category):
+    """Build unique recipient list by email (case-insensitive). category: evacuees | returnees | iraq_requests."""
+    db = get_db()
+    by_email = {}
+    if category == 'evacuees':
+        # All rows in the main evacuees table (same pool as "All Records"), not filtered by
+        # effective_route — many live DBs only have pk_to_kw after review/import, which made the
+        # old KW→PK-only query return zero recipients.
+        rows = db.execute("""
+            SELECT id, name, email FROM evacuees
+            WHERE (dup_flag IS NULL OR UPPER(TRIM(COALESCE(dup_flag,''))) = 'CLEAR')
+              AND (
+                  visa_status IS NULL OR TRIM(COALESCE(visa_status,'')) = ''
+                  OR UPPER(TRIM(visa_status)) <> 'REJECTED'
+              )
+              AND email IS NOT NULL AND TRIM(email) <> ''
+        """).fetchall()
+        for r in rows:
+            em = (r['email'] or '').strip()
+            key = em.lower()
+            if key not in by_email and _is_valid_email_loose(em):
+                by_email[key] = {'email': em, 'name': (r['name'] or '').strip(), 'source': 'evacuee', 'record_id': r['id']}
+    elif category == 'returnees':
+        rows = db.execute("""
+            SELECT ci.id, pm.full_name AS name, pm.email AS email
+            FROM charter_interest ci
+            JOIN person_master pm ON pm.id = ci.person_id
+            WHERE ci.cancellation_status = 'active'
+              AND COALESCE(ci.dup_flag,'CLEAR') = 'CLEAR'
+              AND (
+                  ci.saudi_visa_approved IS NULL OR TRIM(COALESCE(ci.saudi_visa_approved,'')) = ''
+                  OR LOWER(TRIM(ci.saudi_visa_approved)) <> 'no'
+              )
+              AND pm.email IS NOT NULL AND TRIM(pm.email) <> ''
+        """).fetchall()
+        for r in rows:
+            em = (r['email'] or '').strip()
+            key = em.lower()
+            if key not in by_email and _is_valid_email_loose(em):
+                by_email[key] = {'email': em, 'name': (r['name'] or '').strip(), 'source': 'returnee', 'record_id': r['id']}
+    elif category == 'iraq_requests':
+        rows_pub = db.execute("""
+            SELECT id, full_name AS name, email FROM iraq_public_submissions
+            WHERE (status IS NULL OR TRIM(COALESCE(status,'')) = '' OR status <> 'Rejected')
+              AND email IS NOT NULL AND TRIM(email) <> ''
+        """).fetchall()
+        for r in rows_pub:
+            em = (r['email'] or '').strip()
+            key = em.lower()
+            if key not in by_email and _is_valid_email_loose(em):
+                by_email[key] = {'email': em, 'name': (r['name'] or '').strip(), 'source': 'iraq_public', 'record_id': r['id']}
+        rows_app = db.execute("""
+            SELECT id, full_name AS name, email_address AS email FROM iraq_applicants
+            WHERE (
+                visa_status IS NULL OR TRIM(COALESCE(visa_status,'')) = ''
+                OR visa_status <> 'Rejected'
+            )
+            AND email_address IS NOT NULL AND TRIM(email_address) <> ''
+        """).fetchall()
+        for r in rows_app:
+            em = (r['email'] or '').strip()
+            key = em.lower()
+            if key not in by_email and _is_valid_email_loose(em):
+                by_email[key] = {'email': em, 'name': (r['name'] or '').strip(), 'source': 'iraq_mission', 'record_id': r['id']}
+    db.close()
+    return list(by_email.values())
+
+def _queue_admin_advisory_email(to_email, subject, body_text, meta, changed_by):
+    if not _is_valid_email_loose(to_email):
+        return False
+    EMAIL_QUEUE.put({
+        'type': 'admin_advisory',
+        'to': to_email.strip(),
+        'subject': subject,
+        'body': body_text,
+        'meta': meta or {},
+        'changed_by': changed_by
+    })
+    return True
+
+def api_admin_advisory_broadcast(data, user):
+    cat = (data.get('category') or '').strip()
+    if cat not in ('evacuees', 'returnees', 'iraq_requests'):
+        return {'success': False, 'error': 'Choose Evacuees, Returnees, or Iraq requests'}
+    subject = (data.get('subject') or '').strip()
+    body_tpl = (data.get('body') or '').strip()
+    if not subject:
+        return {'success': False, 'error': 'Subject is required'}
+    if not body_tpl:
+        return {'success': False, 'error': 'Message body is required'}
+    if len(subject) > ADVISORY_MAX_SUBJECT_LEN:
+        return {'success': False, 'error': 'Subject is too long'}
+    if len(body_tpl) > ADVISORY_MAX_BODY_LEN:
+        return {'success': False, 'error': 'Message is too long'}
+    cfg = _load_email_config()
+    if not cfg['enabled']:
+        return {'success': False, 'error': 'SMTP is disabled. Enable it under Auto Email Notifications.'}
+    if not cfg['from_email'] or not cfg['app_password_enc']:
+        return {'success': False, 'error': 'SMTP is not fully configured (from address / app password)'}
+    recipients = collect_admin_advisory_recipients(cat)
+    if len(recipients) > ADVISORY_MAX_RECIPIENTS:
+        return {'success': False, 'error': f'Too many recipients ({len(recipients)}). Maximum is {ADVISORY_MAX_RECIPIENTS}.'}
+    queued = 0
+    for rec in recipients:
+        name = (rec.get('name') or 'Applicant').strip() or 'Applicant'
+        personalized = body_tpl.replace('{name}', name)
+        full_body = personalized + ADVISORY_EMAIL_FOOTER
+        meta = {'source': rec.get('source'), 'record_id': rec.get('record_id')}
+        if _queue_admin_advisory_email(rec['email'], subject, full_body, meta, user['user']):
+            queued += 1
+    db = get_db()
+    db.execute(
+        "INSERT INTO audit_log (action, user, details) VALUES ('admin_advisory_broadcast', ?, ?)",
+        [user['user'], json.dumps({'category': cat, 'queued': queued, 'unique_recipients': len(recipients), 'subject': subject})])
+    db.commit()
+    db.close()
+    return {'success': True, 'queued': queued, 'unique_recipients': len(recipients)}
 
 def _recipient_salutation(name):
     nm = (name or '').strip()
@@ -953,6 +1185,19 @@ def _email_worker_loop():
                     "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_route_cleared', ?, ?, ?)",
                     [rec_id, job.get('changed_by', 'system'),
                      json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'admin_advisory':
+                subj = (job.get('subject') or 'Advisory').strip()[:ADVISORY_MAX_SUBJECT_LEN]
+                body = job.get('body') or ''
+                ok, detail = _send_email_smtp(job['to'], subj, body)
+                db = get_db()
+                meta = job.get('meta') or {}
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_admin_advisory', ?, ?, ?)",
+                    [meta.get('record_id'), job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'source': meta.get('source'), 'subject': subj})]
                 )
                 db.commit()
                 db.close()
@@ -1189,6 +1434,73 @@ def import_csv_data(csv_text, user='system', mode='smart'):
 # ═══════════════════════════════════════════════════════════════
 # API HANDLERS
 # ═══════════════════════════════════════════════════════════════
+def _iraq_mission_dashboard_kpi(db):
+    """Roll-up for main dashboard: Iraq public intake + mission batches + MOFA KW tracking."""
+    pub_total = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions").fetchone()['c']
+    pub_portal = db.execute(
+        "SELECT COUNT(*) c FROM iraq_public_submissions WHERE COALESCE(mofa_kw_portal_visible,0)=1"
+    ).fetchone()['c']
+    pub_fwd = db.execute(
+        "SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Forwarded to Embassy Kuwait'"
+    ).fetchone()['c']
+    pub_nv = db.execute(
+        "SELECT COUNT(DISTINCT public_submission_id) c FROM iraq_dispatch_applicants"
+    ).fetchone()['c']
+    dec_map = {}
+    for r in db.execute("""
+        SELECT decision, COUNT(*) c FROM (
+            SELECT d.decision FROM iraq_applicant_decisions d
+            INNER JOIN (
+                SELECT public_submission_id, MAX(id) mid FROM iraq_applicant_decisions GROUP BY public_submission_id
+            ) x ON d.public_submission_id = x.public_submission_id AND d.id = x.mid
+        ) GROUP BY decision
+    """).fetchall():
+        dec_map[r['decision']] = r['c']
+    pub_mofa_app = int(dec_map.get('Approved') or 0)
+    pub_mofa_rej = int(dec_map.get('Rejected') or 0)
+    pub_mofa_pend = int(dec_map.get('Pending') or 0)
+
+    batch_apps = db.execute("SELECT COUNT(*) c FROM iraq_applicants").fetchone()['c']
+    b_pen = db.execute("SELECT COUNT(*) c FROM iraq_batches WHERE status='Pending'").fetchone()['c']
+    b_sent = db.execute("SELECT COUNT(*) c FROM iraq_batches WHERE status='Sent to MOFA Kuwait'").fetchone()['c']
+    b_proc = db.execute("SELECT COUNT(*) c FROM iraq_batches WHERE status='Processed'").fetchone()['c']
+    v_app = db.execute(
+        "SELECT COUNT(*) c FROM iraq_applicants WHERE visa_status='KW Transit Approved'"
+    ).fetchone()['c']
+    v_pend = db.execute(
+        """SELECT COUNT(*) c FROM iraq_applicants
+           WHERE visa_status='Pending' OR visa_status='' OR visa_status IS NULL"""
+    ).fetchone()['c']
+    v_rej = db.execute("SELECT COUNT(*) c FROM iraq_applicants WHERE visa_status='Rejected'").fetchone()['c']
+
+    requests_received = int(pub_total) + int(batch_apps)
+    mofa_kw_approved_total = int(pub_mofa_app) + int(v_app)
+    ksa_mofa_approved = db.execute(
+        "SELECT COUNT(*) c FROM iraq_applicants WHERE ksa_mofa_status='Approved'"
+    ).fetchone()['c']
+    waiting_travel_iraq = db.execute(
+        "SELECT COUNT(*) c FROM iraq_applicants WHERE movement_status='waiting_iraq'"
+    ).fetchone()['c']
+    waiting_transit_kw = db.execute(
+        "SELECT COUNT(*) c FROM iraq_applicants WHERE movement_status='waiting_kw'"
+    ).fetchone()['c']
+
+    return {
+        'requests_received': requests_received,
+        'mofa_kw_approved_total': mofa_kw_approved_total,
+        'mofa_ksa_approved': int(ksa_mofa_approved),
+        'waiting_travel_iraq': int(waiting_travel_iraq),
+        'waiting_transit_kw': int(waiting_transit_kw),
+        'public_total': pub_total, 'public_kw_portal': pub_portal,
+        'public_forwarded_embassy': pub_fwd, 'public_in_nv': pub_nv,
+        'public_mofa_approved': pub_mofa_app, 'public_mofa_rejected': pub_mofa_rej,
+        'public_mofa_pending': pub_mofa_pend,
+        'batch_applicants': batch_apps, 'batches_pending': b_pen,
+        'batches_sent_mofa': b_sent, 'batches_processed': b_proc,
+        'visa_kw_approved': v_app, 'visa_kw_pending': v_pend, 'visa_kw_rejected': v_rej,
+    }
+
+
 def api_dashboard_stats():
     db = get_db()
     # ── Evacuees KPIs: only operationally KW→PK records ──
@@ -1248,6 +1560,8 @@ def api_dashboard_stats():
     mismatch_pending_review = db.execute("SELECT COUNT(*) c FROM evacuees WHERE review_status IN ('pending','under_review','needs_followup')").fetchone()['c']
     corrected_to_pk = db.execute("SELECT COUNT(*) c FROM evacuees WHERE effective_route = 'pk_to_kw' AND route_mismatch = 1").fetchone()['c']
 
+    iraq_mission = _iraq_mission_dashboard_kpi(db)
+
     db.close()
     return {
         'kpi': {'total': total, 'total_all': total_all, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
@@ -1257,6 +1571,7 @@ def api_dashboard_stats():
                 'jazeera_departed': jazeera_departed,
                 'mismatch_total': mismatch_total, 'mismatch_pending_review': mismatch_pending_review,
                 'corrected_to_pk': corrected_to_pk},
+        'iraq_mission': iraq_mission,
         'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
         'by_visa': by_visa, 'by_border': by_border
     }
@@ -2744,6 +3059,15 @@ def api_iraq_stats(user_filter=None, include_visa_stats=True):
         result['visa_approved'] = visa_approved
         result['visa_pending'] = visa_pending
         result['visa_rejected'] = visa_rejected
+        result['ksa_mofa_approved'] = db.execute(
+            f"SELECT COUNT(*) c FROM iraq_applicants a JOIN iraq_batches b ON a.batch_id=b.id WHERE a.ksa_mofa_status='Approved'{awhere}",
+            aparams).fetchone()['c']
+        result['waiting_travel_iraq'] = db.execute(
+            f"SELECT COUNT(*) c FROM iraq_applicants a JOIN iraq_batches b ON a.batch_id=b.id WHERE a.movement_status='waiting_iraq'{awhere}",
+            aparams).fetchone()['c']
+        result['waiting_transit_kw'] = db.execute(
+            f"SELECT COUNT(*) c FROM iraq_applicants a JOIN iraq_batches b ON a.batch_id=b.id WHERE a.movement_status='waiting_kw'{awhere}",
+            aparams).fetchone()['c']
     db.close()
     return result
 
@@ -2880,13 +3204,15 @@ def api_iraq_export_csv(params, user_filter=None):
     writer.writerow(['S.No', 'Batch ID', 'Letter Number', 'Letter Date', 'Full Name', 'Passport Number',
                      'Nationality', 'Date of Birth', 'Gender', 'Employer', 'Current Location', 'Destination',
                      'Remarks', 'Mobile Number', 'Email Address', 'Expected Travel Date',
-                     'Batch Status', 'Individual Status', 'MOFA Reference', 'MOFA Sent Date', 'Uploaded By'])
+                     'Batch Status', 'Individual Status', 'KW Transit Visa', 'MOFA KSA Status', 'Movement',
+                     'MOFA Reference', 'MOFA Sent Date', 'Uploaded By'])
     for i, r in enumerate(rows, 1):
         writer.writerow([i, r['batch_id'], r['letter_number'], r['letter_date'],
                         r['full_name'], r['passport_number'], r['nationality'], r['dob'],
                         r['gender'], r['employer'], r['current_location'], r['destination'],
                         r['remarks'], r.get('mobile_number', ''), r.get('email_address', ''), r.get('expected_travel_date', ''),
                         r['batch_status'], r['individual_status'],
+                        r.get('visa_status', ''), r.get('ksa_mofa_status', ''), r.get('movement_status', ''),
                         r['mofa_reference'], r['mofa_sent_date'], r['uploaded_by']])
     return output.getvalue()
 
@@ -2994,18 +3320,46 @@ def api_iraq_bulk_visa_approval(csv_text, new_status, user):
     return stats
 
 def api_iraq_update_individual_visa(data, user):
-    """Update visa_status for a single Iraq applicant"""
+    """Update KW transit visa, MOFA KSA status, and/or movement bucket for one Iraq applicant (Iraq Transit Visas)."""
     db = get_db()
     app_id = data.get('applicant_id')
-    new_status = data.get('visa_status', '')
-    if not app_id or not new_status:
+    if not app_id:
         db.close()
-        return {'success': False, 'error': 'Applicant ID and visa status required'}
-    now = datetime.now().strftime('%Y-%m-%d')
-    db.execute("UPDATE iraq_applicants SET visa_status = ?, visa_approved_date = ? WHERE id = ?",
-               [new_status, now if new_status == 'KW Transit Approved' else '', app_id])
+        return {'success': False, 'error': 'Applicant ID required'}
+    if not db.execute("SELECT id FROM iraq_applicants WHERE id = ?", [app_id]).fetchone():
+        db.close()
+        return {'success': False, 'error': 'Applicant not found'}
+    parts, vals = [], []
+    if 'visa_status' in data:
+        new_status = (data.get('visa_status') or '').strip()
+        if not new_status:
+            db.close()
+            return {'success': False, 'error': 'Visa status required when updating visa'}
+        now = datetime.now().strftime('%Y-%m-%d')
+        parts.extend(["visa_status = ?", "visa_approved_date = ?"])
+        vals.extend([new_status, now if new_status == 'KW Transit Approved' else ''])
+    if 'ksa_mofa_status' in data:
+        k = (data.get('ksa_mofa_status') or 'Pending').strip()
+        if k not in ('Pending', 'Approved', 'Rejected'):
+            db.close()
+            return {'success': False, 'error': 'Invalid MOFA KSA status'}
+        parts.append("ksa_mofa_status = ?")
+        vals.append(k)
+    if 'movement_status' in data:
+        m = (data.get('movement_status') or '').strip()
+        if m not in ('', 'waiting_iraq', 'waiting_kw'):
+            db.close()
+            return {'success': False, 'error': 'Invalid movement status'}
+        parts.append("movement_status = ?")
+        vals.append(m)
+    if not parts:
+        db.close()
+        return {'success': False, 'error': 'No fields to update'}
+    vals.append(app_id)
+    db.execute(f"UPDATE iraq_applicants SET {', '.join(parts)} WHERE id = ?", vals)
+    detail = {k: data.get(k) for k in ('visa_status', 'ksa_mofa_status', 'movement_status') if k in data}
     db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_visa_individual', ?, ?, ?)",
-               (app_id, user, f"Visa set to {new_status}"))
+               (app_id, user, json.dumps(detail)))
     db.commit(); db.close()
     return {'success': True, 'id': app_id}
 
@@ -3036,6 +3390,442 @@ def api_iraq_search_applicants(params, user_filter=None, include_visa=False):
         WHERE {' AND '.join(where_parts)} ORDER BY a.id DESC""", qparams).fetchall()
     db.close()
     return [dict(r) for r in rows]
+
+# ═══════════════════════════════════════════════════════════════
+# IRAQ PUBLIC INTAKE WORKFLOW (SEPARATE PIPELINE)
+# ═══════════════════════════════════════════════════════════════
+def _new_iraq_public_ref():
+    return "IRQ-" + datetime.now().strftime("%Y%m%d") + "-" + uuid.uuid4().hex[:6].upper()
+
+def api_iraq_public_submit(data):
+    db = get_db()
+    full_name = (data.get('full_name') or '').strip()
+    passport_number = (data.get('passport_number') or '').strip().upper()
+    cnic = re.sub(r'[^0-9]', '', (data.get('cnic') or '').strip())
+    nationality = (data.get('nationality') or '').strip()
+    date_of_birth = (data.get('date_of_birth') or '').strip()
+    gender = (data.get('gender') or '').strip()
+    phone = (data.get('phone') or '').strip()
+    whatsapp = (data.get('whatsapp') or '').strip()
+    email = (data.get('email') or '').strip()
+    current_city = (data.get('current_city') or '').strip()
+    employer = (data.get('employer') or '').strip()
+    travel_route = (data.get('travel_route') or '').strip()
+    travel_purpose = (data.get('travel_purpose') or '').strip()
+    remarks = (data.get('remarks') or '').strip()
+    if not all([full_name, passport_number, cnic, nationality, date_of_birth, gender, phone, whatsapp, email, current_city, employer, travel_route, travel_purpose]):
+        db.close()
+        return {'success': False, 'error': 'All form fields are required'}
+    if not re.fullmatch(r'\d{13}', cnic):
+        db.close()
+        return {'success': False, 'error': 'CNIC must be exactly 13 digits'}
+    if not re.fullmatch(r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', email):
+        db.close()
+        return {'success': False, 'error': 'Please enter a valid email address'}
+    # Phone / WhatsApp: flexible format (+92, spaces, dashes, etc.) — only require non-empty (checked above)
+    if len(phone) > 80 or len(whatsapp) > 80:
+        db.close()
+        return {'success': False, 'error': 'Phone or WhatsApp number is too long'}
+    # Duplicate block: same passport or same CNIC as an existing Iraq public submission
+    pp_compare = re.sub(r'[\s\-]+', '', passport_number)
+    dup_pp = db.execute(
+        """SELECT id, reference_number, status FROM iraq_public_submissions
+           WHERE UPPER(REPLACE(REPLACE(passport_number, ' ', ''), '-', '')) = ?""",
+        [pp_compare]
+    ).fetchone()
+    if dup_pp:
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_submit_duplicate', ?, ?, ?)",
+            (dup_pp['id'], 'public', json.dumps({'reason': 'passport', 'passport': passport_number}))
+        )
+        db.commit()
+        db.close()
+        return {
+            'success': False,
+            'duplicate': True,
+            'matched_on': 'passport',
+            'existing_reference': dup_pp['reference_number'],
+            'error': 'A request with this passport number has already been submitted. Reference: ' + (dup_pp['reference_number'] or str(dup_pp['id']))
+        }
+    dup_cnic = db.execute(
+        """SELECT id, reference_number, status FROM iraq_public_submissions
+           WHERE REPLACE(REPLACE(REPLACE(cnic, '-', ''), ' ', ''), '.', '') = ?""",
+        [cnic]
+    ).fetchone()
+    if dup_cnic:
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_submit_duplicate', ?, ?, ?)",
+            (dup_cnic['id'], 'public', json.dumps({'reason': 'cnic', 'cnic': cnic}))
+        )
+        db.commit()
+        db.close()
+        return {
+            'success': False,
+            'duplicate': True,
+            'matched_on': 'cnic',
+            'existing_reference': dup_cnic['reference_number'],
+            'error': 'A request with this CNIC has already been submitted. Reference: ' + (dup_cnic['reference_number'] or str(dup_cnic['id']))
+        }
+    ref = _new_iraq_public_ref()
+    db.execute("""INSERT INTO iraq_public_submissions
+        (reference_number, full_name, passport_number, cnic, nationality, date_of_birth, gender, phone, whatsapp, email,
+         current_city, employer, travel_route, travel_purpose, remarks, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Submitted')""",
+        [ref, full_name, passport_number, cnic, nationality, date_of_birth, gender, phone, whatsapp, email,
+         current_city, employer, travel_route, travel_purpose, remarks])
+    sid = db.execute("SELECT last_insert_rowid() id").fetchone()['id']
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_submit', ?, ?, ?)",
+               (sid, 'public', json.dumps({'reference_number': ref, 'passport_number': passport_number})))
+    db.commit()
+    created = db.execute("SELECT created_at FROM iraq_public_submissions WHERE id = ?", [sid]).fetchone()['created_at']
+    db.close()
+    return {'success': True, 'id': sid, 'reference_number': ref, 'submitted_at': created, 'status': 'Submitted'}
+
+def api_iraq_public_stats():
+    db = get_db()
+    total = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions").fetchone()['c']
+    under_review = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Under Review'").fetchone()['c']
+    accepted = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Accepted'").fetchone()['c']
+    rejected = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Rejected'").fetchone()['c']
+    batched = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Batched'").fetchone()['c']
+    sent_embassy = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Forwarded to Embassy Kuwait'").fetchone()['c']
+    db.close()
+    return {
+        'total_public_submissions': total,
+        'under_review': under_review,
+        'accepted': accepted,
+        'rejected': rejected,
+        'batched': batched,
+        'sent_to_embassy': sent_embassy
+    }
+
+def api_iraq_public_submissions(params):
+    db = get_db()
+    where = ["1=1"]
+    q = []
+    status = (params.get('status') or '').strip()
+    search = (params.get('search') or '').strip()
+    if status:
+        where.append("status = ?")
+        q.append(status)
+    if search:
+        s = f"%{search}%"
+        where.append("(full_name LIKE ? OR passport_number LIKE ? OR reference_number LIKE ? OR phone LIKE ? OR cnic LIKE ?)")
+        q.extend([s, s, s, s, s])
+    rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {' AND '.join(where)} ORDER BY id DESC", q).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+def api_iraq_public_submission_detail(sub_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM iraq_public_submissions WHERE id = ?", [sub_id]).fetchone()
+    db.close()
+    if not row:
+        return {'success': False, 'error': 'Submission not found'}
+    return {'success': True, 'submission': dict(row)}
+
+def api_iraq_public_submission_update(data, user):
+    db = get_db()
+    sid = data.get('id')
+    if not sid:
+        db.close()
+        return {'success': False, 'error': 'Submission id is required'}
+    existing = db.execute("SELECT id FROM iraq_public_submissions WHERE id = ?", [sid]).fetchone()
+    if not existing:
+        db.close()
+        return {'success': False, 'error': 'Submission not found'}
+
+    editable_fields = [
+        'full_name', 'passport_number', 'cnic', 'nationality', 'date_of_birth', 'gender',
+        'phone', 'whatsapp', 'email', 'current_city', 'employer', 'travel_route',
+        'travel_purpose', 'remarks'
+    ]
+    updates, params = [], []
+    for f in editable_fields:
+        if f in data:
+            v = (data.get(f) or '').strip()
+            if f == 'passport_number':
+                v = v.upper()
+            if f == 'cnic':
+                v = re.sub(r'[^0-9]', '', v)
+                if v and not re.fullmatch(r'\d{13}', v):
+                    db.close()
+                    return {'success': False, 'error': 'CNIC must be exactly 13 digits'}
+            if f == 'email' and v and not re.fullmatch(r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', v):
+                db.close()
+                return {'success': False, 'error': 'Please enter a valid email address'}
+            updates.append(f"{f} = ?")
+            params.append(v)
+
+    if not updates:
+        db.close()
+        return {'success': False, 'error': 'No changes provided'}
+
+    params.append(sid)
+    db.execute(f"UPDATE iraq_public_submissions SET {', '.join(updates)}, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?", params[:-1] + [user, sid])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_edit', ?, ?, ?)",
+               (sid, user, json.dumps({'fields': [u.split(' = ')[0] for u in updates]})))
+    db.commit()
+    db.close()
+    return {'success': True}
+
+def api_iraq_public_submission_delete(sid, user):
+    db = get_db()
+    row = db.execute("SELECT id FROM iraq_public_submissions WHERE id = ?", [sid]).fetchone()
+    if not row:
+        db.close()
+        return {'success': False, 'error': 'Submission not found'}
+    db.execute("DELETE FROM iraq_dispatch_applicants WHERE public_submission_id = ?", [sid])
+    db.execute("DELETE FROM iraq_applicant_decisions WHERE public_submission_id = ?", [sid])
+    db.execute("DELETE FROM iraq_batch_applicants WHERE public_submission_id = ?", [sid])
+    db.execute("DELETE FROM iraq_public_submissions WHERE id = ?", [sid])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_delete', ?, ?, ?)",
+               (sid, user, '{}'))
+    db.commit()
+    db.close()
+    return {'success': True}
+
+def api_iraq_public_release_to_mofa_portal(user):
+    db = get_db()
+    cur = db.execute("""UPDATE iraq_public_submissions
+        SET mofa_kw_portal_visible = 1, mofa_kw_portal_sent_at = CURRENT_TIMESTAMP
+        WHERE COALESCE(mofa_kw_portal_visible, 0) = 0
+        AND status NOT IN ('Rejected', 'Duplicate')""")
+    n = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+    db.execute("INSERT INTO audit_log (action, user, details) VALUES ('iraq_public_release_mofa_portal', ?, ?)",
+               (user, json.dumps({'count': n})))
+    db.commit()
+    db.close()
+    return {'success': True, 'released_count': n}
+
+def api_iraq_public_portal_submissions(params):
+    db = get_db()
+    where = ["COALESCE(mofa_kw_portal_visible, 0) = 1"]
+    q = []
+    status = (params.get('status') or '').strip()
+    search = (params.get('search') or '').strip()
+    if status:
+        where.append("status = ?")
+        q.append(status)
+    if search:
+        sf = f"%{search}%"
+        where.append("(full_name LIKE ? OR passport_number LIKE ? OR reference_number LIKE ? OR phone LIKE ? OR cnic LIKE ?)")
+        q.extend([sf, sf, sf, sf, sf])
+    rows = db.execute(
+        f"SELECT * FROM iraq_public_submissions WHERE {' AND '.join(where)} ORDER BY id DESC", q
+    ).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+def api_iraq_public_portal_stats():
+    db = get_db()
+    on_portal = db.execute(
+        "SELECT COUNT(*) c FROM iraq_public_submissions WHERE COALESCE(mofa_kw_portal_visible,0)=1"
+    ).fetchone()['c']
+    pending_nv = db.execute("""SELECT COUNT(*) c FROM iraq_public_submissions p
+        WHERE COALESCE(p.mofa_kw_portal_visible,0)=1
+        AND NOT EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id)"""
+    ).fetchone()['c']
+    db.close()
+    return {'on_portal': on_portal, 'pending_note_verbale': pending_nv}
+
+def api_iraq_public_update_status(data, user):
+    db = get_db()
+    sid = data.get('id')
+    status = (data.get('status') or '').strip()
+    if not sid or status not in ('Under Review', 'Accepted', 'Rejected', 'Duplicate'):
+        db.close()
+        return {'success': False, 'error': 'Invalid submission or status'}
+    db.execute("""UPDATE iraq_public_submissions
+        SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+        WHERE id = ?""", [status, user, sid])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_review', ?, ?, ?)",
+               (sid, user, json.dumps({'status': status})))
+    db.commit()
+    db.close()
+    return {'success': True}
+
+def api_iraq_create_public_batch(data, user):
+    db = get_db()
+    ids = data.get('submission_ids') or []
+    letter_number = (data.get('letter_number') or '').strip()
+    if not ids or not letter_number:
+        db.close()
+        return {'success': False, 'error': 'Letter number and at least one accepted submission are required'}
+    clean_ids = [int(x) for x in ids]
+    accepted_rows = db.execute(
+        f"SELECT id FROM iraq_public_submissions WHERE id IN ({','.join(['?']*len(clean_ids))}) AND status='Accepted'",
+        clean_ids
+    ).fetchall()
+    if not accepted_rows:
+        db.close()
+        return {'success': False, 'error': 'No accepted submissions selected'}
+    batch_cur = db.execute("""INSERT INTO iraq_batches_public
+        (letter_number, letter_date, created_by, remarks, status)
+        VALUES (?, ?, ?, ?, 'Ready')""",
+        [letter_number, (data.get('letter_date') or '').strip(), user, (data.get('remarks') or '').strip()])
+    batch_id = batch_cur.lastrowid
+    for row in accepted_rows:
+        sid = row['id']
+        db.execute("INSERT INTO iraq_batch_applicants (batch_id, public_submission_id) VALUES (?, ?)", [batch_id, sid])
+        db.execute("UPDATE iraq_public_submissions SET linked_batch_id = ?, status = 'Batched' WHERE id = ?", [batch_id, sid])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_batch_create', ?, ?, ?)",
+               (batch_id, user, json.dumps({'submission_count': len(accepted_rows)})))
+    db.commit()
+    db.close()
+    return {'success': True, 'batch_id': batch_id, 'count': len(accepted_rows)}
+
+def api_iraq_batches_public(params):
+    db = get_db()
+    where = ["1=1"]
+    q = []
+    status = (params.get('status') or '').strip()
+    if status:
+        where.append("b.status = ?")
+        q.append(status)
+    rows = db.execute(f"""SELECT b.*, COUNT(a.id) applicant_count
+        FROM iraq_batches_public b
+        LEFT JOIN iraq_batch_applicants a ON a.batch_id = b.id
+        WHERE {' AND '.join(where)}
+        GROUP BY b.id
+        ORDER BY b.id DESC""", q).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+def api_iraq_batch_public_detail(batch_id):
+    db = get_db()
+    batch = db.execute("SELECT * FROM iraq_batches_public WHERE id = ?", [batch_id]).fetchone()
+    if not batch:
+        db.close()
+        return {'error': 'Batch not found'}
+    apps = db.execute("""SELECT p.* FROM iraq_batch_applicants a
+        JOIN iraq_public_submissions p ON p.id = a.public_submission_id
+        WHERE a.batch_id = ? ORDER BY p.id""", [batch_id]).fetchall()
+    db.close()
+    d = dict(batch)
+    d['applicants'] = [dict(r) for r in apps]
+    return d
+
+def api_iraq_forward_batch_to_embassy(data, user):
+    db = get_db()
+    batch_id = data.get('batch_id')
+    if not batch_id:
+        db.close()
+        return {'success': False, 'error': 'Batch ID is required'}
+    db.execute("""UPDATE iraq_batches_public
+        SET status = 'Sent to Embassy Kuwait', sent_to_embassy_at = CURRENT_TIMESTAMP
+        WHERE id = ?""", [batch_id])
+    db.execute("""UPDATE iraq_public_submissions
+        SET status = 'Forwarded to Embassy Kuwait'
+        WHERE linked_batch_id = ?""", [batch_id])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_batch_forward_embassy', ?, ?, ?)",
+               (batch_id, user, '{}'))
+    db.commit()
+    db.close()
+    return {'success': True}
+
+def api_iraq_embassy_dashboard():
+    db = get_db()
+    total = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions").fetchone()['c']
+    awaiting = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Forwarded to Embassy Kuwait'").fetchone()['c']
+    sent = db.execute("""SELECT COUNT(*) c FROM iraq_dispatch_applicants da
+        JOIN iraq_mofa_dispatches d ON d.id = da.dispatch_id
+        WHERE d.status='Sent' OR d.status='Closed'""").fetchone()['c']
+    approved = db.execute("SELECT COUNT(*) c FROM iraq_applicant_decisions WHERE decision='Approved'").fetchone()['c']
+    rejected = db.execute("SELECT COUNT(*) c FROM iraq_applicant_decisions WHERE decision='Rejected'").fetchone()['c']
+    db.close()
+    return {
+        'total_received': total,
+        'awaiting_mofa_submission': awaiting,
+        'sent_to_mofa': sent,
+        'approved': approved,
+        'rejected': rejected
+    }
+
+def api_iraq_create_dispatch(data, user):
+    db = get_db()
+    note_no = (data.get('note_verbale_number') or '').strip()
+    selected_ids = data.get('public_submission_ids') or []
+    if not note_no or not selected_ids:
+        db.close()
+        return {'success': False, 'error': 'Note Verbale number and applicants are required'}
+    cur = db.execute("""INSERT INTO iraq_mofa_dispatches
+        (note_verbale_number, note_verbale_date, sent_date, remarks, status, created_by)
+        VALUES (?, ?, ?, ?, ?, ?)""",
+        [note_no, (data.get('note_verbale_date') or '').strip(), (data.get('sent_date') or '').strip(),
+         (data.get('remarks') or '').strip(), (data.get('status') or 'Sent').strip(), user])
+    dispatch_id = cur.lastrowid
+    for sid in [int(x) for x in selected_ids]:
+        row = db.execute("SELECT linked_batch_id FROM iraq_public_submissions WHERE id = ?", [sid]).fetchone()
+        batch_id = row['linked_batch_id'] if row else None
+        db.execute("""INSERT OR IGNORE INTO iraq_dispatch_applicants
+            (dispatch_id, batch_id, public_submission_id) VALUES (?, ?, ?)""", [dispatch_id, batch_id, sid])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_dispatch_create', ?, ?, ?)",
+               (dispatch_id, user, json.dumps({'count': len(selected_ids)})))
+    db.commit()
+    db.close()
+    return {'success': True, 'dispatch_id': dispatch_id}
+
+def api_iraq_dispatches():
+    db = get_db()
+    rows = db.execute("""SELECT d.*, COUNT(a.id) applicant_count
+        FROM iraq_mofa_dispatches d
+        LEFT JOIN iraq_dispatch_applicants a ON a.dispatch_id = d.id
+        GROUP BY d.id
+        ORDER BY d.id DESC""").fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+def api_iraq_update_decision(data, user):
+    db = get_db()
+    sid = data.get('public_submission_id')
+    decision = (data.get('decision') or '').strip()
+    if not sid or decision not in ('Pending', 'Approved', 'Rejected'):
+        db.close()
+        return {'success': False, 'error': 'Invalid applicant or decision'}
+    db.execute("""INSERT INTO iraq_applicant_decisions
+        (public_submission_id, decision, decision_date, remarks, decided_by)
+        VALUES (?, ?, ?, ?, ?)""",
+        [sid, decision, (data.get('decision_date') or datetime.now().strftime('%Y-%m-%d')).strip(),
+         (data.get('remarks') or '').strip(), user])
+    db.commit()
+    db.close()
+    return {'success': True}
+
+def api_iraq_public_export(filter_key):
+    db = get_db()
+    if filter_key == 'accepted':
+        where = "status='Accepted'"
+    elif filter_key == 'rejected':
+        where = "status='Rejected'"
+    elif filter_key == 'pending_mofa':
+        where = "status='Forwarded to Embassy Kuwait'"
+    elif filter_key == 'sent_mofa':
+        where = "id IN (SELECT public_submission_id FROM iraq_dispatch_applicants)"
+    elif filter_key == 'approved':
+        where = "id IN (SELECT public_submission_id FROM iraq_applicant_decisions WHERE decision='Approved')"
+    elif filter_key == 'rejected_cases':
+        where = "id IN (SELECT public_submission_id FROM iraq_applicant_decisions WHERE decision='Rejected')"
+    elif filter_key == 'mofa_portal':
+        where = "COALESCE(mofa_kw_portal_visible,0) = 1"
+    else:
+        where = "1=1"
+    rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
+    rows = [dict(r) for r in rows]
+    db.close()
+    out = io.StringIO()
+    wr = csv.writer(out)
+    wr.writerow(['ID', 'Reference Number', 'Full Name', 'Passport Number', 'CNIC', 'Nationality', 'Date of Birth',
+                 'Gender', 'Phone', 'WhatsApp', 'Email', 'Current City', 'Employer', 'Travel Route',
+                 'Travel Purpose', 'Remarks', 'Status', 'Created At', 'Linked Batch ID',
+                 'MOFA KW Portal Visible', 'MOFA KW Portal Sent At'])
+    for r in rows:
+        wr.writerow([r['id'], r['reference_number'], r['full_name'], r['passport_number'], r.get('cnic', ''), r['nationality'],
+                     r['date_of_birth'], r['gender'], r['phone'], r['whatsapp'], r['email'],
+                     r['current_city'], r['employer'], r['travel_route'], r['travel_purpose'],
+                     r['remarks'], r['status'], r['created_at'], r['linked_batch_id'] or '',
+                     r.get('mofa_kw_portal_visible', '') or '', r.get('mofa_kw_portal_sent_at', '') or ''])
+    return out.getvalue()
 
 # ═══════════════════════════════════════════════════════════════
 # HTTP SERVER
@@ -3191,6 +3981,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_html(PUBLIC_REGISTER_PAGE)
         elif path in ('/embassy-registration/success', '/register/success'):
             self.send_html(REGISTER_SUCCESS_PAGE)
+        elif path == '/iraq-public-form':
+            self.send_html(IRAQ_PUBLIC_FORM_PAGE)
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
         elif path == '/':
@@ -3198,12 +3990,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             # Iraq CWA users get their own dedicated interface
             if user['role'] == 'iraq_cwa':
-                app_html = IRAQ_CWA_PAGE.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
+                app_html = IRAQ_CWA_V2_PAGE.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
                 self.send_html(app_html)
             else:
                 # Inject user role into the page
                 app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
                 self.send_html(app_html)
+        elif path == '/iraq-embassy-admin':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_html(IRAQ_EMBASSY_ADMIN_PAGE.replace('__USER_NAME__', user['user']))
         elif path == '/api/stats':
             if not self.require_auth(): return
             self.send_json(api_dashboard_stats())
@@ -3497,6 +4295,76 @@ class Handler(http.server.BaseHTTPRequestHandler):
             is_cwa = user['role'] == 'iraq_cwa'
             user_filter = user['user'] if is_cwa else None
             self.send_json(api_iraq_search_applicants(params, user_filter, include_visa=not is_cwa))
+        elif path == '/api/iraq-public-stats':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_iraq_public_stats())
+        elif path == '/api/iraq-public-submissions':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_iraq_public_submissions(params))
+        elif path == '/api/iraq-public-submission':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            sid = int(params.get('id', 0))
+            if not sid:
+                self.send_json({'success': False, 'error': 'id required'}, 400); return
+            self.send_json(api_iraq_public_submission_detail(sid))
+        elif path == '/api/iraq-public-portal-submissions':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_iraq_public_portal_submissions(params))
+        elif path == '/api/iraq-public-portal-stats':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_iraq_public_portal_stats())
+        elif path == '/api/iraq-public-batches':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_iraq_batches_public(params))
+        elif path == '/api/iraq-public-batch-detail':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            bid = int(params.get('id', 0))
+            self.send_json(api_iraq_batch_public_detail(bid))
+        elif path == '/api/iraq-embassy-dashboard':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_iraq_embassy_dashboard())
+        elif path == '/api/iraq-dispatches':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_iraq_dispatches())
+        elif path == '/api/iraq-public-export':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            fkey = (params.get('filter') or 'all').strip()
+            body = api_iraq_public_export(fkey).encode('utf-8-sig')
+            fname = f'Iraq_Public_{fkey}_{datetime.now().strftime("%Y%m%d")}.csv'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == '/api/audit':
             user = self.require_auth()
             if not user: return
@@ -3530,6 +4398,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             templates = _load_email_templates(db)
             db.close()
             self.send_json({'success': True, 'templates': templates})
+        elif path == '/api/admin-advisory-count':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            cat = (params.get('category') or '').strip()
+            if cat not in ('evacuees', 'returnees', 'iraq_requests'):
+                self.send_json({'error': 'Invalid category'}, 400); return
+            recs = collect_admin_advisory_recipients(cat)
+            self.send_json({'category': cat, 'count': len(recs)})
         elif path == '/logout':
             cookie_str = self.headers.get('Cookie', '')
             c = SimpleCookie(); c.load(cookie_str)
@@ -3556,6 +4433,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         body = self.read_body()
+
+        if path == '/api/iraq-public-submit':
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            self.send_json(api_iraq_public_submit(data))
+            return
 
         if path == '/api/public-register':
             # Public registration — no auth needed, but with spam protection
@@ -3960,6 +4846,67 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Only admin can update Iraq visa status'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_update_individual_visa(data, user['user']))
+        elif path == '/api/iraq-public-update-status':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_iraq_public_update_status(data, user['user']))
+        elif path == '/api/iraq-public-batch-create':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_iraq_create_public_batch(data, user['user']))
+        elif path == '/api/iraq-public-batch-forward':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_iraq_forward_batch_to_embassy(data, user['user']))
+        elif path == '/api/iraq-dispatch-create':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_iraq_create_dispatch(data, user['user']))
+        elif path == '/api/iraq-decision':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_iraq_update_decision(data, user['user']))
+        elif path == '/api/iraq-public-submission-update':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_iraq_public_submission_update(data, user['user']))
+        elif path == '/api/iraq-public-submission-delete':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            sid = data.get('id')
+            if not sid:
+                self.send_json({'success': False, 'error': 'id required'}, 400); return
+            self.send_json(api_iraq_public_submission_delete(int(sid), user['user']))
+        elif path == '/api/iraq-public-release-mofa-portal':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'iraq_cwa':
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_iraq_public_release_to_mofa_portal(user['user']))
 
         elif path == '/api/generate-webhook-key':
             user = self.require_auth()
@@ -4072,6 +5019,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             db.commit()
             db.close()
             self.send_json({'success': True, 'approved_total': len(rows), 'queued': queued, 'invalid_email': invalid_email})
+
+        elif path == '/api/admin-advisory-broadcast':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            result = api_admin_advisory_broadcast(data, user)
+            st = 200 if result.get('success') else 400
+            self.send_json(result, st)
 
         elif path == '/api/setting':
             user = self.require_auth()
@@ -5240,6 +6199,250 @@ document.getElementById('searchInput').addEventListener('keypress',e=>{if(e.key=
 </script></body></html>"""
 
 # ═══════════════════════════════════════════════════════════════
+# IRAQ PUBLIC/PORTAL PAGES
+# ═══════════════════════════════════════════════════════════════
+IRAQ_PUBLIC_FORM_PAGE = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kuwait Transit Visa Request Form - Iraq</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f5f7fa;margin:0;padding:16px;color:#1f2937}
+.wrap{max-width:860px;margin:0 auto;background:#fff;border-radius:12px;padding:18px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
+h1{font-size:1.25em;color:#1565c0;margin-bottom:6px}.muted{font-size:.88em;color:#6b7280}
+.warn{background:#fff8e1;border:1px solid #ffd54f;padding:10px;border-radius:8px;font-size:.85em;margin:12px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+label{font-size:.8em;font-weight:600;color:#4b5563;display:block;margin-bottom:4px}
+.ur{display:block;color:#6b7280;font-size:.85em;font-weight:500;margin-top:2px}
+input,select,textarea{width:100%;padding:9px;border:1px solid #d1d5db;border-radius:8px}
+textarea{min-height:76px}.btn{background:#1565c0;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer}
+#ok{display:none;background:#e8f5e9;border:1px solid #81c784;padding:10px;border-radius:8px;margin-top:10px}
+</style></head><body>
+<div class="wrap">
+<h1>Kuwait Transit Visa Request Form - Iraq</h1>
+<div class="muted">For applicants in Iraq seeking Kuwait transit visa support.</div>
+<div class="warn">Disclaimer: Submitting this form does not guarantee visa approval. Each case is reviewed by relevant authorities.</div>
+<form id="f">
+<div class="grid">
+<div><label>Full Name * <span class="ur">پورا نام</span></label><input name="full_name" required></div>
+<div><label>Passport Number * <span class="ur">پاسپورٹ نمبر</span></label><input name="passport_number" required></div>
+<div><label>CNIC (13 digits) * <span class="ur">شناختی کارڈ نمبر (13 ہندسے)</span></label><input name="cnic" required pattern="\d{13}" maxlength="13" inputmode="numeric" placeholder="e.g. 3740512345671"></div>
+<div><label>Nationality * <span class="ur">قومیت</span></label><input name="nationality" required></div>
+<div><label>Date of Birth * <span class="ur">تاریخ پیدائش</span></label><input type="date" name="date_of_birth" required></div>
+<div><label>Gender * <span class="ur">جنس</span></label><select name="gender" required><option value="">Select / منتخب کریں</option><option>Male</option><option>Female</option></select></div>
+<div><label>Phone Number * <span class="ur">فون نمبر</span></label><input name="phone" required placeholder="+92 300 1234567, 0092..., 0300-1234567"></div>
+<div><label>WhatsApp Number * <span class="ur">واٹس ایپ نمبر</span></label><input name="whatsapp" required placeholder="+92 300 1234567 or same as phone"></div>
+<div><label>Email * <span class="ur">ای میل</span></label><input type="email" name="email" required placeholder="name@example.com"></div>
+<div><label>Current City in Iraq * <span class="ur">عراق میں موجودہ شہر</span></label><input name="current_city" required></div>
+<div><label>Employer / Company * <span class="ur">ملازمت / کمپنی</span></label><input name="employer" required></div>
+<div><label>Travel Route / Destination * <span class="ur">سفری راستہ / منزل</span></label><input name="travel_route" required></div>
+<div><label>Travel Purpose * <span class="ur">سفر کا مقصد</span></label><input name="travel_purpose" required></div>
+<div style="grid-column:1/-1"><label>Remarks <span class="ur">(اختیاری) مزید معلومات</span></label><textarea name="remarks" placeholder="Optional"></textarea></div>
+</div>
+<div style="margin-top:12px"><button class="btn" type="submit">Submit Request</button></div>
+</form>
+<div id="ok"></div>
+</div>
+<script>
+document.getElementById('f').addEventListener('submit',async(e)=>{
+e.preventDefault();
+const fd=new FormData(e.target),d={};fd.forEach((v,k)=>d[k]=v);
+d.cnic=(d.cnic||'').replace(/\D/g,'');
+if(!/^\d{13}$/.test(d.cnic)){alert('CNIC must be exactly 13 digits');return}
+if(!/^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(d.email||'')){alert('Please enter a valid email address');return}
+const r=await fetch('/api/iraq-public-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+const j=await r.json();
+if(j.success){
+document.getElementById('ok').style.display='block';
+document.getElementById('ok').innerHTML='<strong>Submitted.</strong> Reference: <strong>'+j.reference_number+'</strong><br>Timestamp: '+j.submitted_at;
+e.target.reset();
+}else{
+const msg=j.error||'Submission failed';
+if(j.duplicate)alert(msg+'\n\nNo new record was created. If this is a mistake, contact CWA Baghdad / Embassy.');
+else alert(msg);
+}
+});
+</script></body></html>"""
+
+IRAQ_CWA_V2_PAGE = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Iraq CWA Baghdad Portal</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f6f7fb;margin:0}.hdr{background:#0d47a1;color:#fff;padding:12px 16px;display:flex;justify-content:space-between}
+.ctr{max-width:1200px;margin:0 auto;padding:14px}.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.card{background:#fff;border-radius:10px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.08)}
+.lb{font-size:.75em;color:#666;text-transform:uppercase}.vl{font-size:1.8em;font-weight:700;color:#1565c0}
+table{width:100%;border-collapse:collapse;font-size:.84em}th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}th{background:#f9fafb}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.btn{padding:8px 12px;border:none;border-radius:6px;cursor:pointer}.p{background:#1565c0;color:#fff}.d{background:#c62828;color:#fff}
+input,select{padding:8px;border:1px solid #d0d7de;border-radius:6px}
+.sec{background:#fff;padding:14px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.08);margin-top:12px;overflow:auto}
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;align-items:flex-start;justify-content:center;padding:20px 16px;overflow-y:auto}
+.mo.show{display:flex}
+.ml{background:#fff;border-radius:12px;max-width:720px;width:100%;padding:18px 40px 18px 18px;position:relative;margin:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);max-height:92vh;overflow-y:auto}
+.cb{position:absolute;top:8px;right:10px;border:none;background:none;font-size:1.5em;cursor:pointer;line-height:1;color:#666}
+</style></head><body>
+<div class="hdr"><div><strong>CWA Baghdad Portal</strong> - Iraq Public Intake</div><div>__USER_NAME__ | <a href="/logout" style="color:#fff">Logout</a></div></div>
+<div class="ctr">
+<div class="sec">
+<div><strong>Public Form URL:</strong> <code id="pubUrl"></code> <button class="btn" onclick="copyLink()">Copy link</button></div>
+<div style="margin-top:8px"><img id="qr" alt="QR Code" style="max-width:130px"></div>
+</div>
+<div class="sec">
+<h3 style="margin:0 0 8px;color:#0d47a1">MOFA Kuwait &mdash; Main portal (Citizen Support)</h3>
+<p style="font-size:.85em;color:#555;margin:0 0 10px">Send all eligible Iraq public registrations to the Kuwait Citizen Support dashboard so admin/operator can download Excel (CSV), edit, and track. Excludes status <strong>Rejected</strong> and <strong>Duplicate</strong>. Already-released rows are unchanged.</p>
+<button type="button" class="btn p" onclick="releaseAllToMofaKw()">Send all new entries to MOFA Kuwait main portal</button>
+</div>
+<div class="k" id="k"></div>
+<div class="sec">
+<div class="row"><input id="q" placeholder="Search name/passport/reference"><select id="st"><option value="">All</option><option>Submitted</option><option>Under Review</option><option>Accepted</option><option>Rejected</option><option>Duplicate</option><option>Batched</option><option>Forwarded to Embassy Kuwait</option></select><button class="btn p" onclick="loadSubs()">Load</button><button class="btn" onclick="exportCsv('all')">Export all</button><button class="btn" onclick="exportCsv('accepted')">Export accepted</button><button class="btn" onclick="exportCsv('rejected')">Export rejected</button></div>
+<table id="t"></table>
+</div>
+<div class="sec">
+<h3>Create Iraq Official Batch</h3>
+<div class="row"><input id="ln" placeholder="Iraq Letter Number"><input type="date" id="ld"><input id="lr" placeholder="Remarks"><button class="btn p" onclick="mkBatch()">Create Batch from checked Accepted rows</button></div>
+<table id="b"></table>
+</div>
+</div>
+<div class="mo" id="iraqPubViewMo" onclick="if(event.target===this)closeIraqPubView()"><div class="ml" onclick="event.stopPropagation()">
+<button type="button" class="cb" onclick="closeIraqPubView()" aria-label="Close">&times;</button>
+<h3 style="margin:0 0 12px;color:#0d47a1">View registration</h3>
+<div id="iraqPubViewBody"></div>
+<div class="row" style="margin-top:14px"><button class="btn" type="button" id="iraqPubEditBtn" onclick="enableIraqPubEdit()">Edit</button><button class="btn p" style="display:none" type="button" id="iraqPubSaveBtn" onclick="saveIraqPubEdit()">Save</button><button class="btn d" type="button" onclick="deleteIraqPub()">Delete</button><button class="btn p" type="button" onclick="closeIraqPubView()">Close</button></div>
+</div></div>
+<script>
+let _iraqPubCurrent=null;
+function esc(s){if(s==null||s===undefined)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function val(v){return esc(v==null?'':String(v));}
+async function viewIraqPub(id){
+const r=await fetch('/api/iraq-public-submission?id='+encodeURIComponent(id));
+const j=await r.json();
+if(!j.success){alert(j.error||'Could not load registration');return}
+const x=j.submission||{};_iraqPubCurrent=x;
+const rows=[['Reference number',x.reference_number],['Database ID',x.id],['Full name',x.full_name],['Passport number',x.passport_number],['CNIC',x.cnic||'-'],['Nationality',x.nationality],['Date of birth',x.date_of_birth],['Gender',x.gender],['Phone',x.phone],['WhatsApp',x.whatsapp],['Email',x.email],['Current city (Iraq)',x.current_city],['Employer / company',x.employer],['Travel route / destination',x.travel_route],['Travel purpose',x.travel_purpose],['Remarks',(x.remarks&&String(x.remarks).trim())?x.remarks:'—'],['Passport copy (file)',x.passport_file_path||'—'],['Supporting document (file)',x.supporting_file_path||'—'],['Status',x.status],['Submitted at',x.created_at||'—'],['Reviewed at',x.reviewed_at||'—'],['Reviewed by',x.reviewed_by||'—'],['Visible on MOFA KW portal',x.mofa_kw_portal_visible?'Yes':'No'],['MOFA KW portal sent at',x.mofa_kw_portal_sent_at||'—'],['Linked batch ID',x.linked_batch_id!=null&&x.linked_batch_id!==''?x.linked_batch_id:'—']];
+let h='<table style="width:100%;border-collapse:collapse;font-size:.9em"><tbody>';
+rows.forEach(function(kv){h+='<tr><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#555;width:40%;vertical-align:top">'+esc(kv[0])+'</td><td style="padding:8px 10px;border-bottom:1px solid #eee;word-break:break-word">'+esc(kv[1])+'</td></tr>';});
+h+='</tbody></table>';
+document.getElementById('iraqPubViewBody').innerHTML=h;
+document.getElementById('iraqPubEditBtn').style.display='';
+document.getElementById('iraqPubSaveBtn').style.display='none';
+document.getElementById('iraqPubViewMo').classList.add('show');
+}
+function enableIraqPubEdit(){
+if(!_iraqPubCurrent)return;
+const x=_iraqPubCurrent;
+const fields=[
+['Full name','full_name',x.full_name],['Passport number','passport_number',x.passport_number],['CNIC','cnic',x.cnic||''],['Nationality','nationality',x.nationality],
+['Date of birth','date_of_birth',x.date_of_birth],['Gender','gender',x.gender],['Phone','phone',x.phone],['WhatsApp','whatsapp',x.whatsapp],
+['Email','email',x.email],['Current city (Iraq)','current_city',x.current_city],['Employer / company','employer',x.employer],
+['Travel route / destination','travel_route',x.travel_route],['Travel purpose','travel_purpose',x.travel_purpose],['Remarks','remarks',x.remarks||'']
+];
+let h='<table style="width:100%;border-collapse:collapse;font-size:.9em"><tbody>';
+fields.forEach(function(f){
+const isDate=f[1]==='date_of_birth';
+const isRemarks=f[1]==='remarks';
+const input=isRemarks?'<textarea data-f="'+f[1]+'" rows="2" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:6px">'+val(f[2])+'</textarea>':'<input data-f="'+f[1]+'" '+(isDate?'type="date"':'type="text"')+' value="'+val(f[2])+'" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:6px">';
+h+='<tr><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#555;width:40%;vertical-align:top">'+esc(f[0])+'</td><td style="padding:8px 10px;border-bottom:1px solid #eee">'+input+'</td></tr>';
+});
+h+='</tbody></table>';
+document.getElementById('iraqPubViewBody').innerHTML=h;
+document.getElementById('iraqPubEditBtn').style.display='none';
+document.getElementById('iraqPubSaveBtn').style.display='';
+}
+async function saveIraqPubEdit(){
+if(!_iraqPubCurrent)return;
+const payload={id:_iraqPubCurrent.id};
+document.querySelectorAll('#iraqPubViewBody [data-f]').forEach(function(el){payload[el.getAttribute('data-f')]=(el.value||'').trim();});
+if(payload.cnic && !/^\d{13}$/.test(payload.cnic)){alert('CNIC must be exactly 13 digits');return}
+if(payload.email && !/^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(payload.email)){alert('Please enter a valid email address');return}
+const r=await fetch('/api/iraq-public-submission-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const j=await r.json();
+if(!j.success){alert(j.error||'Update failed');return}
+alert('Registration updated successfully');
+viewIraqPub(_iraqPubCurrent.id);
+loadSubs();
+}
+function closeIraqPubView(){document.getElementById('iraqPubViewMo').classList.remove('show');}
+async function deleteIraqPub(){
+if(!_iraqPubCurrent||!confirm('Permanently delete registration #'+_iraqPubCurrent.id+'? This cannot be undone.'))return;
+const r=await fetch('/api/iraq-public-submission-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:_iraqPubCurrent.id})});
+const j=await r.json();
+if(!j.success){alert(j.error||'Delete failed');return}
+closeIraqPubView();loadSubs();loadStats();loadBatches();
+}
+async function releaseAllToMofaKw(){
+if(!confirm('Release all eligible registrations to the Kuwait Citizen Support portal (Iraq Public tab) for admin/operator?'))return;
+const r=await fetch('/api/iraq-public-release-mofa-portal',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+const j=await r.json();
+if(j.error){alert(j.error);return}
+if(!j.success){alert('Request failed');return}
+alert('Released '+(j.released_count||0)+' record(s). Kuwait staff: open Citizen Support \u2192 Iraq Public (MOFA KW).');
+loadSubs();loadStats();
+}
+const pub=location.origin+'/iraq-public-form';document.getElementById('pubUrl').textContent=pub;document.getElementById('qr').src='https://api.qrserver.com/v1/create-qr-code/?size=130x130&data='+encodeURIComponent(pub);
+function copyLink(){navigator.clipboard.writeText(pub);alert('Copied')}
+async function loadStats(){const r=await fetch('/api/iraq-public-stats');const d=await r.json();document.getElementById('k').innerHTML=`
+<div class="card"><div class="lb">Total Public Submissions</div><div class="vl">${d.total_public_submissions||0}</div></div>
+<div class="card"><div class="lb">Under Review</div><div class="vl">${d.under_review||0}</div></div>
+<div class="card"><div class="lb">Accepted</div><div class="vl">${d.accepted||0}</div></div>
+<div class="card"><div class="lb">Rejected</div><div class="vl">${d.rejected||0}</div></div>
+<div class="card"><div class="lb">Batched</div><div class="vl">${d.batched||0}</div></div>
+<div class="card"><div class="lb">Sent to Embassy Kuwait</div><div class="vl">${d.sent_to_embassy||0}</div></div>`}
+async function setStatus(id,status){const r=await fetch('/api/iraq-public-update-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,status})});const d=await r.json();if(!d.success)alert(d.error||'failed');loadSubs();loadStats();}
+async function loadSubs(){const q=document.getElementById('q').value.trim(),st=document.getElementById('st').value;let u='/api/iraq-public-submissions?';if(q)u+='search='+encodeURIComponent(q)+'&';if(st)u+='status='+encodeURIComponent(st);const r=await fetch(u);const d=await r.json();
+let h='<tr><th></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>City</th><th>KW portal</th><th>Status</th><th>Actions</th></tr>';
+d.forEach(x=>{h+=`<tr><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td>${x.mofa_kw_portal_visible?'Y':'—'}</td><td>${x.status||''}</td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td></tr>`});
+document.getElementById('t').innerHTML=h;}
+async function mkBatch(){const ids=[...document.querySelectorAll('.sel:checked')].map(x=>parseInt(x.value));if(!ids.length){alert('Select accepted rows');return}
+const payload={submission_ids:ids,letter_number:document.getElementById('ln').value,letter_date:document.getElementById('ld').value,remarks:document.getElementById('lr').value};
+const r=await fetch('/api/iraq-public-batch-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!d.success){alert(d.error||'failed');return}alert('Batch #'+d.batch_id+' created');loadSubs();loadBatches();loadStats();}
+async function sendEmbassy(id){const r=await fetch('/api/iraq-public-batch-forward',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:id})});const d=await r.json();if(!d.success){alert(d.error||'failed');return}loadBatches();loadSubs();loadStats();}
+async function loadBatches(){const r=await fetch('/api/iraq-public-batches');const d=await r.json();let h='<tr><th>Batch</th><th>Letter#</th><th>Date</th><th>Applicants</th><th>Status</th><th>Action</th></tr>';d.forEach(b=>{h+=`<tr><td>${b.id}</td><td>${b.letter_number||''}</td><td>${b.letter_date||''}</td><td>${b.applicant_count||0}</td><td>${b.status||''}</td><td>${b.status==='Sent to Embassy Kuwait'?'Sent':'<button class="btn p" onclick="sendEmbassy('+b.id+')">Send to Embassy Kuwait</button>'}</td></tr>`});document.getElementById('b').innerHTML=h;}
+function exportCsv(f){window.location='/api/iraq-public-export?filter='+encodeURIComponent(f)}
+loadStats();loadSubs();loadBatches();
+</script></body></html>"""
+
+IRAQ_EMBASSY_ADMIN_PAGE = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Embassy Kuwait - Iraq Admin</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f5f7fb;margin:0}.hdr{background:#14532d;color:#fff;padding:12px 16px;display:flex;justify-content:space-between}
+.ctr{max-width:1200px;margin:0 auto;padding:14px}.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.card,.sec{background:#fff;border-radius:10px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.08)}
+.lb{font-size:.75em;color:#666;text-transform:uppercase}.vl{font-size:1.8em;font-weight:700;color:#14532d}
+table{width:100%;border-collapse:collapse;font-size:.84em}th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}th{background:#f9fafb}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.btn{padding:8px 12px;border:none;border-radius:6px;cursor:pointer}.p{background:#14532d;color:#fff}
+input,select{padding:8px;border:1px solid #d0d7de;border-radius:6px}
+</style></head><body>
+<div class="hdr"><div><strong>Embassy Kuwait Admin - Iraq Workflow</strong></div><div>__USER_NAME__ | <a href="/logout" style="color:#fff">Logout</a></div></div>
+<div class="ctr">
+<div class="k" id="k"></div>
+<div class="sec" style="margin-top:12px">
+<h3>Incoming Iraq Batches (Forwarded by CWA Baghdad)</h3>
+<table id="tb"></table>
+</div>
+<div class="sec" style="margin-top:12px">
+<h3>Create MOFA Kuwait Dispatch / Note Verbale</h3>
+<div class="row"><input id="nvn" placeholder="Note Verbale Number"><input type="date" id="nvd"><input type="date" id="snd"><input id="rm" placeholder="Remarks"></div>
+<div class="row"><input id="ids" placeholder="Applicant IDs (comma separated)"><button class="btn p" onclick="mkDispatch()">Create Dispatch</button><button class="btn" onclick="exportCsv('pending_mofa')">Export pending to MOFA</button><button class="btn" onclick="exportCsv('sent_mofa')">Export sent to MOFA</button><button class="btn" onclick="exportCsv('approved')">Export approved</button><button class="btn" onclick="exportCsv('rejected_cases')">Export rejected</button></div>
+</div>
+<div class="sec" style="margin-top:12px">
+<h3>Dispatch History</h3>
+<table id="td"></table>
+</div>
+</div>
+<script>
+async function loadDash(){const r=await fetch('/api/iraq-embassy-dashboard');const d=await r.json();document.getElementById('k').innerHTML=`
+<div class="card"><div class="lb">Total Iraq Requests Received</div><div class="vl">${d.total_received||0}</div></div>
+<div class="card"><div class="lb">Awaiting MOFA Kuwait Submission</div><div class="vl">${d.awaiting_mofa_submission||0}</div></div>
+<div class="card"><div class="lb">Sent to MOFA Kuwait</div><div class="vl">${d.sent_to_mofa||0}</div></div>
+<div class="card"><div class="lb">Approved</div><div class="vl">${d.approved||0}</div></div>
+<div class="card"><div class="lb">Rejected</div><div class="vl">${d.rejected||0}</div></div>`}
+async function loadBatches(){const r=await fetch('/api/iraq-public-batches?status=Sent%20to%20Embassy%20Kuwait');const d=await r.json();let h='<tr><th>Batch</th><th>Letter#</th><th>Date</th><th>Applicants</th><th>Status</th></tr>';d.forEach(b=>h+=`<tr><td>${b.id}</td><td>${b.letter_number||''}</td><td>${b.letter_date||''}</td><td>${b.applicant_count||0}</td><td>${b.status||''}</td></tr>`);document.getElementById('tb').innerHTML=h;}
+async function mkDispatch(){const ids=document.getElementById('ids').value.split(',').map(x=>parseInt(x.trim())).filter(Boolean);if(!ids.length){alert('Provide applicant ids');return}
+const payload={note_verbale_number:document.getElementById('nvn').value,note_verbale_date:document.getElementById('nvd').value,sent_date:document.getElementById('snd').value,remarks:document.getElementById('rm').value,public_submission_ids:ids,status:'Sent'};
+const r=await fetch('/api/iraq-dispatch-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!d.success){alert(d.error||'failed');return}alert('Dispatch #'+d.dispatch_id+' created');loadDispatches();}
+async function loadDispatches(){const r=await fetch('/api/iraq-dispatches');const d=await r.json();let h='<tr><th>ID</th><th>Note Verbale#</th><th>Date</th><th>Sent Date</th><th>Status</th><th>Applicants</th></tr>';d.forEach(x=>h+=`<tr><td>${x.id}</td><td>${x.note_verbale_number||''}</td><td>${x.note_verbale_date||''}</td><td>${x.sent_date||''}</td><td>${x.status||''}</td><td>${x.applicant_count||0}</td></tr>`);document.getElementById('td').innerHTML=h;}
+function exportCsv(f){window.location='/api/iraq-public-export?filter='+encodeURIComponent(f)}
+loadDash();loadBatches();loadDispatches();
+</script></body></html>"""
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN APPLICATION (single-page app)
 # ═══════════════════════════════════════════════════════════════
 IRAQ_CWA_PAGE = r"""<!DOCTYPE html>
@@ -5614,6 +6817,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <button onclick="go('report',this)">SITREP Report</button>
 <button onclick="go('sitrep',this)">SITREP Editor</button>
 <button onclick="go('iraq',this)" style="color:#1565c0">Iraq Transit Visas</button>
+<button onclick="go('iraq-public',this)" style="color:#0d47a1">Iraq Public (MOFA KW)</button>
 <button onclick="go('admin',this)">Admin</button>
 </div>
 
@@ -5622,6 +6826,11 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="alert" id="alertBar"><span>&#9888;&#65039;</span><span id="alertText"></span></div>
 <h3 style="color:#006600;font-size:1em;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #e8f5e9">Evacuees (Kuwait &rarr; Pakistan)</h3>
 <div class="kg" id="kpiGrid"></div>
+<div style="margin-top:18px;margin-bottom:16px">
+<h3 style="color:#0d47a1;font-size:1em;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #e3f2fd">Iraq mission &mdash; requests from Iraq &amp; MOFA Kuwait</h3>
+<p style="font-size:.82em;color:var(--tl);margin:-4px 0 12px;line-height:1.45">Summary below combines public intake and mission batches. Full detail (portal, NV, batches, KW transit, MOFA KSA, movement) is under <strong>Iraq Transit Visas</strong> and the Iraq public / embassy workflow.</p>
+<div class="kg" id="dashIraqMissionKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
+</div>
 <div style="margin-top:18px;margin-bottom:16px">
 <h3 style="color:#006600;font-size:1em;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #e8f5e9">Returnees (Pakistan &rarr; Kuwait)</h3>
 <div class="kg" id="dashRetKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px"></div>
@@ -5889,6 +7098,32 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="scroll-t" style="max-height:400px"><table id="iraqApplicantsTbl"></table></div>
 </div></div>
 
+<!-- IRAQ PUBLIC — visible on Kuwait Citizen Support (released from CWA Baghdad) -->
+<div id="tab-iraq-public" class="tab"><div class="ctr">
+<h3 style="color:#0d47a1;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #e3f2fd">Iraq public requests &mdash; MOFA Kuwait tracking</h3>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Registrations released from CWA Baghdad appear here (same Iraq-only database; not merged with main evacuee records). Use CSV for Excel.</p>
+<div class="kg" id="ippKpi" style="margin-bottom:14px"></div>
+<div class="sb">
+<input id="ippSearch" placeholder="Search name, passport, CNIC, reference..." oninput="loadIraqPublicPortal()">
+<select id="ippStatus" onchange="loadIraqPublicPortal()"><option value="">All statuses</option><option>Submitted</option><option>Under Review</option><option>Accepted</option><option>Rejected</option><option>Duplicate</option><option>Batched</option><option>Forwarded to Embassy Kuwait</option></select>
+<a href="/api/iraq-public-export?filter=mofa_portal" class="btn btn-i" style="text-decoration:none;color:#fff">Download Excel (CSV)</a>
+<button class="btn btn-p" type="button" onclick="loadIraqPublicPortal()">Refresh</button>
+</div>
+<div class="rc" id="ippCount"></div>
+<div class="scroll-t"><table id="ippTbl"></table></div>
+</div></div>
+<div class="mo" id="ippMo" onclick="if(event.target===this)closeIpp()"><div class="ml" onclick="event.stopPropagation()" style="max-width:720px">
+<button type="button" class="cb" onclick="closeIpp()">&times;</button>
+<h3 id="ippTitle" style="margin:0 0 12px;color:#0d47a1">Iraq public registration</h3>
+<div id="ippBody"></div>
+<div class="bg" style="margin-top:14px">
+<button class="btn btn-p" type="button" id="ippEditBtn" onclick="ippEnableEdit()">Edit</button>
+<button class="btn btn-p" type="button" id="ippSaveBtn" style="display:none" onclick="ippSave()">Save</button>
+<button class="btn btn-d" type="button" onclick="ippDelete()">Delete</button>
+<button class="btn" type="button" onclick="closeIpp()">Close</button>
+</div>
+</div></div>
+
 <!-- ROUTE REVIEW QUEUE -->
 <div id="tab-review" class="tab"><div class="ctr">
 <div class="fs">
@@ -6139,6 +7374,25 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div id="smtpStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
 </div>
+<div class="fs" style="border-left:3px solid #00695c">
+<h3>Custom advisory email (broadcast)</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Send one custom message to <strong>all eligible addresses</strong> in a category. Recipients are de-duplicated by email. Use optional placeholder <code>{name}</code> in the message body.</p>
+<p style="margin-bottom:10px;font-size:.82em;color:var(--tl)"><strong>Who receives mail:</strong> <em>Evacuees</em> &mdash; everyone in the main <strong>All Records</strong> table: non-duplicate rows, visa status not Rejected, with an email address (any effective route). <em>Returnees</em> &mdash; Pakistan&rarr;Kuwait charter interest, active, clear duplicates, KSA visa pending/approved/blank (not &ldquo;no&rdquo;), with email. <em>Iraq requests</em> &mdash; Iraq public submissions (not Rejected) and mission applicants (KW transit not Rejected), with email.</p>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Audience</label><select id="advCategory" onchange="loadAdvisoryCount()">
+<option value="evacuees">Evacuees (main portal)</option>
+<option value="returnees">Returnees (charter / PK&rarr;KW)</option>
+<option value="iraq_requests">Iraq requests (public + mission)</option>
+</select></div>
+<div class="fgp"><label>Eligible recipients</label><div id="advCount" style="padding:10px 0;font-weight:600;color:var(--p)">&mdash; open Admin tab to load</div></div>
+</div>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Subject</label><input id="advSubject" placeholder="e.g. Advisory — travel update" style="width:100%"></div>
+</div>
+<div class="fgp" style="margin-bottom:10px"><label>Message (plain text)</label><textarea id="advBody" rows="10" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.88em" placeholder="Dear applicant,&#10;&#10;...&#10;&#10;You may use {name} once if you want it replaced with each person&#39;s name."></textarea></div>
+<button class="btn btn-p" onclick="sendAdvisoryBroadcast()">Queue emails to all in category</button>
+<div id="advStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
+</div>
 <div class="fs" style="border-left:3px solid #8e24aa">
 <h3>Email Message Templates</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Use placeholders like <code>{salutation}</code>, <code>{name}</code>, <code>{passport}</code>, <code>{tracking_number}</code>, <code>{border_crossing}</code>, <code>{mofa_letter_number}</code>, <code>{mofa_letter_date}</code>, <code>{embassy_name}</code>, <code>{embassy_contact}</code>, <code>{embassy_hours}</code>.</p>
@@ -6259,7 +7513,7 @@ document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
 document.getElementById('tab-'+tab).classList.add('active');
 btn.classList.add('active');
-if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}if(tab==='review')loadReviewQueue();
+if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}if(tab==='review')loadReviewQueue();if(tab==='iraq-public')loadIraqPublicPortal();
 }
 
 async function api(url,opts){const r=await fetch(url,opts);if(r.status===302||r.redirected){window.location='/login';return null}return r.json()}
@@ -6281,6 +7535,15 @@ ${k.returned > 0 ? '<div class="kc d"><div class="lb">Returned</div><div class="
 <div class="kc s" style="background:#fff3e0;border-color:#e65100"><div class="lb" style="color:#e65100">Today Live</div><div class="vl" style="color:#e65100">${k.departed_today}</div><div class="su" style="color:#bf360c">${k.departed_today} departed | ${k.entered_today} entered KSA</div></div>
 ${k.mismatch_total>0?'<div class="kc w" style="background:#fff8e1;border-color:#ff8f00"><div class="lb" style="color:#e65100">Route Mismatches</div><div class="vl" style="color:#e65100">'+k.mismatch_total+'</div><div class="su" style="color:#bf360c">'+k.corrected_to_pk+' corrected to PK\u2192KW | '+(k.mismatch_pending_review||0)+' pending review</div></div>':''}
 `;
+const im=d.iraq_mission;
+if(im){
+document.getElementById('dashIraqMissionKpi').innerHTML=`
+<div class="kc i"><div class="lb">Iraq requests received</div><div class="vl">${im.requests_received||0}</div><div class="su">${im.public_total||0} public + ${im.batch_applicants||0} mission applicants</div></div>
+<div class="kc s"><div class="lb">Approved by MOFA Kuwait</div><div class="vl">${im.mofa_kw_approved_total||0}</div><div class="su">${im.public_mofa_approved||0} public + ${im.visa_kw_approved||0} KW transit (mission)</div></div>
+<div class="kc s"><div class="lb">Approved by MOFA KSA</div><div class="vl">${im.mofa_ksa_approved||0}</div><div class="su">Set in Iraq Transit Visas</div></div>
+<div class="kc w"><div class="lb">Waiting travel from Iraq</div><div class="vl">${im.waiting_travel_iraq||0}</div><div class="su">Movement flag (Iraq Transit Visas)</div></div>
+`;
+}else{document.getElementById('dashIraqMissionKpi').innerHTML='<div class="kc" style="opacity:.7"><div class="lb">Iraq mission</div><div class="su">No summary available</div></div>';}
 if(k.pending>k.visa_approved){document.getElementById('alertBar').style.display='flex';document.getElementById('alertText').textContent=`ALERT: Pending (${k.pending}) outpacing resolved (${k.visa_approved}) — urgent KSA action needed`}
 else document.getElementById('alertBar').style.display='none';
 
@@ -6996,7 +8259,7 @@ const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
 a.slice(0,50).forEach(x=>{h+=`<tr><td>${x.created_at}</td><td>${x.action}</td><td>${x.user||'-'}</td><td>${x.record_id||'-'}</td></tr>`});
 h+='</tbody>';document.getElementById('auditTbl').innerHTML=h}
-loadBackups();loadEmailConfig();loadEmailTemplates()}
+loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount()}
 async function createUser(){
 const data={username:document.getElementById('nu_user').value,password:document.getElementById('nu_pass').value,
 full_name:document.getElementById('nu_name').value,role:document.getElementById('nu_role').value};
@@ -7101,6 +8364,31 @@ const r=await api('/api/email-resend-approved',{method:'POST'});
 if(r?.success){
 toast(`Queued ${r.queued} emails (Approved: ${r.approved_total}, Invalid email: ${r.invalid_email})`);
 }else toast('Bulk resend failed: '+(r?.error||'unknown'));
+}
+async function loadAdvisoryCount(){
+const cat=document.getElementById('advCategory')?.value||'evacuees';
+const el=document.getElementById('advCount');
+if(!el)return;
+const r=await api('/api/admin-advisory-count?category='+encodeURIComponent(cat));
+if(r?.error){el.textContent='—';return}
+el.textContent=r.count+' unique email address(es)';
+}
+async function sendAdvisoryBroadcast(){
+const cat=document.getElementById('advCategory').value;
+const subject=document.getElementById('advSubject').value.trim();
+const body=document.getElementById('advBody').value.trim();
+if(!subject){toast('Enter a subject');return}
+if(!body){toast('Enter a message body');return}
+const n=document.getElementById('advCount')?.textContent||'';
+if(!confirm('Queue advisory email to everyone in this category? '+n+'. Messages send in the background.'))return;
+const r=await api('/api/admin-advisory-broadcast',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:cat,subject,body})});
+if(r?.success){
+document.getElementById('advStatus').textContent='Queued '+r.queued+' of '+r.unique_recipients+' recipient(s). Check SMTP settings if some fail.';
+toast('Queued '+r.queued+' advisory email(s)');
+}else{
+document.getElementById('advStatus').textContent=r?.error||'Failed';
+toast(r?.error||'Broadcast failed');
+}
 }
 async function loadEmailTemplates(){
 const r=await api('/api/email-templates');
@@ -7297,6 +8585,71 @@ document.getElementById('retImportDetails').innerHTML=d.details?d.details.map(x=
 loadReturnees();loadReturneesStats();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// IRAQ PUBLIC (MOFA KW) — Admin / Operator
+// ═══════════════════════════════════════════════════════════════
+let _ippCur=null;
+function ippEsc(s){if(s==null||s===undefined)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function ippVal(v){return ippEsc(v==null?'':String(v));}
+async function loadIraqPublicPortal(){
+const st=document.getElementById('ippStatus').value,q=document.getElementById('ippSearch').value.trim();
+let u='/api/iraq-public-portal-submissions?';if(st)u+='status='+encodeURIComponent(st)+'&';if(q)u+='search='+encodeURIComponent(q)+'&';
+const d=await api(u);if(!d)return;
+if(!Array.isArray(d)){toast(d.error||'Could not load portal list');return}
+const stx=await api('/api/iraq-public-portal-stats');if(stx&&!stx.error){
+document.getElementById('ippKpi').innerHTML='<div class="kc i"><div class="lb">On MOFA KW portal</div><div class="vl">'+(stx.on_portal||0)+'</div></div><div class="kc w"><div class="lb">Pending NV dispatch</div><div class="vl">'+(stx.pending_note_verbale||0)+'</div></div>';
+}
+document.getElementById('ippCount').textContent=d.length+' record(s)';
+let h='<tr><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>Sent to portal</th><th></th></tr>';
+d.forEach(x=>{h+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td>'+((x.mofa_kw_portal_sent_at||'').slice(0,19)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>'});
+document.getElementById('ippTbl').innerHTML=h;
+}
+async function ippView(id){
+const r=await fetch('/api/iraq-public-submission?id='+encodeURIComponent(id));const j=await r.json();
+if(!j.success){toast(j.error||'Load failed');return}
+const x=j.submission||{};_ippCur=x;
+const rows=[['Reference',x.reference_number],['ID',x.id],['Name',x.full_name],['Passport',x.passport_number],['CNIC',x.cnic||'-'],['Nationality',x.nationality],['DOB',x.date_of_birth],['Gender',x.gender],['Phone',x.phone],['WhatsApp',x.whatsapp],['Email',x.email],['City (Iraq)',x.current_city],['Employer',x.employer],['Route',x.travel_route],['Purpose',x.travel_purpose],['Remarks',x.remarks||'\u2014'],['Status',x.status],['Submitted',x.created_at||'\u2014'],['Portal sent',x.mofa_kw_portal_sent_at||'\u2014'],['Batch ID',x.linked_batch_id!=null?x.linked_batch_id:'\u2014']];
+let h='<table style="width:100%;border-collapse:collapse;font-size:.88em"><tbody>';
+rows.forEach(kv=>{h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">'+ippEsc(kv[0])+'</td><td style="padding:6px 8px;border-bottom:1px solid #eee;word-break:break-word">'+ippEsc(kv[1])+'</td></tr>'});
+h+='</tbody></table>';
+document.getElementById('ippBody').innerHTML=h;
+document.getElementById('ippEditBtn').style.display='';
+document.getElementById('ippSaveBtn').style.display='none';
+document.getElementById('ippMo').classList.add('show');
+}
+function ippEnableEdit(){
+if(!_ippCur)return;const x=_ippCur;
+const fs=[['full_name',x.full_name],['passport_number',x.passport_number],['cnic',x.cnic||''],['nationality',x.nationality],['date_of_birth',x.date_of_birth],['gender',x.gender],['phone',x.phone],['whatsapp',x.whatsapp],['email',x.email],['current_city',x.current_city],['employer',x.employer],['travel_route',x.travel_route],['travel_purpose',x.travel_purpose],['remarks',x.remarks||'']];
+let h='<table style="width:100%;font-size:.88em"><tbody>';
+fs.forEach(function(z){
+const nm=z[0],isD=nm==='date_of_birth',isR=nm==='remarks';
+const inp=isR?'<textarea data-ipp="'+nm+'" rows="2" style="width:100%;padding:6px">'+ippVal(z[1])+'</textarea>':'<input data-ipp="'+nm+'" '+(isD?'type="date"':'type="text"')+' value="'+ippVal(z[1])+'" style="width:100%;padding:6px">';
+h+='<tr><td style="padding:6px;color:#666">'+ippEsc(nm)+'</td><td>'+inp+'</td></tr>';
+});
+h+='</tbody></table>';
+document.getElementById('ippBody').innerHTML=h;
+document.getElementById('ippEditBtn').style.display='none';
+document.getElementById('ippSaveBtn').style.display='';
+}
+async function ippSave(){
+if(!_ippCur)return;
+const payload={id:_ippCur.id};
+document.querySelectorAll('[data-ipp]').forEach(el=>{payload[el.getAttribute('data-ipp')]=(el.value||'').trim();});
+if(payload.cnic && !/^\d{13}$/.test(payload.cnic)){toast('CNIC must be 13 digits');return}
+const r=await fetch('/api/iraq-public-submission-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const j=await r.json();
+if(!j.success){toast(j.error||'Save failed');return}
+toast('Saved');ippView(_ippCur.id);loadIraqPublicPortal();
+}
+async function ippDelete(){
+if(!_ippCur||!confirm('Delete this Iraq public registration #'+_ippCur.id+'?'))return;
+const r=await fetch('/api/iraq-public-submission-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:_ippCur.id})});
+const j=await r.json();
+if(!j.success){toast(j.error||'Delete failed');return}
+toast('Deleted');closeIpp();loadIraqPublicPortal();
+}
+function closeIpp(){document.getElementById('ippMo').classList.remove('show');_ippCur=null;}
+
 // ROLE-BASED ACCESS CONTROL
 const USER_ROLE='__USER_ROLE__';
 const USER_NAME='__USER_NAME__';
@@ -7319,7 +8672,7 @@ return;
 if(USER_ROLE==='viewer'){
 document.querySelectorAll('.nav button').forEach(b=>{
 const tab=b.textContent.trim();
-if(['New Registration','CSV Import','MOFA Export','Admin'].includes(tab)){b.style.display='none'}});
+if(['New Registration','CSV Import','MOFA Export','Admin','Iraq Public (MOFA KW)'].includes(tab)){b.style.display='none'}});
 document.querySelectorAll('.btn-d').forEach(b=>b.style.display='none');// hide delete buttons
 }
 // Operator: can register, import, edit, but NOT delete data, export, or manage users
@@ -7349,7 +8702,10 @@ let html=`
 if(d.visa_approved!==undefined){
 html+=`<div class="kc s"><div class="lb">Visas Approved</div><div class="vl">${d.visa_approved}</div><div class="su">KW Transit Approved</div></div>
 <div class="kc w"><div class="lb">Visas Pending</div><div class="vl">${d.visa_pending}</div><div class="su">Awaiting approval</div></div>
-<div class="kc d"><div class="lb">Visas Rejected</div><div class="vl">${d.visa_rejected}</div><div class="su">Not approved</div></div>`;
+<div class="kc d"><div class="lb">Visas Rejected</div><div class="vl">${d.visa_rejected}</div><div class="su">Not approved</div></div>
+<div class="kc s"><div class="lb">MOFA KSA approved</div><div class="vl">${d.ksa_mofa_approved||0}</div><div class="su">Mission applicants</div></div>
+<div class="kc w"><div class="lb">Waiting travel (Iraq)</div><div class="vl">${d.waiting_travel_iraq||0}</div><div class="su">Movement bucket</div></div>
+<div class="kc w"><div class="lb">Waiting transit (KW)</div><div class="vl">${d.waiting_transit_kw||0}</div><div class="su">Movement bucket</div></div>`;
 }
 document.getElementById('iraqKpiGrid').innerHTML=html;
 }
@@ -7393,25 +8749,34 @@ document.getElementById('iraqBatchStatus').value=d.status||'Pending';
 document.getElementById('iraqMofaRef').value=d.mofa_reference||'';
 document.getElementById('iraqMofaSentDate').value=d.mofa_sent_date||'';
 document.getElementById('iraqAdminRemarks').value=d.admin_remarks||'';
-let ah='<tr><th>#</th><th>Full Name</th><th>Passport</th><th>Nationality</th><th>DOB</th><th>Gender</th><th>Employer</th><th>Mobile</th><th>Email</th><th>Travel Date</th><th>Location</th><th>Batch Status</th><th>Visa Status (Admin Only)</th></tr>';
+let ah='<tr><th>#</th><th>Full Name</th><th>Passport</th><th>Nationality</th><th>DOB</th><th>Gender</th><th>Employer</th><th>Mobile</th><th>Email</th><th>Travel Date</th><th>Location</th><th>Batch Status</th><th>KW transit</th><th>MOFA KSA</th><th>Movement</th></tr>';
 (d.applicants||[]).forEach((a,i)=>{
 const ast=a.individual_status==='Pending'?'bdg-pen':a.individual_status==='Sent to MOFA Kuwait'?'bdg-vis':'bdg-dep';
-const vst=a.visa_status==='KW Transit Approved'?'bdg-dep':a.visa_status==='Rejected'?'bdg-dup':'bdg-pen';
+const ksa=a.ksa_mofa_status||'Pending';
+const mov=a.movement_status||'';
 ah+=`<tr><td>${i+1}</td><td>${a.full_name||'-'}</td><td>${a.passport_number||'-'}</td><td>${a.nationality||'-'}</td><td>${a.dob||'-'}</td><td>${a.gender||'-'}</td><td>${a.employer||'-'}</td><td>${a.mobile_number||'-'}</td><td>${a.email_address||'-'}</td><td>${a.expected_travel_date||'-'}</td><td>${a.current_location||'-'}</td><td><span class="bdg ${ast}">${a.individual_status||'Pending'}</span></td>`;
-ah+=`<td><select onchange="updateIraqIndividualVisa(${a.id},this.value)" style="padding:3px 6px;font-size:.8em;border:1px solid #ccc;border-radius:4px">`;
+ah+=`<td><select onchange="updateIraqApplicantOps(${a.id},{visa_status:this.value})" style="padding:3px 6px;font-size:.8em;border:1px solid #ccc;border-radius:4px">`;
 ah+=`<option value="Pending"${(a.visa_status||'Pending')==='Pending'?' selected':''}>Pending</option>`;
 ah+=`<option value="KW Transit Approved"${a.visa_status==='KW Transit Approved'?' selected':''}>KW Transit Approved</option>`;
 ah+=`<option value="Rejected"${a.visa_status==='Rejected'?' selected':''}>Rejected</option>`;
-ah+=`</select>${a.visa_approved_date?'<br><span style="font-size:.72em;color:#999">'+a.visa_approved_date+'</span>':''}</td></tr>`;
+ah+=`</select>${a.visa_approved_date?'<br><span style="font-size:.72em;color:#999">'+a.visa_approved_date+'</span>':''}</td>`;
+ah+=`<td><select onchange="updateIraqApplicantOps(${a.id},{ksa_mofa_status:this.value})" style="padding:3px 6px;font-size:.8em;border:1px solid #ccc;border-radius:4px">`;
+ah+=`<option value="Pending"${ksa==='Pending'?' selected':''}>Pending</option>`;
+ah+=`<option value="Approved"${ksa==='Approved'?' selected':''}>Approved</option>`;
+ah+=`<option value="Rejected"${ksa==='Rejected'?' selected':''}>Rejected</option></select></td>`;
+ah+=`<td><select onchange="updateIraqApplicantOps(${a.id},{movement_status:this.value})" style="padding:3px 6px;font-size:.8em;border:1px solid #ccc;border-radius:4px">`;
+ah+=`<option value=""${mov===''?' selected':''}>\u2014</option>`;
+ah+=`<option value="waiting_iraq"${mov==='waiting_iraq'?' selected':''}>Waiting travel (Iraq)</option>`;
+ah+=`<option value="waiting_kw"${mov==='waiting_kw'?' selected':''}>Waiting transit (Kuwait)</option></select></td></tr>`;
 });
 document.getElementById('iraqApplicantsTbl').innerHTML=ah;
 document.getElementById('iraqDetailModal').classList.add('show');
 }
 
-async function updateIraqIndividualVisa(appId,newStatus){
-const r=await fetch('/api/iraq-visa-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({applicant_id:appId,visa_status:newStatus})});
+async function updateIraqApplicantOps(appId,patch){
+const r=await fetch('/api/iraq-visa-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({applicant_id:appId,...patch})});
 const d=await r.json();
-if(d.success){toast('Visa status updated');loadIraqStats();}
+if(d.success){toast('Updated');loadIraqStats();if(_iraqCurrentBatchId)openIraqDetail(_iraqCurrentBatchId);}
 else{toast('Error: '+(d.error||'Unknown'));}
 }
 
