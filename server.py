@@ -772,7 +772,7 @@ def _send_email_smtp(to_email, subject, body_text):
 
 def _queue_visa_approved_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
-    if not _is_valid_email(email):
+    if not _is_valid_email_loose(email):
         return
     EMAIL_QUEUE.put({
         'type': 'visa_approved',
@@ -791,7 +791,7 @@ def _tracking_no(record_id):
 
 def _queue_registration_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
-    if not _is_valid_email(email):
+    if not _is_valid_email_loose(email):
         return
     EMAIL_QUEUE.put({
         'type': 'registration_success',
@@ -801,6 +801,24 @@ def _queue_registration_email(record, changed_by='system'):
         'tracking_number': _tracking_no(record.get('id')),
         'record_id': record.get('id'),
         'changed_by': changed_by
+    })
+
+def _queue_iraq_public_submitted_email(submission_id, reference_number, full_name, passport_number, email, phone, current_city, submitted_at, changed_by='public'):
+    to_addr = (email or '').strip()
+    if not _is_valid_email_loose(to_addr):
+        return
+    EMAIL_QUEUE.put({
+        'type': 'iraq_public_submitted',
+        'to': to_addr,
+        'applicant_email': to_addr,
+        'name': (full_name or 'Applicant').strip(),
+        'passport': (passport_number or '').strip(),
+        'reference_number': reference_number or '',
+        'phone': (phone or '').strip(),
+        'current_city': (current_city or '').strip(),
+        'submitted_at': str(submitted_at or ''),
+        'submission_id': submission_id,
+        'changed_by': changed_by,
     })
 
 def _queue_mofa_sent_email(record, changed_by='system'):
@@ -997,15 +1015,22 @@ def _recipient_salutation(name):
         return f'Dear Sir {nm},'
     return f'Dear Sir Mr. {nm},'
 
+# Iraq public confirmation emails — static contact lines (also shown on web after submit)
+IRAQ_PUBLIC_EMAIL_PASSPORT_ADDR = 'parepkuwaitcwa37@gmail.com'
+IRAQ_PUBLIC_EMAIL_HOC_PHONE = '03028578078'
+IRAQ_PUBLIC_EMAIL_BABAR_PHONE = '+964 7854000'
+
 DEFAULT_EMAIL_TEMPLATES = {
     'registration_success': (
         "{salutation}\n\n"
-        "You have successfully registered with Pakistan Embassy Kuwait for Transit KSA support.\n\n"
+        "You have successfully registered your transit / visa support request with Pakistan Embassy Kuwait "
+        "(Citizen Support for Transit KSA).\n\n"
         "Your tracking details are as follows:\n"
         "Tracking Number: {tracking_number}\n"
         "Name: {name}\n"
         "Passport: {passport}\n\n"
-        "Please keep your tracking number for future follow-up.\n\n"
+        "Further updates regarding your application may be sent to this email address when available.\n"
+        "Please keep your tracking number for follow-up.\n\n"
         "Pakistan Embassy Kuwait\n"
         "Citizen Support for Transit KSA System"
     ),
@@ -1025,10 +1050,31 @@ DEFAULT_EMAIL_TEMPLATES = {
     ),
     'visa_approved': (
         "{salutation}\n\n"
-        "Your Transit Visa has been approved by MOFA KSA.\n"
+        "Your transit visa has been approved by MOFA KSA. This is an automatic notification.\n\n"
         "You are requested to contact Embassy staff {embassy_name} at {embassy_contact} "
-        "or visit the Embassy during opening hours for further instructions and border crossing.\n\n"
+        "or visit the Embassy during opening hours for passport collection, further instructions, and border crossing.\n\n"
         "Embassy Hours: {embassy_hours}\n\n"
+        "Pakistan Embassy Kuwait\n"
+        "Citizen Support for Transit KSA System"
+    ),
+    'iraq_public_submitted': (
+        "{salutation}\n\n"
+        "Your Kuwait transit visa support request (Iraq intake) has been received.\n\n"
+        "Reference number: {reference_number}\n"
+        "Name: {name}\n"
+        "Passport number: {passport}\n"
+        "Email on file: {email}\n"
+        "Phone: {phone}\n"
+        "Current city (Iraq): {current_city}\n"
+        "Submitted: {submitted_at}\n\n"
+        "Next steps\n"
+        "Please contact Pakistan Embassy Iraq for coordination and any instructions regarding your application.\n\n"
+        "You may be advised to send passport copies or related documents to:\n"
+        "{passport_submission_email}\n\n"
+        "Pakistan Embassy Iraq — contact numbers:\n"
+        "Head of Chancery: {iraq_hoc_phone}\n"
+        "Mr Babar: {iraq_babar_phone}\n\n"
+        "Please save your reference number for follow-up.\n\n"
         "Pakistan Embassy Kuwait\n"
         "Citizen Support for Transit KSA System"
     ),
@@ -1137,6 +1183,32 @@ def _email_worker_loop():
                     "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_visa_approved', ?, ?, ?)",
                     [job.get('record_id'), job.get('changed_by', 'system'),
                      json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'iraq_public_submitted':
+                subject = "Kuwait Transit Visa Request Received — " + (job.get('reference_number') or 'Reference')
+                salutation = _recipient_salutation(job.get('name', ''))
+                templates = _load_email_templates()
+                body = _render_email_template(templates.get('iraq_public_submitted', ''), {
+                    'salutation': salutation,
+                    'reference_number': job.get('reference_number', ''),
+                    'name': job.get('name', ''),
+                    'passport': job.get('passport', ''),
+                    'email': job.get('applicant_email', ''),
+                    'phone': job.get('phone', ''),
+                    'current_city': job.get('current_city', ''),
+                    'submitted_at': job.get('submitted_at', ''),
+                    'passport_submission_email': IRAQ_PUBLIC_EMAIL_PASSPORT_ADDR,
+                    'iraq_hoc_phone': IRAQ_PUBLIC_EMAIL_HOC_PHONE,
+                    'iraq_babar_phone': IRAQ_PUBLIC_EMAIL_BABAR_PHONE,
+                })
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_iraq_public_submitted', ?, ?, ?)",
+                    [job.get('submission_id'), job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'reference': job.get('reference_number')})]
                 )
                 db.commit()
                 db.close()
@@ -3265,9 +3337,8 @@ def import_iraq_csv(csv_text, letter_number, letter_date, user):
     return stats
 
 def api_iraq_bulk_visa_approval(csv_text, new_status, user):
-    """Bulk update visa_status for Iraq transit applicants by passport number.
-    new_status: 'KW Transit Approved' or 'Rejected'"""
-    stats = {'approved': 0, 'not_found': 0, 'already_done': 0, 'errors': 0, 'details': []}
+    """Bulk update visa_status for Iraq mission applicants by passport; also matches Iraq public (MOFA KW) intake by passport."""
+    stats = {'approved': 0, 'not_found': 0, 'already_done': 0, 'errors': 0, 'iraq_public_matched': 0, 'details': []}
     reader = csv.DictReader(io.StringIO(csv_text))
     # Auto-map columns
     col_map = {}
@@ -3276,7 +3347,8 @@ def api_iraq_bulk_visa_approval(csv_text, new_status, user):
         if 'passport' in cl: col_map[orig_col] = 'passport'
         elif 'name' in cl and 'file' not in cl: col_map[orig_col] = 'name'
     if 'passport' not in col_map.values():
-        return {'approved': 0, 'not_found': 0, 'errors': 1, 'details': ['Could not find a Passport column in CSV']}
+        return {'approved': 0, 'not_found': 0, 'already_done': 0, 'errors': 1, 'iraq_public_matched': 0,
+                'details': ['Could not find a Passport column in CSV']}
     db = get_db()
     now = datetime.now().strftime('%Y-%m-%d')
     row_num = 0
@@ -3287,35 +3359,62 @@ def api_iraq_bulk_visa_approval(csv_text, new_status, user):
             for orig_col, field in col_map.items():
                 val = row.get(orig_col, '').strip()
                 if val: rec[field] = val
-            passport = (rec.get('passport', '') or '').strip().upper().replace(' ', '')
+            passport = re.sub(r'[\s\-]+', '', (rec.get('passport', '') or '').strip().upper())
             name = rec.get('name', '').strip()
             if not passport:
                 stats['errors'] += 1
                 stats['details'].append(f"Row {row_num}: No passport, skipped")
                 continue
             existing = db.execute(
-                "SELECT a.id, a.full_name, a.passport_number, a.visa_status, a.batch_id FROM iraq_applicants a WHERE UPPER(TRIM(a.passport_number)) = ?",
+                "SELECT a.id, a.full_name, a.passport_number, a.visa_status, a.batch_id FROM iraq_applicants a WHERE UPPER(REPLACE(REPLACE(TRIM(COALESCE(a.passport_number,'')), ' ', ''), '-', '')) = ?",
                 [passport]).fetchone()
-            if not existing:
+            if existing:
+                if existing['visa_status'] == new_status:
+                    stats['already_done'] += 1
+                    stats['details'].append(f"Row {row_num}: {existing['full_name']} ({passport}) — already {new_status}")
+                    continue
+                db.execute("UPDATE iraq_applicants SET visa_status = ?, visa_approved_date = ? WHERE id = ?",
+                           [new_status, now if new_status == 'KW Transit Approved' else '', existing['id']])
+                db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_visa_approval', ?, ?, ?)",
+                           (existing['id'], user, f"Visa {new_status} for {existing['full_name']} ({passport})"))
+                stats['approved'] += 1
+                stats['details'].append(f"Row {row_num}: {existing['full_name']} ({passport}) — {new_status} ✓ (mission batch)")
+                continue
+            pub = db.execute(
+                """SELECT id, full_name, passport_number FROM iraq_public_submissions
+                   WHERE UPPER(REPLACE(REPLACE(passport_number, ' ', ''), '-', '')) = ?""",
+                [passport]
+            ).fetchone()
+            if not pub:
                 stats['not_found'] += 1
-                stats['details'].append(f"Row {row_num}: {name} ({passport}) — NOT FOUND in Iraq transit system")
+                stats['details'].append(f"Row {row_num}: {name} ({passport}) — NOT FOUND (mission or Iraq public)")
                 continue
-            if existing['visa_status'] == new_status:
+            target_decision = 'Approved' if new_status == 'KW Transit Approved' else 'Rejected'
+            last_dec = db.execute(
+                """SELECT decision FROM iraq_applicant_decisions WHERE public_submission_id = ?
+                   ORDER BY id DESC LIMIT 1""", [pub['id']]
+            ).fetchone()
+            cur_dec = (last_dec['decision'] if last_dec else '') or 'Pending'
+            if cur_dec == target_decision:
                 stats['already_done'] += 1
-                stats['details'].append(f"Row {row_num}: {existing['full_name']} ({passport}) — already {new_status}")
+                stats['details'].append(f"Row {row_num}: {pub['full_name']} ({passport}) — Iraq public already {target_decision}")
                 continue
-            db.execute("UPDATE iraq_applicants SET visa_status = ?, visa_approved_date = ? WHERE id = ?",
-                       [new_status, now if new_status == 'KW Transit Approved' else '', existing['id']])
-            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_visa_approval', ?, ?, ?)",
-                       (existing['id'], user, f"Visa {new_status} for {existing['full_name']} ({passport})"))
+            db.execute("""INSERT INTO iraq_applicant_decisions
+                (public_submission_id, decision, decision_date, remarks, decided_by)
+                VALUES (?, ?, ?, ?, ?)""",
+                [pub['id'], target_decision, now, 'Bulk visa CSV upload', user])
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_visa_decision_csv', ?, ?, ?)",
+                       (pub['id'], user, json.dumps({'passport': passport, 'decision': target_decision})))
             stats['approved'] += 1
-            stats['details'].append(f"Row {row_num}: {existing['full_name']} ({passport}) — {new_status} ✓")
+            stats['iraq_public_matched'] += 1
+            stats['details'].append(f"Row {row_num}: {pub['full_name']} ({passport}) — {target_decision} ✓ (Iraq public / MOFA KW)")
         except Exception as e:
             stats['errors'] += 1
             stats['details'].append(f"Row {row_num}: Error — {str(e)}")
     db.commit()
     db.execute("INSERT INTO audit_log (action, user, details) VALUES (?, ?, ?)",
-               ('iraq_bulk_visa_approval', user, f"{new_status}: {stats['approved']}, not found {stats['not_found']}, already {stats['already_done']}"))
+               ('iraq_bulk_visa_approval', user,
+                f"{new_status}: {stats['approved']}, public {stats['iraq_public_matched']}, not found {stats['not_found']}, already {stats['already_done']}"))
     db.commit(); db.close()
     return stats
 
@@ -3412,7 +3511,6 @@ def api_iraq_public_submit(data):
     employer = (data.get('employer') or '').strip()
     travel_route = (data.get('travel_route') or '').strip()
     travel_purpose = (data.get('travel_purpose') or '').strip()
-    remarks = (data.get('remarks') or '').strip()
     if not all([full_name, passport_number, cnic, nationality, date_of_birth, gender, phone, whatsapp, email, current_city, employer, travel_route, travel_purpose]):
         db.close()
         return {'success': False, 'error': 'All form fields are required'}
@@ -3472,13 +3570,14 @@ def api_iraq_public_submit(data):
          current_city, employer, travel_route, travel_purpose, remarks, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Submitted')""",
         [ref, full_name, passport_number, cnic, nationality, date_of_birth, gender, phone, whatsapp, email,
-         current_city, employer, travel_route, travel_purpose, remarks])
+         current_city, employer, travel_route, travel_purpose, ''])
     sid = db.execute("SELECT last_insert_rowid() id").fetchone()['id']
     db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_submit', ?, ?, ?)",
                (sid, 'public', json.dumps({'reference_number': ref, 'passport_number': passport_number})))
     db.commit()
     created = db.execute("SELECT created_at FROM iraq_public_submissions WHERE id = ?", [sid]).fetchone()['created_at']
     db.close()
+    _queue_iraq_public_submitted_email(sid, ref, full_name, passport_number, email, phone, current_city, created, 'public')
     return {'success': True, 'id': sid, 'reference_number': ref, 'submitted_at': created, 'status': 'Submitted'}
 
 def api_iraq_public_stats():
@@ -3519,10 +3618,17 @@ def api_iraq_public_submissions(params):
 def api_iraq_public_submission_detail(sub_id):
     db = get_db()
     row = db.execute("SELECT * FROM iraq_public_submissions WHERE id = ?", [sub_id]).fetchone()
-    db.close()
     if not row:
+        db.close()
         return {'success': False, 'error': 'Submission not found'}
-    return {'success': True, 'submission': dict(row)}
+    d = dict(row)
+    dec = db.execute(
+        """SELECT decision FROM iraq_applicant_decisions WHERE public_submission_id = ?
+           ORDER BY id DESC LIMIT 1""", [sub_id]
+    ).fetchone()
+    d['kw_transit_visa_status'] = (dec['decision'] if dec and dec['decision'] else '') or 'Pending'
+    db.close()
+    return {'success': True, 'submission': d}
 
 def api_iraq_public_submission_update(data, user):
     db = get_db()
@@ -3600,10 +3706,31 @@ def api_iraq_public_release_to_mofa_portal(user):
 
 def api_iraq_public_portal_submissions(params):
     db = get_db()
-    where = ["COALESCE(mofa_kw_portal_visible, 0) = 1"]
+    where = []
     q = []
     status = (params.get('status') or '').strip()
     search = (params.get('search') or '').strip()
+    pending_nv = (params.get('pending_nv') or '').strip().lower() in ('1', 'true', 'yes')
+    created_date = (params.get('created_date') or '').strip()
+    include_unreleased = (params.get('include_unreleased') or '').strip().lower() in ('1', 'true', 'yes')
+    if created_date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', created_date):
+        created_date = ''
+    # Visibility: default only rows already released to this portal; optional "today" preview includes not-yet-released (same calendar day only)
+    if include_unreleased and created_date:
+        where.append("""(
+            (COALESCE(mofa_kw_portal_visible, 0) = 1 AND date(created_at) = date(?))
+            OR (COALESCE(mofa_kw_portal_visible, 0) = 0 AND status NOT IN ('Rejected', 'Duplicate') AND date(created_at) = date(?))
+        )""")
+        q.extend([created_date, created_date])
+    else:
+        where.append("COALESCE(mofa_kw_portal_visible, 0) = 1")
+        if created_date:
+            where.append("date(created_at) = date(?)")
+            q.append(created_date)
+    if pending_nv:
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id)"
+        )
     if status:
         where.append("status = ?")
         q.append(status)
@@ -3612,10 +3739,21 @@ def api_iraq_public_portal_submissions(params):
         where.append("(full_name LIKE ? OR passport_number LIKE ? OR reference_number LIKE ? OR phone LIKE ? OR cnic LIKE ?)")
         q.extend([sf, sf, sf, sf, sf])
     rows = db.execute(
-        f"SELECT * FROM iraq_public_submissions WHERE {' AND '.join(where)} ORDER BY id DESC", q
+        f"""SELECT p.*,
+            EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id) AS has_nv_dispatch,
+            (SELECT d2.decision FROM iraq_applicant_decisions d2
+             WHERE d2.public_submission_id = p.id ORDER BY d2.id DESC LIMIT 1) AS kw_transit_visa_status
+            FROM iraq_public_submissions p WHERE {' AND '.join(where)} ORDER BY p.id DESC""", q
     ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['has_nv_dispatch'] = bool(d.get('has_nv_dispatch'))
+        kws = d.get('kw_transit_visa_status')
+        d['kw_transit_visa_status'] = (kws if kws else '') or 'Pending'
+        out.append(d)
     db.close()
-    return [dict(r) for r in rows]
+    return out
 
 def api_iraq_public_portal_stats():
     db = get_db()
@@ -3626,8 +3764,14 @@ def api_iraq_public_portal_stats():
         WHERE COALESCE(p.mofa_kw_portal_visible,0)=1
         AND NOT EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id)"""
     ).fetchone()['c']
+    today = datetime.now().strftime('%Y-%m-%d')
+    today_pending_nv = db.execute("""SELECT COUNT(*) c FROM iraq_public_submissions p
+        WHERE COALESCE(p.mofa_kw_portal_visible,0)=1
+        AND date(p.created_at) = date(?)
+        AND NOT EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id)""",
+        [today]).fetchone()['c']
     db.close()
-    return {'on_portal': on_portal, 'pending_note_verbale': pending_nv}
+    return {'on_portal': on_portal, 'pending_note_verbale': pending_nv, 'today_pending_nv': today_pending_nv}
 
 def api_iraq_public_update_status(data, user):
     db = get_db()
@@ -3745,26 +3889,64 @@ def api_iraq_embassy_dashboard():
 def api_iraq_create_dispatch(data, user):
     db = get_db()
     note_no = (data.get('note_verbale_number') or '').strip()
-    selected_ids = data.get('public_submission_ids') or []
+    raw_ids = data.get('public_submission_ids') or []
+    release_first = (data.get('release_to_portal_if_needed') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    try:
+        selected_ids = [int(x) for x in raw_ids]
+    except (TypeError, ValueError):
+        db.close()
+        return {'success': False, 'error': 'Invalid submission id list'}
     if not note_no or not selected_ids:
         db.close()
-        return {'success': False, 'error': 'Note Verbale number and applicants are required'}
+        return {'success': False, 'error': 'Note Verbale number and at least one applicant are required'}
+    sent_date_val = (data.get('sent_date') or '').strip()
+    if not sent_date_val:
+        sent_date_val = datetime.now().strftime('%Y-%m-%d')
+    ok_ids = []
+    skipped = []
+    for sid in selected_ids:
+        row = db.execute(
+            "SELECT id, status, COALESCE(mofa_kw_portal_visible,0) AS vis, linked_batch_id FROM iraq_public_submissions WHERE id = ?",
+            [sid]
+        ).fetchone()
+        if not row:
+            skipped.append({'id': sid, 'reason': 'not_found'})
+            continue
+        if row['status'] in ('Rejected', 'Duplicate'):
+            skipped.append({'id': sid, 'reason': 'invalid_status'})
+            continue
+        dup = db.execute("SELECT 1 FROM iraq_dispatch_applicants WHERE public_submission_id = ?", [sid]).fetchone()
+        if dup:
+            skipped.append({'id': sid, 'reason': 'already_dispatched'})
+            continue
+        vis = int(row['vis'] or 0)
+        if vis != 1:
+            if release_first:
+                db.execute("""UPDATE iraq_public_submissions SET mofa_kw_portal_visible = 1,
+                    mofa_kw_portal_sent_at = COALESCE(mofa_kw_portal_sent_at, CURRENT_TIMESTAMP) WHERE id = ?""", [sid])
+            else:
+                skipped.append({'id': sid, 'reason': 'not_on_portal'})
+                continue
+        ok_ids.append((sid, row['linked_batch_id']))
+    if not ok_ids:
+        db.commit()
+        db.close()
+        return {'success': False, 'error': 'No eligible submissions to add (check portal visibility or already dispatched).', 'skipped': skipped}
     cur = db.execute("""INSERT INTO iraq_mofa_dispatches
         (note_verbale_number, note_verbale_date, sent_date, remarks, status, created_by)
         VALUES (?, ?, ?, ?, ?, ?)""",
-        [note_no, (data.get('note_verbale_date') or '').strip(), (data.get('sent_date') or '').strip(),
+        [note_no, (data.get('note_verbale_date') or '').strip(), sent_date_val,
          (data.get('remarks') or '').strip(), (data.get('status') or 'Sent').strip(), user])
     dispatch_id = cur.lastrowid
-    for sid in [int(x) for x in selected_ids]:
-        row = db.execute("SELECT linked_batch_id FROM iraq_public_submissions WHERE id = ?", [sid]).fetchone()
-        batch_id = row['linked_batch_id'] if row else None
-        db.execute("""INSERT OR IGNORE INTO iraq_dispatch_applicants
-            (dispatch_id, batch_id, public_submission_id) VALUES (?, ?, ?)""", [dispatch_id, batch_id, sid])
+    for sid, batch_id in ok_ids:
+        db.execute("""INSERT INTO iraq_dispatch_applicants
+            (dispatch_id, batch_id, public_submission_id) VALUES (?, ?, ?)""",
+            [dispatch_id, batch_id, sid])
     db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_dispatch_create', ?, ?, ?)",
-               (dispatch_id, user, json.dumps({'count': len(selected_ids)})))
+               (dispatch_id, user, json.dumps({'added': len(ok_ids), 'skipped': skipped, 'note_verbale_number': note_no})))
     db.commit()
     db.close()
-    return {'success': True, 'dispatch_id': dispatch_id}
+    return {'success': True, 'dispatch_id': dispatch_id, 'added_count': len(ok_ids), 'skipped': skipped}
 
 def api_iraq_dispatches():
     db = get_db()
@@ -3792,39 +3974,70 @@ def api_iraq_update_decision(data, user):
     db.close()
     return {'success': True}
 
-def api_iraq_public_export(filter_key):
+def api_iraq_public_export(filter_key, dispatch_id=None):
     db = get_db()
-    if filter_key == 'accepted':
+    dispatch_join_cols = False
+    if filter_key == 'dispatch':
+        try:
+            did = int(dispatch_id)
+        except (TypeError, ValueError):
+            did = 0
+        if did <= 0:
+            db.close()
+            return ''
+        rows = db.execute("""
+            SELECT p.*, d.id AS _dispatch_id, d.note_verbale_number AS _nv_no, d.note_verbale_date AS _nv_date,
+                   d.sent_date AS _dispatch_sent_date
+            FROM iraq_public_submissions p
+            JOIN iraq_dispatch_applicants a ON a.public_submission_id = p.id
+            JOIN iraq_mofa_dispatches d ON d.id = a.dispatch_id
+            WHERE d.id = ?
+            ORDER BY p.id
+        """, [did]).fetchall()
+        dispatch_join_cols = True
+    elif filter_key == 'accepted':
         where = "status='Accepted'"
+        rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
     elif filter_key == 'rejected':
         where = "status='Rejected'"
+        rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
     elif filter_key == 'pending_mofa':
         where = "status='Forwarded to Embassy Kuwait'"
+        rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
     elif filter_key == 'sent_mofa':
         where = "id IN (SELECT public_submission_id FROM iraq_dispatch_applicants)"
+        rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
     elif filter_key == 'approved':
         where = "id IN (SELECT public_submission_id FROM iraq_applicant_decisions WHERE decision='Approved')"
+        rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
     elif filter_key == 'rejected_cases':
         where = "id IN (SELECT public_submission_id FROM iraq_applicant_decisions WHERE decision='Rejected')"
+        rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
     elif filter_key == 'mofa_portal':
         where = "COALESCE(mofa_kw_portal_visible,0) = 1"
+        rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
     else:
-        where = "1=1"
-    rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {where} ORDER BY id DESC").fetchall()
+        rows = db.execute("SELECT * FROM iraq_public_submissions WHERE 1=1 ORDER BY id DESC").fetchall()
     rows = [dict(r) for r in rows]
     db.close()
     out = io.StringIO()
     wr = csv.writer(out)
-    wr.writerow(['ID', 'Reference Number', 'Full Name', 'Passport Number', 'CNIC', 'Nationality', 'Date of Birth',
-                 'Gender', 'Phone', 'WhatsApp', 'Email', 'Current City', 'Employer', 'Travel Route',
-                 'Travel Purpose', 'Remarks', 'Status', 'Created At', 'Linked Batch ID',
-                 'MOFA KW Portal Visible', 'MOFA KW Portal Sent At'])
+    base_header = ['ID', 'Reference Number', 'Full Name', 'Passport Number', 'CNIC', 'Nationality', 'Date of Birth',
+                   'Gender', 'Phone', 'WhatsApp', 'Email', 'Current City', 'Employer', 'Travel Route',
+                   'Travel Purpose', 'Remarks', 'Status', 'Created At', 'Linked Batch ID',
+                   'MOFA KW Portal Visible', 'MOFA KW Portal Sent At']
+    if dispatch_join_cols:
+        base_header.extend(['Dispatch ID', 'Note Verbale Number', 'Note Verbale Date', 'MOFA Sent Date (dispatch)'])
+    wr.writerow(base_header)
     for r in rows:
-        wr.writerow([r['id'], r['reference_number'], r['full_name'], r['passport_number'], r.get('cnic', ''), r['nationality'],
-                     r['date_of_birth'], r['gender'], r['phone'], r['whatsapp'], r['email'],
-                     r['current_city'], r['employer'], r['travel_route'], r['travel_purpose'],
-                     r['remarks'], r['status'], r['created_at'], r['linked_batch_id'] or '',
-                     r.get('mofa_kw_portal_visible', '') or '', r.get('mofa_kw_portal_sent_at', '') or ''])
+        row_out = [r['id'], r['reference_number'], r['full_name'], r['passport_number'], r.get('cnic', ''), r['nationality'],
+                   r['date_of_birth'], r['gender'], r['phone'], r['whatsapp'], r['email'],
+                   r['current_city'], r['employer'], r['travel_route'], r['travel_purpose'],
+                   r['remarks'], r['status'], r['created_at'], r['linked_batch_id'] or '',
+                   r.get('mofa_kw_portal_visible', '') or '', r.get('mofa_kw_portal_sent_at', '') or '']
+        if dispatch_join_cols:
+            row_out.extend([r.get('_dispatch_id', ''), r.get('_nv_no', ''), r.get('_nv_date', ''), r.get('_dispatch_sent_date', '')])
+        wr.writerow(row_out)
     return out.getvalue()
 
 # ═══════════════════════════════════════════════════════════════
@@ -4357,8 +4570,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             fkey = (params.get('filter') or 'all').strip()
-            body = api_iraq_public_export(fkey).encode('utf-8-sig')
-            fname = f'Iraq_Public_{fkey}_{datetime.now().strftime("%Y%m%d")}.csv'
+            dispatch_id = None
+            if fkey == 'dispatch':
+                try:
+                    dispatch_id = int(params.get('dispatch_id') or 0)
+                except ValueError:
+                    dispatch_id = 0
+                if dispatch_id <= 0:
+                    self.send_json({'error': 'filter=dispatch requires dispatch_id'}, 400); return
+            body = api_iraq_public_export(fkey, dispatch_id).encode('utf-8-sig')
+            fname = f'Iraq_Public_{fkey}_{dispatch_id or "all"}_{datetime.now().strftime("%Y%m%d")}.csv'
             self.send_response(200)
             self.send_header('Content-Type', 'text/csv; charset=utf-8')
             self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
@@ -6214,7 +6435,11 @@ label{font-size:.8em;font-weight:600;color:#4b5563;display:block;margin-bottom:4
 .ur{display:block;color:#6b7280;font-size:.85em;font-weight:500;margin-top:2px}
 input,select,textarea{width:100%;padding:9px;border:1px solid #d1d5db;border-radius:8px}
 textarea{min-height:76px}.btn{background:#1565c0;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer}
-#ok{display:none;background:#e8f5e9;border:1px solid #81c784;padding:10px;border-radius:8px;margin-top:10px}
+#ok{display:none;background:#e8f5e9;border:1px solid #81c784;padding:12px;border-radius:8px;margin-top:10px;font-size:.9em;line-height:1.45}
+#ok .ok-title{font-weight:700;color:#1b5e20;margin-bottom:8px}
+#ok .ok-ref{font-size:1.05em;margin:6px 0}
+#ok ul{margin:8px 0 0 18px;padding:0}
+#ok .contact{background:#fff;border-radius:8px;padding:10px;margin-top:10px;border:1px solid #c8e6c9}
 </style></head><body>
 <div class="wrap">
 <h1>Kuwait Transit Visa Request Form - Iraq</h1>
@@ -6235,7 +6460,6 @@ textarea{min-height:76px}.btn{background:#1565c0;color:#fff;border:none;border-r
 <div><label>Employer / Company * <span class="ur">ملازمت / کمپنی</span></label><input name="employer" required></div>
 <div><label>Travel Route / Destination * <span class="ur">سفری راستہ / منزل</span></label><input name="travel_route" required></div>
 <div><label>Travel Purpose * <span class="ur">سفر کا مقصد</span></label><input name="travel_purpose" required></div>
-<div style="grid-column:1/-1"><label>Remarks <span class="ur">(اختیاری) مزید معلومات</span></label><textarea name="remarks" placeholder="Optional"></textarea></div>
 </div>
 <div style="margin-top:12px"><button class="btn" type="submit">Submit Request</button></div>
 </form>
@@ -6251,8 +6475,24 @@ if(!/^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(d.email||'')){aler
 const r=await fetch('/api/iraq-public-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
 const j=await r.json();
 if(j.success){
+const ref=j.reference_number||'';
+const em=(d.email||'').replace(/</g,'&lt;');
 document.getElementById('ok').style.display='block';
-document.getElementById('ok').innerHTML='<strong>Submitted.</strong> Reference: <strong>'+j.reference_number+'</strong><br>Timestamp: '+j.submitted_at;
+document.getElementById('ok').innerHTML=
+'<div class="ok-title">Request submitted successfully</div>'+
+'<div class="ok-ref">Tracking / reference: <strong>'+ref+'</strong></div>'+
+'<p style="margin:8px 0 0 0"><strong>Your details on record:</strong><br>'+
+'Name: '+(d.full_name||'').replace(/</g,'&lt;')+'<br>'+
+'Passport: '+(d.passport_number||'').replace(/</g,'&lt;')+'<br>'+
+'Email: '+em+'</p>'+
+'<p style="margin:10px 0 0 0"><strong>Next steps:</strong> Please contact <strong>Pakistan Embassy Iraq</strong> for coordination and instructions regarding your application.</p>'+
+'<p style="margin:8px 0 0 0">You may be advised to send passport copies or related documents to:<br>'+
+'<a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a></p>'+
+'<div class="contact"><strong>Pakistan Embassy Iraq — contacts</strong><ul style="margin-top:6px">'+
+'<li>Head of Chancery: <strong>03028578078</strong></li>'+
+'<li>Mr Babar: <strong>+964 7854000</strong></li></ul></div>'+
+'<p style="margin:10px 0 0 0;font-size:.85em;color:#2e7d32">A confirmation email has been queued to your address (if email is enabled on the server). Save your reference number.</p>'+
+'<p style="margin:6px 0 0 0;font-size:.82em;color:#666">Submitted: '+j.submitted_at+'</p>';
 e.target.reset();
 }else{
 const msg=j.error||'Submission failed';
@@ -7066,7 +7306,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <!-- Bulk Visa Approval Section -->
 <div class="fs" style="margin-top:20px;border-left:4px solid #2e7d32">
 <h3 style="color:#2e7d32">Bulk Kuwait Transit Visa Approval Upload</h3>
-<p style="font-size:.85em;color:var(--tl);margin-bottom:12px">Upload a CSV with passport numbers to mark applicants as <strong>KW Transit Approved</strong> or <strong>Rejected</strong>. These approvals are visible only to admin &mdash; <em>not</em> shown to Iraq CWA side.<br>Required column: <strong>Passport Number</strong> (optional: Name)</p>
+<p style="font-size:.85em;color:var(--tl);margin-bottom:12px">Upload a CSV with passport numbers to mark applicants as <strong>KW Transit Approved</strong> or <strong>Rejected</strong>. Passports are matched first to <strong>Iraq mission batches</strong> (this tab), then to <strong>Iraq public (MOFA KW)</strong> registrations &mdash; so approvals from MOFA automatically update the public pipeline when the same passport appears.<br>Required column: <strong>Passport Number</strong> (optional: Name)</p>
 <div class="fg" style="margin-bottom:10px">
 <div class="fgp"><label>CSV File with Passport Numbers *</label><input type="file" id="iraqVisaCsvFile" accept=".csv"></div>
 <div class="fgp"><label>Visa Decision</label><select id="iraqVisaDecision"><option value="KW Transit Approved">KW Transit Approved</option><option value="Rejected">Rejected</option></select></div>
@@ -7101,9 +7341,32 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <!-- IRAQ PUBLIC — visible on Kuwait Citizen Support (released from CWA Baghdad) -->
 <div id="tab-iraq-public" class="tab"><div class="ctr">
 <h3 style="color:#0d47a1;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #e3f2fd">Iraq public requests &mdash; MOFA Kuwait tracking</h3>
-<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Registrations released from CWA Baghdad appear here (same Iraq-only database; not merged with main evacuee records). Use CSV for Excel.</p>
+<p style="font-size:.88em;color:var(--tl);margin-bottom:14px">Registrations released from CWA Baghdad appear here (same Iraq-only database; not merged with main evacuee records). Filter rows, select them, then create a <strong>Note Verbale</strong> dispatch to MOFA Kuwait. Use CSV for Excel.</p>
 <div class="kg" id="ippKpi" style="margin-bottom:14px"></div>
+<div class="fs" style="margin-bottom:14px;border-left:3px solid #1565c0;padding:12px 14px;background:#fafcff">
+<h4 style="margin:0 0 6px;color:#0d47a1;font-size:1em">Send to MOFA Kuwait (Note Verbale)</h4>
+<p style="font-size:.8em;color:var(--tl);margin:0 0 10px;line-height:1.45">Preview with the filters below, tick applicants, enter the NV number and dates, then <strong>Create MOFA dispatch</strong>. If CWA has not released someone to this tab yet, enable the checkbox to release them when dispatching (use &ldquo;Today (incl. not on portal)&rdquo; to see them).</p>
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:8px">
+<div><label style="font-size:.72em;font-weight:600;color:#555">Note Verbale # *</label><br><input id="ippNvNo" placeholder="e.g. NV-2026/123" style="padding:8px;border:1px solid var(--bd);border-radius:7px;min-width:170px"></div>
+<div><label style="font-size:.72em;font-weight:600;color:#555">NV date</label><br><input type="date" id="ippNvDate" style="padding:8px;border:1px solid var(--bd);border-radius:7px"></div>
+<div><label style="font-size:.72em;font-weight:600;color:#555">Sent to MOFA date</label><br><input type="date" id="ippSentDate" style="padding:8px;border:1px solid var(--bd);border-radius:7px"></div>
+<div style="flex:1;min-width:200px"><label style="font-size:.72em;font-weight:600;color:#555">Remarks</label><br><input id="ippNvRm" placeholder="Optional" style="width:100%;padding:8px;border:1px solid var(--bd);border-radius:7px"></div>
+</div>
+<label style="font-size:.8em;display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px"><input type="checkbox" id="ippReleaseIfNeeded"> Release to this portal first if not yet visible (eligible rows only)</label>
+<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+<button type="button" class="btn btn-p" onclick="ippCreateDispatch()">Create MOFA dispatch for selected rows</button>
+<button type="button" class="btn" onclick="ippSelectPendingNv()">Select all shown (eligible only)</button>
+<a href="#" id="ippDlDispatch" class="btn btn-i" style="display:none;text-decoration:none;color:#fff;padding:9px 14px" onclick="return ippDownloadLastDispatch()">Download Excel — last dispatch</a>
+</div>
+<div id="ippDispatchMsg" style="margin-top:8px;font-size:.82em;color:#555"></div>
+</div>
 <div class="sb">
+<select id="ippViewMode" onchange="loadIraqPublicPortal()" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;font-size:.85em;max-width:280px">
+<option value="all">All on portal</option>
+<option value="pending_nv">Pending NV dispatch only</option>
+<option value="today">Submitted today (on portal)</option>
+<option value="today_all">Today — incl. not yet on portal</option>
+</select>
 <input id="ippSearch" placeholder="Search name, passport, CNIC, reference..." oninput="loadIraqPublicPortal()">
 <select id="ippStatus" onchange="loadIraqPublicPortal()"><option value="">All statuses</option><option>Submitted</option><option>Under Review</option><option>Accepted</option><option>Rejected</option><option>Duplicate</option><option>Batched</option><option>Forwarded to Embassy Kuwait</option></select>
 <a href="/api/iraq-public-export?filter=mofa_portal" class="btn btn-i" style="text-decoration:none;color:#fff">Download Excel (CSV)</a>
@@ -7395,13 +7658,14 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div class="fs" style="border-left:3px solid #8e24aa">
 <h3>Email Message Templates</h3>
-<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Use placeholders like <code>{salutation}</code>, <code>{name}</code>, <code>{passport}</code>, <code>{tracking_number}</code>, <code>{border_crossing}</code>, <code>{mofa_letter_number}</code>, <code>{mofa_letter_date}</code>, <code>{embassy_name}</code>, <code>{embassy_contact}</code>, <code>{embassy_hours}</code>.</p>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Use placeholders like <code>{salutation}</code>, <code>{name}</code>, <code>{passport}</code>, <code>{tracking_number}</code>, <code>{border_crossing}</code>, <code>{mofa_letter_number}</code>, <code>{mofa_letter_date}</code>, <code>{embassy_name}</code>, <code>{embassy_contact}</code>, <code>{embassy_hours}</code>. Iraq public confirmation also supports <code>{reference_number}</code>, <code>{email}</code>, <code>{phone}</code>, <code>{current_city}</code>, <code>{submitted_at}</code>, <code>{passport_submission_email}</code>, <code>{iraq_hoc_phone}</code>, <code>{iraq_babar_phone}</code>.</p>
 <div class="fg" style="margin-bottom:10px">
 <div class="fgp"><label>Registration Success Template</label><textarea id="tplRegistration" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
 <div class="fgp"><label>Sent to MOFA KSA Template</label><textarea id="tplMofaSent" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
 </div>
 <div class="fg" style="margin-bottom:10px">
 <div class="fgp"><label>Visa Approved Template</label><textarea id="tplVisaApproved" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
+<div class="fgp"><label>Iraq Public Form — Submission Confirmation</label><textarea id="tplIraqPublic" rows="12" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
 </div>
 <div style="display:flex;gap:8px;flex-wrap:wrap">
 <button class="btn btn-p" onclick="saveEmailTemplates()">Save Templates</button>
@@ -8397,13 +8661,15 @@ const t=r.templates||{};
 document.getElementById('tplRegistration').value=t.registration_success||'';
 document.getElementById('tplMofaSent').value=t.mofa_sent||'';
 document.getElementById('tplVisaApproved').value=t.visa_approved||'';
+document.getElementById('tplIraqPublic').value=t.iraq_public_submitted||'';
 document.getElementById('tplStatus').textContent='Templates loaded.';
 }
 async function saveEmailTemplates(){
 const payload={templates:{
 registration_success:document.getElementById('tplRegistration').value,
 mofa_sent:document.getElementById('tplMofaSent').value,
-visa_approved:document.getElementById('tplVisaApproved').value
+visa_approved:document.getElementById('tplVisaApproved').value,
+iraq_public_submitted:document.getElementById('tplIraqPublic').value
 }};
 const r=await api('/api/email-templates',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
 if(r?.success){document.getElementById('tplStatus').textContent='Templates saved successfully.';toast('Email templates saved')}
@@ -8591,17 +8857,86 @@ loadReturnees();loadReturneesStats();
 let _ippCur=null;
 function ippEsc(s){if(s==null||s===undefined)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function ippVal(v){return ippEsc(v==null?'':String(v));}
+function ippNormKw(s){s=String(s==null?'':s).trim();return ['Pending','Approved','Rejected'].indexOf(s)>=0?s:'Pending';}
+function ippKwVisaOptions(cur){cur=ippNormKw(cur);var o=['Pending','Approved','Rejected'],h='',i;for(i=0;i<o.length;i++)h+='<option value="'+o[i]+'"'+(o[i]===cur?' selected':'')+'>'+o[i]+'</option>';return h;}
+async function ippSetKwVisa(sel){
+if(!sel)return;
+var id=parseInt(sel.getAttribute('data-ipp-kw'),10);
+if(isNaN(id))return;
+var v=ippNormKw(sel.value);
+var prev=ippNormKw(sel.getAttribute('data-prev'));
+if(v===prev)return;
+try{
+var r=await fetch('/api/iraq-decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({public_submission_id:id,decision:v})});
+var j=await r.json();
+if(!j.success){sel.value=prev;toast(j.error||'Update failed');return}
+sel.setAttribute('data-prev',v);
+if(_ippCur&&_ippCur.id===id)_ippCur.kw_transit_visa_status=v;
+toast('Kuwait transit visa: '+v);
+loadIraqPublicPortal();
+}catch(e){sel.value=prev;toast(e.message||'Error')}
+}
+function ippToggleAll(checked){
+document.querySelectorAll('.ipp-sel:not(:disabled)').forEach(cb=>{cb.checked=!!checked});
+}
+function ippSelectPendingNv(){
+document.querySelectorAll('.ipp-sel:not(:disabled)').forEach(cb=>{cb.checked=true});
+}
+async function ippCreateDispatch(){
+const ids=[...document.querySelectorAll('.ipp-sel:checked')].map(el=>parseInt(el.value,10)).filter(n=>!isNaN(n));
+if(!ids.length){toast('Select at least one row');return}
+const nv=(document.getElementById('ippNvNo').value||'').trim();
+if(!nv){toast('Note Verbale number is required');return}
+const sd=document.getElementById('ippSentDate').value;
+const payload={
+public_submission_ids:ids,
+note_verbale_number:nv,
+note_verbale_date:document.getElementById('ippNvDate').value||'',
+sent_date:sd||'',
+remarks:(document.getElementById('ippNvRm').value||'').trim(),
+release_to_portal_if_needed:document.getElementById('ippReleaseIfNeeded').checked
+};
+const r=await fetch('/api/iraq-dispatch-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const j=await r.json();
+if(!j.success){toast(j.error||'Dispatch failed');return}
+window._ippLastDispatchId=j.dispatch_id;
+const dl=document.getElementById('ippDlDispatch');if(dl)dl.style.display='inline-block';
+let msg='Dispatch #'+(j.dispatch_id||'')+': added '+(j.added_count||0)+' row(s)';
+if(j.skipped&&j.skipped.length)msg+='; skipped '+(j.skipped.length)+' (see toast details)';
+document.getElementById('ippDispatchMsg').textContent=msg;
+toast(msg);
+loadIraqPublicPortal();
+}
+function ippDownloadLastDispatch(){
+const id=window._ippLastDispatchId;if(!id){toast('Create a dispatch first');return false}
+window.location='/api/iraq-public-export?filter=dispatch&dispatch_id='+encodeURIComponent(id);
+return false;
+}
 async function loadIraqPublicPortal(){
+const mode=document.getElementById('ippViewMode').value;
 const st=document.getElementById('ippStatus').value,q=document.getElementById('ippSearch').value.trim();
-let u='/api/iraq-public-portal-submissions?';if(st)u+='status='+encodeURIComponent(st)+'&';if(q)u+='search='+encodeURIComponent(q)+'&';
+let u='/api/iraq-public-portal-submissions?';
+if(st)u+='status='+encodeURIComponent(st)+'&';
+if(q)u+='search='+encodeURIComponent(q)+'&';
+if(mode==='pending_nv')u+='pending_nv=1&';
+const today=new Date().toISOString().slice(0,10);
+if(mode==='today')u+='created_date='+encodeURIComponent(today)+'&';
+if(mode==='today_all')u+='created_date='+encodeURIComponent(today)+'&include_unreleased=1&';
 const d=await api(u);if(!d)return;
 if(!Array.isArray(d)){toast(d.error||'Could not load portal list');return}
 const stx=await api('/api/iraq-public-portal-stats');if(stx&&!stx.error){
-document.getElementById('ippKpi').innerHTML='<div class="kc i"><div class="lb">On MOFA KW portal</div><div class="vl">'+(stx.on_portal||0)+'</div></div><div class="kc w"><div class="lb">Pending NV dispatch</div><div class="vl">'+(stx.pending_note_verbale||0)+'</div></div>';
+document.getElementById('ippKpi').innerHTML='<div class="kc i"><div class="lb">On MOFA KW portal</div><div class="vl">'+(stx.on_portal||0)+'</div></div><div class="kc w"><div class="lb">Pending NV dispatch</div><div class="vl">'+(stx.pending_note_verbale||0)+'</div></div><div class="kc s"><div class="lb">Today pending NV</div><div class="vl">'+(stx.today_pending_nv||0)+'</div></div>';
 }
-document.getElementById('ippCount').textContent=d.length+' record(s)';
-let h='<tr><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>Sent to portal</th><th></th></tr>';
-d.forEach(x=>{h+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td>'+((x.mofa_kw_portal_sent_at||'').slice(0,19)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>'});
+if(!document.getElementById('ippSentDate').value)document.getElementById('ippSentDate').value=today;
+document.getElementById('ippCount').textContent=d.length+' record(s) in current filter';
+let h='<tr><th style="width:36px"><input type="checkbox" title="Select all eligible" onchange="ippToggleAll(this.checked)"></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>NV</th><th>Submitted</th><th>Portal sent</th><th></th></tr>';
+d.forEach(x=>{
+const hasNv=x.has_nv_dispatch;
+const dis=hasNv?'Y':'\u2014';
+const cbDis=hasNv?' disabled title="Already in a dispatch"':'';
+const kw=ippNormKw(x.kw_transit_visa_status);
+h+='<tr><td><input type="checkbox" class="ipp-sel" value="'+x.id+'"'+cbDis+'></td><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td>'+dis+'</td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td>'+((x.mofa_kw_portal_sent_at||'').slice(0,19)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
+});
 document.getElementById('ippTbl').innerHTML=h;
 }
 async function ippView(id){
@@ -8609,8 +8944,10 @@ const r=await fetch('/api/iraq-public-submission?id='+encodeURIComponent(id));co
 if(!j.success){toast(j.error||'Load failed');return}
 const x=j.submission||{};_ippCur=x;
 const rows=[['Reference',x.reference_number],['ID',x.id],['Name',x.full_name],['Passport',x.passport_number],['CNIC',x.cnic||'-'],['Nationality',x.nationality],['DOB',x.date_of_birth],['Gender',x.gender],['Phone',x.phone],['WhatsApp',x.whatsapp],['Email',x.email],['City (Iraq)',x.current_city],['Employer',x.employer],['Route',x.travel_route],['Purpose',x.travel_purpose],['Remarks',x.remarks||'\u2014'],['Status',x.status],['Submitted',x.created_at||'\u2014'],['Portal sent',x.mofa_kw_portal_sent_at||'\u2014'],['Batch ID',x.linked_batch_id!=null?x.linked_batch_id:'\u2014']];
+const kwM=ippNormKw(x.kw_transit_visa_status);
 let h='<table style="width:100%;border-collapse:collapse;font-size:.88em"><tbody>';
 rows.forEach(kv=>{h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">'+ippEsc(kv[0])+'</td><td style="padding:6px 8px;border-bottom:1px solid #eee;word-break:break-word">'+ippEsc(kv[1])+'</td></tr>'});
+h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">Kuwait transit visa</td><td style="padding:6px 8px;border-bottom:1px solid #eee"><select data-ipp-kw="'+x.id+'" data-prev="'+kwM+'" onchange="ippSetKwVisa(this)" style="padding:6px;min-width:140px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td></tr>';
 h+='</tbody></table>';
 document.getElementById('ippBody').innerHTML=h;
 document.getElementById('ippEditBtn').style.display='';
@@ -8626,6 +8963,8 @@ const nm=z[0],isD=nm==='date_of_birth',isR=nm==='remarks';
 const inp=isR?'<textarea data-ipp="'+nm+'" rows="2" style="width:100%;padding:6px">'+ippVal(z[1])+'</textarea>':'<input data-ipp="'+nm+'" '+(isD?'type="date"':'type="text"')+' value="'+ippVal(z[1])+'" style="width:100%;padding:6px">';
 h+='<tr><td style="padding:6px;color:#666">'+ippEsc(nm)+'</td><td>'+inp+'</td></tr>';
 });
+const kwE=ippNormKw(x.kw_transit_visa_status);
+h+='<tr><td style="padding:6px;color:#666;vertical-align:middle">Kuwait transit visa</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kwE+'" onchange="ippSetKwVisa(this)" style="padding:6px;min-width:140px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td></tr>';
 h+='</tbody></table>';
 document.getElementById('ippBody').innerHTML=h;
 document.getElementById('ippEditBtn').style.display='none';
@@ -8810,7 +9149,7 @@ fd.append('status',decision);
 const r=await fetch('/api/iraq-bulk-visa-approval',{method:'POST',body:fd});
 const d=await r.json();
 document.getElementById('iraqVisaResult').style.display='block';
-document.getElementById('iraqVisaStats').innerHTML=`<span class="stat-box stat-ok"><strong>${decision}:</strong> ${d.approved||0}</span><span class="stat-box stat-skip">Already done: ${d.already_done||0}</span><span class="stat-box stat-err">Not found: ${d.not_found||0}</span><span class="stat-box stat-err">Errors: ${d.errors||0}</span>`;
+document.getElementById('iraqVisaStats').innerHTML=`<span class="stat-box stat-ok"><strong>${decision}:</strong> ${d.approved||0}</span><span class="stat-box" style="background:#e8eaf6;color:#283593"><strong>Iraq public matched:</strong> ${d.iraq_public_matched||0}</span><span class="stat-box stat-skip">Already done: ${d.already_done||0}</span><span class="stat-box stat-err">Not found: ${d.not_found||0}</span><span class="stat-box stat-err">Errors: ${d.errors||0}</span>`;
 document.getElementById('iraqVisaDetails').innerHTML=(d.details||[]).map(x=>'<div>'+x+'</div>').join('');
 loadIraqStats();
 }
