@@ -8025,8 +8025,13 @@ document.getElementById('viewEditBtn').style.display='none';
 document.getElementById('viewSaveBtn').style.display='';
 // Rebuild body with editable fields
 const r=viewRec;
-const sel=(name,opts,cur)=>{let s=`<select data-vf="${name}" style="width:100%;padding:5px 8px;border:1px solid #1565c0;border-radius:4px;font-size:.9em;background:#fff">`;
-opts.forEach(o=>{s+=`<option${(cur||'')===o?' selected':''}>${o}</option>`});return s+'</select>';};
+const sel=(name,opts,cur)=>{
+const c=(cur==null?'':String(cur));
+let s=`<select data-vf="${name}" style="width:100%;padding:5px 8px;border:1px solid #1565c0;border-radius:4px;font-size:.9em;background:#fff">`;
+if(opts.indexOf(c)<0)s+='<option value="" selected>Select</option>';
+opts.forEach(o=>{s+=`<option value="${o}"${c===o?' selected':''}>${o}</option>`});
+return s+'</select>';
+};
 const inp=(name,val,type)=>`<input data-vf="${name}" type="${type||'text'}" value="${(val||'').toString().replace(/"/g,'&quot;')}" style="width:100%;padding:5px 8px;border:1px solid #1565c0;border-radius:4px;font-size:.9em">`;
 const ta=(name,val)=>`<textarea data-vf="${name}" rows="2" style="width:100%;padding:5px 8px;border:1px solid #1565c0;border-radius:4px;font-size:.9em">${val||''}</textarea>`;
 const sec=(title,fields)=>{
