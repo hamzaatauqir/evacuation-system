@@ -2745,6 +2745,15 @@ def api_route_review_queue(params):
             AND (record_locked IS NULL OR record_locked = 0 OR record_locked = '0')
             AND (mofa_status IS NULL OR mofa_status = '' OR LOWER(mofa_status) NOT IN ('sent', 'submitted', 'approved', 'received'))"""
 
+    # Only queue records with an actual inconsistency signal.
+    # This prevents manually-flagged/no-issue records from filling the staff queue.
+    inconsistency_clause = """
+            AND (
+                COALESCE(route_mismatch,0) = 1
+                OR COALESCE(location_review_flag,0) = 1
+                OR COALESCE(ip_location_status,'') = 'needs_review'
+            )"""
+
     if filter_type == 'suspects':
         rows = db.execute("""SELECT id, name, passport, cnic, country, civil_id, mobile, email,
             border_crossing, mofa_status, mofa_submitted, record_locked,
@@ -2757,16 +2766,8 @@ def api_route_review_queue(params):
             clarification_email_last_status, clarification_email_last_trigger_source,
             clarification_email_last_sent_by
             FROM evacuees
-            WHERE (route_mismatch = 0 OR route_mismatch IS NULL)
-            AND (review_status IS NULL OR review_status = '' OR review_status = 'pending')
-            AND (
-                (LOWER(COALESCE(country,'')) LIKE '%pakistan%'
-                    AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
-                OR ((mobile LIKE '+92%%' OR mobile LIKE '03%%' OR mobile LIKE '92%%')
-                    AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
-                OR (LOWER(COALESCE(physical_location,'')) = 'pakistan'
-                    AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
-            )""" + mofa_exclusion + search_clause + """
+            WHERE (review_status IS NULL OR review_status = '' OR review_status = 'pending')
+            """ + inconsistency_clause + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'flagged':
         rows = db.execute("""SELECT * FROM evacuees
@@ -2774,7 +2775,8 @@ def api_route_review_queue(params):
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'pending':
         rows = db.execute("""SELECT * FROM evacuees
-            WHERE review_status IN ('pending', 'under_review', 'needs_followup')""" + mofa_exclusion + search_clause + """
+            WHERE review_status IN ('pending', 'under_review', 'needs_followup')
+            """ + inconsistency_clause + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'finalized':
         rows = db.execute("""SELECT * FROM evacuees
@@ -2782,20 +2784,8 @@ def api_route_review_queue(params):
             ORDER BY reviewed_at DESC LIMIT 200""", search_params).fetchall()
     else:
         rows = db.execute("""SELECT * FROM evacuees
-            WHERE (route_mismatch = 1
-            OR review_status IN ('pending', 'under_review', 'needs_followup')
-            OR (
-                (route_mismatch = 0 OR route_mismatch IS NULL)
-                AND (review_status IS NULL OR review_status = '' OR review_status = 'pending')
-                AND (
-                    (LOWER(COALESCE(country,'')) LIKE '%pakistan%'
-                        AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
-                    OR ((mobile LIKE '+92%%' OR mobile LIKE '03%%' OR mobile LIKE '92%%')
-                        AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
-                    OR (LOWER(COALESCE(physical_location,'')) = 'pakistan'
-                        AND COALESCE(original_form_source,'kw_to_pk') = 'kw_to_pk')
-                )
-            ))""" + mofa_exclusion + search_clause + """
+            WHERE 1=1
+            """ + inconsistency_clause + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
 
     result = [dict(r) for r in rows]
