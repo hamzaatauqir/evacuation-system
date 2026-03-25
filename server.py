@@ -6621,6 +6621,47 @@ input,select{padding:8px;border:1px solid #d0d7de;border-radius:6px}
 .mo.show{display:flex}
 .ml{background:#fff;border-radius:12px;max-width:720px;width:100%;padding:18px 40px 18px 18px;position:relative;margin:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);max-height:92vh;overflow-y:auto}
 .cb{position:absolute;top:8px;right:10px;border:none;background:none;font-size:1.5em;cursor:pointer;line-height:1;color:#666}
+/* ═══ GLOBAL SEARCH BAR ═══ */
+.search-hero{background:linear-gradient(135deg,#0d47a1 0%,#1565c0 50%,#1976d2 100%);border-radius:14px;padding:20px 22px;margin-top:12px;box-shadow:0 4px 18px rgba(13,71,161,.25)}
+.search-hero h3{color:#fff;font-size:1em;margin:0 0 10px;display:flex;align-items:center;gap:8px;font-weight:600}
+.search-row{display:flex;gap:10px;align-items:stretch}
+.search-row input{flex:1;padding:12px 16px;border:2px solid rgba(255,255,255,.25);border-radius:10px;font-size:.95em;background:rgba(255,255,255,.95);color:#1e293b;outline:none;transition:border .2s,box-shadow .2s}
+.search-row input:focus{border-color:#fff;box-shadow:0 0 0 4px rgba(255,255,255,.2)}
+.search-row input::placeholder{color:#94a3b8}
+.search-btn{background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none;border-radius:10px;padding:0 28px;font-size:.95em;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:8px;transition:transform .15s,box-shadow .2s;box-shadow:0 4px 12px rgba(245,158,11,.3);white-space:nowrap}
+.search-btn:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(245,158,11,.4)}
+.search-btn:active{transform:translateY(0)}
+/* ═══ SEARCH RESULTS MODAL ═══ */
+.smo{display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:4000;align-items:flex-start;justify-content:center;padding:30px 16px;overflow-y:auto}
+.smo.show{display:flex}
+.sml{background:#fff;border-radius:16px;max-width:900px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.2);animation:smlSlide .3s cubic-bezier(.16,1,.3,1);overflow:hidden;max-height:90vh;display:flex;flex-direction:column}
+@keyframes smlSlide{from{opacity:0;transform:translateY(20px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+.sml-hdr{background:linear-gradient(135deg,#0d47a1,#1565c0);color:#fff;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.sml-hdr h3{margin:0;font-size:1.05em;display:flex;align-items:center;gap:8px}
+.sml-hdr .sml-count{font-size:.82em;opacity:.8;font-weight:400}
+.sml-close{background:rgba(255,255,255,.15);border:none;color:#fff;width:34px;height:34px;border-radius:8px;font-size:1.2em;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .2s}
+.sml-close:hover{background:rgba(255,255,255,.3)}
+.sml-body{padding:16px 22px;overflow-y:auto;flex:1}
+.sr-card{border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:12px;transition:border-color .2s,box-shadow .2s;cursor:pointer;position:relative}
+.sr-card:hover{border-color:#93c5fd;box-shadow:0 4px 16px rgba(59,130,246,.1)}
+.sr-card.is-new{border-left:4px solid #e65100}
+.sr-card.is-sent{border-left:4px solid #2e7d32}
+.sr-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px}
+.sr-name{font-size:1em;font-weight:700;color:#1e293b}
+.sr-ref{font-size:.78em;color:#64748b;font-family:monospace;background:#f1f5f9;padding:2px 8px;border-radius:6px}
+.sr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px 16px}
+.sr-field{font-size:.82em}.sr-field .sr-label{color:#94a3b8;font-size:.85em}.sr-field .sr-val{color:#334155;font-weight:500}
+.sr-badges{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.sr-bdg{display:inline-block;padding:2px 10px;border-radius:10px;font-size:.72em;font-weight:600}
+.sr-bdg-pending{background:#fff3e0;color:#e65100}
+.sr-bdg-sent{background:#e8f5e9;color:#2e7d32}
+.sr-bdg-submitted{background:#e3f2fd;color:#0d47a1}
+.sr-view{position:absolute;top:16px;right:16px;background:#1565c0;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:.78em;font-weight:600;cursor:pointer;transition:background .2s}
+.sr-view:hover{background:#0d47a1}
+.sr-empty{text-align:center;padding:40px 20px;color:#94a3b8}
+.sr-empty .sr-empty-icon{font-size:2.5em;margin-bottom:10px;opacity:.5}
+.sr-empty p{margin:0;font-size:.95em}
+.sr-empty .sr-hint{font-size:.82em;margin-top:6px;color:#cbd5e1}
 </style></head><body>
 <div class="hdr"><div><strong>CWA Baghdad Portal</strong> - Iraq Public Intake</div><div>__USER_NAME__ | <a href="/logout" style="color:#fff">Logout</a></div></div>
 <div class="ctr">
@@ -6634,8 +6675,22 @@ input,select{padding:8px;border:1px solid #d0d7de;border-radius:6px}
 <button type="button" class="btn p" onclick="releaseAllToMofaKw()">Send all new entries to MOFA Kuwait main portal</button>
 </div>
 <div class="k" id="k"></div>
+<div class="search-hero">
+<h3>&#128269; Search All Iraq Records</h3>
+<div class="search-row">
+<input id="q" placeholder="Type name, passport, CNIC, reference, phone or email..." autocomplete="off">
+<button type="button" class="search-btn" onclick="globalSearch()">&#128269; Search</button>
+</div>
+</div>
 <div class="sec">
-<div class="row"><input id="q" placeholder="Search name/passport/reference"><select id="st"><option value="">All</option><option>Submitted</option><option>Under Review</option><option>Accepted</option><option>Rejected</option><option>Duplicate</option><option>Batched</option><option>Forwarded to Embassy Kuwait</option></select><button class="btn p" onclick="loadSubs()">Load</button><button class="btn" onclick="exportCsv('all')">Export all</button><button class="btn" onclick="exportCsv('accepted')">Export accepted</button><button class="btn" onclick="exportCsv('rejected')">Export rejected</button></div>
+<div class="row"><select id="st" onchange="loadSubs()"><option value="">All Statuses</option><option>Submitted</option><option>Under Review</option><option>Accepted</option><option>Rejected</option><option>Duplicate</option><option>Batched</option><option>Forwarded to Embassy Kuwait</option></select><button class="btn p" onclick="loadSubs()">Reload Tables</button><button class="btn" onclick="exportCsv('all')">Export all</button><button class="btn" onclick="exportCsv('accepted')">Export accepted</button><button class="btn" onclick="exportCsv('rejected')">Export rejected</button></div>
+</div>
+<!-- SEARCH RESULTS MODAL -->
+<div class="smo" id="searchMo" onclick="if(event.target===this)closeSearch()">
+<div class="sml">
+<div class="sml-hdr"><h3>&#128269; Search Results <span class="sml-count" id="srCount"></span></h3><button class="sml-close" onclick="closeSearch()">&times;</button></div>
+<div class="sml-body" id="srBody"></div>
+</div>
 </div>
 <div class="sec" style="border-left:4px solid #e65100">
 <h3 style="margin:0 0 6px;color:#e65100;display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:#fff3e0;border-radius:50%;font-size:.85em">&#9993;</span> New &amp; Pending on Portal <span id="newCount" style="font-size:.75em;font-weight:400;color:#777;margin-left:4px"></span></h3>
@@ -6741,30 +6796,66 @@ async function loadStats(){const r=await fetch('/api/iraq-public-stats');const d
 <div class="card"><div class="lb">Sent to Embassy Kuwait</div><div class="vl">${d.sent_to_embassy||0}</div></div>`}
 async function setStatus(id,status){const r=await fetch('/api/iraq-public-update-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,status})});const d=await r.json();if(!d.success)alert(d.error||'failed');loadSubs();loadStats();}
 async function loadSubs(){
-const q=(document.getElementById('q').value||'').trim(),st=document.getElementById('st').value;
-let u='/api/iraq-public-submissions?';if(q)u+='search='+encodeURIComponent(q)+'&';if(st)u+='status='+encodeURIComponent(st);
+const st=document.getElementById('st').value;
+let u='/api/iraq-public-submissions?';if(st)u+='status='+encodeURIComponent(st);
 let d=[];
 try{const r=await fetch(u);d=await r.json();}catch(_){d=[]}
 let rows=Array.isArray(d)?d:[];
-if(q){
-const needle=q.toLowerCase().replace(/[\s\-]+/g,'');
-const hit=v=>String(v==null?'':v).toLowerCase().replace(/[\s\-]+/g,'').includes(needle);
-rows=rows.filter(x=>hit(x.full_name)||hit(x.passport_number)||hit(x.reference_number)||String(x.id||'')===q);
-}
 const newRows=rows.filter(x=>!x.mofa_kw_portal_visible);
 const sentRows=rows.filter(x=>x.mofa_kw_portal_visible);
-const hdr='<tr><th></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>City</th><th>Status</th><th>Actions</th></tr>';
-let hNew=hdr;
-newRows.forEach(x=>{hNew+=`<tr style="background:#fffbeb"><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td><span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:.75em;font-weight:600;background:#fff9c4;color:#f57f17">${x.status||''}</span></td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td></tr>`});
+const hdrNew='<tr><th style="width:36px"><input type="checkbox" onchange="togSel(this,\'tNew\')"></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>City</th><th>Status</th><th>Actions</th></tr>';
+let hNew=hdrNew;
+newRows.forEach(x=>{hNew+=`<tr style="background:#fffbeb"><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td><span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:.75em;font-weight:600;background:#fff3e0;color:#e65100">Pending</span></td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button></td></tr>`});
 if(newRows.length===0)hNew+='<tr><td colspan="8" style="text-align:center;color:#999;padding:18px">No new / pending records</td></tr>';
 document.getElementById('tNew').innerHTML=hNew;
 document.getElementById('newCount').textContent='('+newRows.length+')';
-let hSent=hdr.replace('</tr>','<th>Portal</th></tr>');
-sentRows.forEach(x=>{hSent+=`<tr><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td>${x.status||''}</td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td><td><span style="color:#2e7d32;font-weight:600;font-size:.8em">&#10003; Sent</span></td></tr>`});
+const hdrSent='<tr><th style="width:36px"><input type="checkbox" onchange="togSel(this,\'tSent\')"></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>City</th><th>Status</th><th>Actions</th><th>Portal</th></tr>';
+let hSent=hdrSent;
+sentRows.forEach(x=>{hSent+=`<tr><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td><span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:.75em;font-weight:600;background:#c8e6c9;color:#1b5e20">Submitted</span></td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button></td><td><span style="color:#2e7d32;font-weight:600;font-size:.8em">&#10003; Sent</span></td></tr>`});
 if(sentRows.length===0)hSent+='<tr><td colspan="9" style="text-align:center;color:#999;padding:18px">No records sent to main portal yet</td></tr>';
 document.getElementById('tSent').innerHTML=hSent;
 document.getElementById('sentCount').textContent='('+sentRows.length+')';
 }
+function togSel(master,tblId){const t=document.getElementById(tblId);t.querySelectorAll('.sel:not(:disabled)').forEach(cb=>{cb.checked=master.checked});}
+/* ═══ GLOBAL SEARCH POPUP ═══ */
+async function globalSearch(){
+const q=(document.getElementById('q').value||'').trim();
+if(!q){document.getElementById('q').focus();return}
+let d=[];
+try{const r=await fetch('/api/iraq-public-submissions?search='+encodeURIComponent(q));d=await r.json();}catch(_){d=[]}
+let rows=Array.isArray(d)?d:[];
+const needle=q.toLowerCase().replace(/[\s\-]+/g,'');
+const hit=v=>String(v==null?'':v).toLowerCase().replace(/[\s\-]+/g,'').includes(needle);
+rows=rows.filter(x=>hit(x.full_name)||hit(x.passport_number)||hit(x.reference_number)||hit(x.cnic)||hit(x.phone)||hit(x.email)||hit(x.whatsapp)||hit(x.employer)||hit(x.current_city)||String(x.id||'')===q);
+document.getElementById('srCount').textContent='— '+rows.length+' record(s) found';
+if(rows.length===0){
+document.getElementById('srBody').innerHTML='<div class="sr-empty"><div class="sr-empty-icon">&#128270;</div><p>No records found for &ldquo;'+esc(q)+'&rdquo;</p><div class="sr-hint">Try searching by passport number, full name, CNIC, reference number, phone or email</div></div>';
+}else{
+let h='';
+rows.forEach(x=>{
+const isSent=!!x.mofa_kw_portal_visible;
+const cls=isSent?'sr-card is-sent':'sr-card is-new';
+const stBdg=isSent?'<span class="sr-bdg sr-bdg-sent">&#10003; On Main Portal</span>':'<span class="sr-bdg sr-bdg-pending">&#9888; Pending on Portal</span>';
+const statusBdg='<span class="sr-bdg '+(isSent?'sr-bdg-submitted':'sr-bdg-pending')+'">'+esc(x.status||'Submitted')+'</span>';
+h+='<div class="'+cls+'" onclick="closeSearch();viewIraqPub('+x.id+')">'+
+'<button type="button" class="sr-view" onclick="event.stopPropagation();closeSearch();viewIraqPub('+x.id+')">View Details &#10148;</button>'+
+'<div class="sr-top"><div class="sr-name">'+esc(x.full_name||'—')+'</div><div class="sr-ref">'+(x.reference_number||'ID: '+x.id)+'</div></div>'+
+'<div class="sr-grid">'+
+'<div class="sr-field"><div class="sr-label">Passport</div><div class="sr-val">'+esc(x.passport_number||'—')+'</div></div>'+
+'<div class="sr-field"><div class="sr-label">CNIC</div><div class="sr-val">'+esc(x.cnic||'—')+'</div></div>'+
+'<div class="sr-field"><div class="sr-label">Phone</div><div class="sr-val">'+esc(x.phone||'—')+'</div></div>'+
+'<div class="sr-field"><div class="sr-label">City (Iraq)</div><div class="sr-val">'+esc(x.current_city||'—')+'</div></div>'+
+'<div class="sr-field"><div class="sr-label">Employer</div><div class="sr-val">'+esc(x.employer||'—')+'</div></div>'+
+'<div class="sr-field"><div class="sr-label">Submitted</div><div class="sr-val">'+esc((x.created_at||'').slice(0,10)||'—')+'</div></div>'+
+'</div>'+
+'<div class="sr-badges">'+statusBdg+stBdg+'</div>'+
+'</div>';
+});
+document.getElementById('srBody').innerHTML=h;
+}
+document.getElementById('searchMo').classList.add('show');
+}
+function closeSearch(){document.getElementById('searchMo').classList.remove('show');}
 async function mkBatch(){const ids=[...document.querySelectorAll('.sel:checked')].map(x=>parseInt(x.value));if(!ids.length){alert('Select accepted rows');return}
 const payload={submission_ids:ids,letter_number:document.getElementById('ln').value,letter_date:document.getElementById('ld').value,remarks:document.getElementById('lr').value};
 const r=await fetch('/api/iraq-public-batch-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!d.success){alert(d.error||'failed');return}alert('Batch #'+d.batch_id+' created');loadSubs();loadBatches();loadStats();}
@@ -6772,7 +6863,7 @@ async function sendEmbassy(id){const r=await fetch('/api/iraq-public-batch-forwa
 async function loadBatches(){const r=await fetch('/api/iraq-public-batches');const d=await r.json();let h='<tr><th>Batch</th><th>Letter#</th><th>Date</th><th>Applicants</th><th>Status</th><th>Action</th></tr>';d.forEach(b=>{h+=`<tr><td>${b.id}</td><td>${b.letter_number||''}</td><td>${b.letter_date||''}</td><td>${b.applicant_count||0}</td><td>${b.status||''}</td><td>${b.status==='Sent to Embassy Kuwait'?'Sent':'<button class="btn p" onclick="sendEmbassy('+b.id+')">Send to Embassy Kuwait</button>'}</td></tr>`});document.getElementById('b').innerHTML=h;}
 function exportCsv(f){window.location='/api/iraq-public-export?filter='+encodeURIComponent(f)}
 loadStats();loadSubs();loadBatches();
-document.getElementById('q').addEventListener('keydown',function(e){if(e.key==='Enter')loadSubs()});
+document.getElementById('q').addEventListener('keydown',function(e){if(e.key==='Enter')globalSearch()});
 </script></body></html>"""
 
 IRAQ_EMBASSY_ADMIN_PAGE = r"""<!DOCTYPE html>
@@ -7497,6 +7588,13 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 </div>
 <div id="ippDispatchMsg" style="margin-top:8px;font-size:.82em;color:#555"></div>
 </div>
+<div style="background:linear-gradient(135deg,#0d47a1 0%,#1565c0 50%,#1976d2 100%);border-radius:14px;padding:18px 20px;margin-bottom:14px;box-shadow:0 4px 18px rgba(13,71,161,.25)">
+<div style="color:#fff;font-size:.95em;font-weight:600;margin:0 0 10px;display:flex;align-items:center;gap:8px">&#128269; Search All Iraq Records on Portal</div>
+<div style="display:flex;gap:10px;align-items:stretch">
+<input id="ippSearch" placeholder="Type name, passport, CNIC, reference, phone or email..." autocomplete="off" style="flex:1;padding:12px 16px;border:2px solid rgba(255,255,255,.25);border-radius:10px;font-size:.92em;background:rgba(255,255,255,.95);color:#1e293b">
+<button type="button" onclick="ippGlobalSearch()" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none;border-radius:10px;padding:0 26px;font-size:.92em;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:8px;box-shadow:0 4px 12px rgba(245,158,11,.3);white-space:nowrap">&#128269; Search</button>
+</div>
+</div>
 <div class="sb">
 <select id="ippViewMode" onchange="loadIraqPublicPortal()" style="padding:8px 10px;border:1px solid var(--bd);border-radius:7px;font-size:.85em;max-width:280px">
 <option value="all">All on portal</option>
@@ -7504,11 +7602,15 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <option value="today">Submitted today (on portal)</option>
 <option value="today_all">Today — incl. not yet on portal</option>
 </select>
-<input id="ippSearch" placeholder="Search name, passport, CNIC, reference..." oninput="loadIraqPublicPortal()">
 <select id="ippStatus" onchange="loadIraqPublicPortal()"><option value="">All statuses</option><option>Submitted</option><option>Under Review</option><option>Accepted</option><option>Rejected</option><option>Duplicate</option><option>Batched</option><option>Forwarded to Embassy Kuwait</option></select>
 <a href="/api/iraq-public-export?filter=mofa_portal" class="btn btn-i" style="text-decoration:none;color:#fff">Download Excel (CSV)</a>
 <button class="btn btn-p" type="button" onclick="loadIraqPublicPortal()">Refresh</button>
 </div>
+<!-- SEARCH RESULTS MODAL -->
+<div class="mo" id="ippSearchMo" onclick="if(event.target===this)ippCloseSearch()" style="z-index:5000;background:rgba(15,23,42,.55);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)"><div onclick="event.stopPropagation()" style="background:#fff;border-radius:16px;max-width:900px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.2);overflow:hidden;max-height:90vh;display:flex;flex-direction:column;margin:30px auto">
+<div style="background:linear-gradient(135deg,#0d47a1,#1565c0);color:#fff;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0"><h3 style="margin:0;font-size:1.05em;display:flex;align-items:center;gap:8px">&#128269; Search Results <span style="font-size:.82em;opacity:.8;font-weight:400" id="ippSrCount"></span></h3><button onclick="ippCloseSearch()" style="background:rgba(255,255,255,.15);border:none;color:#fff;width:34px;height:34px;border-radius:8px;font-size:1.2em;cursor:pointer">&times;</button></div>
+<div style="padding:16px 22px;overflow-y:auto;flex:1" id="ippSrBody"></div>
+</div></div>
 <div class="rc" id="ippCount"></div>
 <div class="tc" style="border-left:4px solid #e65100;margin-bottom:14px">
 <h4 style="margin:0 0 8px;color:#e65100;display:flex;align-items:center;gap:8px;font-size:.95em"><span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:#fff3e0;border-radius:50%;font-size:.8em">&#9888;</span> New Registrations &mdash; Pending NV Dispatch <span id="ippNewCount" style="font-size:.78em;font-weight:400;color:var(--tl);margin-left:4px"></span></h4>
@@ -9073,10 +9175,9 @@ return false;
 }
 async function loadIraqPublicPortal(){
 const mode=document.getElementById('ippViewMode').value;
-const st=document.getElementById('ippStatus').value,q=document.getElementById('ippSearch').value.trim();
+const st=document.getElementById('ippStatus').value;
 let u='/api/iraq-public-portal-submissions?';
 if(st)u+='status='+encodeURIComponent(st)+'&';
-if(q)u+='search='+encodeURIComponent(q)+'&';
 if(mode==='pending_nv')u+='pending_nv=1&';
 const today=new Date().toISOString().slice(0,10);
 if(mode==='today')u+='created_date='+encodeURIComponent(today)+'&';
@@ -9109,6 +9210,47 @@ if(sentRows.length===0)hSent+='<tr><td colspan="10" style="text-align:center;pad
 document.getElementById('ippTblSent').innerHTML=hSent;
 document.getElementById('ippSentCount').textContent='('+sentRows.length+')';
 }
+/* ═══ IRAQ PUBLIC GLOBAL SEARCH POPUP ═══ */
+async function ippGlobalSearch(){
+const q=(document.getElementById('ippSearch').value||'').trim();
+if(!q){document.getElementById('ippSearch').focus();return}
+const d=await api('/api/iraq-public-portal-submissions?search='+encodeURIComponent(q));
+if(!d||!Array.isArray(d)){toast('Search failed');return}
+let rows=d;
+const needle=q.toLowerCase().replace(/[\s\-]+/g,'');
+const hit=v=>String(v==null?'':v).toLowerCase().replace(/[\s\-]+/g,'').includes(needle);
+rows=rows.filter(x=>hit(x.full_name)||hit(x.passport_number)||hit(x.reference_number)||hit(x.cnic)||hit(x.phone)||hit(x.email)||hit(x.current_city)||hit(x.employer)||String(x.id||'')===q);
+document.getElementById('ippSrCount').textContent='\u2014 '+rows.length+' record(s) found';
+if(rows.length===0){
+document.getElementById('ippSrBody').innerHTML='<div style="text-align:center;padding:40px 20px;color:#94a3b8"><div style="font-size:2.5em;margin-bottom:10px;opacity:.5">&#128270;</div><p style="margin:0;font-size:.95em">No records found for \u201c'+ippEsc(q)+'\u201d</p><div style="font-size:.82em;margin-top:6px;color:#cbd5e1">Try searching by passport number, full name, CNIC, reference number, phone or email</div></div>';
+}else{
+let h='';
+rows.forEach(x=>{
+const hasNv=!!x.has_nv_dispatch;
+const borderCls=hasNv?'border-left:4px solid #2e7d32':'border-left:4px solid #e65100';
+const nvBdg=hasNv?'<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:.72em;font-weight:600;background:#e8f5e9;color:#2e7d32">&#10003; Dispatched</span>':'<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:.72em;font-weight:600;background:#fff3e0;color:#e65100">&#9888; Pending NV</span>';
+const stBdg='<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:.72em;font-weight:600;background:#e3f2fd;color:#0d47a1">'+ippEsc(x.status||'Submitted')+'</span>';
+const kwTxt=x.kw_transit_visa_status||'Pending';
+const kwColor=kwTxt==='Approved'?'#2e7d32':kwTxt==='Rejected'?'#c62828':'#94a3b8';
+h+='<div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:12px;cursor:pointer;position:relative;transition:border-color .2s,box-shadow .2s;'+borderCls+'" onclick="ippCloseSearch();ippView('+x.id+')" onmouseover="this.style.borderColor=\'#93c5fd\';this.style.boxShadow=\'0 4px 16px rgba(59,130,246,.1)\'" onmouseout="this.style.borderColor=\'#e5e7eb\';this.style.boxShadow=\'none\'">'+
+'<button type="button" onclick="event.stopPropagation();ippCloseSearch();ippView('+x.id+')" style="position:absolute;top:16px;right:16px;background:#1565c0;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:.78em;font-weight:600;cursor:pointer">View Details &#10148;</button>'+
+'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:10px;padding-right:110px"><div style="font-size:1em;font-weight:700;color:#1e293b">'+ippEsc(x.full_name||'\u2014')+'</div><div style="font-size:.78em;color:#64748b;font-family:monospace;background:#f1f5f9;padding:2px 8px;border-radius:6px">'+(x.reference_number||'ID: '+x.id)+'</div></div>'+
+'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:6px 16px">'+
+'<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">Passport</div><div style="color:#334155;font-weight:500">'+ippEsc(x.passport_number||'\u2014')+'</div></div>'+
+'<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">CNIC</div><div style="color:#334155;font-weight:500">'+ippEsc(x.cnic||'\u2014')+'</div></div>'+
+'<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">City (Iraq)</div><div style="color:#334155;font-weight:500">'+ippEsc(x.current_city||'\u2014')+'</div></div>'+
+'<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">KW Transit Visa</div><div style="color:'+kwColor+';font-weight:600">'+ippEsc(kwTxt)+'</div></div>'+
+'<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">Submitted</div><div style="color:#334155;font-weight:500">'+ippEsc((x.created_at||'').slice(0,10)||'\u2014')+'</div></div>'+
+'</div>'+
+'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'+stBdg+nvBdg+'</div>'+
+'</div>';
+});
+document.getElementById('ippSrBody').innerHTML=h;
+}
+document.getElementById('ippSearchMo').classList.add('show');
+}
+function ippCloseSearch(){document.getElementById('ippSearchMo').classList.remove('show');}
+document.getElementById('ippSearch').addEventListener('keydown',function(e){if(e.key==='Enter')ippGlobalSearch()});
 async function ippView(id){
 const r=await fetch('/api/iraq-public-submission?id='+encodeURIComponent(id));const j=await r.json();
 if(!j.success){toast(j.error||'Load failed');return}
