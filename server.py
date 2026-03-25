@@ -7,9 +7,9 @@ Access: http://localhost:8080
 Default login: admin / embassy2026
 """
 
-import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading, base64, smtplib, ssl
+import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading, base64, smtplib, ssl, urllib.request, urllib.error
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlencode
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
@@ -26,6 +26,14 @@ else:
     DB_PATH = Path(__file__).parent / 'evacuation.db'
     BACKUP_DIR = Path(__file__).parent / 'backups'
 SESSIONS = {}  # token -> {user, role, expires}
+
+# OneDrive secondary backup (Microsoft Graph). Set on Render: ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_REFRESH_TOKEN
+ONEDRIVE_CLIENT_ID = os.environ.get('ONEDRIVE_CLIENT_ID', '').strip()
+ONEDRIVE_CLIENT_SECRET = os.environ.get('ONEDRIVE_CLIENT_SECRET', '').strip()
+ONEDRIVE_REFRESH_TOKEN = os.environ.get('ONEDRIVE_REFRESH_TOKEN', '').strip()
+ONEDRIVE_TENANT = os.environ.get('ONEDRIVE_TENANT', 'consumers').strip() or 'consumers'
+ONEDRIVE_FOLDER = os.environ.get('ONEDRIVE_FOLDER', 'EmbassyBackups').strip() or 'EmbassyBackups'
+_onedrive_refresh_runtime = ONEDRIVE_REFRESH_TOKEN  # updated in-process if Microsoft returns a new refresh_token
 
 # ═══════════════════════════════════════════════════════════════
 # DATABASE
@@ -539,6 +547,75 @@ def init_db():
 # ═══════════════════════════════════════════════════════════════
 # BACKUP SYSTEM
 # ═══════════════════════════════════════════════════════════════
+def _onedrive_get_access_token():
+    global _onedrive_refresh_runtime
+    if not all([ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, _onedrive_refresh_runtime]):
+        return None
+    token_url = f'https://login.microsoftonline.com/{ONEDRIVE_TENANT}/oauth2/v2.0/token'
+    body = urlencode({
+        'client_id': ONEDRIVE_CLIENT_ID,
+        'client_secret': ONEDRIVE_CLIENT_SECRET,
+        'refresh_token': _onedrive_refresh_runtime,
+        'grant_type': 'refresh_token',
+        'scope': 'Files.ReadWrite offline_access',
+    }).encode()
+    req = urllib.request.Request(token_url, data=body, method='POST')
+    req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        err = e.read().decode() if e.fp else str(e)
+        print(f'[OneDrive] Token request failed: {e.code} {err}', flush=True)
+        return None
+    except Exception as e:
+        print(f'[OneDrive] Token request failed: {e}', flush=True)
+        return None
+    if result.get('refresh_token'):
+        _onedrive_refresh_runtime = result['refresh_token']
+    return result.get('access_token')
+
+def upload_to_onedrive(file_path, folder=None):
+    """Upload a file to the signed-in user's OneDrive (simple PUT; fine for files well under ~4 MB)."""
+    folder = folder or ONEDRIVE_FOLDER
+    if not all([ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, _onedrive_refresh_runtime or ONEDRIVE_REFRESH_TOKEN]):
+        return False
+    token = _onedrive_get_access_token()
+    if not token:
+        return False
+    path = Path(file_path)
+    if not path.is_file():
+        print(f'[OneDrive] Missing file: {file_path}', flush=True)
+        return False
+    filename = path.name
+    upload_url = f'https://graph.microsoft.com/v1.0/me/drive/root:/{folder}/{filename}:/content'
+    try:
+        file_data = path.read_bytes()
+    except Exception as e:
+        print(f'[OneDrive] Read failed: {e}', flush=True)
+        return False
+    req = urllib.request.Request(upload_url, data=file_data, method='PUT')
+    req.add_header('Authorization', f'Bearer {token}')
+    req.add_header('Content-Type', 'application/octet-stream')
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            json.loads(resp.read().decode())
+        print(f'[OneDrive] Uploaded {filename} ({len(file_data)} bytes) → {folder}/', flush=True)
+        return True
+    except urllib.error.HTTPError as e:
+        err = e.read().decode() if e.fp else str(e)
+        print(f'[OneDrive] Upload failed: {e.code} {err}', flush=True)
+        return False
+    except Exception as e:
+        print(f'[OneDrive] Upload failed: {e}', flush=True)
+        return False
+
+def _onedrive_upload_async(file_path):
+    try:
+        upload_to_onedrive(file_path)
+    except Exception as e:
+        print(f'[OneDrive] Background upload error: {e}', flush=True)
+
 def do_backup(reason='scheduled'):
     """Create a timestamped backup of the database"""
     BACKUP_DIR.mkdir(exist_ok=True)
@@ -555,6 +632,8 @@ def do_backup(reason='scheduled'):
         backups = sorted(BACKUP_DIR.glob('*.db'), key=lambda p: p.stat().st_mtime)
         while len(backups) > 50:
             backups.pop(0).unlink()
+        if ONEDRIVE_CLIENT_ID and ONEDRIVE_CLIENT_SECRET and (ONEDRIVE_REFRESH_TOKEN or _onedrive_refresh_runtime):
+            threading.Thread(target=_onedrive_upload_async, args=(str(backup_path),), daemon=True).start()
         return str(backup_path)
     except Exception as e:
         return f"Backup failed: {e}"
@@ -9705,7 +9784,10 @@ else{toast('Error: '+(d.error||'Unknown'))}
 if __name__ == '__main__':
     init_db()
     BACKUP_DIR.mkdir(exist_ok=True)
-    do_backup('startup')
+    _startup_backup = do_backup('startup')
+    print(f'[Backup] startup: {_startup_backup}', flush=True)
+    _od_on = bool(ONEDRIVE_CLIENT_ID and ONEDRIVE_CLIENT_SECRET and (ONEDRIVE_REFRESH_TOKEN or _onedrive_refresh_runtime))
+    print(f'[OneDrive] configured={_od_on} (secondary upload after each successful disk backup)', flush=True)
     # Start auto-backup thread
     backup_thread = threading.Thread(target=auto_backup_scheduler, daemon=True)
     backup_thread.start()
