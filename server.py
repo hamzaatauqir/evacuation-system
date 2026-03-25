@@ -3605,8 +3605,18 @@ def api_iraq_public_submissions(params):
         q.append(status)
     if search:
         s = f"%{search}%"
-        where.append("(full_name LIKE ? OR passport_number LIKE ? OR reference_number LIKE ? OR phone LIKE ? OR cnic LIKE ?)")
-        q.extend([s, s, s, s, s])
+        compact = re.sub(r'[\s\-]+', '', search or '')
+        compact_like = f"%{compact}%"
+        where.append("""(
+            UPPER(COALESCE(full_name,'')) LIKE UPPER(?)
+            OR UPPER(REPLACE(REPLACE(COALESCE(passport_number,''), ' ', ''), '-', '')) LIKE UPPER(?)
+            OR UPPER(COALESCE(reference_number,'')) LIKE UPPER(?)
+            OR UPPER(REPLACE(REPLACE(COALESCE(reference_number,''), ' ', ''), '-', '')) LIKE UPPER(?)
+            OR COALESCE(phone,'') LIKE ?
+            OR COALESCE(cnic,'') LIKE ?
+            OR CAST(id AS TEXT) = ?
+        )""")
+        q.extend([s, compact_like, s, compact_like, s, s, search])
     rows = db.execute(f"SELECT * FROM iraq_public_submissions WHERE {' AND '.join(where)} ORDER BY id DESC", q).fetchall()
     db.close()
     return [dict(r) for r in rows]
