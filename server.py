@@ -3980,7 +3980,7 @@ def api_iraq_update_decision(data, user):
     db.close()
     return {'success': True}
 
-def api_iraq_public_export(filter_key, dispatch_id=None):
+def api_iraq_public_export(filter_key, dispatch_id=None, slim=False):
     db = get_db()
     dispatch_join_cols = False
     if filter_key == 'dispatch':
@@ -4028,6 +4028,11 @@ def api_iraq_public_export(filter_key, dispatch_id=None):
     db.close()
     out = io.StringIO()
     wr = csv.writer(out)
+    if slim:
+        wr.writerow(['Reference Number', 'Full Name', 'Passport Number', 'CNIC', 'Status'])
+        for r in rows:
+            wr.writerow([r.get('reference_number', ''), r.get('full_name', ''), r.get('passport_number', ''), r.get('cnic', ''), r.get('status', '')])
+        return out.getvalue()
     base_header = ['ID', 'Reference Number', 'Full Name', 'Passport Number', 'CNIC', 'Nationality', 'Date of Birth',
                    'Gender', 'Phone', 'WhatsApp', 'Email', 'Current City', 'Employer', 'Travel Route',
                    'Travel Purpose', 'Remarks', 'Status', 'Created At', 'Linked Batch ID',
@@ -4594,7 +4599,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     dispatch_id = 0
                 if dispatch_id <= 0:
                     self.send_json({'error': 'filter=dispatch requires dispatch_id'}, 400); return
-            body = api_iraq_public_export(fkey, dispatch_id).encode('utf-8-sig')
+            slim = (user.get('role') == 'iraq_cwa')
+            body = api_iraq_public_export(fkey, dispatch_id, slim=slim).encode('utf-8-sig')
             fname = f'Iraq_Public_{fkey}_{dispatch_id or "all"}_{datetime.now().strftime("%Y%m%d")}.csv'
             self.send_response(200)
             self.send_header('Content-Type', 'text/csv; charset=utf-8')
