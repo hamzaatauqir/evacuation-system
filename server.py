@@ -3584,6 +3584,8 @@ def api_iraq_public_stats():
     rejected = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Rejected'").fetchone()['c']
     batched = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Batched'").fetchone()['c']
     sent_embassy = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Forwarded to Embassy Kuwait'").fetchone()['c']
+    new_pending = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE COALESCE(mofa_kw_portal_visible,0)=0").fetchone()['c']
+    on_portal = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions WHERE COALESCE(mofa_kw_portal_visible,0)=1").fetchone()['c']
     db.close()
     return {
         'total_public_submissions': total,
@@ -3591,7 +3593,9 @@ def api_iraq_public_stats():
         'accepted': accepted,
         'rejected': rejected,
         'batched': batched,
-        'sent_to_embassy': sent_embassy
+        'sent_to_embassy': sent_embassy,
+        'new_pending': new_pending,
+        'on_portal': on_portal
     }
 
 def api_iraq_public_submissions(params):
@@ -6448,25 +6452,75 @@ IRAQ_PUBLIC_FORM_PAGE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kuwait Transit Visa Request Form - Iraq</title>
 <style>
-body{font-family:Arial,sans-serif;background:#f5f7fa;margin:0;padding:16px;color:#1f2937}
-.wrap{max-width:860px;margin:0 auto;background:#fff;border-radius:12px;padding:18px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
-h1{font-size:1.25em;color:#1565c0;margin-bottom:6px}.muted{font-size:.88em;color:#6b7280}
-.warn{background:#fff8e1;border:1px solid #ffd54f;padding:10px;border-radius:8px;font-size:.85em;margin:12px 0}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
-label{font-size:.8em;font-weight:600;color:#4b5563;display:block;margin-bottom:4px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#f0f4f8 0%,#e2e8f0 100%);margin:0;padding:16px;color:#1f2937;min-height:100vh}
+.wrap{max-width:860px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 8px 32px rgba(0,0,0,.08);border:1px solid rgba(0,0,0,.04)}
+.form-hdr{display:flex;align-items:center;gap:14px;margin-bottom:6px;padding-bottom:14px;border-bottom:2px solid #e8f0fe}
+.form-hdr .emblem{width:48px;height:48px;background:linear-gradient(135deg,#01411c,#1565c0);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.5em;color:#fff;font-weight:700;flex-shrink:0}
+h1{font-size:1.25em;color:#0d47a1;margin-bottom:2px;letter-spacing:-.3px}
+.muted{font-size:.85em;color:#6b7280}
+.warn{background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fbbf24;padding:12px 14px;border-radius:10px;font-size:.84em;margin:14px 0;display:flex;align-items:flex-start;gap:8px;line-height:1.5}
+.warn-icon{font-size:1.1em;flex-shrink:0;margin-top:1px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+label{font-size:.8em;font-weight:600;color:#374151;display:block;margin-bottom:5px}
 .ur{display:block;color:#6b7280;font-size:.85em;font-weight:500;margin-top:2px}
-input,select,textarea{width:100%;padding:9px;border:1px solid #d1d5db;border-radius:8px}
-textarea{min-height:76px}.btn{background:#1565c0;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer}
-#ok{display:none;background:#e8f5e9;border:1px solid #81c784;padding:12px;border-radius:8px;margin-top:10px;font-size:.9em;line-height:1.45}
-#ok .ok-title{font-weight:700;color:#1b5e20;margin-bottom:8px}
-#ok .ok-ref{font-size:1.05em;margin:6px 0}
-#ok ul{margin:8px 0 0 18px;padding:0}
-#ok .contact{background:#fff;border-radius:8px;padding:10px;margin-top:10px;border:1px solid #c8e6c9}
+input,select,textarea{width:100%;padding:10px 12px;border:1.5px solid #d1d5db;border-radius:10px;font-size:.9em;transition:border-color .2s,box-shadow .2s;background:#fafbfc}
+input:focus,select:focus,textarea:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12);outline:none;background:#fff}
+textarea{min-height:76px}
+.btn-submit{background:linear-gradient(135deg,#1565c0,#0d47a1);color:#fff;border:none;border-radius:10px;padding:12px 28px;font-weight:700;cursor:pointer;font-size:.95em;transition:transform .15s,box-shadow .2s;box-shadow:0 4px 12px rgba(21,101,192,.25)}
+.btn-submit:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(21,101,192,.35)}
+.btn-submit:active{transform:translateY(0)}
+
+/* ═══ CONFIRMATION OVERLAY ═══ */
+.confirm-overlay{display:none;position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.6);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:16px;animation:fadeOverlay .3s ease}
+.confirm-overlay.show{display:flex}
+@keyframes fadeOverlay{from{opacity:0}to{opacity:1}}
+.confirm-card{background:#fff;border-radius:20px;max-width:560px;width:100%;box-shadow:0 25px 60px rgba(0,0,0,.18);animation:slideUp .4s cubic-bezier(.16,1,.3,1);overflow:hidden;max-height:94vh;overflow-y:auto}
+@keyframes slideUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
+.confirm-top{background:linear-gradient(135deg,#01411c 0%,#166534 60%,#1565c0 100%);padding:32px 28px 28px;text-align:center;color:#fff;position:relative;overflow:hidden}
+.confirm-top::before{content:'';position:absolute;top:-40px;right:-40px;width:120px;height:120px;background:rgba(255,255,255,.06);border-radius:50%}
+.confirm-top::after{content:'';position:absolute;bottom:-20px;left:-20px;width:80px;height:80px;background:rgba(255,255,255,.04);border-radius:50%}
+.checkmark-ring{width:72px;height:72px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;animation:popIn .5s cubic-bezier(.16,1,.3,1) .2s both}
+@keyframes popIn{from{opacity:0;transform:scale(.5)}to{opacity:1;transform:scale(1)}}
+.checkmark-ring svg{width:40px;height:40px}
+.checkmark-ring svg path{stroke-dasharray:48;stroke-dashoffset:48;animation:drawCheck .4s ease .5s forwards}
+@keyframes drawCheck{to{stroke-dashoffset:0}}
+.confirm-top h2{font-size:1.3em;font-weight:700;margin-bottom:4px;letter-spacing:-.2px}
+.confirm-top .sub{font-size:.88em;opacity:.85}
+.ref-badge{display:inline-block;background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.3);border-radius:10px;padding:8px 20px;margin-top:12px;font-size:1.05em;font-weight:700;letter-spacing:.5px;backdrop-filter:blur(4px)}
+.confirm-body{padding:24px 28px 20px}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;margin-bottom:18px}
+.detail-cell{padding:10px 14px;border-bottom:1px solid #f0f0f0;font-size:.86em}
+.detail-cell:nth-child(odd){background:#f8fafc;color:#64748b;font-weight:600}
+.detail-cell:nth-child(even){color:#1e293b;word-break:break-word}
+.detail-grid .detail-cell:nth-last-child(-n+2){border-bottom:none}
+.next-steps{background:linear-gradient(135deg,#eff6ff,#e0f2fe);border:1px solid #93c5fd;border-radius:12px;padding:16px;margin-bottom:16px}
+.next-steps h4{color:#1e40af;font-size:.9em;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.next-steps p{font-size:.84em;color:#334155;line-height:1.55;margin:0}
+.next-steps a{color:#1d4ed8;font-weight:600}
+.contact-bar{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.contact-item{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;text-align:center}
+.contact-item .cl{font-size:.75em;color:#64748b;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+.contact-item .cn{font-size:.82em;color:#0f172a;font-weight:700}
+.contact-item a{color:#0f172a;text-decoration:none}
+.email-note{display:flex;align-items:center;gap:8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:10px 14px;font-size:.82em;color:#166534;margin-bottom:14px}
+.confirm-footer{display:flex;gap:10px;padding:0 28px 24px;flex-wrap:wrap}
+.confirm-footer .btn-cf{flex:1;min-width:120px;padding:11px 16px;border-radius:10px;font-weight:600;font-size:.88em;cursor:pointer;border:none;transition:all .2s}
+.btn-new{background:linear-gradient(135deg,#1565c0,#0d47a1);color:#fff;box-shadow:0 4px 12px rgba(21,101,192,.2)}
+.btn-new:hover{box-shadow:0 6px 18px rgba(21,101,192,.3);transform:translateY(-1px)}
+.btn-print{background:#f1f5f9;color:#475569;border:1px solid #cbd5e1}
+.btn-print:hover{background:#e2e8f0}
+.submitted-ts{text-align:center;font-size:.78em;color:#94a3b8;padding:0 28px 18px}
+@media print{.confirm-overlay{position:static;background:#fff;display:block!important}.confirm-card{box-shadow:none;max-height:none;border-radius:0}.confirm-footer,.btn-print{display:none!important}}
+@media(max-width:520px){.detail-grid{grid-template-columns:1fr}.detail-cell:nth-child(odd){border-bottom:0;padding-bottom:2px}.detail-cell:nth-child(even){padding-top:2px}.contact-bar{grid-template-columns:1fr}}
 </style></head><body>
-<div class="wrap">
-<h1>Kuwait Transit Visa Request Form - Iraq</h1>
-<div class="muted">For applicants in Iraq seeking Kuwait transit visa support.</div>
-<div class="warn">Disclaimer: Submitting this form does not guarantee visa approval. Each case is reviewed by relevant authorities.</div>
+<div class="wrap" id="formWrap">
+<div class="form-hdr">
+<div class="emblem">PK</div>
+<div><h1>Kuwait Transit Visa Request Form &mdash; Iraq</h1>
+<div class="muted">For applicants in Iraq seeking Kuwait transit visa support</div></div>
+</div>
+<div class="warn"><span class="warn-icon">&#9888;</span><span>Disclaimer: Submitting this form does not guarantee visa approval. Each case is reviewed by relevant authorities.</span></div>
 <form id="f">
 <div class="grid">
 <div><label>Full Name * <span class="ur">پورا نام</span></label><input name="full_name" required></div>
@@ -6483,11 +6537,44 @@ textarea{min-height:76px}.btn{background:#1565c0;color:#fff;border:none;border-r
 <div><label>Travel Route / Destination * <span class="ur">سفری راستہ / منزل</span></label><input name="travel_route" required></div>
 <div><label>Travel Purpose * <span class="ur">سفر کا مقصد</span></label><input name="travel_purpose" required></div>
 </div>
-<div style="margin-top:12px"><button class="btn" type="submit">Submit Request</button></div>
+<div style="margin-top:16px;text-align:center"><button class="btn-submit" type="submit">Submit Request / درخواست جمع کرائیں</button></div>
 </form>
-<div id="ok"></div>
 </div>
+
+<!-- ═══ CONFIRMATION OVERLAY (separate window) ═══ -->
+<div class="confirm-overlay" id="confirmOverlay">
+<div class="confirm-card" id="confirmCard">
+<div class="confirm-top">
+<div class="checkmark-ring"><svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+<h2>Request Submitted Successfully</h2>
+<div class="sub">درخواست کامیابی سے جمع ہو گئی</div>
+<div class="ref-badge" id="cfRef"></div>
+</div>
+<div class="confirm-body">
+<div class="detail-grid" id="cfDetails"></div>
+<div class="next-steps">
+<h4>&#10148; Next Steps / اگلے مراحل</h4>
+<p>Please contact <strong>Pakistan Embassy Iraq</strong> for coordination and instructions regarding your application.<br>
+You may be advised to send passport copies or related documents to:<br>
+<a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a></p>
+</div>
+<div class="contact-bar">
+<div class="contact-item"><div class="cl">Head of Chancery</div><div class="cn"><a href="tel:+9647839800899">+964 7839800899</a></div></div>
+<div class="contact-item"><div class="cl">Mr Babar</div><div class="cn"><a href="tel:+9647854000">+964 7854000</a></div></div>
+</div>
+<div class="email-note">&#9993; A confirmation email has been queued to your address. Please save your reference number.</div>
+</div>
+<div class="submitted-ts" id="cfTime"></div>
+<div class="confirm-footer">
+<button class="btn-cf btn-print" onclick="window.print()">&#128424; Print / پرنٹ</button>
+<button class="btn-cf btn-new" onclick="closeConfirmation()">&#10133; Submit Another Request</button>
+</div>
+</div>
+</div>
+
 <script>
+function esc(s){return s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function closeConfirmation(){document.getElementById('confirmOverlay').classList.remove('show');document.getElementById('formWrap').style.display=''}
 document.getElementById('f').addEventListener('submit',async(e)=>{
 e.preventDefault();
 const fd=new FormData(e.target),d={};fd.forEach((v,k)=>d[k]=v);
@@ -6498,24 +6585,19 @@ const r=await fetch('/api/iraq-public-submit',{method:'POST',headers:{'Content-T
 const j=await r.json();
 if(j.success){
 const ref=j.reference_number||'';
-const em=(d.email||'').replace(/</g,'&lt;');
-document.getElementById('ok').style.display='block';
-document.getElementById('ok').innerHTML=
-'<div class="ok-title">Request submitted successfully</div>'+
-'<div class="ok-ref">Tracking / reference: <strong>'+ref+'</strong></div>'+
-'<p style="margin:8px 0 0 0"><strong>Your details on record:</strong><br>'+
-'Name: '+(d.full_name||'').replace(/</g,'&lt;')+'<br>'+
-'Passport: '+(d.passport_number||'').replace(/</g,'&lt;')+'<br>'+
-'Email: '+em+'</p>'+
-'<p style="margin:10px 0 0 0"><strong>Next steps:</strong> Please contact <strong>Pakistan Embassy Iraq</strong> for coordination and instructions regarding your application.</p>'+
-'<p style="margin:8px 0 0 0">You may be advised to send passport copies or related documents to:<br>'+
-'<a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a></p>'+
-'<div class="contact"><strong>Pakistan Embassy Iraq — contacts</strong><ul style="margin-top:6px">'+
-'<li>Head of Chancery: <strong>+964 7839800899</strong></li>'+
-'<li>Mr Babar: <strong>+964 7854000</strong></li></ul></div>'+
-'<p style="margin:10px 0 0 0;font-size:.85em;color:#2e7d32">A confirmation email has been queued to your address (if email is enabled on the server). Save your reference number.</p>'+
-'<p style="margin:6px 0 0 0;font-size:.82em;color:#666">Submitted: '+j.submitted_at+'</p>';
+document.getElementById('cfRef').textContent=ref;
+document.getElementById('cfDetails').innerHTML=
+'<div class="detail-cell">Full Name</div><div class="detail-cell">'+esc(d.full_name)+'</div>'+
+'<div class="detail-cell">Passport</div><div class="detail-cell">'+esc(d.passport_number)+'</div>'+
+'<div class="detail-cell">CNIC</div><div class="detail-cell">'+esc(d.cnic)+'</div>'+
+'<div class="detail-cell">Email</div><div class="detail-cell">'+esc(d.email)+'</div>'+
+'<div class="detail-cell">Phone</div><div class="detail-cell">'+esc(d.phone)+'</div>'+
+'<div class="detail-cell">City (Iraq)</div><div class="detail-cell">'+esc(d.current_city)+'</div>';
+document.getElementById('cfTime').textContent='Submitted: '+(j.submitted_at||new Date().toLocaleString());
+document.getElementById('formWrap').style.display='none';
+document.getElementById('confirmOverlay').classList.add('show');
 e.target.reset();
+window.scrollTo({top:0,behavior:'smooth'});
 }else{
 const msg=j.error||'Submission failed';
 if(j.duplicate)alert(msg+'\n\nNo new record was created. If this is a mistake, contact CWA Baghdad / Embassy.');
@@ -6554,7 +6636,16 @@ input,select{padding:8px;border:1px solid #d0d7de;border-radius:6px}
 <div class="k" id="k"></div>
 <div class="sec">
 <div class="row"><input id="q" placeholder="Search name/passport/reference"><select id="st"><option value="">All</option><option>Submitted</option><option>Under Review</option><option>Accepted</option><option>Rejected</option><option>Duplicate</option><option>Batched</option><option>Forwarded to Embassy Kuwait</option></select><button class="btn p" onclick="loadSubs()">Load</button><button class="btn" onclick="exportCsv('all')">Export all</button><button class="btn" onclick="exportCsv('accepted')">Export accepted</button><button class="btn" onclick="exportCsv('rejected')">Export rejected</button></div>
-<table id="t"></table>
+</div>
+<div class="sec" style="border-left:4px solid #e65100">
+<h3 style="margin:0 0 6px;color:#e65100;display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:#fff3e0;border-radius:50%;font-size:.85em">&#9993;</span> New &amp; Pending on Portal <span id="newCount" style="font-size:.75em;font-weight:400;color:#777;margin-left:4px"></span></h3>
+<p style="font-size:.82em;color:#888;margin:0 0 10px">These submissions have <strong>NOT yet been sent</strong> to the Kuwait Citizen Support main portal.</p>
+<div style="max-height:420px;overflow-y:auto"><table id="tNew"></table></div>
+</div>
+<div class="sec" style="border-left:4px solid #2e7d32">
+<h3 style="margin:0 0 6px;color:#2e7d32;display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:#e8f5e9;border-radius:50%;font-size:.85em">&#10003;</span> Sent to Main Portal (Citizen Support KW) <span id="sentCount" style="font-size:.75em;font-weight:400;color:#777;margin-left:4px"></span></h3>
+<p style="font-size:.82em;color:#888;margin:0 0 10px">These submissions are <strong>visible to admin/operator</strong> on the Kuwait Citizen Support dashboard.</p>
+<div style="max-height:500px;overflow-y:auto"><table id="tSent"></table></div>
 </div>
 <div class="sec">
 <h3>Create Iraq Official Batch</h3>
@@ -6641,6 +6732,8 @@ const pub=location.origin+'/iraq-public-form';document.getElementById('pubUrl').
 function copyLink(){navigator.clipboard.writeText(pub);alert('Copied')}
 async function loadStats(){const r=await fetch('/api/iraq-public-stats');const d=await r.json();document.getElementById('k').innerHTML=`
 <div class="card"><div class="lb">Total Public Submissions</div><div class="vl">${d.total_public_submissions||0}</div></div>
+<div class="card" style="border-left:4px solid #e65100"><div class="lb">New / Not on Portal</div><div class="vl" style="color:#e65100">${d.new_pending||0}</div></div>
+<div class="card" style="border-left:4px solid #2e7d32"><div class="lb">Sent to Main Portal</div><div class="vl" style="color:#2e7d32">${d.on_portal||0}</div></div>
 <div class="card"><div class="lb">Under Review</div><div class="vl">${d.under_review||0}</div></div>
 <div class="card"><div class="lb">Accepted</div><div class="vl">${d.accepted||0}</div></div>
 <div class="card"><div class="lb">Rejected</div><div class="vl">${d.rejected||0}</div></div>
@@ -6658,10 +6751,19 @@ const needle=q.toLowerCase().replace(/[\s\-]+/g,'');
 const hit=v=>String(v==null?'':v).toLowerCase().replace(/[\s\-]+/g,'').includes(needle);
 rows=rows.filter(x=>hit(x.full_name)||hit(x.passport_number)||hit(x.reference_number)||String(x.id||'')===q);
 }
-let h='<tr><th></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>City</th><th>KW portal</th><th>Status</th><th>Actions</th></tr>';
-rows.forEach(x=>{h+=`<tr><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td>${x.mofa_kw_portal_visible?'Y':'—'}</td><td>${x.status||''}</td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td></tr>`});
-if(rows.length===0)h+='<tr><td colspan="9" style="text-align:center;color:#666">No records found</td></tr>';
-document.getElementById('t').innerHTML=h;
+const newRows=rows.filter(x=>!x.mofa_kw_portal_visible);
+const sentRows=rows.filter(x=>x.mofa_kw_portal_visible);
+const hdr='<tr><th></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>City</th><th>Status</th><th>Actions</th></tr>';
+let hNew=hdr;
+newRows.forEach(x=>{hNew+=`<tr style="background:#fffbeb"><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td><span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:.75em;font-weight:600;background:#fff9c4;color:#f57f17">${x.status||''}</span></td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td></tr>`});
+if(newRows.length===0)hNew+='<tr><td colspan="8" style="text-align:center;color:#999;padding:18px">No new / pending records</td></tr>';
+document.getElementById('tNew').innerHTML=hNew;
+document.getElementById('newCount').textContent='('+newRows.length+')';
+let hSent=hdr.replace('</tr>','<th>Portal</th></tr>');
+sentRows.forEach(x=>{hSent+=`<tr><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td>${x.status||''}</td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td><td><span style="color:#2e7d32;font-weight:600;font-size:.8em">&#10003; Sent</span></td></tr>`});
+if(sentRows.length===0)hSent+='<tr><td colspan="9" style="text-align:center;color:#999;padding:18px">No records sent to main portal yet</td></tr>';
+document.getElementById('tSent').innerHTML=hSent;
+document.getElementById('sentCount').textContent='('+sentRows.length+')';
 }
 async function mkBatch(){const ids=[...document.querySelectorAll('.sel:checked')].map(x=>parseInt(x.value));if(!ids.length){alert('Select accepted rows');return}
 const payload={submission_ids:ids,letter_number:document.getElementById('ln').value,letter_date:document.getElementById('ld').value,remarks:document.getElementById('lr').value};
@@ -7408,7 +7510,16 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <button class="btn btn-p" type="button" onclick="loadIraqPublicPortal()">Refresh</button>
 </div>
 <div class="rc" id="ippCount"></div>
-<div class="scroll-t"><table id="ippTbl"></table></div>
+<div class="tc" style="border-left:4px solid #e65100;margin-bottom:14px">
+<h4 style="margin:0 0 8px;color:#e65100;display:flex;align-items:center;gap:8px;font-size:.95em"><span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:#fff3e0;border-radius:50%;font-size:.8em">&#9888;</span> New Registrations &mdash; Pending NV Dispatch <span id="ippNewCount" style="font-size:.78em;font-weight:400;color:var(--tl);margin-left:4px"></span></h4>
+<p style="font-size:.78em;color:var(--tl);margin:0 0 8px">These applicants have <strong>not yet been included</strong> in any Note Verbale dispatch to MOFA Kuwait.</p>
+<div class="scroll-t" style="max-height:400px"><table id="ippTblNew"></table></div>
+</div>
+<div class="tc" style="border-left:4px solid #2e7d32">
+<h4 style="margin:0 0 8px;color:#2e7d32;display:flex;align-items:center;gap:8px;font-size:.95em"><span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:#e8f5e9;border-radius:50%;font-size:.8em">&#10003;</span> Dispatched / Processed <span id="ippSentCount" style="font-size:.78em;font-weight:400;color:var(--tl);margin-left:4px"></span></h4>
+<p style="font-size:.78em;color:var(--tl);margin:0 0 8px">These applicants are already <strong>included in a Note Verbale dispatch</strong> sent or queued for MOFA Kuwait.</p>
+<div class="scroll-t" style="max-height:400px"><table id="ippTblSent"></table></div>
+</div>
 </div></div>
 <div class="mo" id="ippMo" onclick="if(event.target===this)closeIpp()"><div class="ml" onclick="event.stopPropagation()" style="max-width:720px">
 <button type="button" class="cb" onclick="closeIpp()">&times;</button>
@@ -8977,15 +9088,26 @@ document.getElementById('ippKpi').innerHTML='<div class="kc i"><div class="lb">O
 }
 if(!document.getElementById('ippSentDate').value)document.getElementById('ippSentDate').value=today;
 document.getElementById('ippCount').textContent=d.length+' record(s) in current filter';
-let h='<tr><th style="width:36px"><input type="checkbox" title="Select all eligible" onchange="ippToggleAll(this.checked)"></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>NV</th><th>Submitted</th><th>Portal sent</th><th></th></tr>';
-d.forEach(x=>{
-const hasNv=x.has_nv_dispatch;
-const dis=hasNv?'Y':'\u2014';
-const cbDis=hasNv?' disabled title="Already in a dispatch"':'';
+const newRows=d.filter(x=>!x.has_nv_dispatch);
+const sentRows=d.filter(x=>x.has_nv_dispatch);
+const hdr='<tr><th style="width:36px"><input type="checkbox" title="Select all eligible" onchange="ippToggleAll(this.checked)"></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>Submitted</th><th>Portal sent</th><th></th></tr>';
+let hNew=hdr;
+newRows.forEach(x=>{
 const kw=ippNormKw(x.kw_transit_visa_status);
-h+='<tr><td><input type="checkbox" class="ipp-sel" value="'+x.id+'"'+cbDis+'></td><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td>'+dis+'</td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td>'+((x.mofa_kw_portal_sent_at||'').slice(0,19)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
+hNew+='<tr style="background:#fffbeb"><td><input type="checkbox" class="ipp-sel" value="'+x.id+'"></td><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td>'+((x.mofa_kw_portal_sent_at||'').slice(0,19)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
 });
-document.getElementById('ippTbl').innerHTML=h;
+if(newRows.length===0)hNew+='<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--tl)">No pending NV dispatch records</td></tr>';
+document.getElementById('ippTblNew').innerHTML=hNew;
+document.getElementById('ippNewCount').textContent='('+newRows.length+')';
+const hdrS='<tr><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>NV</th><th>Submitted</th><th></th></tr>';
+let hSent=hdrS;
+sentRows.forEach(x=>{
+const kw=ippNormKw(x.kw_transit_visa_status);
+hSent+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td><span style="color:#2e7d32;font-weight:600;font-size:.78em">&#10003; Dispatched</span></td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
+});
+if(sentRows.length===0)hSent+='<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--tl)">No dispatched records yet</td></tr>';
+document.getElementById('ippTblSent').innerHTML=hSent;
+document.getElementById('ippSentCount').textContent='('+sentRows.length+')';
 }
 async function ippView(id){
 const r=await fetch('/api/iraq-public-submission?id='+encodeURIComponent(id));const j=await r.json();
