@@ -1017,7 +1017,7 @@ def _recipient_salutation(name):
 
 # Iraq public confirmation emails — static contact lines (also shown on web after submit)
 IRAQ_PUBLIC_EMAIL_PASSPORT_ADDR = 'parepkuwaitcwa37@gmail.com'
-IRAQ_PUBLIC_EMAIL_HOC_PHONE = '03028578078'
+IRAQ_PUBLIC_EMAIL_HOC_PHONE = '+964 7839800899'
 IRAQ_PUBLIC_EMAIL_BABAR_PHONE = '+964 7854000'
 
 DEFAULT_EMAIL_TEMPLATES = {
@@ -1916,8 +1916,14 @@ def api_save_record(data, user):
         LOCKED_FIELDS = {'name','passport','cnic','gender','country','civil_id',
                          'dob','border_crossing','destination_country'}
         if old_rec.get('record_locked') == 1 or old_rec.get('record_locked') == '1':
+            # Keep comparisons stable for normalized fields (e.g. border crossing),
+            # so locked saves don't fail when a UI submits the same value.
+            old_rec['border_crossing'] = normalize_border(old_rec.get('border_crossing'))
             # Only check fields actually being submitted, not all fields
-            changed_locked = [f for f in LOCKED_FIELDS if f in data and str(data.get(f, '')) != str(old_rec.get(f, ''))]
+            changed_locked = [
+                f for f in LOCKED_FIELDS
+                if f in data and str(data.get(f, '') or '') != str(old_rec.get(f, '') or '')
+            ]
             if changed_locked:
                 db.close()
                 return {'success': False, 'error': f'Record is locked (sent to MOFA KSA). Cannot edit: {", ".join(changed_locked)}'}
@@ -4105,6 +4111,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         date_of_request, created_at,
                         COALESCE(effective_route,'kw_to_pk') as effective_route,
                         COALESCE(route_mismatch,0) as route_mismatch,
+                        COALESCE(location_review_flag,0) as location_review_flag,
+                        COALESCE(ip_location_status,'') as ip_location_status,
                         COALESCE(review_status,'') as review_status
                         FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
             else:
@@ -4115,6 +4123,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     date_of_request, created_at,
                     COALESCE(effective_route,'kw_to_pk') as effective_route,
                     COALESCE(route_mismatch,0) as route_mismatch,
+                    COALESCE(location_review_flag,0) as location_review_flag,
+                    COALESCE(ip_location_status,'') as ip_location_status,
                     COALESCE(review_status,'') as review_status
                     FROM evacuees WHERE UPPER(TRIM(passport)) = ?""", [passport]).fetchone()
             db.close()
@@ -4133,8 +4143,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
                 # Check if record is held for route review (pending/under_review/needs_followup)
                 review_held = r.get('review_status', '') in ('pending', 'under_review', 'needs_followup')
+                # Only show "on hold" when there is a real inconsistency signal.
+                inconsistency_found = (
+                    r.get('route_mismatch', 0) == 1
+                    or r.get('location_review_flag', 0) == 1
+                    or r.get('ip_location_status', '') == 'needs_review'
+                )
 
-                if review_held and r['visa_status'] != 'Approved' and r['mofa_status'] != 'Sent to MOFA':
+                if review_held and inconsistency_found and r['visa_status'] != 'Approved' and r['mofa_status'] != 'Sent to MOFA':
                     status_info['status'] = 'ROUTE_HOLD'
                     status_info['status_detail'] = 'Your application has been flagged due to a travel route clarity issue. Please contact Mr. Awais immediately at +965 55977292 to confirm your correct travel route. Your application cannot be processed further until this is resolved.'
                     status_info['action_required'] = True
@@ -6479,7 +6495,7 @@ document.getElementById('ok').innerHTML=
 '<p style="margin:8px 0 0 0">You may be advised to send passport copies or related documents to:<br>'+
 '<a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a></p>'+
 '<div class="contact"><strong>Pakistan Embassy Iraq — contacts</strong><ul style="margin-top:6px">'+
-'<li>Head of Chancery: <strong>03028578078</strong></li>'+
+'<li>Head of Chancery: <strong>+964 7839800899</strong></li>'+
 '<li>Mr Babar: <strong>+964 7854000</strong></li></ul></div>'+
 '<p style="margin:10px 0 0 0;font-size:.85em;color:#2e7d32">A confirmation email has been queued to your address (if email is enabled on the server). Save your reference number.</p>'+
 '<p style="margin:6px 0 0 0;font-size:.82em;color:#666">Submitted: '+j.submitted_at+'</p>';
