@@ -7921,6 +7921,9 @@ let viewRec=null;
 function openView(id){
 viewRec=allRecords.find(x=>x.id===id);
 if(!viewRec){toast('Record not found');return}
+viewEditMode=false;
+document.getElementById('viewEditBtn').style.display='';
+document.getElementById('viewSaveBtn').style.display='none';
 const r=viewRec;
 document.getElementById('viewId').textContent='#'+r.id;
 document.getElementById('viewTracking').textContent='PKE-'+String(r.id).padStart(4,'0');
@@ -8017,7 +8020,12 @@ document.getElementById('viewBody').innerHTML=html;
 document.getElementById('viewModal').classList.add('show');
 }
 let viewEditMode=false;
-function closeView(){document.getElementById('viewModal').classList.remove('show');viewEditMode=false}
+function closeView(){
+document.getElementById('viewModal').classList.remove('show');
+viewEditMode=false;
+document.getElementById('viewEditBtn').style.display='';
+document.getElementById('viewSaveBtn').style.display='none';
+}
 function viewToggleEdit(){
 if(!viewRec)return;
 viewEditMode=true;
