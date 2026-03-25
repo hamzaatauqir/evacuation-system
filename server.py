@@ -6641,10 +6641,22 @@ async function loadStats(){const r=await fetch('/api/iraq-public-stats');const d
 <div class="card"><div class="lb">Batched</div><div class="vl">${d.batched||0}</div></div>
 <div class="card"><div class="lb">Sent to Embassy Kuwait</div><div class="vl">${d.sent_to_embassy||0}</div></div>`}
 async function setStatus(id,status){const r=await fetch('/api/iraq-public-update-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,status})});const d=await r.json();if(!d.success)alert(d.error||'failed');loadSubs();loadStats();}
-async function loadSubs(){const q=document.getElementById('q').value.trim(),st=document.getElementById('st').value;let u='/api/iraq-public-submissions?';if(q)u+='search='+encodeURIComponent(q)+'&';if(st)u+='status='+encodeURIComponent(st);const r=await fetch(u);const d=await r.json();
+async function loadSubs(){
+const q=(document.getElementById('q').value||'').trim(),st=document.getElementById('st').value;
+let u='/api/iraq-public-submissions?';if(q)u+='search='+encodeURIComponent(q)+'&';if(st)u+='status='+encodeURIComponent(st);
+let d=[];
+try{const r=await fetch(u);d=await r.json();}catch(_){d=[]}
+let rows=Array.isArray(d)?d:[];
+if(q){
+const needle=q.toLowerCase().replace(/[\s\-]+/g,'');
+const hit=v=>String(v==null?'':v).toLowerCase().replace(/[\s\-]+/g,'').includes(needle);
+rows=rows.filter(x=>hit(x.full_name)||hit(x.passport_number)||hit(x.reference_number)||String(x.id||'')===q);
+}
 let h='<tr><th></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>City</th><th>KW portal</th><th>Status</th><th>Actions</th></tr>';
-d.forEach(x=>{h+=`<tr><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td>${x.mofa_kw_portal_visible?'Y':'—'}</td><td>${x.status||''}</td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td></tr>`});
-document.getElementById('t').innerHTML=h;}
+rows.forEach(x=>{h+=`<tr><td><input type="checkbox" class="sel" value="${x.id}" ${x.status==='Accepted'?'':'disabled'}></td><td>${x.id}</td><td>${x.reference_number||'-'}</td><td>${x.full_name||''}</td><td>${x.passport_number||''}</td><td>${x.current_city||''}</td><td>${x.mofa_kw_portal_visible?'Y':'—'}</td><td>${x.status||''}</td><td><button class="btn p" type="button" onclick="viewIraqPub(${x.id})">View</button> <button class="btn" type="button" onclick="setStatus(${x.id},'Under Review')">Review</button><button class="btn" type="button" onclick="setStatus(${x.id},'Accepted')">Accept</button><button class="btn" type="button" onclick="setStatus(${x.id},'Rejected')">Reject</button><button class="btn" type="button" onclick="setStatus(${x.id},'Duplicate')">Duplicate</button></td></tr>`});
+if(rows.length===0)h+='<tr><td colspan="9" style="text-align:center;color:#666">No records found</td></tr>';
+document.getElementById('t').innerHTML=h;
+}
 async function mkBatch(){const ids=[...document.querySelectorAll('.sel:checked')].map(x=>parseInt(x.value));if(!ids.length){alert('Select accepted rows');return}
 const payload={submission_ids:ids,letter_number:document.getElementById('ln').value,letter_date:document.getElementById('ld').value,remarks:document.getElementById('lr').value};
 const r=await fetch('/api/iraq-public-batch-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!d.success){alert(d.error||'failed');return}alert('Batch #'+d.batch_id+' created');loadSubs();loadBatches();loadStats();}
@@ -6652,6 +6664,7 @@ async function sendEmbassy(id){const r=await fetch('/api/iraq-public-batch-forwa
 async function loadBatches(){const r=await fetch('/api/iraq-public-batches');const d=await r.json();let h='<tr><th>Batch</th><th>Letter#</th><th>Date</th><th>Applicants</th><th>Status</th><th>Action</th></tr>';d.forEach(b=>{h+=`<tr><td>${b.id}</td><td>${b.letter_number||''}</td><td>${b.letter_date||''}</td><td>${b.applicant_count||0}</td><td>${b.status||''}</td><td>${b.status==='Sent to Embassy Kuwait'?'Sent':'<button class="btn p" onclick="sendEmbassy('+b.id+')">Send to Embassy Kuwait</button>'}</td></tr>`});document.getElementById('b').innerHTML=h;}
 function exportCsv(f){window.location='/api/iraq-public-export?filter='+encodeURIComponent(f)}
 loadStats();loadSubs();loadBatches();
+document.getElementById('q').addEventListener('keydown',function(e){if(e.key==='Enter')loadSubs()});
 </script></body></html>"""
 
 IRAQ_EMBASSY_ADMIN_PAGE = r"""<!DOCTYPE html>
