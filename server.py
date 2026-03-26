@@ -9,7 +9,7 @@ Default login: admin / embassy2026
 
 import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading, base64, smtplib, ssl, urllib.request, urllib.error
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qs, urlparse, urlencode
+from urllib.parse import parse_qs, urlparse, urlencode, unquote
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
@@ -28,9 +28,22 @@ else:
 SESSIONS = {}  # token -> {user, role, expires}
 
 # OneDrive secondary backup (Microsoft Graph). Set on Render: ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_REFRESH_TOKEN
-ONEDRIVE_CLIENT_ID = os.environ.get('ONEDRIVE_CLIENT_ID', '').strip()
-ONEDRIVE_CLIENT_SECRET = os.environ.get('ONEDRIVE_CLIENT_SECRET', '').strip()
-ONEDRIVE_REFRESH_TOKEN = os.environ.get('ONEDRIVE_REFRESH_TOKEN', '').strip()
+
+
+def _onedrive_env_clean(value):
+    """Strip whitespace, accidental line breaks, and wrapping quotes from pasted env values."""
+    if not value:
+        return ''
+    s = str(value).strip().replace('\r', '').replace('\n', '')
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in '"\'':
+        s = s[1:-1].strip()
+    return s
+
+
+# OneDrive secondary backup (Microsoft Graph). Set on Render: ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_REFRESH_TOKEN
+ONEDRIVE_CLIENT_ID = _onedrive_env_clean(os.environ.get('ONEDRIVE_CLIENT_ID', ''))
+ONEDRIVE_CLIENT_SECRET = _onedrive_env_clean(os.environ.get('ONEDRIVE_CLIENT_SECRET', ''))
+ONEDRIVE_REFRESH_TOKEN = unquote(_onedrive_env_clean(os.environ.get('ONEDRIVE_REFRESH_TOKEN', '')))
 ONEDRIVE_TENANT = os.environ.get('ONEDRIVE_TENANT', 'consumers').strip() or 'consumers'
 ONEDRIVE_FOLDER = os.environ.get('ONEDRIVE_FOLDER', 'EmbassyBackups').strip() or 'EmbassyBackups'
 _onedrive_refresh_runtime = ONEDRIVE_REFRESH_TOKEN  # updated in-process if Microsoft returns a new refresh_token
@@ -4135,6 +4148,223 @@ def api_iraq_public_export(filter_key, dispatch_id=None, slim=False):
     return out.getvalue()
 
 # ═══════════════════════════════════════════════════════════════
+# PRINTABLE POSTER / QR CODE PAGE
+# ═══════════════════════════════════════════════════════════════
+def generate_poster_page(base_url):
+    """Generate a beautiful A4 printable poster with QR codes for public use."""
+    reg_url = f"{base_url}/embassy-registration"
+    track_url = f"{base_url}/track-application"
+    travel_url = f"{base_url}/travel-interest"
+    iraq_url = f"{base_url}/iraq-public-form"
+    # Use Google Charts QR API (no dependency needed)
+    def qr(url, size=220):
+        from urllib.parse import quote
+        return f"https://api.qrserver.com/v1/create-qr-code/?size={size}x{size}&data={quote(url)}&format=svg&margin=4"
+    return f'''<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pakistan Embassy Kuwait — Scan to Register / Track</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu&family=Playfair+Display:wght@700;900&family=Source+Sans+3:wght@400;600;700;900&display=swap');
+*{{margin:0;padding:0;box-sizing:border-box}}
+@page{{size:A4 portrait;margin:0}}
+@media print{{
+  body{{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
+  .no-print{{display:none!important}}
+  .poster{{box-shadow:none!important;border-radius:0!important}}
+}}
+body{{
+  font-family:'Source Sans 3',sans-serif;
+  background:#e8e8e8;
+  display:flex;flex-direction:column;align-items:center;
+  padding:20px;
+  min-height:100vh;
+}}
+.no-print{{
+  margin-bottom:20px;
+  display:flex;gap:12px;flex-wrap:wrap;justify-content:center;
+}}
+.no-print button{{
+  padding:14px 32px;
+  font-size:1.05em;font-weight:700;
+  border:none;border-radius:10px;cursor:pointer;
+  transition:.2s;
+}}
+.btn-print{{background:#006600;color:#fff}}
+.btn-print:hover{{background:#004d00}}
+.btn-back{{background:#1565c0;color:#fff}}
+.btn-back:hover{{background:#0d47a1}}
+.poster{{
+  width:210mm;min-height:297mm;
+  background:#fff;
+  box-shadow:0 8px 40px rgba(0,0,0,.15);
+  border-radius:8px;
+  overflow:hidden;
+  position:relative;
+}}
+/* Green header bar */
+.p-header{{
+  background:linear-gradient(135deg,#006600 0%,#004d00 100%);
+  color:#fff;padding:28px 30px 22px;
+  text-align:center;position:relative;
+  overflow:hidden;
+}}
+.p-header::after{{
+  content:'';position:absolute;top:0;left:0;right:0;bottom:0;
+  background:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.04'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  opacity:.5;
+}}
+.p-header *{{position:relative;z-index:1}}
+.p-header h1{{
+  font-family:'Playfair Display',serif;
+  font-size:2.1em;font-weight:900;
+  letter-spacing:1px;margin-bottom:4px;
+  text-shadow:0 2px 8px rgba(0,0,0,.3);
+}}
+.p-header .sub{{font-size:1.05em;opacity:.92;font-weight:600;letter-spacing:.5px}}
+.p-header .urdu{{
+  font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;
+  font-size:1.3em;margin-top:6px;direction:rtl;opacity:.88;
+}}
+/* Blue accent bar */
+.p-blue-bar{{
+  background:linear-gradient(135deg,#1565c0,#0d47a1);
+  color:#fff;text-align:center;padding:12px 20px;
+  font-size:1em;font-weight:700;letter-spacing:.5px;
+}}
+/* Main content */
+.p-body{{padding:24px 30px 20px;}}
+.p-intro{{
+  text-align:center;font-size:1.05em;color:#333;
+  line-height:1.6;margin-bottom:22px;
+  border-bottom:2px solid #e0e0e0;padding-bottom:18px;
+}}
+.p-intro strong{{color:#006600}}
+/* QR grid */
+.qr-grid{{
+  display:grid;grid-template-columns:1fr 1fr;
+  gap:20px;margin-bottom:20px;
+}}
+.qr-card{{
+  border:2.5px solid;border-radius:16px;
+  padding:18px 14px;text-align:center;
+  position:relative;overflow:hidden;
+  transition:.2s;
+}}
+.qr-card.green{{border-color:#006600;background:linear-gradient(180deg,#f1f8e9 0%,#fff 100%)}}
+.qr-card.blue{{border-color:#1565c0;background:linear-gradient(180deg,#e3f2fd 0%,#fff 100%)}}
+.qr-card.orange{{border-color:#e65100;background:linear-gradient(180deg,#fff3e0 0%,#fff 100%)}}
+.qr-card.purple{{border-color:#6a1b9a;background:linear-gradient(180deg,#f3e5f5 0%,#fff 100%)}}
+.qr-card .badge{{
+  display:inline-block;
+  padding:4px 16px;border-radius:20px;
+  font-size:.78em;font-weight:700;color:#fff;
+  margin-bottom:10px;letter-spacing:.5px;
+}}
+.qr-card.green .badge{{background:#006600}}
+.qr-card.blue .badge{{background:#1565c0}}
+.qr-card.orange .badge{{background:#e65100}}
+.qr-card.purple .badge{{background:#6a1b9a}}
+.qr-card h3{{
+  font-family:'Playfair Display',serif;
+  font-size:1.15em;font-weight:700;
+  margin-bottom:4px;color:#212121;
+}}
+.qr-card .qr-urdu{{
+  font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif;
+  direction:rtl;font-size:.92em;color:#555;
+  margin-bottom:10px;
+}}
+.qr-card img{{
+  width:160px;height:160px;
+  border:3px solid #eee;border-radius:12px;
+  background:#fff;padding:4px;
+}}
+.qr-card .url{{
+  font-size:.72em;color:#888;word-break:break-all;
+  margin-top:6px;font-family:monospace;
+}}
+/* Footer */
+.p-footer{{
+  background:#f5f5f5;border-top:2px solid #e0e0e0;
+  padding:16px 30px;text-align:center;
+}}
+.p-footer .contacts{{
+  display:flex;justify-content:center;gap:30px;flex-wrap:wrap;
+  margin-bottom:10px;
+}}
+.p-footer .contact-item{{
+  font-size:.88em;color:#333;font-weight:600;
+}}
+.p-footer .contact-item span{{color:#006600}}
+.p-footer .note{{font-size:.78em;color:#888;line-height:1.5}}
+.p-footer .official{{
+  margin-top:8px;padding-top:8px;border-top:1px solid #ddd;
+  font-size:.75em;color:#aaa;
+}}
+</style></head><body>
+<div class="no-print">
+  <button class="btn-print" onclick="window.print()">🖨️ Print This Poster</button>
+  <button class="btn-back" onclick="history.back()">← Back to Dashboard</button>
+</div>
+<div class="poster">
+  <div class="p-header">
+    <h1>🇵🇰 PAKISTAN EMBASSY KUWAIT</h1>
+    <div class="sub">Community Welfare Wing (CWA Kuwait) — Citizen Support Services</div>
+    <div class="urdu">سفارتخانہ پاکستان کویت — شہریوں کی خدمات</div>
+  </div>
+  <div class="p-blue-bar">
+    📱 SCAN QR CODE WITH YOUR PHONE CAMERA — فون کیمرے سے QR کوڈ اسکین کریں
+  </div>
+  <div class="p-body">
+    <div class="p-intro">
+      <strong>Pakistani nationals in Kuwait</strong> can use the services below by scanning the QR code with their phone camera. Registration and tracking is available 24/7 online.
+    </div>
+    <div class="qr-grid">
+      <div class="qr-card green">
+        <div class="badge">REGISTER — رجسٹریشن</div>
+        <h3>Saudi Transit Visa Registration</h3>
+        <div class="qr-urdu">سعودی ٹرانزٹ ویزا رجسٹریشن</div>
+        <img src="{qr(reg_url)}" alt="QR: Registration">
+        <div class="url">{reg_url}</div>
+      </div>
+      <div class="qr-card blue">
+        <div class="badge">TRACK — ٹریک کریں</div>
+        <h3>Track Your Application</h3>
+        <div class="qr-urdu">اپنی درخواست کی صورتحال دیکھیں</div>
+        <img src="{qr(track_url)}" alt="QR: Track Application">
+        <div class="url">{track_url}</div>
+      </div>
+      <div class="qr-card orange">
+        <div class="badge">RETURN TO KUWAIT — واپسی</div>
+        <h3>Pakistan → Kuwait Travel Interest</h3>
+        <div class="qr-urdu">پاکستان سے کویت واپسی رجسٹریشن</div>
+        <img src="{qr(travel_url)}" alt="QR: Travel Interest">
+        <div class="url">{travel_url}</div>
+      </div>
+      <div class="qr-card purple">
+        <div class="badge">IRAQ MISSION — عراق مشن</div>
+        <h3>Iraq Transit Visa Request</h3>
+        <div class="qr-urdu">عراق ٹرانزٹ ویزا درخواست</div>
+        <img src="{qr(iraq_url)}" alt="QR: Iraq Public Form">
+        <div class="url">{iraq_url}</div>
+      </div>
+    </div>
+  </div>
+  <div class="p-footer">
+    <div class="contacts">
+      <div class="contact-item">📞 <span>Mr. Awais:</span> +965‑55977292</div>
+      <div class="contact-item">📞 <span>Embassy:</span> +965‑22521079</div>
+    </div>
+    <div class="note">
+      Keep this poster displayed in a visible location. Citizens can scan any QR code above using their phone camera to access the service directly. No app download required.<br>
+      <span dir="rtl" style="font-family:'Noto Nastaliq Urdu',Tahoma,sans-serif">اس پوسٹر کو نمایاں جگہ پر رکھیں۔ شہری اپنے فون کے کیمرے سے اسکین کر کے براہ راست خدمات تک رسائی حاصل کر سکتے ہیں۔</span>
+    </div>
+    <div class="official">Embassy of Pakistan, Kuwait — Citizen Support for Transit KSA System — {base_url}</div>
+  </div>
+</div>
+</body></html>'''
+
+# ═══════════════════════════════════════════════════════════════
 # HTTP SERVER
 # ═══════════════════════════════════════════════════════════════
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -4300,6 +4530,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_html(REGISTER_SUCCESS_PAGE)
         elif path == '/iraq-public-form':
             self.send_html(IRAQ_PUBLIC_FORM_PAGE)
+        elif path == '/poster':
+            # Printable poster with QR codes — public, no login needed
+            host = self.headers.get('Host', 'localhost:8080')
+            scheme = 'https' if 'onrender.com' in host or 'Railway' in host else 'http'
+            base = f'{scheme}://{host}'
+            self.send_html(generate_poster_page(base))
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
         elif path == '/':
@@ -7914,6 +8150,14 @@ No deterioration in ground security situation so far.</textarea>
 <option value="enabled">Open (accepting registrations)</option>
 <option value="disabled">Closed (show closed message)</option>
 </select>
+</div>
+</div>
+<div class="fs" style="border-left:3px solid #006600;background:linear-gradient(135deg,#f1f8e9,#fff)">
+<h3>🖨️ Printable QR Code Poster</h3>
+<p style="margin-bottom:12px;font-size:.88em;color:var(--tl)">Print an A4 poster with QR codes for all public services (Registration, Tracking, Travel Interest, Iraq Form). Paste it outside the office so citizens can scan and access services from their phones.</p>
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+<a href="/poster" target="_blank" class="btn btn-p" style="display:inline-flex;align-items:center;gap:8px;padding:12px 24px;text-decoration:none;color:#fff;border-radius:8px;font-weight:700;font-size:.95em">🖨️ Open Printable Poster</a>
+<span style="font-size:.82em;color:#888">Opens in a new tab — click Print to save as PDF or print directly</span>
 </div>
 </div>
 <div class="fs"><h3>Webhook / API Key</h3>
