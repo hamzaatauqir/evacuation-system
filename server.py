@@ -7961,6 +7961,11 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <p style="font-size:.78em;color:var(--tl);margin:0 0 8px">These applicants are already <strong>included in a Note Verbale dispatch</strong> sent or queued for MOFA Kuwait.</p>
 <div class="scroll-t" style="max-height:400px"><table id="ippTblSent"></table></div>
 </div>
+<div class="tc" style="border-left:4px solid #1565c0;margin-top:14px">
+<h4 style="margin:0 0 8px;color:#1565c0;display:flex;align-items:center;gap:8px;font-size:.95em"><span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:#e3f2fd;border-radius:50%;font-size:.8em">&#128196;</span> Note Verbale History <span id="ippNvHistCount" style="font-size:.78em;font-weight:400;color:var(--tl);margin-left:4px"></span></h4>
+<p style="font-size:.78em;color:var(--tl);margin:0 0 8px">All Note Verbale dispatches sent to MOFA Kuwait with the number of applicants in each.</p>
+<div class="scroll-t" style="max-height:400px"><table id="ippNvHistTbl"></table></div>
+</div>
 </div></div>
 <div class="mo" id="ippMo" onclick="if(event.target===this)closeIpp()"><div class="ml" onclick="event.stopPropagation()" style="max-width:720px">
 <button type="button" class="cb" onclick="closeIpp()">&times;</button>
@@ -9558,6 +9563,22 @@ hSent+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+i
 if(sentRows.length===0)hSent+='<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--tl)">No dispatched records yet</td></tr>';
 document.getElementById('ippTblSent').innerHTML=hSent;
 document.getElementById('ippSentCount').textContent='('+sentRows.length+')';
+// Load NV dispatch history
+loadNvHistory();
+}
+async function loadNvHistory(){
+const d=await api('/api/iraq-dispatches');
+if(!d||!Array.isArray(d)){return}
+let totalCases=0;
+let h='<tr><th>#</th><th>Note Verbale #</th><th>NV Date</th><th>Sent Date</th><th>Cases</th><th>Status</th><th>Remarks</th><th>Export</th></tr>';
+d.forEach((x,i)=>{
+totalCases+=x.applicant_count||0;
+const stColor=x.status==='Sent'?'#2e7d32':x.status==='Draft'?'#e65100':'#1565c0';
+h+='<tr><td>'+(i+1)+'</td><td style="font-weight:700;color:#0d47a1">'+ippEsc(x.note_verbale_number||'-')+'</td><td>'+ippEsc(x.note_verbale_date||'-')+'</td><td>'+ippEsc(x.sent_date||'-')+'</td><td style="font-weight:700;text-align:center"><span style="display:inline-block;background:#e3f2fd;color:#0d47a1;padding:2px 12px;border-radius:12px;font-size:.88em">'+ippEsc(x.applicant_count||0)+'</span></td><td><span style="color:'+stColor+';font-weight:600;font-size:.82em">'+ippEsc(x.status||'-')+'</span></td><td style="font-size:.78em;color:#666;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+ippEsc(x.remarks||'')+'">'+ippEsc(x.remarks||'-')+'</td><td><a href="/api/iraq-public-export?filter=dispatch&dispatch_id='+x.id+'" class="btn btn-i" style="padding:4px 10px;font-size:.72em;text-decoration:none;color:#fff">CSV</a></td></tr>';
+});
+if(d.length===0)h+='<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--tl)">No Note Verbale dispatches yet</td></tr>';
+document.getElementById('ippNvHistTbl').innerHTML=h;
+document.getElementById('ippNvHistCount').textContent='('+d.length+' dispatches, '+totalCases+' total cases)';
 }
 /* ═══ IRAQ PUBLIC GLOBAL SEARCH POPUP ═══ */
 async function ippGlobalSearch(){
