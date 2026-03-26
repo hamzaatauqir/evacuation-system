@@ -3729,6 +3729,21 @@ def api_iraq_public_submission_detail(sub_id):
            ORDER BY id DESC LIMIT 1""", [sub_id]
     ).fetchone()
     d['kw_transit_visa_status'] = (dec['decision'] if dec and dec['decision'] else '') or 'Pending'
+    # Fetch Note Verbale dispatch info if exists
+    nv = db.execute(
+        """SELECT md.note_verbale_number, md.note_verbale_date, md.sent_date
+           FROM iraq_dispatch_applicants da
+           JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
+           WHERE da.public_submission_id = ? ORDER BY da.id DESC LIMIT 1""", [sub_id]
+    ).fetchone()
+    if nv:
+        d['nv_number'] = nv['note_verbale_number'] or ''
+        d['nv_date'] = nv['note_verbale_date'] or ''
+        d['nv_sent_date'] = nv['sent_date'] or ''
+    else:
+        d['nv_number'] = ''
+        d['nv_date'] = ''
+        d['nv_sent_date'] = ''
     db.close()
     return {'success': True, 'submission': d}
 
@@ -3843,6 +3858,15 @@ def api_iraq_public_portal_submissions(params):
     rows = db.execute(
         f"""SELECT p.*,
             EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id) AS has_nv_dispatch,
+            (SELECT md.note_verbale_number FROM iraq_dispatch_applicants da
+             JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
+             WHERE da.public_submission_id = p.id ORDER BY da.id DESC LIMIT 1) AS nv_number,
+            (SELECT md.note_verbale_date FROM iraq_dispatch_applicants da
+             JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
+             WHERE da.public_submission_id = p.id ORDER BY da.id DESC LIMIT 1) AS nv_date,
+            (SELECT md.sent_date FROM iraq_dispatch_applicants da
+             JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
+             WHERE da.public_submission_id = p.id ORDER BY da.id DESC LIMIT 1) AS nv_sent_date,
             (SELECT d2.decision FROM iraq_applicant_decisions d2
              WHERE d2.public_submission_id = p.id ORDER BY d2.id DESC LIMIT 1) AS kw_transit_visa_status
             FROM iraq_public_submissions p WHERE {' AND '.join(where)} ORDER BY p.id DESC""", q
@@ -9523,13 +9547,15 @@ hNew+='<tr style="background:#fffbeb"><td><input type="checkbox" class="ipp-sel"
 if(newRows.length===0)hNew+='<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--tl)">No pending NV dispatch records</td></tr>';
 document.getElementById('ippTblNew').innerHTML=hNew;
 document.getElementById('ippNewCount').textContent='('+newRows.length+')';
-const hdrS='<tr><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>NV</th><th>Submitted</th><th></th></tr>';
+const hdrS='<tr><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>Note Verbale #</th><th>NV Date</th><th>Submitted</th><th></th></tr>';
 let hSent=hdrS;
 sentRows.forEach(x=>{
 const kw=ippNormKw(x.kw_transit_visa_status);
-hSent+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td><span style="color:#2e7d32;font-weight:600;font-size:.78em">&#10003; Dispatched</span></td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
+const nvNum=x.nv_number||'';
+const nvDate=x.nv_date||'';
+hSent+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td><span style="color:#2e7d32;font-weight:600;font-size:.8em" title="Note Verbale: '+(nvNum||'N/A')+'">'+(nvNum?'&#128196; '+ippEsc(nvNum):'<span style="color:#999">&#10003;</span>')+'</span></td><td style="font-size:.78em;color:#555">'+ippEsc(nvDate||'-')+'</td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
 });
-if(sentRows.length===0)hSent+='<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--tl)">No dispatched records yet</td></tr>';
+if(sentRows.length===0)hSent+='<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--tl)">No dispatched records yet</td></tr>';
 document.getElementById('ippTblSent').innerHTML=hSent;
 document.getElementById('ippSentCount').textContent='('+sentRows.length+')';
 }
@@ -9578,7 +9604,7 @@ async function ippView(id){
 const r=await fetch('/api/iraq-public-submission?id='+encodeURIComponent(id));const j=await r.json();
 if(!j.success){toast(j.error||'Load failed');return}
 const x=j.submission||{};_ippCur=x;
-const rows=[['Reference',x.reference_number],['ID',x.id],['Name',x.full_name],['Passport',x.passport_number],['CNIC',x.cnic||'-'],['Nationality',x.nationality],['DOB',x.date_of_birth],['Gender',x.gender],['Phone',x.phone],['WhatsApp',x.whatsapp],['Email',x.email],['City (Iraq)',x.current_city],['Employer',x.employer],['Route',x.travel_route],['Purpose',x.travel_purpose],['Remarks',x.remarks||'\u2014'],['Status',x.status],['Submitted',x.created_at||'\u2014'],['Portal sent',x.mofa_kw_portal_sent_at||'\u2014'],['Batch ID',x.linked_batch_id!=null?x.linked_batch_id:'\u2014']];
+const rows=[['Reference',x.reference_number],['ID',x.id],['Name',x.full_name],['Passport',x.passport_number],['CNIC',x.cnic||'-'],['Nationality',x.nationality],['DOB',x.date_of_birth],['Gender',x.gender],['Phone',x.phone],['WhatsApp',x.whatsapp],['Email',x.email],['City (Iraq)',x.current_city],['Employer',x.employer],['Route',x.travel_route],['Purpose',x.travel_purpose],['Remarks',x.remarks||'\u2014'],['Status',x.status],['Note Verbale #',x.nv_number||'\u2014'],['NV Date',x.nv_date||'\u2014'],['NV Sent Date',x.nv_sent_date||'\u2014'],['Submitted',x.created_at||'\u2014'],['Portal sent',x.mofa_kw_portal_sent_at||'\u2014'],['Batch ID',x.linked_batch_id!=null?x.linked_batch_id:'\u2014']];
 const kwM=ippNormKw(x.kw_transit_visa_status);
 let h='<table style="width:100%;border-collapse:collapse;font-size:.88em"><tbody>';
 rows.forEach(kv=>{h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">'+ippEsc(kv[0])+'</td><td style="padding:6px 8px;border-bottom:1px solid #eee;word-break:break-word">'+ippEsc(kv[1])+'</td></tr>'});
