@@ -1044,6 +1044,45 @@ def _queue_iraq_forwarded_backfill_emails(changed_by='system', limit=3000):
     db.close()
     return {'queued': queued, 'candidate_rows': len(rows), 'skipped_invalid_email': skipped_invalid_email}
 
+def _queue_iraq_forwarded_resend_emails(changed_by='system', limit=3000):
+    """Manual resend helper: queue Iraq forwarded-status updates even if already sent before."""
+    db = get_db()
+    rows = db.execute("""SELECT e.id, e.name, e.passport, e.email
+        FROM evacuees e
+        WHERE TRIM(COALESCE(e.email,'')) != ''
+          AND (
+            COALESCE(e.mofa_status,'')='Sent to MOFA'
+            OR LOWER(COALESCE(e.mofa_kw_status,''))='sent'
+            OR LOWER(COALESCE(e.mofa_ksa_status,''))='sent'
+            OR TRIM(COALESCE(e.mofa_sent_date,''))!=''
+            OR TRIM(COALESCE(e.mofa_kw_sent_at,''))!=''
+            OR TRIM(COALESCE(e.mofa_ksa_sent_at,''))!=''
+          )
+          AND (
+            LOWER(COALESCE(e.country,'')) LIKE '%iraq%'
+            OR EXISTS (
+              SELECT 1 FROM iraq_public_submissions p
+              WHERE UPPER(REPLACE(REPLACE(COALESCE(p.passport_number,''),' ',''),'-',''))
+                    = UPPER(REPLACE(REPLACE(COALESCE(e.passport,''),' ',''),'-',''))
+            )
+          )
+        ORDER BY e.id ASC
+        LIMIT ?""", [int(limit)]).fetchall()
+    queued = 0
+    skipped_invalid_email = 0
+    for rr in rows:
+        rec = dict(rr)
+        if not _is_valid_email_loose((rec.get('email') or '').strip()):
+            skipped_invalid_email += 1
+            continue
+        _queue_iraq_mofa_forwarded_email(rec, changed_by)
+        queued += 1
+    db.execute("INSERT INTO audit_log (action, user, details) VALUES ('iraq_forwarded_email_manual_resend_queue', ?, ?)",
+               [changed_by, json.dumps({'queued': queued, 'candidate_rows': len(rows), 'skipped_invalid_email': skipped_invalid_email})])
+    db.commit()
+    db.close()
+    return {'queued': queued, 'candidate_rows': len(rows), 'skipped_invalid_email': skipped_invalid_email}
+
 def _queue_route_clarification_email(record, changed_by='system', trigger_source='auto_review'):
     """Queue a route-clarification email. Updates tracking columns on the evacuees row."""
     email = (record.get('email') or '').strip()
@@ -4858,20 +4897,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status_info['status'] = 'ROUTE_HOLD'
                     status_info['status_detail'] = 'Your application has been flagged due to a travel route clarity issue. Please contact Mr. Awais immediately at +965 55977292 to confirm your correct travel route. Your application cannot be processed further until this is resolved.'
                     status_info['action_required'] = True
-                elif _has_both_approvals(r):
+                # Main Kuwait portal public tracking (PKE-xxxx) is KSA-visa workflow.
+                # Keep this separate from Iraq dual-approval logic.
+                elif (r.get('visa_status') == 'Approved'):
                     status_info['status'] = 'APPROVED'
-                    status_info['status_detail'] = 'Final approval is complete from MOFA Kuwait and MOFA KSA. Please approach Pakistan Embassy Iraq for next steps.'
+                    status_info['status_detail'] = 'Final approval is complete. Please contact the Embassy immediately for further instructions on travelling.'
                     status_info['action_required'] = True
                 elif (r.get('mofa_kw_status') == 'Sent' or r.get('mofa_ksa_status') == 'Sent' or r['mofa_status'] == 'Sent to MOFA'):
                     status_info['status'] = 'PENDING_MOFA'
-                    status_info['status_detail'] = 'Requests sent to MOFA Kuwait and MOFA KSA.'
+                    status_info['status_detail'] = 'Your application has been sent to MOFA KSA for processing.'
                     status_info['action_required'] = False
                 else:
                     status_info['status'] = 'PROCESSING'
                     status_info['status_detail'] = 'Application Submitted. Under Review. Requests will be sent to concerned authorities.'
                     status_info['action_required'] = False
-                status_info['approved_kw'] = bool(_is_kw_approved(r))
-                status_info['approved_ksa'] = bool(_is_ksa_approved(r))
+                status_info['approved_kw'] = False
+                status_info['approved_ksa'] = (r.get('visa_status') == 'Approved')
                 self.send_json({'success': True, 'data': status_info})
             else:
                 self.send_json({'success': False, 'error': 'No application found with this information. Please check your passport number or reference number and try again.'})
@@ -4907,7 +4948,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path in ('/embassy-registration/success', '/register/success'):
             self.send_html(REGISTER_SUCCESS_PAGE)
         elif path == '/iraq-public-form':
-            self.send_html(IRAQ_PUBLIC_FORM_PAGE)
+            self.send_html(iraq_public_form_page_with_flag())
         elif path == '/poster':
             # Printable poster with QR codes — public, no login needed
             host = self.headers.get('Host', 'localhost:8080')
@@ -6156,6 +6197,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = _queue_iraq_forwarded_backfill_emails(changed_by=user['user'])
             self.send_json({'success': True, **result})
 
+        elif path == '/api/admin-iraq-email-resend-forwarded':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            result = _queue_iraq_forwarded_resend_emails(changed_by=user['user'])
+            self.send_json({'success': True, **result})
+
         elif path == '/api/upload-visa-approvals':
             user = self.require_auth()
             if not user: return
@@ -6716,6 +6765,10 @@ background:radial-gradient(circle,rgba(255,255,255,.28),rgba(255,255,255,0) 72%)
 }
 .hero h1{font-size:1.5rem;line-height:1.35;font-weight:800;letter-spacing:.4px;max-width:760px}
 .hero p{margin-top:9px;color:#e3f2ff;font-size:.95rem;max-width:760px}
+.hero .flag-top{
+position:absolute;top:14px;right:14px;width:74px;height:50px;object-fit:cover;border-radius:9px;
+border:1px solid rgba(255,255,255,.45);box-shadow:0 8px 18px rgba(0,0,0,.22)
+}
 .card{
 margin-top:16px;background:#fff;border-radius:18px;border:1px solid #e3ebf7;
 padding:20px;box-shadow:0 14px 34px rgba(16,35,63,.08)
@@ -6770,10 +6823,16 @@ display:inline-block;padding:10px 14px;border-radius:10px;text-decoration:none;f
 color:#144d8f;background:#eaf3ff;border:1px solid #cfe0f8
 }
 .loader{display:none;margin-top:14px;color:#355a86;font-size:.9em}
-@media(max-width:760px){.fg{grid-template-columns:1fr}.hero h1{font-size:1.2rem}.card{padding:16px}}
+.quickBack{margin-top:10px}
+.quickBack a{
+display:inline-block;padding:9px 12px;border-radius:10px;text-decoration:none;font-weight:700;
+color:#144d8f;background:#eaf3ff;border:1px solid #cfe0f8;font-size:.88em
+}
+@media(max-width:760px){.fg{grid-template-columns:1fr}.hero h1{font-size:1.2rem}.card{padding:16px}.hero .flag-top{width:62px;height:42px;top:10px;right:10px}}
 </style></head><body>
 <div class="wrap">
   <div class="hero">
+    <img class="flag-top" src="https://upload.wikimedia.org/wikipedia/commons/3/32/Flag_of_Pakistan.svg" alt="Pakistan Flag">
     <h1>TRACK YOUR APPLICATION FOR KUWAIT TRANSIT VISA</h1>
     <p>Use your Iraq reference number or passport number to check your latest public application status.</p>
   </div>
@@ -6788,6 +6847,7 @@ color:#144d8f;background:#eaf3ff;border:1px solid #cfe0f8
     </div>
     <div class="loader" id="loader">Checking your application status...</div>
     <div class="err" id="errMsg"></div>
+    <div class="quickBack"><a href="/iraq-public-form">&larr; Back to Iraq Registration Page</a></div>
   </div>
 
   <div class="card result" id="resultCard">
@@ -6871,6 +6931,22 @@ document.getElementById('trackBtn').disabled=false;
 }
 document.getElementById('passportInput').addEventListener('keypress',e=>{if(e.key==='Enter')doTrack()});
 </script></body></html>"""
+
+IRAQ_FLAG_IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/3/32/Flag_of_Pakistan.svg"
+def iraq_public_form_page_with_flag():
+    return (
+        IRAQ_PUBLIC_FORM_PAGE
+        .replace(
+            "</style></head><body>",
+            ".hdr{position:relative;padding-right:130px}.iraq-top-flag{position:absolute;top:14px;right:16px;width:74px;height:50px;object-fit:cover;border-radius:9px;border:1px solid rgba(255,255,255,.45);box-shadow:0 8px 18px rgba(0,0,0,.22)}@media(max-width:760px){.hdr{padding-right:96px}.iraq-top-flag{width:62px;height:42px;top:10px;right:10px}}</style></head><body>",
+            1
+        )
+        .replace(
+            '<div class="hdr">',
+            f'<div class="hdr"><img class="iraq-top-flag" src="{IRAQ_FLAG_IMAGE_URL}" alt="Pakistan Flag">',
+            1
+        )
+    )
 
 REGISTER_SUCCESS_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -8829,6 +8905,7 @@ No deterioration in ground security situation so far.</textarea>
 <div id="bulkKsaResult" style="display:none;margin-top:12px"><div id="bulkKsaStats" style="padding:10px;background:#ede7f6;border-radius:6px;margin-bottom:8px"></div><div id="bulkKsaDetails" class="imp-result"></div></div>
 <div style="margin-top:10px">
 <button class="btn btn-w" onclick="runIraqEmailBackfill()">Run Iraq Sent-Email Catch-up (one-time safe)</button>
+<button class="btn btn-i" onclick="resendIraqForwardedEmails()">Re-send Iraq Updated Status Emails</button>
 <div id="iraqBackfillStatus" style="font-size:.82em;color:#555;margin-top:6px"></div>
 </div>
 </div>
@@ -9837,6 +9914,15 @@ if(!r||r.error){toast(r?.error||'Could not run Iraq email catch-up');return}
 const msg=`Queued: ${r.queued||0} | Candidates: ${r.candidate_rows||0} | Invalid email skipped: ${r.skipped_invalid_email||0}`;
 const el=document.getElementById('iraqBackfillStatus'); if(el)el.textContent=msg;
 toast('Iraq catch-up email queue completed');
+}
+
+async function resendIraqForwardedEmails(){
+if(!confirm('Re-send Iraq updated status emails for already-sent cases (MOFA Kuwait/KSA)?'))return;
+const r=await api('/api/admin-iraq-email-resend-forwarded',{method:'POST'});
+if(!r||r.error){toast(r?.error||'Could not re-send Iraq updated status emails');return}
+const msg=`Re-send queued: ${r.queued||0} | Candidates: ${r.candidate_rows||0} | Invalid email skipped: ${r.skipped_invalid_email||0}`;
+const el=document.getElementById('iraqBackfillStatus'); if(el)el.textContent=msg;
+toast('Iraq updated status re-send queued');
 }
 
 async function uploadVisaCSV(){
