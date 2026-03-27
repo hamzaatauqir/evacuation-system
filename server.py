@@ -6817,7 +6817,48 @@ color:#144d8f;background:#eaf3ff;border:1px solid #cfe0f8
 display:inline-block;padding:9px 12px;border-radius:10px;text-decoration:none;font-weight:700;
 color:#144d8f;background:#eaf3ff;border:1px solid #cfe0f8;font-size:.88em
 }
-@media(max-width:760px){.fg{grid-template-columns:1fr}.hero h1{font-size:1.2rem}.card{padding:16px}.hero .flag-top{width:62px;height:42px;top:10px;right:10px}}
+@media(max-width:760px){
+.wrap{padding:14px 10px 30px}
+.hero{border-radius:16px;padding:22px 16px}
+.hero h1{font-size:1.15rem}
+.hero p{font-size:.88rem;margin-top:6px}
+.hero .flag-top{width:56px;height:38px;top:10px;right:10px;border-radius:7px}
+.card{padding:16px;border-radius:14px;margin-top:12px}
+.fg{grid-template-columns:1fr;gap:10px}
+label{font-size:.84em;margin-bottom:5px}
+input{padding:13px 12px;font-size:1em;border-radius:10px}
+button{width:100%;padding:14px;font-size:1em;border-radius:10px}
+.tiny{font-size:.8em;margin-top:6px}
+.quickBack{margin-top:8px}
+.quickBack a{padding:10px 12px;font-size:.86em;border-radius:8px;display:block;text-align:center}
+.statusBand{flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border-radius:12px}
+.statusBand .v{font-size:.98em}
+.grid{grid-template-columns:1fr;gap:8px}
+.mini{padding:10px;border-radius:10px}
+.mini .k{font-size:.72em}
+.mini .v{font-size:.92em}
+.flow{padding:12px;border-radius:12px;margin-top:12px}
+.flow h3{font-size:.9em;margin-bottom:8px}
+.steps{flex-direction:column;gap:6px}
+.st{flex:none;width:100%;min-width:unset;padding:10px;border-radius:8px;font-size:.84em}
+.next{padding:12px;border-radius:10px;margin-top:12px}
+.next h4{font-size:.86em}
+.next p{font-size:.86em}
+.foot{margin-top:12px;justify-content:center}
+.back{padding:12px 16px;font-size:.9em;border-radius:10px;text-align:center;width:100%;display:block}
+}
+@media(max-width:380px){
+.wrap{padding:8px 6px 24px}
+.hero{padding:18px 12px;border-radius:12px}
+.hero h1{font-size:1.05rem}
+.hero p{font-size:.82rem}
+.hero .flag-top{width:48px;height:32px;top:8px;right:8px}
+.card{padding:12px;border-radius:12px}
+input{padding:12px 10px}
+button{padding:13px}
+.statusBand{padding:12px;border-radius:10px}
+.mini{padding:8px}
+}
 </style></head><body>
 <div class="wrap">
   <div class="hero">
@@ -6927,7 +6968,7 @@ def iraq_public_form_page_with_flag():
         IRAQ_PUBLIC_FORM_PAGE
         .replace(
             "</style></head><body>",
-            ".wrap{position:relative;padding-right:104px}.iraq-top-flag{position:absolute;top:18px;right:18px;width:74px;height:50px;object-fit:cover;border-radius:9px;border:1px solid rgba(0,0,0,.08);box-shadow:0 8px 18px rgba(0,0,0,.18);background:#fff}@media(max-width:760px){.wrap{padding-right:86px}.iraq-top-flag{width:62px;height:42px;top:14px;right:12px}}</style></head><body>",
+            ".wrap{position:relative;padding-right:104px}.iraq-top-flag{position:absolute;top:18px;right:18px;width:74px;height:50px;object-fit:cover;border-radius:9px;border:1px solid rgba(0,0,0,.08);box-shadow:0 8px 18px rgba(0,0,0,.18);background:#fff}@media(max-width:760px){.wrap{padding-right:86px}.iraq-top-flag{width:62px;height:42px;top:14px;right:12px}}@media(max-width:600px){.wrap{padding-right:14px}.iraq-top-flag{position:static;display:block;margin:0 auto 10px;width:70px;height:48px}}</style></head><body>",
             1
         )
         .replace(
@@ -7439,8 +7480,12 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#
 .form-hdr .emblem{width:48px;height:48px;background:linear-gradient(135deg,#01411c,#1565c0);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.5em;color:#fff;font-weight:700;flex-shrink:0}
 h1{font-size:1.25em;color:#0d47a1;margin-bottom:2px;letter-spacing:-.3px}
 .muted{font-size:.85em;color:#6b7280}
-.warn{background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fbbf24;padding:12px 14px;border-radius:10px;font-size:.84em;margin:14px 0;display:flex;align-items:flex-start;gap:8px;line-height:1.5}
-.warn-icon{font-size:1.1em;flex-shrink:0;margin-top:1px}
+.warn{background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fbbf24;padding:18px 20px;border-radius:12px;font-size:.84em;margin:14px 0;line-height:1.7}
+.warn-title{display:flex;align-items:center;gap:8px;font-weight:700;color:#92400e;margin-bottom:8px;font-size:1em}
+.warn-icon{font-size:1.1em;flex-shrink:0}
+.warn-en{color:#78350f;margin-bottom:0;line-height:1.7;word-wrap:break-word}
+.warn-divider{border:none;border-top:1px solid #fbbf24;margin:14px 0;opacity:.5}
+.warn-ur{direction:rtl;text-align:right;font-family:'Noto Nastaliq Urdu',Tahoma,'Segoe UI',Arial,sans-serif;line-height:2;color:#78350f;word-wrap:break-word}
 .track-cta{display:flex;align-items:center;justify-content:space-between;gap:12px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #93c5fd;padding:12px 14px;border-radius:10px;margin:10px 0 14px}
 .track-cta .txt{font-size:.84em;color:#1e3a8a;line-height:1.45}
 .track-cta .btn-track{display:inline-block;background:linear-gradient(135deg,#1565c0,#0d47a1);color:#fff;text-decoration:none;padding:10px 14px;border-radius:9px;font-size:.82em;font-weight:700;white-space:nowrap}
@@ -7496,7 +7541,49 @@ textarea{min-height:76px}
 .btn-print:hover{background:#e2e8f0}
 .submitted-ts{text-align:center;font-size:.78em;color:#94a3b8;padding:0 28px 18px}
 @media print{.confirm-overlay{position:static;background:#fff;display:block!important}.confirm-card{box-shadow:none;max-height:none;border-radius:0}.confirm-footer,.btn-print{display:none!important}}
-@media(max-width:520px){.detail-grid{grid-template-columns:1fr}.detail-cell:nth-child(odd){border-bottom:0;padding-bottom:2px}.detail-cell:nth-child(even){padding-top:2px}.contact-bar{grid-template-columns:1fr}}
+@media(max-width:520px){.detail-grid{grid-template-columns:1fr}.detail-cell:nth-child(odd){border-bottom:0;padding-bottom:2px}.detail-cell:nth-child(even){padding-top:2px}}
+@media(max-width:760px){
+body{padding:8px}
+.wrap{padding:16px 14px;border-radius:12px}
+.form-hdr{flex-direction:column;align-items:flex-start;gap:10px;padding-bottom:10px}
+.form-hdr .emblem{width:40px;height:40px;font-size:1.2em;border-radius:10px}
+h1{font-size:1.1em}
+.muted{font-size:.8em}
+.warn{padding:14px;margin:10px 0;font-size:.82em;border-radius:10px}
+.warn-title{font-size:.95em}
+.warn-en{line-height:1.65}
+.warn-ur{line-height:1.9;font-size:.93em}
+.track-cta{flex-direction:column;align-items:stretch;gap:10px;padding:12px;text-align:center}
+.track-cta .txt{font-size:.82em;text-align:center}
+.track-cta .btn-track{width:100%;text-align:center;padding:12px 14px;font-size:.88em;border-radius:10px}
+.grid{grid-template-columns:1fr;gap:10px}
+input,select,textarea{padding:12px;font-size:1em;border-radius:10px}
+label{font-size:.82em;margin-bottom:4px}
+.btn-submit{width:100%;padding:14px 20px;font-size:1em;border-radius:10px}
+.confirm-card{border-radius:14px}
+.confirm-top{padding:24px 18px 22px}
+.confirm-top h2{font-size:1.1em}
+.ref-badge{font-size:.92em;padding:6px 14px}
+.confirm-body{padding:18px 16px 14px}
+.confirm-footer{padding:0 16px 20px;flex-direction:column}
+.confirm-footer .btn-cf{min-width:auto;padding:13px 14px;font-size:.9em}
+.next-steps{padding:14px}
+.next-steps h4{font-size:.88em}
+.next-steps p{font-size:.82em}
+.contact-bar{grid-template-columns:1fr;gap:8px}
+.email-note{font-size:.8em;padding:10px 12px;flex-direction:column;text-align:center}
+.submitted-ts{padding:0 14px 14px}
+}
+@media(max-width:380px){
+body{padding:4px}
+.wrap{padding:12px 10px;border-radius:10px}
+h1{font-size:1em}
+.warn{padding:12px 10px;font-size:.78em}
+.warn-title{font-size:.88em}
+.warn-ur{font-size:.88em;line-height:1.85}
+.btn-submit{padding:14px 16px;font-size:.95em}
+.confirm-footer .btn-cf{padding:12px;font-size:.88em}
+}
 </style></head><body>
 <div class="wrap" id="formWrap">
 <div class="form-hdr">
@@ -7504,7 +7591,12 @@ textarea{min-height:76px}
 <div><h1>Kuwait Transit Visa Request Form &mdash; Iraq</h1>
 <div class="muted">For applicants in Iraq seeking Kuwait transit visa support</div></div>
 </div>
-<div class="warn"><span class="warn-icon">&#9888;</span><span>Disclaimer: Submitting this form does not guarantee visa approval. Each case is reviewed by relevant authorities.</span></div>
+<div class="warn">
+<div class="warn-title"><span class="warn-icon">&#9888;</span> Disclaimer</div>
+<div class="warn-en">This form is intended for Pakistani nationals in Iraq who wish to travel to Pakistan via the Kuwait and Saudi border route. Requests submitted through this page will be processed for necessary approvals from the Ministry of Foreign Affairs of Kuwait and the relevant authorities in the Kingdom of Saudi Arabia. Every effort will be made to ensure that the applicant&#8217;s information is processed so that the required transit visa approvals for both countries are obtained before entry into Kuwait, and necessary facilitation is provided. This portal is being operated by the Embassy of Pakistan, Kuwait, and coordination in this regard will also be made as the applicant enters Kuwait. Applicants are requested to fill out the form carefully, accurately, and completely. Incomplete or incorrect information may cause delay or affect processing.</div>
+<hr class="warn-divider">
+<div class="warn-ur">&#1575;&#1729;&#1605; &#1608;&#1590;&#1575;&#1581;&#1578;: &#1740;&#1729; &#1601;&#1575;&#1585;&#1605; &#1593;&#1585;&#1575;&#1602; &#1605;&#1740;&#1722; &#1605;&#1608;&#1580;&#1608;&#1583; &#1575;&#1606; &#1662;&#1575;&#1705;&#1587;&#1578;&#1575;&#1606;&#1740; &#1588;&#1729;&#1585;&#1740;&#1608;&#1722; &#1705;&#1746; &#1604;&#1740;&#1746; &#1729;&#1746; &#1580;&#1608; &#1705;&#1608;&#1740;&#1578; &#1575;&#1608;&#1585; &#1587;&#1593;&#1608;&#1583;&#1740; &#1576;&#1575;&#1585;&#1672;&#1585; &#1585;&#1608;&#1657; &#1705;&#1746; &#1584;&#1585;&#1740;&#1593;&#1746; &#1662;&#1575;&#1705;&#1587;&#1578;&#1575;&#1606; &#1580;&#1575;&#1606;&#1575; &#1670;&#1575;&#1729;&#1578;&#1746; &#1729;&#1740;&#1722;&#1748; &#1575;&#1587; &#1589;&#1601;&#1581;&#1746; &#1705;&#1746; &#1584;&#1585;&#1740;&#1593;&#1746; &#1580;&#1605;&#1593; &#1705;&#1585;&#1575;&#1574;&#1740; &#1711;&#1574;&#1740; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578;&#1608;&#1722; &#1662;&#1585; &#1608;&#1586;&#1575;&#1585;&#1578;&#1616; &#1582;&#1575;&#1585;&#1580;&#1729; &#1705;&#1608;&#1740;&#1578; &#1575;&#1608;&#1585; &#1605;&#1605;&#1604;&#1705;&#1578;&#1616; &#1587;&#1593;&#1608;&#1583;&#1740; &#1593;&#1585;&#1576; &#1705;&#1746; &#1605;&#1578;&#1593;&#1604;&#1602;&#1729; &#1581;&#1705;&#1575;&#1605; &#1587;&#1746; &#1590;&#1585;&#1608;&#1585;&#1740; &#1605;&#1606;&#1592;&#1608;&#1585;&#1740;&#1608;&#1722; &#1705;&#1746; &#1604;&#1740;&#1746; &#1705;&#1575;&#1585;&#1585;&#1608;&#1575;&#1574;&#1740; &#1705;&#1740; &#1580;&#1575;&#1574;&#1746; &#1711;&#1740;&#1748; &#1729;&#1585; &#1605;&#1605;&#1705;&#1606; &#1705;&#1608;&#1588;&#1588; &#1705;&#1740; &#1580;&#1575;&#1574;&#1746; &#1711;&#1740; &#1705;&#1729; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1711;&#1586;&#1575;&#1585; &#1705;&#1740; &#1605;&#1593;&#1604;&#1608;&#1605;&#1575;&#1578; &#1662;&#1585; &#1705;&#1575;&#1585;&#1585;&#1608;&#1575;&#1574;&#1740; &#1575;&#1587; &#1575;&#1606;&#1583;&#1575;&#1586; &#1605;&#1740;&#1722; &#1705;&#1740; &#1580;&#1575;&#1574;&#1746; &#1705;&#1729; &#1583;&#1608;&#1606;&#1608;&#1722; &#1605;&#1605;&#1575;&#1604;&#1705; &#1705;&#1746; &#1657;&#1585;&#1575;&#1606;&#1586;&#1657; &#1608;&#1740;&#1586;&#1575; &#1705;&#1740; &#1590;&#1585;&#1608;&#1585;&#1740; &#1605;&#1606;&#1592;&#1608;&#1585;&#1740;&#1608;&#1722; &#1705;&#1575; &#1581;&#1589;&#1608;&#1604; &#1705;&#1608;&#1740;&#1578; &#1605;&#1740;&#1722; &#1583;&#1575;&#1582;&#1604;&#1746; &#1587;&#1746; &#1602;&#1576;&#1604; &#1605;&#1605;&#1705;&#1606; &#1729;&#1608; &#1587;&#1705;&#1746; &#1575;&#1608;&#1585; &#1590;&#1585;&#1608;&#1585;&#1740; &#1587;&#1729;&#1608;&#1604;&#1578; &#1601;&#1585;&#1575;&#1729;&#1605; &#1705;&#1740; &#1580;&#1575; &#1587;&#1705;&#1746;&#1748; &#1740;&#1729; &#1662;&#1608;&#1585;&#1657;&#1604; &#1587;&#1601;&#1575;&#1585;&#1578; &#1582;&#1575;&#1606;&#1729; &#1662;&#1575;&#1705;&#1587;&#1578;&#1575;&#1606;&#1548; &#1705;&#1608;&#1740;&#1578; &#1705;&#1746; &#1586;&#1740;&#1585;&#1616; &#1575;&#1606;&#1578;&#1592;&#1575;&#1605; &#1670;&#1604;&#1575;&#1740;&#1575; &#1580;&#1575; &#1585;&#1729;&#1575; &#1729;&#1746;&#1548; &#1575;&#1608;&#1585; &#1575;&#1587; &#1590;&#1605;&#1606; &#1605;&#1740;&#1722; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1711;&#1586;&#1575;&#1585; &#1705;&#1746; &#1705;&#1608;&#1740;&#1578; &#1605;&#1740;&#1722; &#1583;&#1575;&#1582;&#1604; &#1729;&#1608;&#1606;&#1746; &#1662;&#1585; &#1576;&#1726;&#1740; &#1590;&#1585;&#1608;&#1585;&#1740; &#1585;&#1575;&#1576;&#1591;&#1729; &#1608; &#1605;&#1593;&#1575;&#1608;&#1606;&#1578; &#1705;&#1740; &#1580;&#1575;&#1574;&#1746; &#1711;&#1740;&#1748; &#1583;&#1585;&#1582;&#1608;&#1575;&#1587;&#1578; &#1711;&#1586;&#1575;&#1585;&#1608;&#1722; &#1587;&#1746; &#1711;&#1586;&#1575;&#1585;&#1588; &#1729;&#1746; &#1705;&#1729; &#1601;&#1575;&#1585;&#1605; &#1705;&#1608; &#1575;&#1581;&#1578;&#1740;&#1575;&#1591;&#1548; &#1583;&#1585;&#1587;&#1578;&#1711;&#1740; &#1575;&#1608;&#1585; &#1605;&#1705;&#1605;&#1604; &#1605;&#1593;&#1604;&#1608;&#1605;&#1575;&#1578; &#1705;&#1746; &#1587;&#1575;&#1578;&#1726; &#1662;&#1615;&#1585; &#1705;&#1585;&#1740;&#1722;&#1748; &#1606;&#1575;&#1605;&#1705;&#1605;&#1604; &#1740;&#1575; &#1594;&#1604;&#1591; &#1605;&#1593;&#1604;&#1608;&#1605;&#1575;&#1578; &#1705;&#1575;&#1585;&#1585;&#1608;&#1575;&#1574;&#1740; &#1605;&#1740;&#1722; &#1578;&#1575;&#1582;&#1740;&#1585; &#1740;&#1575; &#1605;&#1587;&#1574;&#1604;&#1729; &#1662;&#1740;&#1583;&#1575; &#1705;&#1585; &#1587;&#1705;&#1578;&#1740; &#1729;&#1740;&#1722;&#1748;</div>
+</div>
 <div class="track-cta">
 <div class="txt"><strong>Already submitted?</strong><br>Use your <strong>Reference Number (PKE-XXXX)</strong> or <strong>Passport Number</strong> to track status.</div>
 <a class="btn-track" href="/iraq-track-application">Track Your Application</a>
