@@ -2244,8 +2244,7 @@ def api_save_record(data, user):
         # Only lock fields that were submitted to MOFA (identity & routing).
         # Operational fields (visa_status, travel_status, departure_airport,
         # airline, ticket_number, etc.) must remain editable for workflow.
-        LOCKED_FIELDS = {'name','passport','cnic','gender','country','civil_id',
-                         'dob','border_crossing','destination_country'}
+        LOCKED_FIELDS = {'name','passport','cnic','gender','country','civil_id','dob'}
         if old_rec.get('record_locked') == 1 or old_rec.get('record_locked') == '1':
             # Keep comparisons stable for normalized fields (e.g. border crossing),
             # so locked saves don't fail when a UI submits the same value.
@@ -9432,7 +9431,7 @@ el.value=v;
 });
 // MOFA-locked records: identity fields remain read-only, operational fields stay editable
 const isLocked=(r.record_locked==1||r.record_locked==='1');
-const lockFields=['name','passport','cnic','gender','country','civil_id','border_crossing','destination_country'];
+const lockFields=['name','passport','cnic','gender','country','civil_id'];
 lockFields.forEach(f=>{
 const el=document.getElementById('e_'+f);
 if(!el)return;
