@@ -9409,11 +9409,42 @@ else toast('Error: '+(r?.error||'unknown'));return false}
 // EDIT
 function openEdit(id){const r=allRecords.find(x=>x.id===id);if(!r){toast('Record not found');return}
 document.getElementById('e_id').value=id;document.getElementById('editId').textContent='#'+id;
-F.forEach(f=>{const el=document.getElementById('e_'+f);if(el)el.value=r[f]||''});
+F.forEach(f=>{
+const el=document.getElementById('e_'+f);
+if(!el)return;
+const v=(r[f]==null?'':String(r[f]));
+if(el.tagName==='SELECT'){
+// Remove previously injected fallback option(s)
+Array.from(el.querySelectorAll('option[data-dynamic="1"]')).forEach(o=>o.remove());
+// Keep exact stored value selected (including empty/legacy values) to avoid accidental changes
+const hasOpt=Array.from(el.options).some(o=>o.value===v);
+if(!hasOpt){
+const opt=document.createElement('option');
+opt.value=v;
+opt.textContent=v||'Select';
+opt.setAttribute('data-dynamic','1');
+el.insertBefore(opt,el.firstChild);
+}
+el.value=v;
+}else{
+el.value=v;
+}
+});
+// MOFA-locked records: identity fields remain read-only, operational fields stay editable
+const isLocked=(r.record_locked==1||r.record_locked==='1');
+const lockFields=['name','passport','cnic','gender','country','civil_id','border_crossing','destination_country'];
+lockFields.forEach(f=>{
+const el=document.getElementById('e_'+f);
+if(!el)return;
+el.disabled=isLocked;
+el.style.background=isLocked?'#f5f5f5':'';
+el.style.cursor=isLocked?'not-allowed':'';
+});
+if(isLocked){toast('Record is MOFA-locked: core identity fields are read-only. You can still update visa/travel status, airline, ticket, and departure details.')}
 document.getElementById('editModal').classList.add('show')}
 function closeEdit(){document.getElementById('editModal').classList.remove('show')}
 async function saveEdit(e){e.preventDefault();const data={id:parseInt(document.getElementById('e_id').value)};
-F.forEach(f=>{const el=document.getElementById('e_'+f);if(el)data[f]=el.value});
+F.forEach(f=>{const el=document.getElementById('e_'+f);if(el&&!el.disabled)data[f]=el.value});
 const r=await api('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 if(r&&r.success){closeEdit();loadRecords();loadDash();toast('Updated'+(r.dup_details?.length?' — '+r.dup_details.join('; '):''))}return false}
 async function delRecord(){const id=parseInt(document.getElementById('e_id').value);
