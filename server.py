@@ -6097,51 +6097,48 @@ def generate_embassy_letter_html(record):
 <html lang="en"><head><meta charset="UTF-8">
 <title>Embassy Letter — {name}</title>
 <style>
-@page {{ size: A4; margin: 11mm 14mm 12mm 14mm; }}
+@page {{ size: A4; margin: 9mm 12mm 10mm 12mm; }}
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; line-height: 1.45; color: #222; background: #e8e8e8; }}
 .doc {{ max-width: 210mm; margin: 0 auto; background: #fff; }}
 .sheet {{
-  min-height: 275mm;
-  padding: 0 3mm 4mm;
-  display: flex;
-  flex-direction: column;
+  padding: 0 2mm 2mm;
   page-break-after: always;
   break-after: page;
   background: #fff;
 }}
 .sheet:last-of-type {{ page-break-after: auto; break-after: auto; }}
-.sheet-body {{ flex: 1 1 auto; }}
-.sheet-foot {{ flex: 0 0 auto; margin-top: auto; padding-top: 8px; }}
-.letterhead-row {{ margin-bottom: 10px; padding-bottom: 10px; border-bottom: 2px solid #006600; text-align: center; }}
+.sheet-body {{ display: block; }}
+.sheet-foot {{ margin-top: 4px; padding-top: 4px; }}
+.letterhead-row {{ margin-bottom: 7px; padding-bottom: 7px; border-bottom: 2px solid #006600; text-align: center; }}
 .titles-en {{
   text-align: center;
-  font-size: 17.5pt;
+  font-size: 16.5pt;
   font-weight: 700;
   letter-spacing: 0.08em;
   color: #005a2b;
   line-height: 1.2;
 }}
-.titles-en .line2 {{ margin-top: 3px; font-size: 15pt; letter-spacing: 0.12em; }}
+.titles-en .line2 {{ margin-top: 2px; font-size: 14pt; letter-spacing: 0.11em; }}
 .titles-ar {{
   direction: rtl;
   text-align: center;
   font-family: Arial, 'Segoe UI', Tahoma, sans-serif;
-  font-size: 17pt;
+  font-size: 16pt;
   font-weight: 700;
   color: #005a2b;
   line-height: 1.25;
 }}
-.meta {{ display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 9pt; color: #444; }}
-.subject {{ text-align: center; font-weight: 700; font-size: 11pt; margin: 6px 0 8px; color: #111; }}
-.body-text {{ text-align: justify; margin-bottom: 8px; font-size: 9.5pt; }}
+.meta {{ display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 8.7pt; color: #444; }}
+.subject {{ text-align: center; font-weight: 700; font-size: 10.5pt; margin: 4px 0 6px; color: #111; }}
+.body-text {{ text-align: justify; margin-bottom: 6px; font-size: 9.1pt; }}
 .body-text.ar {{ direction: rtl; text-align: right; font-family: Arial, Tahoma, sans-serif; }}
-.details-table {{ width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 8.8pt; }}
-.details-table td {{ padding: 3px 7px; border: 1px solid #ccc; vertical-align: top; }}
+.details-table {{ width: 100%; border-collapse: collapse; margin: 4px 0 6px; font-size: 8.5pt; }}
+.details-table td {{ padding: 2px 6px; border: 1px solid #ccc; vertical-align: top; }}
 .details-table td:first-child {{ font-weight: 600; width: 36%; background: #f3f9f3; color: #1b5e20; }}
 .issue-note {{ text-align: center; font-size: 9pt; color: #333; margin: 4px 0 3px; line-height: 1.4; }}
 .computer-gen {{ text-align: center; font-size: 7.8pt; color: #666; margin: 4px 8px 6px; line-height: 1.35; }}
-.sign-block {{ margin: 6px 0 10px; text-align: right; page-break-inside: avoid; }}
+.sign-block {{ margin: 4px 0 7px; text-align: right; page-break-inside: avoid; }}
 .sheet--ar .sign-block {{ text-align: left; }}
 .sign-name {{ font-size: 11pt; font-weight: 700; color: #1b5e20; margin-bottom: 2px; }}
 .sign-title {{ font-size: 9pt; color: #333; line-height: 1.35; }}
@@ -6152,7 +6149,6 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
   body {{ background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
   .doc {{ max-width: none; }}
   .sheet {{
-    min-height: 270mm;
     padding: 0;
     page-break-after: always;
     break-after: page;
