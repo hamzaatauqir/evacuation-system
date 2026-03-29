@@ -2,14 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM - Pakistan Embassy Kuwait
-Zero-dependency Python server (stdlib only). Run: python3 server.py
+Core server uses Python stdlib only. Run: python3 server.py
 Access: http://localhost:8080
 Default login: admin / embassy2026
+
+MOFA approval PDF parsing order: (1) pypdf text layer, (2) Poppler pdftotext CLI if on PATH,
+(3) raster OCR (Pillow, pytesseract, pdf2image, Tesseract). Easiest fix for searchable PDFs:
+pip install pypdf. macOS: brew install poppler gives pdftotext without extra pip packages.
 """
 
-import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, threading, base64, smtplib, ssl, urllib.request, urllib.error
+import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qs, urlparse, urlencode, unquote
+from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
@@ -26,6 +30,12 @@ else:
     DB_PATH = Path(__file__).parent / 'evacuation.db'
     BACKUP_DIR = Path(__file__).parent / 'backups'
 SESSIONS = {}  # token -> {user, role, expires}
+
+# Approval PDF uploads directory
+if RENDER_DISK.exists() and RENDER_DISK.is_dir():
+    APPROVAL_UPLOADS_DIR = RENDER_DISK / 'approval_uploads'
+else:
+    APPROVAL_UPLOADS_DIR = Path(__file__).parent / 'approval_uploads'
 
 # OneDrive secondary backup (Microsoft Graph). Set on Render: ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_REFRESH_TOKEN
 
@@ -538,6 +548,90 @@ def init_db():
         except sqlite3.OperationalError:
             pass
     db.execute("CREATE INDEX IF NOT EXISTS idx_ev_location_flag ON evacuees(location_review_flag)")
+
+    # ── Approval PDF Upload & OCR Workflow tables ─────────────
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS approval_uploads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id TEXT UNIQUE,
+        filename TEXT,
+        original_filename TEXT,
+        uploaded_by TEXT,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        note_verbal_number TEXT,
+        note_verbal_date TEXT,
+        document_reference TEXT,
+        total_rows_extracted INTEGER DEFAULT 0,
+        matched_count INTEGER DEFAULT 0,
+        pdf_not_found_count INTEGER DEFAULT 0,
+        portal_not_found_count INTEGER DEFAULT 0,
+        low_confidence_count INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'uploaded',
+        raw_ocr_text TEXT,
+        parse_summary TEXT,
+        comparison_scope TEXT DEFAULT '',
+        applied_at TIMESTAMP,
+        applied_by TEXT
+    );
+    CREATE TABLE IF NOT EXISTS approval_upload_rows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id TEXT,
+        row_index INTEGER,
+        page_number INTEGER DEFAULT 0,
+        serial_no TEXT,
+        extracted_name TEXT,
+        extracted_passport_number TEXT,
+        normalized_passport_number TEXT,
+        entry_point TEXT,
+        extraction_confidence REAL DEFAULT 0.0,
+        matched_record_id INTEGER,
+        matched_name TEXT,
+        matched_passport TEXT,
+        match_confidence REAL DEFAULT 0.0,
+        match_status TEXT DEFAULT 'unmatched',
+        match_method TEXT DEFAULT '',
+        review_status TEXT DEFAULT 'pending',
+        reviewer_notes TEXT,
+        manually_corrected_name TEXT,
+        manually_corrected_passport TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_aur_batch ON approval_upload_rows(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_aur_norm_pp ON approval_upload_rows(normalized_passport_number);
+    CREATE INDEX IF NOT EXISTS idx_aur_matched ON approval_upload_rows(matched_record_id);
+    CREATE INDEX IF NOT EXISTS idx_aur_status ON approval_upload_rows(match_status);
+    CREATE INDEX IF NOT EXISTS idx_au_batch ON approval_uploads(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_au_status ON approval_uploads(status);
+    """)
+
+    # ── Approval PDF per-record columns on evacuees ───────────
+    for col, coltype in [
+        ('note_verbal_number', 'TEXT'),
+        ('note_verbal_date', 'TEXT'),
+        ('mofa_approval_serial', 'TEXT'),
+        ('approval_pdf_filename', 'TEXT'),
+        ('approval_pdf_uploaded_at', 'TIMESTAMP'),
+        ('approval_pdf_uploaded_by', 'TEXT'),
+        ('approval_batch_id', 'TEXT'),
+        ('approval_source', 'TEXT'),
+        ('approval_confidence', 'REAL'),
+        ('approval_matched_by', 'TEXT'),
+        ('approval_review_status', 'TEXT'),
+        ('approval_notes', 'TEXT'),
+        ('approved_at', 'TIMESTAMP'),
+        ('approved_by', 'TEXT'),
+        ('embassy_letter_issued_at', 'TIMESTAMP'),
+        ('embassy_letter_issued_by', 'TEXT'),
+        ('embassy_letter_print_count', 'INTEGER DEFAULT 0'),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    # Index must run after approval_batch_id column exists (ALTER above).
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ev_approval_batch ON evacuees(approval_batch_id)")
 
     # ── Backfill existing records ────────────────────────────────
     db.execute("UPDATE evacuees SET original_form_source = 'kw_to_pk' WHERE original_form_source IS NULL")
@@ -1992,8 +2086,8 @@ def api_records(params):
             qparams.append(rec_id)
         else:
             s = f"%{search_val}%"
-            where.append("(name LIKE ? OR passport LIKE ? OR cnic LIKE ? OR mobile LIKE ? OR civil_id LIKE ?)")
-            qparams.extend([s, s, s, s, s])
+            where.append("(name LIKE ? OR passport LIKE ? OR cnic LIKE ? OR mobile LIKE ? OR civil_id LIKE ? OR IFNULL(note_verbal_number,'') LIKE ?)")
+            qparams.extend([s, s, s, s, s, s])
     if params.get('status'):
         where.append("travel_status = ?")
         qparams.append(params['status'])
@@ -2229,7 +2323,8 @@ def api_save_record(data, user):
               'dob','emergency_contact','medical','family_group_id','dependents',
               'accommodation','priority','remarks','planned_departure','saudi_city',
               'traveling_with_family','confirm_ksa_3days','departure_date',
-              'current_country','current_city_pakistan','current_area_kuwait']
+              'current_country','current_city_pakistan','current_area_kuwait',
+              'note_verbal_number','note_verbal_date','mofa_approval_serial']
 
     if rec_id:  # Update
         # Get old record to detect changes
@@ -4765,6 +4860,1673 @@ body{{
 </body></html>'''
 
 # ═══════════════════════════════════════════════════════════════
+# APPROVAL PDF OCR — Helpers, Pipeline, Matching, API
+# ═══════════════════════════════════════════════════════════════
+
+# ---------- OCR dependency flags ----------
+_OCR_AVAILABLE = False
+_OCR_MISSING_MSG = ''
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+    _OCR_AVAILABLE = True
+except ImportError:
+    _OCR_MISSING_MSG += 'Pillow not installed. '
+
+try:
+    import pytesseract
+    _OCR_AVAILABLE = _OCR_AVAILABLE and True
+except ImportError:
+    _OCR_AVAILABLE = False
+    _OCR_MISSING_MSG += 'pytesseract not installed. '
+
+_PDF2IMG_AVAILABLE = False
+try:
+    from pdf2image import convert_from_path
+    _PDF2IMG_AVAILABLE = True
+except ImportError:
+    _OCR_MISSING_MSG += 'pdf2image not installed. '
+
+# Text-layer PDF extraction (searchable / OCR-generated PDFs) — pure Python, no Tesseract
+_PYPDF_AVAILABLE = False
+PdfReader = None  # set below if import succeeds
+try:
+    from pypdf import PdfReader as _PdfReader  # type: ignore
+    PdfReader = _PdfReader
+    _PYPDF_AVAILABLE = True
+except ImportError:
+    try:
+        from PyPDF2 import PdfReader as _PdfReader  # type: ignore
+        PdfReader = _PdfReader
+        _PYPDF_AVAILABLE = True
+    except ImportError:
+        pass
+
+def _check_ocr_deps():
+    """Return (ok, message). Caller must handle gracefully if not ok."""
+    if not _OCR_AVAILABLE or not _PDF2IMG_AVAILABLE:
+        return False, ('OCR dependencies missing: ' + _OCR_MISSING_MSG +
+                        'Install with: pip install Pillow pytesseract pdf2image  '
+                        'and ensure tesseract-ocr and poppler-utils are on the system.')
+    return True, 'OK'
+
+def _extract_pdf_text_per_page(pdf_path):
+    """Extract embedded text per page (searchable / OCR-with-text-layer PDF)."""
+    if not _PYPDF_AVAILABLE or not PdfReader:
+        return []
+    try:
+        with open(pdf_path, 'rb') as f:
+            reader = PdfReader(f)
+            out = []
+            for i, page in enumerate(reader.pages):
+                t = ''
+                try:
+                    fn = getattr(page, 'extract_text', None)
+                    if fn:
+                        try:
+                            t = fn(extraction_mode='layout') or ''
+                        except TypeError:
+                            t = ''
+                        if not (t and t.strip()):
+                            t = fn() or ''
+                except Exception:
+                    t = ''
+                out.append((i + 1, t or ''))
+            return out
+    except Exception as e:
+        print(f'[ApprovalPDF] pypdf extract error: {e}', flush=True)
+        return []
+
+def _extract_pdf_text_via_pdftotext(pdf_path):
+    """
+    Poppler's pdftotext to stdout — works when Poppler is installed but pypdf is not.
+    No extra pip packages beyond the OS tool (e.g. brew install poppler / apt install poppler-utils).
+    """
+    exe = shutil.which('pdftotext')
+    if not exe:
+        return []
+    try:
+        r = subprocess.run(
+            [exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if r.returncode != 0:
+            return []
+        txt = (r.stdout or '').strip()
+        if not txt:
+            return []
+        parts = txt.split('\f')
+        if len(parts) > 1:
+            return [(i + 1, p) for i, p in enumerate(parts)]
+        return [(1, txt)]
+    except Exception as e:
+        print(f'[ApprovalPDF] pdftotext error: {e}', flush=True)
+        return []
+
+def _embedded_pdf_pages_for_parse(pdf_path):
+    """Combine pypdf per-page text with optional pdftotext fallback."""
+    pages = _extract_pdf_text_per_page(pdf_path)
+    if _pdf_text_layer_usable(pages):
+        return pages
+    alt = _extract_pdf_text_via_pdftotext(pdf_path)
+    if _pdf_text_layer_usable(alt):
+        return alt
+    return pages
+
+def _pdf_text_layer_usable(page_texts):
+    """Whether extracted text is substantial enough to skip raster OCR."""
+    if not page_texts:
+        return False
+    joined = '\n'.join(t for _, t in page_texts)
+    compact = re.sub(r'\s+', '', joined)
+    if len(compact) >= 80:
+        return True
+    if re.search(r'[A-Z]{1,2}\s*\d{5,8}\b', joined, re.IGNORECASE):
+        return True
+    return False
+
+# ---------- Normalization helpers ----------
+
+def normalize_passport_number(value):
+    """Uppercase, strip spaces/punctuation, collapse OCR-noise characters."""
+    if not value:
+        return ''
+    v = str(value).upper().strip()
+    v = re.sub(r'[\s\-\.\/\\,;:\'"()]+', '', v)     # remove common noise
+    v = v.replace('O', '0') if v and v[0].isdigit() else v  # leading-digit context: O→0
+    v = re.sub(r'[^A-Z0-9]', '', v)                   # keep only alnum
+    return v
+
+def normalize_name(value):
+    """Trim whitespace, collapse spaces, readable casing for display."""
+    if not value:
+        return ''
+    v = re.sub(r'\s+', ' ', str(value).strip())
+    return v
+
+def _name_upper(value):
+    """For comparison only — uppercase normalized."""
+    return normalize_name(value).upper()
+
+def _passport_distance(a, b):
+    """Simple character-level edit distance between two normalized passport numbers."""
+    if not a or not b:
+        return 999
+    if len(a) != len(b):
+        return max(len(a), len(b))
+    return sum(1 for x, y in zip(a, b) if x != y)
+
+
+def build_passport_norm_index(db):
+    """
+    Map normalize_passport_number(passport) -> list of {id, name, passport} for CLEAR rows.
+    Used for fast exact matching and duplicate-passport detection during approval OCR batches.
+    """
+    idx = {}
+    for r in db.execute(
+            """SELECT id, name, passport FROM evacuees
+               WHERE dup_flag = 'CLEAR' AND passport IS NOT NULL AND TRIM(passport) != ''"""):
+        n = normalize_passport_number(r['passport'])
+        if not n:
+            continue
+        idx.setdefault(n, []).append({'id': r['id'], 'name': r['name'], 'passport': r['passport']})
+    return idx
+
+
+def load_all_normalized_passport_rows(db):
+    """(norm_pp, id, name, passport) for every CLEAR record with a passport — for fuzzy suggestions."""
+    rows = []
+    for r in db.execute(
+            """SELECT id, name, passport FROM evacuees
+               WHERE dup_flag = 'CLEAR' AND passport IS NOT NULL AND TRIM(passport) != ''"""):
+        n = normalize_passport_number(r['passport'])
+        if n:
+            rows.append((n, r['id'], r['name'], r['passport']))
+    return rows
+
+def _name_similarity(a, b):
+    """Token-overlap similarity 0.0-1.0 between two names."""
+    ta = set(_name_upper(a).split())
+    tb = set(_name_upper(b).split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(len(ta), len(tb))
+
+# ---------- OCR / Parsing pipeline ----------
+
+def _pdf_to_images(pdf_path):
+    """Convert PDF pages to PIL images for OCR. Returns list of (page_no, image)."""
+    if not _PDF2IMG_AVAILABLE:
+        return []
+    try:
+        images = convert_from_path(str(pdf_path), dpi=300)
+        return [(i + 1, img) for i, img in enumerate(images)]
+    except Exception as e:
+        print(f'[ApprovalOCR] pdf2image error: {e}', flush=True)
+        return []
+
+def _preprocess_image(img):
+    """Grayscale, sharpen, enhance contrast for better OCR."""
+    try:
+        img = img.convert('L')                          # grayscale
+        img = ImageEnhance.Contrast(img).enhance(1.8)   # boost contrast
+        img = img.filter(ImageFilter.SHARPEN)            # sharpen
+    except Exception:
+        pass
+    return img
+
+def _ocr_image(img):
+    """Run tesseract OCR on a single PIL image. Returns text string."""
+    try:
+        text = pytesseract.image_to_string(img, lang='eng', config='--psm 6')
+        return text or ''
+    except Exception as e:
+        print(f'[ApprovalOCR] tesseract error: {e}', flush=True)
+        return ''
+
+def parse_note_verbal_details(text):
+    """Extract note verbal/reference info from the first page text."""
+    info = {'note_verbal_number': '', 'note_verbal_date': '', 'document_reference': ''}
+    if not text:
+        return info
+    # Try to find Note Verbal / Note Verbale / NV number patterns
+    nv = re.search(r'(?:Note\s*Verbal[e]?\s*(?:No\.?|Number|#|Ref)?[\s:.\-]*)([\w\-/]+)', text, re.IGNORECASE)
+    if nv:
+        info['note_verbal_number'] = nv.group(1).strip()
+    # Date patterns (dd/mm/yyyy, dd-mm-yyyy, yyyy-mm-dd, or written dates)
+    dt = re.search(r'(?:Date|Dated?)[\s:.\-]*(\d{1,2}[\s/\-\.]\d{1,2}[\s/\-\.]\d{2,4})', text, re.IGNORECASE)
+    if not dt:
+        dt = re.search(r'(\d{1,2}[\s/\-\.]\d{1,2}[\s/\-\.]\d{4})', text)
+    if dt:
+        info['note_verbal_date'] = dt.group(1).strip()
+    # Reference / Inward number
+    ref = re.search(r'(?:Ref(?:erence)?|Inward|Admin|File)\s*(?:No\.?|Number|#)?[\s:.\-]*([\w\-/]+)', text, re.IGNORECASE)
+    if ref and ref.group(1) != info['note_verbal_number']:
+        info['document_reference'] = ref.group(1).strip()
+    return info
+
+def _detect_tabular_lines(text):
+    """Detect lines that look like rows in an approval list (serial + name + passport)."""
+    lines = text.split('\n')
+    rows = []
+    # Passport: 1–2 letters + 5–8 digits, optional space between letters and digits (text PDFs)
+    pp_compact = re.compile(r'\b([A-Z]{1,2})(\d{5,8})\b')
+    pp_spaced = re.compile(r'\b([A-Z]{1,2})\s+(\d{5,8})\b')
+    serial_pattern = re.compile(r'^\s*(\d{1,4})[\s.\-)\]]+')
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or len(stripped) < 5:
+            continue
+        # Skip header-like lines
+        if any(h in stripped.upper() for h in ['SERIAL', 'S.NO', 'PASSPORT', 'NAME', '-----', '=====']):
+            continue
+        up = stripped.upper()
+        pp_match = pp_spaced.search(up) or pp_compact.search(up)
+        if pp_match:
+            pp_raw = pp_match.group(1) + pp_match.group(2)
+            serial = ''
+            sm = serial_pattern.match(stripped)
+            if sm:
+                serial = sm.group(1)
+            pp_start = up.index(pp_match.group(0))
+            name_part = stripped[:pp_start].strip()
+            if sm:
+                name_part = name_part[len(sm.group(0)):].strip()
+            name_part = re.sub(r'[\|\[\]{}]+', '', name_part).strip(' .-')
+            remainder = stripped[pp_start + len(pp_match.group(0)):].strip(' .\t,')
+            rows.append({
+                'serial_no': serial,
+                'extracted_name': normalize_name(name_part),
+                'extracted_passport_number': pp_raw,
+                'entry_point': remainder[:60] if remainder else '',
+                'line_index': i,
+            })
+    return rows
+
+def parse_approval_rows(text, page_no=1):
+    """Parse tabular approval rows from OCR text of a single page."""
+    rows = _detect_tabular_lines(text)
+    for r in rows:
+        r['page_number'] = page_no
+        r['normalized_passport_number'] = normalize_passport_number(r['extracted_passport_number'])
+    return rows
+
+def compute_extraction_confidence(row):
+    """Score 0.0-1.0 how confident we are in the OCR extraction quality."""
+    score = 1.0
+    pp = row.get('normalized_passport_number', '')
+    name = row.get('extracted_name', '')
+    # Passport checks
+    if not pp:
+        return 0.0
+    if len(pp) < 6:
+        score -= 0.4
+    if not re.match(r'^[A-Z]{1,2}\d{5,8}$', pp):
+        score -= 0.3
+    # Name checks
+    if not name:
+        score -= 0.3
+    elif len(name) < 3:
+        score -= 0.2
+    # Contains suspicious OCR artifacts?
+    if any(c in name for c in '|[]{}@#$%^&*'):
+        score -= 0.2
+    return max(0.0, min(1.0, round(score, 2)))
+
+# ---------- Full parse pipeline ----------
+
+def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
+    """
+    Parse approval PDF: embedded text first (searchable / OCR-with-text-layer PDFs via pypdf),
+    then rasterize + Tesseract if needed for scanned PDFs.
+    """
+    embedded_pages = _embedded_pdf_pages_for_parse(pdf_path)
+    all_text = ''
+    nv_info = {}
+    all_rows = []
+    source = None
+    page_count = 0
+
+    if _pdf_text_layer_usable(embedded_pages):
+        source = 'pdf_text'
+        page_count = len(embedded_pages)
+        for page_no, text in embedded_pages:
+            all_text += f'\n--- PAGE {page_no} ---\n' + text
+            if page_no == 1:
+                nv_info = parse_note_verbal_details(text)
+            all_rows.extend(parse_approval_rows(text, page_no))
+        if not nv_info.get('note_verbal_number'):
+            nv_info = parse_note_verbal_details(all_text)
+    else:
+        ok, msg = _check_ocr_deps()
+        if not ok:
+            tiny = sum(len(t or '') for _, t in embedded_pages) < 80
+            fix = (' — Fix (pick one): (1) pip install pypdf  (2) Install Poppler: '
+                   'macOS brew install poppler, Ubuntu apt install poppler-utils  '
+                   '(enables pdftotext without extra Python packages)  '
+                   '(3) Scanned PDFs: pip install Pillow pytesseract pdf2image + system Tesseract.')
+            hint = 'This PDF has little or no extractable text (common for scan-only files). ' if tiny else ''
+            return {'success': False, 'error': (hint + msg.strip() + fix).strip()}
+        page_images = _pdf_to_images(pdf_path)
+        if not page_images:
+            err = ('Could not convert PDF to images (Poppler pdftoppm required for OCR path). '
+                   'For searchable PDFs use: pip install pypdf or install Poppler (pdftotext).')
+            return {'success': False, 'error': err}
+        source = 'ocr'
+        page_count = len(page_images)
+        for page_no, img in page_images:
+            processed = _preprocess_image(img)
+            text = _ocr_image(processed)
+            all_text += f'\n--- PAGE {page_no} ---\n' + text
+            if page_no == 1:
+                nv_info = parse_note_verbal_details(text)
+            all_rows.extend(parse_approval_rows(text, page_no))
+        if not nv_info.get('note_verbal_number'):
+            nv_info = parse_note_verbal_details(all_text)
+
+    # Compute confidence for each row
+    for i, row in enumerate(all_rows):
+        row['row_index'] = i
+        row['extraction_confidence'] = compute_extraction_confidence(row)
+
+    parse_summary = {'pages': page_count, 'rows': len(all_rows), 'source': source or 'unknown'}
+
+    # Store in database (replace any prior rows if re-parsing the same batch)
+    db = get_db()
+    try:
+        db.execute("DELETE FROM approval_upload_rows WHERE batch_id = ?", [batch_id])
+        db.execute("""UPDATE approval_uploads SET
+            note_verbal_number = ?, note_verbal_date = ?, document_reference = ?,
+            total_rows_extracted = ?, raw_ocr_text = ?, status = 'parsed',
+            parse_summary = ?
+            WHERE batch_id = ?""",
+            [nv_info.get('note_verbal_number', ''),
+             nv_info.get('note_verbal_date', ''),
+             nv_info.get('document_reference', ''),
+             len(all_rows),
+             all_text[:100000],  # cap stored text
+             json.dumps(parse_summary),
+             batch_id])
+
+        for row in all_rows:
+            db.execute("""INSERT INTO approval_upload_rows
+                (batch_id, row_index, page_number, serial_no, extracted_name,
+                 extracted_passport_number, normalized_passport_number, entry_point,
+                 extraction_confidence, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+                [batch_id, row['row_index'], row.get('page_number', 0),
+                 row.get('serial_no', ''), row.get('extracted_name', ''),
+                 row.get('extracted_passport_number', ''),
+                 row.get('normalized_passport_number', ''),
+                 row.get('entry_point', ''),
+                 row.get('extraction_confidence', 0.0)])
+
+        db.execute("INSERT INTO audit_log (action, user, details) VALUES ('approval_ocr_parsed', ?, ?)",
+                   [uploaded_by, json.dumps({'batch_id': batch_id, 'pages': page_count,
+                                            'rows': len(all_rows), 'source': source})])
+        db.commit()
+    finally:
+        db.close()
+
+    return {
+        'success': True,
+        'batch_id': batch_id,
+        'pages': page_count,
+        'rows_extracted': len(all_rows),
+        'note_verbal_number': nv_info.get('note_verbal_number', ''),
+        'note_verbal_date': nv_info.get('note_verbal_date', ''),
+        'parse_source': source,
+    }
+
+# ---------- Matching engine ----------
+
+LOW_CONFIDENCE_THRESHOLD = 0.5
+
+def match_approval_row_to_record(row, db, passport_index, all_norm_rows):
+    """
+    Match a single extracted OCR row to an evacuee portal record.
+    Golden rule: only a unique exact normalized passport match auto-matches.
+    Duplicate passports in the portal => ambiguous (staff must link manually).
+    Name-only matches are suggestions only (never auto-matched).
+    """
+    raw_pp = (row.get('manually_corrected_passport') or row.get('extracted_passport_number') or '').strip()
+    norm_pp = (row.get('normalized_passport_number') or '').strip() or normalize_passport_number(raw_pp)
+    result = {'matched_record_id': None, 'match_confidence': 0.0,
+              'match_method': '', 'matched_name': '', 'matched_passport': '',
+              'match_status': 'unmatched', 'candidates': []}
+
+    if not norm_pp:
+        result['match_status'] = 'no_passport'
+        return result
+
+    # 1. Exact normalized passport — require single portal row
+    hits = passport_index.get(norm_pp, [])
+    if len(hits) == 1:
+        rec = hits[0]
+        result['matched_record_id'] = rec['id']
+        result['matched_name'] = rec['name']
+        result['matched_passport'] = rec['passport']
+        result['match_confidence'] = 0.95
+        result['match_method'] = 'exact_passport'
+        result['match_status'] = 'matched'
+        return result
+    if len(hits) > 1:
+        result['match_status'] = 'ambiguous'
+        result['match_method'] = 'duplicate_passport_portal'
+        result['match_confidence'] = 0.25
+        result['candidates'] = [{'id': h['id'], 'name': h['name'], 'passport': h['passport'],
+                                 'method': 'duplicate_passport'} for h in hits[:5]]
+        return result
+
+    # 2. One-character-different passport — suggestion only (never auto)
+    close_matches = []
+    for n, rid, nm, pp in all_norm_rows:
+        d = _passport_distance(norm_pp, n)
+        if d == 1:
+            close_matches.append({'id': rid, 'name': nm, 'passport': pp, 'distance': d, 'method': 'close_passport'})
+
+    extracted_name = row.get('extracted_name', '') or ''
+    if close_matches and extracted_name:
+        for cm in close_matches:
+            cm['name_sim'] = _name_similarity(extracted_name, cm['name'])
+        close_matches.sort(key=lambda x: (-x.get('name_sim', 0), x['distance']))
+
+    if close_matches:
+        best = close_matches[0]
+        result['candidates'] = close_matches[:3]
+        result['match_status'] = 'suggested'
+        result['match_confidence'] = 0.5 if best.get('name_sim', 0) > 0.5 else 0.3
+        result['match_method'] = 'close_passport_suggestion'
+        return result
+
+    # 3. Passport + weak name hint: same first token, modest similarity (still suggestion only)
+    if extracted_name and len(extracted_name) > 3:
+        first = _name_upper(extracted_name).split()[0] if _name_upper(extracted_name).split() else ''
+        if first and len(first) > 2:
+            name_recs = db.execute("""SELECT id, name, passport FROM evacuees
+                WHERE dup_flag = 'CLEAR' AND UPPER(name) LIKE ? LIMIT 8""",
+                ['%' + first + '%']).fetchall()
+            for r in name_recs:
+                sim = _name_similarity(extracted_name, r['name'])
+                if sim > 0.45:
+                    result['candidates'].append({'id': r['id'], 'name': r['name'],
+                                                   'passport': r['passport'], 'name_sim': sim,
+                                                   'method': 'name_hint_suggestion'})
+            if result['candidates']:
+                result['match_status'] = 'suggested'
+                result['match_confidence'] = 0.25
+                result['match_method'] = 'name_similarity_suggestion'
+
+    return result
+
+def run_matching_for_batch(batch_id):
+    """Run matching for all rows in a batch. Updates DB in place."""
+    db = get_db()
+    try:
+        passport_index = build_passport_norm_index(db)
+        all_norm_rows = load_all_normalized_passport_rows(db)
+        rows = db.execute("SELECT * FROM approval_upload_rows WHERE batch_id = ?", [batch_id]).fetchall()
+        for row in rows:
+            row = dict(row)
+            if row['review_status'] in ('confirmed', 'applied', 'skipped'):
+                continue
+            result = match_approval_row_to_record(row, db, passport_index, all_norm_rows)
+            db.execute("""UPDATE approval_upload_rows SET
+                matched_record_id = ?, matched_name = ?, matched_passport = ?,
+                match_confidence = ?, match_method = ?, match_status = ?,
+                updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?""",
+                [result['matched_record_id'], result['matched_name'], result['matched_passport'],
+                 result['match_confidence'], result['match_method'], result['match_status'],
+                 row['id']])
+            if row['extraction_confidence'] < LOW_CONFIDENCE_THRESHOLD:
+                db.execute("UPDATE approval_upload_rows SET review_status = 'low_confidence' WHERE id = ?", [row['id']])
+            elif result['match_status'] == 'matched':
+                db.execute("UPDATE approval_upload_rows SET review_status = 'auto_matched' WHERE id = ?", [row['id']])
+            else:
+                db.execute("UPDATE approval_upload_rows SET review_status = 'needs_review' WHERE id = ?", [row['id']])
+
+        # Recompute summary from DB for consistent bucket counts
+        all_r = [dict(x) for x in db.execute("SELECT * FROM approval_upload_rows WHERE batch_id = ?", [batch_id]).fetchall()]
+        matched = sum(1 for r in all_r if r['extraction_confidence'] >= LOW_CONFIDENCE_THRESHOLD
+                      and r['match_status'] == 'matched' and r['review_status'] != 'skipped')
+        low_conf = sum(1 for r in all_r if r['extraction_confidence'] < LOW_CONFIDENCE_THRESHOLD)
+        pdf_not_found = sum(1 for r in all_r if r['extraction_confidence'] >= LOW_CONFIDENCE_THRESHOLD
+                            and r['review_status'] != 'skipped'
+                            and r['match_status'] in ('unmatched', 'no_passport', 'suggested', 'ambiguous'))
+
+        db.execute("""UPDATE approval_uploads SET
+            matched_count = ?, pdf_not_found_count = ?, low_confidence_count = ?,
+            status = 'matched'
+            WHERE batch_id = ?""",
+            [matched, pdf_not_found, low_conf, batch_id])
+        db.commit()
+    finally:
+        db.close()
+    return {'matched': matched, 'pdf_not_found': pdf_not_found, 'low_confidence': low_conf}
+
+def compute_portal_not_found(batch_id, scope_filter):
+    """
+    Compare portal records (filtered by scope) against extracted rows.
+    Returns count of portal records not in PDF.
+    scope_filter: dict with keys like visa_status, mofa_status, from_id, to_id
+    """
+    db = get_db()
+    try:
+        # Get all normalized passports from extracted rows
+        extracted_rows = db.execute("SELECT normalized_passport_number FROM approval_upload_rows WHERE batch_id = ?", [batch_id]).fetchall()
+        extracted_passports = set(r['normalized_passport_number'] for r in extracted_rows if r['normalized_passport_number'])
+
+        # Build portal query based on scope
+        q = "SELECT id, name, passport FROM evacuees WHERE dup_flag = 'CLEAR'"
+        params = []
+        if scope_filter.get('visa_status'):
+            q += " AND visa_status = ?"
+            params.append(scope_filter['visa_status'])
+        if scope_filter.get('mofa_status'):
+            q += " AND mofa_status = ?"
+            params.append(scope_filter['mofa_status'])
+        if scope_filter.get('from_id') not in (None, '', 0, '0'):
+            q += " AND id >= ?"
+            params.append(int(scope_filter['from_id']))
+        if scope_filter.get('to_id') not in (None, '', 0, '0'):
+            q += " AND id <= ?"
+            params.append(int(scope_filter['to_id']))
+        if scope_filter.get('mofa_letter_number'):
+            q += " AND mofa_letter_number = ?"
+            params.append(scope_filter['mofa_letter_number'])
+        # Default: records sent to MOFA and pending
+        if not any(scope_filter.get(k) for k in ['visa_status', 'mofa_status', 'from_id', 'to_id', 'mofa_letter_number']):
+            q += " AND mofa_status = 'Sent to MOFA' AND visa_status != 'Approved'"
+
+        portal_recs = db.execute(q, params).fetchall()
+        not_found = []
+        for rec in portal_recs:
+            norm = normalize_passport_number(rec['passport'])
+            if norm and norm not in extracted_passports:
+                not_found.append({'id': rec['id'], 'name': rec['name'], 'passport': rec['passport']})
+
+        db.execute("UPDATE approval_uploads SET portal_not_found_count = ?, comparison_scope = ? WHERE batch_id = ?",
+                   [len(not_found), json.dumps(scope_filter), batch_id])
+        db.commit()
+        return not_found
+    finally:
+        db.close()
+
+# ---------- Approval PDF API functions ----------
+
+def api_approval_upload(file_data, original_filename, uploaded_by):
+    """Handle PDF file upload, create batch, store file."""
+    APPROVAL_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    batch_id = 'APB-' + datetime.now().strftime('%Y%m%d%H%M%S') + '-' + secrets.token_hex(4)
+    safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', original_filename)
+    stored_name = f'{batch_id}_{safe_name}'
+    file_path = APPROVAL_UPLOADS_DIR / stored_name
+    try:
+        with open(file_path, 'wb') as f:
+            f.write(file_data)
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to save file: {e}'}
+
+    db = get_db()
+    try:
+        db.execute("""INSERT INTO approval_uploads
+            (batch_id, filename, original_filename, uploaded_by, uploaded_at, status)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 'uploaded')""",
+            [batch_id, stored_name, original_filename, uploaded_by])
+        db.execute("INSERT INTO audit_log (action, user, details) VALUES ('approval_pdf_uploaded', ?, ?)",
+                   [uploaded_by, json.dumps({'batch_id': batch_id, 'filename': original_filename})])
+        db.commit()
+    finally:
+        db.close()
+    return {'success': True, 'batch_id': batch_id, 'filename': stored_name}
+
+def api_approval_parse(batch_id, user):
+    """Trigger OCR pipeline for a batch."""
+    db = get_db()
+    batch = db.execute("SELECT * FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
+    db.close()
+    if not batch:
+        return {'success': False, 'error': 'Batch not found'}
+    pdf_path = APPROVAL_UPLOADS_DIR / batch['filename']
+    if not pdf_path.exists():
+        return {'success': False, 'error': 'PDF file not found on disk'}
+    result = run_approval_ocr_pipeline(str(pdf_path), batch_id, user)
+    if result.get('success'):
+        match_result = run_matching_for_batch(batch_id)
+        result.update(match_result)
+    else:
+        db = get_db()
+        try:
+            db.execute("""UPDATE approval_uploads SET status = 'parse_failed',
+                parse_summary = ? WHERE batch_id = ?""",
+                [json.dumps({'error': result.get('error', 'Unknown'), 'by': user}), batch_id])
+            db.execute("INSERT INTO audit_log (action, user, details) VALUES ('approval_ocr_failed', ?, ?)",
+                       [user, json.dumps({'batch_id': batch_id, 'error': result.get('error', '')})])
+            db.commit()
+        finally:
+            db.close()
+    return result
+
+def api_approval_batch_review(batch_id, scope_filter=None):
+    """Get full review data for a batch — all 4 buckets."""
+    db = get_db()
+    try:
+        batch = db.execute("SELECT * FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
+        if not batch:
+            return {'success': False, 'error': 'Batch not found'}
+        batch = dict(batch)
+        rows = [dict(r) for r in db.execute("SELECT * FROM approval_upload_rows WHERE batch_id = ? ORDER BY row_index", [batch_id]).fetchall()]
+
+        def in_matched_bucket(r):
+            if r.get('review_status') == 'skipped':
+                return False
+            if r['extraction_confidence'] < LOW_CONFIDENCE_THRESHOLD:
+                return False
+            if r['match_status'] == 'matched':
+                return True
+            if r['match_status'] == 'manually_linked' and r.get('matched_record_id'):
+                return True
+            return False
+
+        # Bucket 1: Matched (auto or staff-linked, OCR confident enough for auto tab)
+        matched = [r for r in rows if in_matched_bucket(r)]
+        # Bucket 2: PDF rows not in portal (or need manual link / OCR fix)
+        pdf_not_found = [r for r in rows if not in_matched_bucket(r)
+                         and r['extraction_confidence'] >= LOW_CONFIDENCE_THRESHOLD
+                         and r.get('review_status') != 'skipped']
+        # Bucket 4: Low confidence OCR
+        low_conf = [r for r in rows if r['extraction_confidence'] < LOW_CONFIDENCE_THRESHOLD]
+
+        # Bucket 3: Portal records not in PDF
+        portal_not_found = []
+        if scope_filter:
+            portal_not_found = compute_portal_not_found(batch_id, scope_filter)
+
+        summary = {
+            'total_extracted': len(rows),
+            'matched_auto': len(matched),
+            'pdf_not_found': len(pdf_not_found),
+            'portal_not_found': len(portal_not_found),
+            'low_confidence': len(low_conf),
+        }
+        # Update batch counts
+        db.execute("""UPDATE approval_uploads SET
+            matched_count = ?, pdf_not_found_count = ?, portal_not_found_count = ?, low_confidence_count = ?
+            WHERE batch_id = ?""",
+            [summary['matched_auto'], summary['pdf_not_found'], summary['portal_not_found'], summary['low_confidence'], batch_id])
+        db.commit()
+
+        return {
+            'success': True,
+            'batch': batch,
+            'summary': summary,
+            'matched': matched,
+            'pdf_not_found': pdf_not_found,
+            'portal_not_found': portal_not_found,
+            'low_confidence': low_conf,
+        }
+    finally:
+        db.close()
+
+def api_approval_row_update(row_id, data, user):
+    """Update a single OCR row — manual correction, link, skip, etc."""
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM approval_upload_rows WHERE id = ?", [row_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Row not found'}
+        sets = {}
+        if 'manually_corrected_name' in data:
+            sets['manually_corrected_name'] = data['manually_corrected_name']
+        if 'manually_corrected_passport' in data:
+            sets['manually_corrected_passport'] = data['manually_corrected_passport']
+            sets['normalized_passport_number'] = normalize_passport_number(data['manually_corrected_passport'])
+        if 'reviewer_notes' in data:
+            sets['reviewer_notes'] = data['reviewer_notes']
+        if 'review_status' in data:
+            sets['review_status'] = data['review_status']
+
+        linked = False
+        if 'matched_record_id' in data:
+            mid = data['matched_record_id']
+            sets['matched_record_id'] = mid
+            if mid:
+                rec = db.execute("SELECT name, passport FROM evacuees WHERE id = ?", [mid]).fetchone()
+                if rec:
+                    sets['matched_name'] = rec['name']
+                    sets['matched_passport'] = rec['passport']
+                    sets['match_status'] = 'manually_linked'
+                    sets['match_method'] = 'manual_link'
+                    sets['match_confidence'] = 1.0
+                    linked = True
+            else:
+                sets['matched_name'] = ''
+                sets['matched_passport'] = ''
+
+        if 'match_status' in data and 'match_status' not in sets:
+            sets['match_status'] = data['match_status']
+
+        cols = [f'{k} = ?' for k, v in sets.items()]
+        vals = list(sets.values())
+        cols.append('updated_at = CURRENT_TIMESTAMP')
+        vals.append(row_id)
+        if cols:
+            db.execute(f"UPDATE approval_upload_rows SET {', '.join(cols)} WHERE id = ?", vals)
+            act = 'approval_row_linked' if linked else 'approval_row_corrected'
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                       [act, row_id, user, json.dumps(data)])
+            db.commit()
+        return {'success': True}
+    finally:
+        db.close()
+
+def api_approval_rematch_row(row_id, user):
+    """Re-run matching for a single row after correction."""
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM approval_upload_rows WHERE id = ?", [row_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Row not found'}
+        row = dict(row)
+        # Use corrected values if available
+        if row.get('manually_corrected_passport'):
+            row['normalized_passport_number'] = normalize_passport_number(row['manually_corrected_passport'])
+            row['extracted_passport_number'] = row['manually_corrected_passport']
+        if row.get('manually_corrected_name'):
+            row['extracted_name'] = row['manually_corrected_name']
+        passport_index = build_passport_norm_index(db)
+        all_norm_rows = load_all_normalized_passport_rows(db)
+        result = match_approval_row_to_record(row, db, passport_index, all_norm_rows)
+        rev = 'auto_matched' if result['match_status'] == 'matched' else (
+            'low_confidence' if row.get('extraction_confidence', 0) < LOW_CONFIDENCE_THRESHOLD else 'needs_review')
+        db.execute("""UPDATE approval_upload_rows SET
+            matched_record_id = ?, matched_name = ?, matched_passport = ?,
+            match_confidence = ?, match_method = ?, match_status = ?,
+            review_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            [result['matched_record_id'], result['matched_name'], result['matched_passport'],
+             result['match_confidence'], result['match_method'], result['match_status'], rev, row_id])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('approval_row_rematch', ?, ?, ?)",
+                   [row_id, user, json.dumps({'match_status': result.get('match_status')})])
+        db.commit()
+        return {'success': True, 'result': result}
+    finally:
+        db.close()
+
+def api_approval_search_portal(query, batch_id=None):
+    """Search portal records for manual linking."""
+    db = get_db()
+    try:
+        q = query.strip().upper()
+        results = []
+        if q:
+            rows = db.execute("""SELECT id, name, passport, visa_status, mobile
+                FROM evacuees WHERE dup_flag = 'CLEAR' AND (
+                    UPPER(REPLACE(REPLACE(passport,' ',''),'-','')) LIKE ? OR
+                    UPPER(name) LIKE ?
+                ) LIMIT 20""", ['%' + q + '%', '%' + q + '%']).fetchall()
+            results = [dict(r) for r in rows]
+        return {'success': True, 'results': results}
+    finally:
+        db.close()
+
+def api_approval_batch_save_nv(batch_id, note_verbal_number, note_verbal_date, user):
+    """Persist note verbal number/date on the batch before apply (review page)."""
+    db = get_db()
+    try:
+        if not batch_id:
+            return {'success': False, 'error': 'batch_id required'}
+        row = db.execute("SELECT batch_id, status FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Batch not found'}
+        if row['status'] == 'applied':
+            return {'success': False, 'error': 'This batch is already applied; note verbal cannot be changed here.'}
+        db.execute(
+            "UPDATE approval_uploads SET note_verbal_number = ?, note_verbal_date = ? WHERE batch_id = ?",
+            [note_verbal_number or '', note_verbal_date or '', batch_id])
+        db.commit()
+        return {'success': True}
+    finally:
+        db.close()
+
+def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None, note_verbal_date=None):
+    """Apply approval updates to selected rows. Only updates confirmed/matched rows."""
+    db = get_db()
+    try:
+        batch = db.execute("SELECT * FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
+        if not batch:
+            return {'success': False, 'error': 'Batch not found'}
+        batch = dict(batch)
+        if note_verbal_number is not None or note_verbal_date is not None:
+            nv_n = (note_verbal_number if note_verbal_number is not None else (batch.get('note_verbal_number') or ''))
+            nv_d = (note_verbal_date if note_verbal_date is not None else (batch.get('note_verbal_date') or ''))
+            if isinstance(nv_n, str):
+                nv_n = nv_n.strip()
+            else:
+                nv_n = str(nv_n or '')
+            if isinstance(nv_d, str):
+                nv_d = nv_d.strip()
+            else:
+                nv_d = str(nv_d or '')
+            db.execute(
+                "UPDATE approval_uploads SET note_verbal_number = ?, note_verbal_date = ? WHERE batch_id = ?",
+                [nv_n, nv_d, batch_id])
+            batch = dict(db.execute("SELECT * FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone())
+
+        applied = 0
+        skipped = 0
+        errors = []
+
+        for row_id in selected_row_ids:
+            row = db.execute("SELECT * FROM approval_upload_rows WHERE id = ? AND batch_id = ?", [row_id, batch_id]).fetchone()
+            if not row:
+                errors.append(f'Row {row_id} not found')
+                continue
+            row = dict(row)
+            if not row['matched_record_id']:
+                skipped += 1
+                continue
+            if row['review_status'] in ('skipped', 'applied'):
+                skipped += 1
+                continue
+            ext_low = (row.get('extraction_confidence') or 0) < LOW_CONFIDENCE_THRESHOLD
+            manual_link = row.get('match_method') == 'manual_link' or row.get('match_status') == 'manually_linked'
+            staff_confirmed = row.get('review_status') == 'confirmed'
+            if ext_low and not (manual_link or staff_confirmed):
+                skipped += 1
+                continue
+            if row['match_status'] not in ('matched', 'manually_linked') and row['review_status'] not in ('confirmed', 'auto_matched'):
+                skipped += 1
+                continue
+
+            rec_id = row['matched_record_id']
+            existing = db.execute(
+                "SELECT approval_batch_id, visa_status FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+            if existing and existing['visa_status'] == 'Approved':
+                skipped += 1
+                continue
+
+            serial = (row.get('serial_no') or '').strip() or str(row.get('row_index', ''))
+            matched_by = '%s|%s' % (row.get('match_method') or 'unknown', user)
+
+            db.execute("""UPDATE evacuees SET
+                visa_status = 'Approved',
+                note_verbal_number = ?,
+                note_verbal_date = ?,
+                mofa_approval_serial = ?,
+                approval_pdf_filename = ?,
+                approval_pdf_uploaded_at = ?,
+                approval_pdf_uploaded_by = ?,
+                approval_batch_id = ?,
+                approval_source = 'approval_pdf_ocr',
+                approval_confidence = ?,
+                approval_matched_by = ?,
+                approval_review_status = 'approved_applied',
+                approved_at = CURRENT_TIMESTAMP,
+                approved_by = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = ?
+                WHERE id = ?""",
+                [batch.get('note_verbal_number', ''),
+                 batch.get('note_verbal_date', ''),
+                 serial,
+                 batch.get('original_filename', ''),
+                 batch.get('uploaded_at', ''),
+                 batch.get('uploaded_by', ''),
+                 batch_id,
+                 row.get('match_confidence', 0),
+                 matched_by,
+                 user, user, rec_id])
+
+            # Trigger workflow rules
+            apply_workflow_rules(db, rec_id, 'visa_status', 'Approved', user)
+
+            # Mark row as applied
+            db.execute("UPDATE approval_upload_rows SET review_status = 'applied', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [row_id])
+
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('approval_applied', ?, ?, ?)",
+                       [rec_id, user, json.dumps({'batch_id': batch_id, 'row_id': row_id, 'match_method': row.get('match_method', '')})])
+
+            # Queue approval email
+            fresh = db.execute("SELECT id, name, passport, email FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+            if fresh:
+                _queue_visa_approved_email(dict(fresh), user)
+
+            applied += 1
+
+        db.execute("""UPDATE approval_uploads SET status = 'applied', applied_at = CURRENT_TIMESTAMP, applied_by = ?
+            WHERE batch_id = ?""", [user, batch_id])
+        db.commit()
+
+        return {'success': True, 'applied': applied, 'skipped': skipped, 'errors': errors}
+    finally:
+        db.close()
+
+def api_approval_export_csv(batch_id, export_type):
+    """Export exception rows to CSV."""
+    db = get_db()
+    try:
+        rows = [dict(r) for r in db.execute("SELECT * FROM approval_upload_rows WHERE batch_id = ? ORDER BY row_index", [batch_id]).fetchall()]
+        batch = db.execute("SELECT * FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
+
+        if export_type == 'pdf_not_found':
+            data = [r for r in rows if r['match_status'] in ('unmatched', 'no_passport', 'suggested', 'ambiguous')
+                    and r['extraction_confidence'] >= LOW_CONFIDENCE_THRESHOLD]
+        elif export_type == 'portal_not_found':
+            scope_str = batch['comparison_scope'] if batch else '{}'
+            scope = json.loads(scope_str) if scope_str else {}
+            portal_nf = compute_portal_not_found(batch_id, scope)
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(['Portal ID', 'Name', 'Passport Number', 'Status'])
+            for r in portal_nf:
+                writer.writerow([r['id'], r['name'], r['passport'], 'Not in PDF'])
+            return output.getvalue()
+        elif export_type == 'low_confidence':
+            data = [r for r in rows if r['extraction_confidence'] < LOW_CONFIDENCE_THRESHOLD]
+        elif export_type in ('all_exceptions', 'all'):
+            pdf_nf = [r for r in rows if r['match_status'] in ('unmatched', 'no_passport', 'suggested', 'ambiguous')
+                      and r['extraction_confidence'] >= LOW_CONFIDENCE_THRESHOLD]
+            low = [r for r in rows if r['extraction_confidence'] < LOW_CONFIDENCE_THRESHOLD]
+            scope_str = batch['comparison_scope'] if batch else '{}'
+            scope = json.loads(scope_str) if scope_str else {}
+            portal_nf = compute_portal_not_found(batch_id, scope)
+            data = pdf_nf + low
+            output = io.StringIO()
+            w = csv.writer(output)
+            w.writerow(['Section', 'Row #', 'Serial No', 'Extracted Name', 'Extracted Passport', 'Normalized Passport',
+                        'Confidence', 'Match Status', 'Matched Portal ID', 'Notes'])
+            for r in pdf_nf:
+                w.writerow(['pdf_not_in_portal', r.get('row_index', ''), r.get('serial_no', ''), r.get('extracted_name', ''),
+                            r.get('extracted_passport_number', ''), r.get('normalized_passport_number', ''),
+                            r.get('extraction_confidence', ''), r.get('match_status', ''),
+                            r.get('matched_record_id', ''), r.get('reviewer_notes', '')])
+            for r in low:
+                w.writerow(['low_confidence_ocr', r.get('row_index', ''), r.get('serial_no', ''), r.get('extracted_name', ''),
+                            r.get('extracted_passport_number', ''), r.get('normalized_passport_number', ''),
+                            r.get('extraction_confidence', ''), r.get('match_status', ''),
+                            r.get('matched_record_id', ''), r.get('reviewer_notes', '')])
+            for r in portal_nf:
+                w.writerow(['portal_not_in_pdf', '', '', r.get('name', ''), r.get('passport', ''), '', '', '', r.get('id', ''), ''])
+            return output.getvalue()
+        else:
+            data = [r for r in rows if r['match_status'] != 'matched' or r['extraction_confidence'] < LOW_CONFIDENCE_THRESHOLD]
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Row #', 'Serial No', 'Extracted Name', 'Extracted Passport', 'Normalized Passport',
+                         'Confidence', 'Match Status', 'Matched Portal ID', 'Matched Name', 'Matched Passport',
+                         'Review Status', 'Notes', 'Corrected Name', 'Corrected Passport'])
+        for r in data:
+            writer.writerow([
+                r.get('row_index', ''), r.get('serial_no', ''), r.get('extracted_name', ''),
+                r.get('extracted_passport_number', ''), r.get('normalized_passport_number', ''),
+                r.get('extraction_confidence', ''), r.get('match_status', ''),
+                r.get('matched_record_id', ''), r.get('matched_name', ''), r.get('matched_passport', ''),
+                r.get('review_status', ''), r.get('reviewer_notes', ''),
+                r.get('manually_corrected_name', ''), r.get('manually_corrected_passport', ''),
+            ])
+        return output.getvalue()
+    finally:
+        db.close()
+
+def api_approval_batches_list():
+    """List all approval batches."""
+    db = get_db()
+    try:
+        batches = [dict(r) for r in db.execute("""SELECT id, batch_id, original_filename, uploaded_by, uploaded_at,
+            note_verbal_number, note_verbal_date, total_rows_extracted, matched_count,
+            pdf_not_found_count, portal_not_found_count, low_confidence_count, status
+            FROM approval_uploads ORDER BY uploaded_at DESC""").fetchall()]
+        return {'success': True, 'batches': batches}
+    finally:
+        db.close()
+
+# ---------- Embassy Letter helpers ----------
+
+EMBASSY_LETTERHEAD_FILENAME = 'embassy_letterhead.png'  # Embassy seal/logo PNG (place next to server.py)
+
+def _embassy_letterhead_data_url():
+    """Load uploaded letterhead PNG as data URL for print page (no extra HTTP round-trip)."""
+    p = Path(__file__).resolve().parent / EMBASSY_LETTERHEAD_FILENAME
+    if not p.is_file():
+        return ''
+    try:
+        raw = p.read_bytes()
+    except OSError:
+        return ''
+    return 'data:image/png;base64,' + base64.b64encode(raw).decode('ascii')
+
+def is_letter_print_ready(record):
+    """Check if a record has all required fields for embassy letter printing."""
+    required = ['ticket_number', 'airline', 'departure_date', 'departure_airport',
+                'destination_country', 'note_verbal_number', 'note_verbal_date', 'mofa_approval_serial']
+    if record.get('visa_status') != 'Approved':
+        return False
+    for f in required:
+        if not (record.get(f) or '').strip():
+            return False
+    return True
+
+def generate_embassy_letter_html(record):
+    """Generate printable A4 embassy letter: page 1 English, page 2 Arabic; seal logo; QR at foot of each sheet."""
+    name = esc(record.get('name', ''))
+    passport = esc(record.get('passport', ''))
+    nv_number = esc(record.get('note_verbal_number', ''))
+    nv_date = esc(record.get('note_verbal_date', ''))
+    serial = esc(record.get('mofa_approval_serial', ''))
+    airline = esc(record.get('airline', ''))
+    ticket = esc(record.get('ticket_number', ''))
+    dep_airport = esc(record.get('departure_airport', ''))
+    dep_date = esc(record.get('departure_date', ''))
+    dest_country = esc(record.get('destination_country', ''))
+    issue_date = esc(datetime.now().strftime('%d %B %Y'))
+
+    gender = (record.get('gender') or '').strip().lower()
+    prefix = 'Ms.' if gender in ('female', 'f') else 'Mr.'
+    prefix_ar = 'السيدة' if gender in ('female', 'f') else 'السيد'
+    holder_ar = 'حاملة' if gender in ('female', 'f') else 'حامل'
+
+    verify_url = 'https://evacuation-system.onrender.com/'
+    qr_src = 'https://api.qrserver.com/v1/create-qr-code/?size=120x120&margin=0&data=' + quote(verify_url, safe='')
+
+    lh_data = _embassy_letterhead_data_url()
+    emblem_img = (
+        f'<img src="{lh_data}" class="letterhead-emblem" alt="">'
+        if lh_data else '<div class="letterhead-emblem-fallback" aria-hidden="true"></div>'
+    )
+
+    footer_html = f'''<footer class="footer-wrap">
+    <hr class="footer-rule">
+    <div class="footer-contact">
+      Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
+      Tel.: +965-25327647, +96555977292 &nbsp;|&nbsp; Fax: +965-25327648 &nbsp;|&nbsp; E-mail: parepkuwait@mofa.gov.pk
+    </div>
+  </footer>'''
+
+    return f'''<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>Embassy Letter — {name}</title>
+<style>
+@page {{ size: A4; margin: 11mm 14mm 12mm 14mm; }}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; line-height: 1.45; color: #222; background: #e8e8e8; }}
+.doc {{ max-width: 210mm; margin: 0 auto; background: #fff; }}
+.sheet {{
+  min-height: 275mm;
+  padding: 0 3mm 4mm;
+  display: flex;
+  flex-direction: column;
+  page-break-after: always;
+  break-after: page;
+  background: #fff;
+}}
+.sheet:last-of-type {{ page-break-after: auto; break-after: auto; }}
+.sheet-body {{ flex: 1 1 auto; }}
+.sheet-foot {{ flex: 0 0 auto; margin-top: auto; padding-top: 8px; }}
+.letterhead-row {{ display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #006600; }}
+.sheet--ar .letterhead-row {{ flex-direction: row-reverse; }}
+.letterhead-left {{
+  width: 82px; height: 82px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}}
+.letterhead-emblem {{ max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; object-position: center; display: block; }}
+.letterhead-emblem-fallback {{ width: 76px; height: 76px; border: 1px solid #ccc; border-radius: 50%; background: #f5f5f5; }}
+.titles-en {{ text-align: right; font-size: 10.5pt; font-weight: 700; letter-spacing: 0.05em; color: #006600; line-height: 1.3; }}
+.titles-en .line2 {{ margin-top: 2px; }}
+.titles-ar {{ direction: rtl; text-align: right; font-family: Arial, 'Segoe UI', Tahoma, sans-serif; font-size: 10.5pt; font-weight: 700; color: #006600; line-height: 1.4; }}
+.meta {{ display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 9pt; color: #444; }}
+.subject {{ text-align: center; font-weight: 700; font-size: 11pt; margin: 6px 0 8px; color: #111; }}
+.body-text {{ text-align: justify; margin-bottom: 8px; font-size: 9.5pt; }}
+.body-text.ar {{ direction: rtl; text-align: right; font-family: Arial, Tahoma, sans-serif; }}
+.details-table {{ width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 8.8pt; }}
+.details-table td {{ padding: 3px 7px; border: 1px solid #ccc; vertical-align: top; }}
+.details-table td:first-child {{ font-weight: 600; width: 36%; background: #f3f9f3; color: #1b5e20; }}
+.qr-block {{
+  text-align: center; padding: 8px 10px 6px; border: 1px solid #006600; background: #fafcfa;
+  max-width: 220px; margin: 0 auto 6px; page-break-inside: avoid;
+}}
+.qr-block img {{ display: block; margin: 0 auto 6px; width: 120px; height: 120px; }}
+.qr-caption-en {{ font-size: 8pt; color: #333; line-height: 1.35; }}
+.qr-url {{ font-size: 7.5pt; color: #006600; word-break: break-all; margin-top: 2px; }}
+.qr-caption-ar {{ direction: rtl; font-size: 8pt; color: #333; margin-top: 5px; line-height: 1.4; font-family: Arial, Tahoma, sans-serif; }}
+.issue-note {{ text-align: center; font-size: 9pt; color: #333; margin: 4px 0 3px; line-height: 1.4; }}
+.computer-gen {{ text-align: center; font-size: 7.8pt; color: #666; margin: 4px 8px 6px; line-height: 1.35; }}
+.footer-wrap {{ page-break-inside: avoid; padding-top: 4px; }}
+.footer-rule {{ border: none; border-top: 1px solid #222; margin: 0 auto 6px; width: 90%; }}
+.footer-contact {{ text-align: center; font-size: 8pt; color: #333; line-height: 1.45; }}
+@media print {{
+  body {{ background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  .doc {{ max-width: none; }}
+  .sheet {{
+    min-height: 270mm;
+    padding: 0;
+    page-break-after: always;
+    break-after: page;
+  }}
+  .sheet:last-of-type {{ page-break-after: auto; break-after: auto; }}
+  .no-print {{ display: none !important; }}
+}}
+</style></head><body>
+<div class="no-print" style="text-align:center;padding:10px;background:#006600;color:#fff">
+  <button type="button" onclick="window.print()" style="padding:10px 28px;font-size:13pt;cursor:pointer;border:none;border-radius:6px;background:#fff;color:#006600;font-weight:bold">Print letter (2 pages)</button>
+  <button type="button" onclick="window.close()" style="padding:10px 18px;font-size:12pt;cursor:pointer;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;margin-left:10px">Close</button>
+</div>
+<div class="doc">
+  <!-- —— Page 1: English —— -->
+  <section class="sheet sheet--en" lang="en">
+    <div class="sheet-body">
+      <header class="letterhead-row">
+        <div class="letterhead-left">{emblem_img}</div>
+        <div class="letterhead-right">
+          <div class="titles-en">EMBASSY OF PAKISTAN<div class="line2">KUWAIT</div></div>
+        </div>
+      </header>
+      <div class="meta">
+        <div>Ref: CWA/KWT/{nv_number}/{serial}</div>
+        <div>Date: {issue_date}</div>
+      </div>
+      <div class="subject">TRAVEL FACILITATION CERTIFICATE</div>
+      <div class="body-text">
+        <p>This is to certify that <strong>{prefix} {name}</strong>, holder of Passport No. <strong>{passport}</strong>,
+        has been facilitated for travel on the basis of a Note Verbal No. <strong>{nv_number}</strong> dated <strong>{nv_date}</strong>
+        (approval serial <strong>{serial}</strong>), <strong>approved by the Ministry of Foreign Affairs of the Kingdom of Saudi Arabia</strong>.</p>
+        <p style="margin-top:6px">The applicant is scheduled to travel by <strong>{airline}</strong>, Ticket No. <strong>{ticket}</strong>,
+        departing from <strong>{dep_airport}</strong> on <strong>{dep_date}</strong> for <strong>{dest_country}</strong>.</p>
+      </div>
+      <table class="details-table">
+        <tr><td>Full name</td><td>{name}</td></tr>
+        <tr><td>Passport No.</td><td>{passport}</td></tr>
+        <tr><td>Note Verbal No.</td><td>{nv_number}</td></tr>
+        <tr><td>Note Verbal Date</td><td>{nv_date}</td></tr>
+        <tr><td>Approval serial</td><td>{serial}</td></tr>
+        <tr><td>Airline</td><td>{airline}</td></tr>
+        <tr><td>Ticket No.</td><td>{ticket}</td></tr>
+        <tr><td>Departure airport</td><td>{dep_airport}</td></tr>
+        <tr><td>Departure date</td><td>{dep_date}</td></tr>
+        <tr><td>Destination</td><td>{dest_country}</td></tr>
+      </table>
+      <div class="body-text"><p>This certificate is issued for record and travel facilitation only.</p></div>
+    </div>
+    <div class="sheet-foot">
+      <div class="qr-block">
+        <img src="{qr_src}" width="120" height="120" alt="Verification QR">
+        <div class="qr-caption-en">Verifiable online by Embassy of Pakistan Kuwait</div>
+        <div class="qr-url">{verify_url}</div>
+      </div>
+      <div class="issue-note">Issued electronically by Embassy of Pakistan, Kuwait</div>
+      <div class="computer-gen">This is a computer generated document and does not require signature.</div>
+      {footer_html}
+    </div>
+  </section>
+
+  <!-- —— Page 2: Arabic —— -->
+  <section class="sheet sheet--ar" lang="ar" dir="rtl">
+    <div class="sheet-body">
+      <header class="letterhead-row">
+        <div class="letterhead-left">{emblem_img}</div>
+        <div class="letterhead-right">
+          <div class="titles-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
+        </div>
+      </header>
+      <div class="meta" dir="rtl">
+        <div>التاريخ: {issue_date}</div>
+        <div>المرجع: CWA/KWT/{nv_number}/{serial}</div>
+      </div>
+      <div class="subject">شهادة تسهيل السفر</div>
+      <div class="body-text ar">
+        <p>يشهد سفارة جمهورية باكستان الإسلامية لدى دولة الكويت بأن <strong>{prefix_ar} {name}</strong>، {holder_ar} جواز السفر رقم <strong>{passport}</strong>،
+        قد تم تسهيل سفره/سفرها استناداً إلى إشعار خطي رقم <strong>{nv_number}</strong> بتاريخ <strong>{nv_date}</strong>
+        (رقم الموافقة <strong>{serial}</strong>)، <strong>الموافق عليها من قبل وزارة خارجية المملكة العربية السعودية</strong>.</p>
+        <p style="margin-top:6px">من المقرر سفر <strong>{prefix_ar} {name}</strong> على متن <strong>{airline}</strong>، وتذكرة رقم <strong>{ticket}</strong>،
+        مغادرة من <strong>{dep_airport}</strong> بتاريخ <strong>{dep_date}</strong> إلى <strong>{dest_country}</strong>.</p>
+      </div>
+      <table class="details-table">
+        <tr><td>الاسم الكامل</td><td>{name}</td></tr>
+        <tr><td>رقم الجواز</td><td>{passport}</td></tr>
+        <tr><td>رقم الإشعار الخطي</td><td>{nv_number}</td></tr>
+        <tr><td>تاريخ الإشعار الخطي</td><td>{nv_date}</td></tr>
+        <tr><td>رقم الموافقة</td><td>{serial}</td></tr>
+        <tr><td>شركة الطيران</td><td>{airline}</td></tr>
+        <tr><td>رقم التذكرة</td><td>{ticket}</td></tr>
+        <tr><td>مطار المغادرة</td><td>{dep_airport}</td></tr>
+        <tr><td>تاريخ المغادرة</td><td>{dep_date}</td></tr>
+        <tr><td>الوجهة</td><td>{dest_country}</td></tr>
+      </table>
+      <div class="body-text ar"><p>أُصدرت هذه الشهادة لأغراض السجل وتسهيل السفر فقط.</p></div>
+    </div>
+    <div class="sheet-foot" dir="rtl">
+      <div class="qr-block">
+        <img src="{qr_src}" width="120" height="120" alt="QR">
+        <div class="qr-caption-ar">يمكن التحقق من هذه الوثيقة إلكترونياً عبر سفارة باكستان - الكويت</div>
+        <div class="qr-url" dir="ltr" style="text-align:center">{verify_url}</div>
+      </div>
+      <div class="issue-note">صادرة إلكترونياً عن سفارة جمهورية باكستان الإسلامية لدى دولة الكويت</div>
+      <div class="computer-gen">هذه وثيقة صادرة آلياً من النظام ولا تتطلب توقيعاً.</div>
+      {footer_html}
+    </div>
+  </section>
+</div>
+</body></html>'''
+
+# ═══════════════════════════════════════════════════════════════
+# APPROVAL REVIEW PAGE (full staff-only HTML page)
+# ═══════════════════════════════════════════════════════════════
+
+def extract_multipart_upload(body, content_type, field_names=('file', 'pdf', 'approval_pdf')):
+    """Parse multipart/form-data; return (original_filename, file_bytes) or (None, None)."""
+    if not body or 'multipart/form-data' not in (content_type or ''):
+        return None, None
+    if 'boundary=' not in content_type:
+        return None, None
+    boundary = content_type.split('boundary=', 1)[1].strip().encode()
+    if len(boundary) >= 2 and boundary[:1] == b'"' and boundary[-1:] == b'"':
+        boundary = boundary[1:-1]
+    parts = body.split(b'--' + boundary)
+    for part in parts:
+        if b'name="' not in part:
+            continue
+        sep = b'\r\n\r\n' if b'\r\n\r\n' in part else (b'\n\n' if b'\n\n' in part else None)
+        if not sep:
+            continue
+        head, _, rest = part.partition(sep)
+        try:
+            disp = head.decode('latin-1', errors='replace')
+        except Exception:
+            continue
+        if not any(f'name="{fn}"' in disp for fn in field_names):
+            continue
+        m = re.search(r'filename="([^"]*)"', disp)
+        orig = (m.group(1) if m else '') or 'upload.pdf'
+        data = rest.rstrip(b'\r\n') if rest.endswith(b'\r\n') else rest.rstrip(b'\n')
+        return orig, data
+    return None, None
+
+
+APPROVAL_REVIEW_PAGE = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Approval PDF Review — Pakistan Embassy Kuwait</title>
+<style>
+:root{--p:#006600;--pl:#e8f5e9;--d:#c62828;--dl:#ffebee;--w:#e65100;--wl:#fff3e0;--i:#1565c0;--il:#e3f2fd;--s:#2e7d32;--bg:#f5f5f5;--card:#fff;--t:#212121;--tl:#757575;--bd:#e0e0e0;--sh:0 2px 8px rgba(0,0,0,.1)}
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--t)}
+.hdr{background:linear-gradient(135deg,var(--p),#004d00);color:#fff;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.hdr h1{font-size:1.15em}.hdr .sub{font-size:.78em;opacity:.85}
+.hdr .user-info{display:flex;align-items:center;gap:12px;font-size:.85em}
+.hdr .user-info a{color:#fff;text-decoration:none;background:rgba(255,255,255,.15);padding:6px 14px;border-radius:6px}
+.ctr{max-width:1500px;margin:0 auto;padding:16px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.sum-card{background:var(--card);border-radius:10px;padding:14px;box-shadow:var(--sh);text-align:center;border-top:4px solid var(--p)}
+.sum-card.matched{border-top-color:var(--s)}.sum-card.pdfnf{border-top-color:var(--w)}.sum-card.portalnf{border-top-color:var(--i)}.sum-card.lowconf{border-top-color:var(--d)}
+.sum-card .num{font-size:2em;font-weight:700}.sum-card .lbl{font-size:.75em;color:var(--tl);text-transform:uppercase}
+.sum-card.matched .num{color:var(--s)}.sum-card.pdfnf .num{color:var(--w)}.sum-card.portalnf .num{color:var(--i)}.sum-card.lowconf .num{color:var(--d)}
+.batch-info{background:var(--card);border-radius:10px;padding:16px;box-shadow:var(--sh);margin-bottom:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.batch-info .bi-item{font-size:.88em}.batch-info .bi-label{font-weight:600;color:var(--tl);font-size:.75em;text-transform:uppercase}.batch-info .bi-value{margin-top:2px}
+.batch-info input.nv-input{width:100%;max-width:320px;margin-top:4px;padding:6px 10px;border:1px solid var(--bd);border-radius:6px;font-size:.9em}
+.tabs{display:flex;border-bottom:2px solid var(--bd);margin-bottom:16px;flex-wrap:wrap;background:var(--card);border-radius:10px 10px 0 0;overflow:hidden}
+.tabs button{padding:12px 22px;border:none;background:none;cursor:pointer;font-weight:600;font-size:.88em;color:var(--tl);border-bottom:3px solid transparent;transition:.2s}
+.tabs button.active{color:var(--p);border-bottom-color:var(--p);background:var(--pl)}
+.tabs button:hover{background:#f0f0f0}
+.tab-content{display:none}.tab-content.active{display:block}
+.tc{background:var(--card);border-radius:10px;padding:16px;box-shadow:var(--sh);margin-bottom:16px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.82em}
+th{background:#f8f9fa;padding:8px 10px;text-align:left;font-weight:600;border-bottom:2px solid var(--bd);position:sticky;top:0}
+td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
+.bdg{padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;white-space:nowrap}
+.bdg-match{background:#c8e6c9;color:#1b5e20}.bdg-unmatch{background:#fff9c4;color:#f57f17}.bdg-low{background:#ffcdd2;color:#b71c1c}
+.bdg-link{background:#bbdefb;color:#0d47a1}.bdg-skip{background:#e0e0e0;color:#616161}.bdg-applied{background:#c8e6c9;color:#1b5e20}
+.btn{padding:7px 16px;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:.82em;transition:.2s}
+.btn-p{background:var(--p);color:#fff}.btn-p:hover{background:#004d00}
+.btn-sm{padding:4px 10px;font-size:.75em;border-radius:4px}
+.btn-d{background:var(--d);color:#fff}.btn-i{background:var(--i);color:#fff}.btn-w{background:var(--w);color:#fff}
+.btn-outline{background:transparent;border:1px solid var(--bd);color:var(--t)}.btn-outline:hover{background:#f0f0f0}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.action-bar{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0;align-items:center}
+.conf-bar{height:6px;border-radius:3px;background:#e0e0e0;overflow:hidden;width:80px;display:inline-block;vertical-align:middle}
+.conf-fill{height:100%;border-radius:3px}
+.search-box{display:flex;gap:6px;margin-top:4px}
+.search-box input{padding:5px 8px;border:1px solid var(--bd);border-radius:4px;font-size:.82em;width:140px}
+.edit-inline{padding:4px 8px;border:1px solid var(--bd);border-radius:4px;font-size:.82em;width:130px}
+.toast{position:fixed;bottom:20px;right:20px;background:#333;color:#fff;padding:12px 24px;border-radius:8px;font-size:.9em;z-index:9999;display:none;box-shadow:0 4px 20px rgba(0,0,0,.3)}
+.modal-bg{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:9000;align-items:center;justify-content:center}
+.modal-bg.show{display:flex}
+.modal{background:#fff;border-radius:12px;padding:24px;max-width:600px;width:95%;max-height:85vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.3)}
+.modal h3{margin-bottom:12px;color:var(--p)}
+.scope-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:12px 0}
+.scope-form label{font-size:.8em;font-weight:600;color:var(--tl)}.scope-form input,.scope-form select{padding:7px 10px;border:1px solid var(--bd);border-radius:6px;font-size:.85em;width:100%}
+@media(max-width:768px){.summary-grid{grid-template-columns:repeat(2,1fr)}.batch-info{grid-template-columns:1fr}.tabs button{padding:10px 14px;font-size:.82em}table{font-size:.75em}th,td{padding:5px 6px}}
+</style></head><body>
+<div class="hdr">
+  <div><h1>📋 Approval PDF Review</h1><div class="sub">Embassy of Pakistan, Kuwait — Staff Portal</div></div>
+  <div class="user-info">
+    <span>👤 __USER_NAME__</span>
+    <a href="/">← Dashboard</a>
+    <a href="/logout">Logout</a>
+  </div>
+</div>
+<div class="ctr">
+  <div id="loadingMsg" style="text-align:center;padding:40px;color:var(--tl)">Loading batch data...</div>
+  <div id="mainContent" style="display:none">
+    <!-- Batch Info -->
+    <div class="batch-info" id="batchInfo"></div>
+    <!-- Summary Cards -->
+    <div class="summary-grid" id="summaryGrid"></div>
+    <!-- Scope Filter for Portal Not Found -->
+    <div id="scopeSection" style="display:none;margin-bottom:16px">
+      <div class="tc">
+        <h4 style="margin-bottom:8px;color:var(--i)">📌 Portal Comparison Scope</h4>
+        <p style="font-size:.82em;color:var(--tl);margin-bottom:10px">Define which portal records to compare against the PDF. Leave blank fields to use defaults (Sent to MOFA, Not Approved).</p>
+        <div class="scope-form">
+          <div><label>MOFA Letter Number</label><input id="scopeLetterNum" placeholder="e.g. MOFA/2026/123"></div>
+          <div><label>From Record ID</label><input id="scopeFromId" type="number" placeholder="e.g. 1"></div>
+          <div><label>To Record ID</label><input id="scopeToId" type="number" placeholder="e.g. 500"></div>
+          <div><label>Visa Status</label><select id="scopeVisaStatus"><option value="">— Any —</option><option value="Pending">Pending</option><option value="Approved">Approved</option></select></div>
+          <div><label>MOFA Status</label><select id="scopeMofaStatus"><option value="">— Any —</option><option value="Sent to MOFA">Sent to MOFA</option></select></div>
+        </div>
+        <button class="btn btn-i" onclick="loadPortalNotFound()" style="margin-top:10px">🔍 Compare Portal Records</button>
+      </div>
+    </div>
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="active" onclick="switchTab('matched',this)">✅ Matched (<span id="tabMatchedCount">0</span>)</button>
+      <button onclick="switchTab('pdfnf',this)">⚠️ PDF Not in Portal (<span id="tabPdfNfCount">0</span>)</button>
+      <button onclick="switchTab('portalnf',this)">🔍 Portal Not in PDF (<span id="tabPortalNfCount">0</span>)</button>
+      <button onclick="switchTab('lowconf',this)">🔴 Low Confidence (<span id="tabLowConfCount">0</span>)</button>
+    </div>
+    <!-- Tab 1: Matched -->
+    <div class="tab-content active" id="tab-matched">
+      <div class="action-bar">
+        <button class="btn btn-p" onclick="selectAllMatched()">☑ Select All</button>
+        <button class="btn btn-outline" onclick="deselectAllMatched()">☐ Deselect All</button>
+        <span id="selectedCount" style="font-size:.85em;color:var(--tl)">0 selected</span>
+        <div style="flex:1"></div>
+        <button class="btn btn-p" onclick="applyApprovals()" id="btnApply">✅ Apply Approval Updates</button>
+      </div>
+      <div class="tc"><div id="matchedTable"></div></div>
+    </div>
+    <!-- Tab 2: PDF Not Found -->
+    <div class="tab-content" id="tab-pdfnf">
+      <div class="action-bar">
+        <button class="btn btn-w btn-sm" onclick="exportCSV('pdf_not_found')">📥 Export CSV</button>
+        <button class="btn btn-outline btn-sm" onclick="exportCSV('all_exceptions')">📥 All exceptions (combined)</button>
+      </div>
+      <div class="tc"><div id="pdfNfTable"></div></div>
+    </div>
+    <!-- Tab 3: Portal Not Found -->
+    <div class="tab-content" id="tab-portalnf">
+      <div class="action-bar">
+        <button class="btn btn-i btn-sm" onclick="exportCSV('portal_not_found')">📥 Export CSV</button>
+      </div>
+      <div class="tc"><div id="portalNfTable"></div></div>
+    </div>
+    <!-- Tab 4: Low Confidence -->
+    <div class="tab-content" id="tab-lowconf">
+      <div class="action-bar">
+        <button class="btn btn-d btn-sm" onclick="exportCSV('low_confidence')">📥 Export CSV</button>
+      </div>
+      <div class="tc"><div id="lowConfTable"></div></div>
+    </div>
+  </div>
+</div>
+<!-- Search Modal -->
+<div class="modal-bg" id="searchModal">
+  <div class="modal">
+    <h3>🔍 Search Portal Records</h3>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input id="searchInput" placeholder="Search by passport or name..." style="flex:1;padding:9px 12px;border:1px solid var(--bd);border-radius:6px;font-size:.9em">
+      <button class="btn btn-p" onclick="doSearch()">Search</button>
+    </div>
+    <div id="searchResults" style="max-height:300px;overflow-y:auto"></div>
+    <div style="text-align:right;margin-top:12px"><button class="btn btn-outline" onclick="closeSearchModal()">Close</button></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const BATCH_ID = new URLSearchParams(window.location.search).get('batch_id') || '';
+let _data = null;
+let _searchRowId = null;
+let _portalNF = [];
+
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
+function escAttr(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function switchTab(tab,btn){
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  btn.classList.add('active');
+  if(tab==='portalnf')document.getElementById('scopeSection').style.display='block';
+  else document.getElementById('scopeSection').style.display='none';
+}
+function confBar(v){const c=v>=.7?'#2e7d32':v>=.4?'#e65100':'#c62828';return `<span class="conf-bar"><span class="conf-fill" style="width:${Math.round(v*100)}%;background:${c}"></span></span> ${Math.round(v*100)}%`}
+function statusBdg(s){const m={'matched':'bdg-match','auto_matched':'bdg-match','manually_linked':'bdg-link','applied':'bdg-applied','unmatched':'bdg-unmatch','suggested':'bdg-unmatch','no_passport':'bdg-low','skipped':'bdg-skip','low_confidence':'bdg-low','needs_review':'bdg-unmatch','confirmed':'bdg-match'};return `<span class="bdg ${m[s]||'bdg-unmatch'}">${(s||'').replace(/_/g,' ')}</span>`}
+
+async function loadBatch(){
+  if(!BATCH_ID){document.getElementById('loadingMsg').textContent='No batch_id provided.';return}
+  try{
+    const r=await fetch('/api/approval-review?batch_id='+BATCH_ID);
+    const d=await r.json();
+    if(!d.success){document.getElementById('loadingMsg').textContent='Error: '+(d.error||'Unknown');return}
+    _data=d;
+    renderAll();
+    document.getElementById('loadingMsg').style.display='none';
+    document.getElementById('mainContent').style.display='block';
+  }catch(e){document.getElementById('loadingMsg').textContent='Failed to load: '+e.message}
+}
+
+function renderAll(){
+  const b=_data.batch, s=_data.summary;
+  // Batch info
+  document.getElementById('batchInfo').innerHTML=`
+    <div class="bi-item"><div class="bi-label">Batch ID</div><div class="bi-value">${b.batch_id}</div></div>
+    <div class="bi-item"><div class="bi-label">File</div><div class="bi-value">${b.original_filename||''}</div></div>
+    <div class="bi-item"><div class="bi-label">Uploaded By</div><div class="bi-value">${b.uploaded_by||''}</div></div>
+    <div class="bi-item"><div class="bi-label">Uploaded At</div><div class="bi-value">${b.uploaded_at||''}</div></div>
+    <div class="bi-item"><div class="bi-label">Note Verbal No.</div><input type="text" class="nv-input" id="batchNvNumber" value="${escAttr(b.note_verbal_number)}" placeholder="e.g. 001-47-243463" ${b.status==='applied'?'disabled':''}></div>
+    <div class="bi-item"><div class="bi-label">Note Verbal Date</div><input type="text" class="nv-input" id="batchNvDate" value="${escAttr(b.note_verbal_date)}" placeholder="e.g. 12.09.1447" ${b.status==='applied'?'disabled':''}></div>
+    <div class="bi-item" style="grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:4px">
+      <button type="button" class="btn btn-outline btn-sm" onclick="saveBatchNoteVerbal()" id="btnSaveNv" ${b.status==='applied'?'disabled':''}>💾 Save note verbal to batch</button>
+      <span style="font-size:.78em;color:var(--tl)">Values in these fields are written to each approved record when you click <strong>Apply Approval Updates</strong> (you can save early with the button above).</span>
+    </div>
+    <div class="bi-item"><div class="bi-label">Status</div><div class="bi-value">${statusBdg(b.status)}</div></div>`;
+  // Summary
+  document.getElementById('summaryGrid').innerHTML=`
+    <div class="sum-card"><div class="num">${s.total_extracted}</div><div class="lbl">Total Extracted</div></div>
+    <div class="sum-card matched"><div class="num">${s.matched_auto}</div><div class="lbl">Matched Auto</div></div>
+    <div class="sum-card pdfnf"><div class="num">${s.pdf_not_found}</div><div class="lbl">PDF Not in Portal</div></div>
+    <div class="sum-card portalnf"><div class="num">${s.portal_not_found}</div><div class="lbl">Portal Not in PDF</div></div>
+    <div class="sum-card lowconf"><div class="num">${s.low_confidence}</div><div class="lbl">Low Confidence</div></div>`;
+  document.getElementById('tabMatchedCount').textContent=s.matched_auto;
+  document.getElementById('tabPdfNfCount').textContent=s.pdf_not_found;
+  document.getElementById('tabPortalNfCount').textContent=s.portal_not_found;
+  document.getElementById('tabLowConfCount').textContent=s.low_confidence;
+  renderMatchedTable();
+  renderPdfNfTable();
+  renderPortalNfTable();
+  renderLowConfTable();
+  updateSelectedCount();
+}
+
+function renderMatchedTable(){
+  const rows=_data.matched||[];
+  if(!rows.length){document.getElementById('matchedTable').innerHTML='<p style="color:var(--tl);padding:20px;text-align:center">No matched records found.</p>';return}
+  let h='<table><thead><tr><th><input type="checkbox" onchange="toggleAllMatched(this)" checked></th><th>#</th><th>Serial</th><th>Extracted Name</th><th>Extracted Passport</th><th>Portal Name</th><th>Portal Passport</th><th>Confidence</th><th>Method</th><th>Status</th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    const checked=r.review_status!=='skipped'?'checked':'';
+    h+=`<tr><td><input type="checkbox" class="match-chk" data-id="${r.id}" ${checked}></td><td>${i+1}</td><td>${r.serial_no||''}</td><td>${r.extracted_name||''}</td><td>${r.extracted_passport_number||''}</td><td>${r.matched_name||''}</td><td>${r.matched_passport||''}</td><td>${confBar(r.match_confidence)}</td><td>${r.match_method||''}</td><td>${statusBdg(r.review_status||r.match_status)}</td></tr>`;
+  });
+  h+='</tbody></table>';
+  document.getElementById('matchedTable').innerHTML=h;
+}
+
+function renderPdfNfTable(){
+  const rows=_data.pdf_not_found||[];
+  if(!rows.length){document.getElementById('pdfNfTable').innerHTML='<p style="color:var(--tl);padding:20px;text-align:center">All extracted rows matched portal records.</p>';return}
+  let h='<table><thead><tr><th>#</th><th>Serial</th><th>Extracted Name</th><th>Extracted Passport</th><th>Confidence</th><th>Status</th><th>Corrected Passport</th><th>Corrected Name</th><th>Actions</th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    h+=`<tr id="pdfnf-row-${r.id}"><td>${i+1}</td><td>${r.serial_no||''}</td><td>${r.extracted_name||''}</td><td>${r.extracted_passport_number||''}</td><td>${confBar(r.extraction_confidence)}</td><td>${statusBdg(r.review_status||r.match_status)}</td>
+    <td><input class="edit-inline" id="corr-pp-${r.id}" value="${r.manually_corrected_passport||''}" placeholder="Corrected passport"></td>
+    <td><input class="edit-inline" id="corr-nm-${r.id}" value="${r.manually_corrected_name||''}" placeholder="Corrected name"></td>
+    <td>
+      <button class="btn btn-sm btn-i" onclick="searchForRow(${r.id})">🔍</button>
+      <button class="btn btn-sm btn-p" onclick="saveCorrection(${r.id})">💾</button>
+      <button class="btn btn-sm btn-w" onclick="rematchRow(${r.id})">🔄</button>
+      <button class="btn btn-sm btn-outline" onclick="skipRow(${r.id})">Skip</button>
+    </td></tr>`;
+  });
+  h+='</tbody></table>';
+  document.getElementById('pdfNfTable').innerHTML=h;
+}
+
+function renderPortalNfTable(){
+  const rows=_data.portal_not_found||_portalNF||[];
+  if(!rows.length){document.getElementById('portalNfTable').innerHTML='<p style="color:var(--tl);padding:20px;text-align:center">Click "Compare Portal Records" above to check for missing portal entries.</p>';return}
+  let h='<table><thead><tr><th>#</th><th>Portal ID</th><th>Name</th><th>Passport</th><th>Actions</th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    h+=`<tr><td>${i+1}</td><td>PKE-${String(r.id).padStart(4,'0')}</td><td>${r.name||''}</td><td>${r.passport||''}</td>
+    <td>
+      <button class="btn btn-sm btn-outline" onclick="toast('Marked as pending')">Leave Pending</button>
+      <button class="btn btn-sm btn-w" onclick="toast('Marked for manual review')">Manual Review</button>
+    </td></tr>`;
+  });
+  h+='</tbody></table>';
+  document.getElementById('portalNfTable').innerHTML=h;
+}
+
+function renderLowConfTable(){
+  const rows=_data.low_confidence||[];
+  if(!rows.length){document.getElementById('lowConfTable').innerHTML='<p style="color:var(--tl);padding:20px;text-align:center">No low confidence rows.</p>';return}
+  let h='<table><thead><tr><th>#</th><th>Serial</th><th>Extracted Name</th><th>Extracted Passport</th><th>Confidence</th><th>Corrected Passport</th><th>Corrected Name</th><th>Actions</th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    h+=`<tr><td>${i+1}</td><td>${r.serial_no||''}</td><td>${r.extracted_name||''}</td><td>${r.extracted_passport_number||''}</td><td>${confBar(r.extraction_confidence)}</td>
+    <td><input class="edit-inline" id="lc-pp-${r.id}" value="${r.manually_corrected_passport||''}" placeholder="Corrected passport"></td>
+    <td><input class="edit-inline" id="lc-nm-${r.id}" value="${r.manually_corrected_name||''}" placeholder="Corrected name"></td>
+    <td>
+      <button class="btn btn-sm btn-i" onclick="searchForRow(${r.id})">🔍</button>
+      <button class="btn btn-sm btn-p" onclick="saveLcCorrection(${r.id})">💾</button>
+      <button class="btn btn-sm btn-w" onclick="rematchRow(${r.id})">🔄</button>
+      <button class="btn btn-sm btn-outline" onclick="skipRow(${r.id})">Skip</button>
+    </td></tr>`;
+  });
+  h+='</tbody></table>';
+  document.getElementById('lowConfTable').innerHTML=h;
+}
+
+function toggleAllMatched(el){document.querySelectorAll('.match-chk').forEach(c=>c.checked=el.checked);updateSelectedCount()}
+function selectAllMatched(){document.querySelectorAll('.match-chk').forEach(c=>c.checked=true);updateSelectedCount()}
+function deselectAllMatched(){document.querySelectorAll('.match-chk').forEach(c=>c.checked=false);updateSelectedCount()}
+function updateSelectedCount(){const n=document.querySelectorAll('.match-chk:checked').length;document.getElementById('selectedCount').textContent=n+' selected'}
+
+function batchNvPayload(){const n=document.getElementById('batchNvNumber'),d=document.getElementById('batchNvDate');return{note_verbal_number:(n&&n.value!=null)?n.value.trim():'',note_verbal_date:(d&&d.value!=null)?d.value.trim():''}}
+
+async function saveBatchNoteVerbal(){
+  if(!BATCH_ID){toast('No batch');return}
+  const p=batchNvPayload();
+  try{
+    const r=await fetch('/api/approval-batch-nv',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:BATCH_ID,...p})});
+    const j=await r.json();
+    if(j.success){toast('Note verbal saved to batch');loadBatch()}
+    else toast(j.error||'Save failed');
+  }catch(e){toast('Error: '+e.message)}
+}
+
+async function applyApprovals(){
+  const ids=[];document.querySelectorAll('.match-chk:checked').forEach(c=>ids.push(parseInt(c.dataset.id)));
+  if(!ids.length){toast('No rows selected');return}
+  if(!confirm(`Apply approval updates to ${ids.length} matched records? This will set their visa_status to Approved.`))return;
+  try{
+    const r=await fetch('/api/approval-apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:BATCH_ID,selected_row_ids:ids,...batchNvPayload()})});
+    const d=await r.json();
+    if(d.success){toast(`Applied: ${d.applied}, Skipped: ${d.skipped}`);loadBatch()}
+    else toast('Error: '+(d.error||'Unknown'));
+  }catch(e){toast('Error: '+e.message)}
+}
+
+async function saveCorrection(rowId){
+  const pp=document.getElementById('corr-pp-'+rowId).value.trim();
+  const nm=document.getElementById('corr-nm-'+rowId).value.trim();
+  try{
+    const r=await fetch('/api/approval-row-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({row_id:rowId,manually_corrected_passport:pp,manually_corrected_name:nm})});
+    const d=await r.json();if(d.success)toast('Saved');else toast('Error: '+(d.error||''));
+  }catch(e){toast('Error: '+e.message)}
+}
+
+async function saveLcCorrection(rowId){
+  const pp=document.getElementById('lc-pp-'+rowId).value.trim();
+  const nm=document.getElementById('lc-nm-'+rowId).value.trim();
+  try{
+    const r=await fetch('/api/approval-row-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({row_id:rowId,manually_corrected_passport:pp,manually_corrected_name:nm})});
+    const d=await r.json();if(d.success)toast('Saved');else toast('Error: '+(d.error||''));
+  }catch(e){toast('Error: '+e.message)}
+}
+
+async function rematchRow(rowId){
+  try{
+    const r=await fetch('/api/approval-rematch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({row_id:rowId})});
+    const d=await r.json();
+    if(d.success){toast('Re-matched: '+(d.result?.match_status||''));loadBatch()}
+    else toast('Error: '+(d.error||''));
+  }catch(e){toast('Error: '+e.message)}
+}
+
+async function skipRow(rowId){
+  try{
+    const r=await fetch('/api/approval-row-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({row_id:rowId,review_status:'skipped',match_status:'skipped'})});
+    const d=await r.json();if(d.success){toast('Skipped');loadBatch()}else toast('Error: '+(d.error||''));
+  }catch(e){toast('Error: '+e.message)}
+}
+
+function searchForRow(rowId){_searchRowId=rowId;document.getElementById('searchModal').classList.add('show');document.getElementById('searchInput').focus()}
+function closeSearchModal(){document.getElementById('searchModal').classList.remove('show');_searchRowId=null}
+async function doSearch(){
+  const q=document.getElementById('searchInput').value.trim();
+  if(!q){toast('Enter search term');return}
+  try{
+    const r=await fetch('/api/approval-search?q='+encodeURIComponent(q)+'&batch_id='+BATCH_ID);
+    const d=await r.json();
+    if(!d.success){toast('Error');return}
+    let h='';
+    if(!d.results.length)h='<p style="color:var(--tl);padding:10px">No results found.</p>';
+    else d.results.forEach(r=>{
+      h+=`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid #eee">
+        <div><strong>${r.name}</strong><br><span style="font-size:.82em;color:var(--tl)">PKE-${String(r.id).padStart(4,'0')} | ${r.passport||''} | ${r.visa_status||''}</span></div>
+        <button class="btn btn-sm btn-p" onclick="linkRecord(${_searchRowId},${r.id})">Link</button></div>`;
+    });
+    document.getElementById('searchResults').innerHTML=h;
+  }catch(e){toast('Error: '+e.message)}
+}
+
+async function linkRecord(rowId,recordId){
+  try{
+    const r=await fetch('/api/approval-row-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({row_id:rowId,matched_record_id:recordId,review_status:'confirmed'})});
+    const d=await r.json();
+    if(d.success){toast('Linked successfully');closeSearchModal();loadBatch()}
+    else toast('Error: '+(d.error||''));
+  }catch(e){toast('Error: '+e.message)}
+}
+
+async function loadPortalNotFound(){
+  const scope={
+    mofa_letter_number:document.getElementById('scopeLetterNum').value.trim(),
+    from_id:document.getElementById('scopeFromId').value.trim(),
+    to_id:document.getElementById('scopeToId').value.trim(),
+    visa_status:document.getElementById('scopeVisaStatus').value,
+    mofa_status:document.getElementById('scopeMofaStatus').value,
+  };
+  try{
+    const r=await fetch('/api/approval-review?batch_id='+BATCH_ID+'&scope='+encodeURIComponent(JSON.stringify(scope)));
+    const d=await r.json();
+    if(d.success){_data=d;_portalNF=d.portal_not_found||[];renderAll();toast('Portal comparison complete: '+(_portalNF.length)+' not found in PDF')}
+    else toast('Error: '+(d.error||''));
+  }catch(e){toast('Error: '+e.message)}
+}
+
+function exportCSV(type){window.open('/api/approval-export?batch_id='+BATCH_ID+'&type='+type,'_blank')}
+
+loadBatch();
+</script></body></html>"""
+
+# ═══════════════════════════════════════════════════════════════
 # HTTP SERVER
 # ═══════════════════════════════════════════════════════════════
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -5402,6 +7164,99 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Set-Cookie', 'session=; Path=/; Max-Age=0')
             self.send_header('Location', '/login')
             self.end_headers()
+
+        # ── MOFA approval PDF (OCR) — staff only ─────────────────────
+        elif path == '/approval-review':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            html = APPROVAL_REVIEW_PAGE.replace('__USER_NAME__', esc(user['user']))
+            self.send_html(html)
+
+        elif path == '/api/approval-batches':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_approval_batches_list())
+
+        elif path == '/api/approval-review':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            batch_id = (params.get('batch_id') or '').strip()
+            if not batch_id:
+                self.send_json({'success': False, 'error': 'batch_id required'}, 400); return
+            scope_filter = None
+            raw_scope = params.get('scope', '')
+            if raw_scope:
+                try:
+                    scope_filter = json.loads(unquote(raw_scope))
+                except json.JSONDecodeError:
+                    scope_filter = {}
+            self.send_json(api_approval_batch_review(batch_id, scope_filter))
+
+        elif path == '/api/approval-export':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            batch_id = (params.get('batch_id') or '').strip()
+            ex_type = (params.get('type') or 'pdf_not_found').strip()
+            if not batch_id:
+                self.send_json({'error': 'batch_id required'}, 400); return
+            csv_data = api_approval_export_csv(batch_id, ex_type)
+            body = csv_data.encode('utf-8-sig')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="approval_exceptions_{batch_id}_{ex_type}.csv"')
+            self.send_header('Content-Length', len(body))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == '/api/approval-search':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            q = (params.get('q') or '').strip()
+            self.send_json(api_approval_search_portal(q, params.get('batch_id')))
+
+        elif path == '/print/embassy-letter':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                rid = int(params.get('id', 0) or 0)
+            except (TypeError, ValueError):
+                rid = 0
+            if rid <= 0:
+                self.send_html('<p>Invalid record.</p>', 400); return
+            db = get_db()
+            rec = db.execute("SELECT * FROM evacuees WHERE id = ?", [rid]).fetchone()
+            if not rec:
+                db.close()
+                self.send_html('<p>Record not found.</p>', 404); return
+            rec = dict(rec)
+            if not is_letter_print_ready(rec):
+                db.close()
+                self.send_html('<p>This record is not ready for printing. Required: approved visa, travel details, and note verbal fields.</p>', 400); return
+            db.execute("""UPDATE evacuees SET
+                embassy_letter_print_count = COALESCE(embassy_letter_print_count, 0) + 1,
+                embassy_letter_issued_at = CURRENT_TIMESTAMP,
+                embassy_letter_issued_by = ?,
+                updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                WHERE id = ?""", [user['user'], user['user'], rid])
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('embassy_letter_printed', ?, ?, ?)",
+                       [rid, user['user'], json.dumps({'batch': rec.get('approval_batch_id') or ''})])
+            db.commit()
+            db.close()
+            self.send_html(generate_embassy_letter_html(rec))
+
         # MS Forms webhook endpoint (public, uses API key)
         elif path == '/api/webhook/forms':
             api_key = params.get('key', '')
@@ -6232,6 +8087,118 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
             path_result = do_backup('manual')
             self.send_json({'success': True, 'path': path_result})
+
+        elif path == '/api/approval-upload':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            ct = self.headers.get('Content-Type', '')
+            orig, raw = extract_multipart_upload(body, ct)
+            if not raw:
+                self.send_json({'success': False, 'error': 'PDF file required (multipart field: file)'}, 400); return
+            if not (orig.lower().endswith('.pdf') or raw[:4] == b'%PDF'):
+                self.send_json({'success': False, 'error': 'Only PDF uploads are allowed'}, 400); return
+            self.send_json(api_approval_upload(raw, orig, user['user']))
+
+        elif path == '/api/approval-parse':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            bid = (data.get('batch_id') or '').strip()
+            if not bid:
+                self.send_json({'success': False, 'error': 'batch_id required'}, 400); return
+            self.send_json(api_approval_parse(bid, user['user']))
+
+        elif path == '/api/approval-apply':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            bid = (data.get('batch_id') or '').strip()
+            ids = data.get('selected_row_ids') or []
+            if not bid or not isinstance(ids, list):
+                self.send_json({'success': False, 'error': 'batch_id and selected_row_ids required'}, 400); return
+            try:
+                ids = [int(x) for x in ids]
+            except (TypeError, ValueError):
+                self.send_json({'success': False, 'error': 'Invalid row ids'}, 400); return
+            nv_n = data.get('note_verbal_number')
+            nv_d = data.get('note_verbal_date')
+            if 'note_verbal_number' not in data:
+                nv_n = None
+            if 'note_verbal_date' not in data:
+                nv_d = None
+            self.send_json(api_approval_apply(bid, ids, user['user'], nv_n, nv_d))
+
+        elif path == '/api/approval-batch-nv':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            bid = (data.get('batch_id') or '').strip()
+            if not bid:
+                self.send_json({'success': False, 'error': 'batch_id required'}, 400); return
+            self.send_json(api_approval_batch_save_nv(
+                bid,
+                (data.get('note_verbal_number') or '').strip(),
+                (data.get('note_verbal_date') or '').strip(),
+                user['user']))
+
+        elif path == '/api/approval-row-update':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            rid = data.get('row_id')
+            if not rid:
+                self.send_json({'success': False, 'error': 'row_id required'}, 400); return
+            payload = {k: v for k, v in data.items() if k != 'row_id'}
+            self.send_json(api_approval_row_update(int(rid), payload, user['user']))
+
+        elif path == '/api/approval-rematch':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            rid = data.get('row_id')
+            if not rid:
+                self.send_json({'success': False, 'error': 'row_id required'}, 400); return
+            self.send_json(api_approval_rematch_row(int(rid), user['user']))
+
+        elif path == '/api/approval-search':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            # GET-style via POST body for consistency with other approval APIs
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                data = {}
+            q = (data.get('q') or '').strip()
+            self.send_json(api_approval_search_portal(q, data.get('batch_id')))
 
         elif path == '/api/restore':
             user = self.require_auth()
@@ -8618,6 +10585,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <button onclick="go('recs',this)">All Records</button>
 <button onclick="go('returnees',this)">Returnees</button>
 <button onclick="go('mofa',this)">MOFA Export</button>
+<button type="button" onclick="goToApprovalPdfSection()" style="color:#1b5e20;font-weight:600" title="Opens Admin tab — MOFA approval PDF upload and batch list">MOFA Approval PDF</button>
 <button onclick="go('review',this)" style="color:#e65100">Route Review</button>
 <button onclick="go('csv',this)">CSV Import</button>
 <button onclick="go('report',this)">SITREP Report</button>
@@ -9155,7 +11123,7 @@ No deterioration in ground security situation so far.</textarea>
 
 <!-- ADMIN -->
 <div id="tab-admin" class="tab"><div class="ctr">
-<div class="fs"><h3>User Management</h3>
+<div class="fs" data-admin-only><h3>User Management</h3>
 <div class="fg" style="margin-bottom:14px">
 <div class="fgp"><label>Username</label><input id="nu_user"></div>
 <div class="fgp"><label>Password</label><input id="nu_pass" type="password"></div>
@@ -9165,7 +11133,7 @@ No deterioration in ground security situation so far.</textarea>
 <button class="btn btn-p" onclick="createUser()">Create User</button>
 <div style="margin-top:14px"><table id="usersTbl"></table></div>
 </div>
-<div class="fs" style="border-left:3px solid var(--s)">
+<div class="fs" style="border-left:3px solid var(--s)" data-admin-only>
 <h3>Public Registration Link</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Share this link with the public. Anyone can register through it — no login needed. Data goes directly into your dashboard.</p>
 <div style="background:#f0f7f0;padding:14px;border-radius:8px;margin-bottom:12px">
@@ -9180,7 +11148,7 @@ No deterioration in ground security situation so far.</textarea>
 </select>
 </div>
 </div>
-<div class="fs" style="border-left:3px solid #006600;background:linear-gradient(135deg,#f1f8e9,#fff)">
+<div class="fs" style="border-left:3px solid #006600;background:linear-gradient(135deg,#f1f8e9,#fff)" data-admin-only>
 <h3>🖨️ Printable QR Code Poster</h3>
 <p style="margin-bottom:12px;font-size:.88em;color:var(--tl)">Print an A4 poster with QR codes for all public services (Registration, Tracking, Travel Interest, Iraq Form). Paste it outside the office so citizens can scan and access services from their phones.</p>
 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -9188,7 +11156,7 @@ No deterioration in ground security situation so far.</textarea>
 <span style="font-size:.82em;color:#888">Opens in a new tab — click Print to save as PDF or print directly</span>
 </div>
 </div>
-<div class="fs"><h3>Webhook / API Key</h3>
+<div class="fs" data-admin-only><h3>Webhook / API Key</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Generate an API key for Microsoft Forms Power Automate integration.</p>
 <button class="btn btn-w" onclick="genWebhookKey()">Generate New API Key</button>
 <div id="webhookKeyDisplay" style="margin-top:10px;font-family:monospace;font-size:.9em"></div>
@@ -9227,7 +11195,18 @@ No deterioration in ground security situation so far.</textarea>
 <div id="visaCsvDetails" class="imp-result" style="max-height:300px;overflow-y:auto;font-size:.82em;background:#f9f9f9;padding:10px;border-radius:6px"></div>
 </div>
 </div>
-<div class="fs" style="border-left:3px solid #6a1b9a">
+<div id="approvalPdfSection" class="fs" style="border-left:3px solid #1b5e20;background:linear-gradient(135deg,#f1f8e9,#fff);scroll-margin-top:88px">
+<h3 style="color:#1b5e20">MOFA approval PDF (OCR workflow)</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl);line-height:1.45">Upload scanned approval lists from authorities. The system runs OCR, matches on <strong>passport number</strong>, and requires staff review before any record is marked <strong>Approved</strong>. After applying updates, use <strong>Print Embassy Letter</strong> on each record once travel details are complete.</p>
+<form id="approvalPdfForm" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px" onsubmit="return approvalPdfUpload(event)">
+<input type="file" id="approvalPdfInput" accept=".pdf,application/pdf" required style="font-size:.85em;max-width:100%">
+<button type="submit" class="btn btn-p" style="padding:8px 16px">Upload Approval PDF</button>
+<button type="button" class="btn" style="padding:8px 14px;background:#eee" onclick="loadApprovalBatches()">Refresh list</button>
+</form>
+<p style="font-size:.78em;color:var(--tl);margin:0 0 8px"><a href="/approval-review" target="_blank" rel="noopener" style="color:var(--p);font-weight:600">Open batch review</a> (pick batch from the table below or add <code>?batch_id=…</code>)</p>
+<div id="approvalBatchList" style="font-size:.82em;overflow-x:auto"></div>
+</div>
+<div class="fs" style="border-left:3px solid #6a1b9a" data-admin-only>
 <h3>Auto Email Notifications (Visa Approved)</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Connect Gmail SMTP using an <strong>App Password</strong>. When visa status changes to <strong>Approved</strong>, emails are sent automatically in the background.</p>
 <div class="fg" style="margin-bottom:10px">
@@ -9248,7 +11227,7 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div id="smtpStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
 </div>
-<div class="fs" style="border-left:3px solid #00695c">
+<div class="fs" style="border-left:3px solid #00695c" data-admin-only>
 <h3>Custom advisory email (broadcast)</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Send one custom message to <strong>all eligible addresses</strong> in a category. Recipients are de-duplicated by email. Use optional placeholder <code>{name}</code> in the message body.</p>
 <p style="margin-bottom:10px;font-size:.82em;color:var(--tl)"><strong>Who receives mail:</strong> <em>Evacuees</em> &mdash; everyone in the main <strong>All Records</strong> table: non-duplicate rows, visa status not Rejected, with an email address (any effective route). <em>Returnees</em> &mdash; Pakistan&rarr;Kuwait charter interest, active, clear duplicates, KSA visa pending/approved/blank (not &ldquo;no&rdquo;), with email. <em>Iraq requests</em> &mdash; Iraq public submissions (not Rejected) and mission applicants (KW transit not Rejected), with email.</p>
@@ -9267,7 +11246,7 @@ No deterioration in ground security situation so far.</textarea>
 <button class="btn btn-p" onclick="sendAdvisoryBroadcast()">Queue emails to all in category</button>
 <div id="advStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
 </div>
-<div class="fs" style="border-left:3px solid #8e24aa">
+<div class="fs" style="border-left:3px solid #8e24aa" data-admin-only>
 <h3>Email Message Templates</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Use placeholders like <code>{salutation}</code>, <code>{name}</code>, <code>{passport}</code>, <code>{tracking_number}</code>, <code>{border_crossing}</code>, <code>{mofa_letter_number}</code>, <code>{mofa_letter_date}</code>, <code>{embassy_name}</code>, <code>{embassy_contact}</code>, <code>{embassy_hours}</code>. Iraq templates also support <code>{reference_number}</code>, <code>{email}</code>, <code>{phone}</code>, <code>{current_city}</code>, <code>{submitted_at}</code>, <code>{passport_submission_email}</code>, <code>{iraq_hoc_phone}</code>, <code>{iraq_babar_phone}</code>.</p>
 <div class="fg" style="margin-bottom:10px">
@@ -9287,7 +11266,7 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div id="tplStatus" style="margin-top:10px;font-size:.84em;color:#555"></div>
 </div>
-<div class="fs" style="border-left:3px solid var(--s)">
+<div class="fs" style="border-left:3px solid var(--s)" data-admin-only>
 <h3>Backup &amp; Recovery</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Database is automatically backed up every 2 hours and on server start/stop. You can also create manual backups and restore from any point.</p>
 <div class="bg" style="margin-bottom:14px">
@@ -9295,11 +11274,11 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div id="backupList"></div>
 </div>
-<div class="fs"><h3>Change Your Password</h3>
+<div class="fs" data-admin-only><h3>Change Your Password</h3>
 <div class="fg"><div class="fgp"><label>New Password</label><input id="newPw" type="password"></div></div>
 <button class="btn btn-p" style="margin-top:10px" onclick="changePw()">Change Password</button>
 </div>
-<div class="fs"><h3>Audit Log (Recent)</h3><div class="scroll-t"><table id="auditTbl"></table></div></div>
+<div class="fs" data-admin-only><h3>Audit Log (Recent)</h3><div class="scroll-t"><table id="auditTbl"></table></div></div>
 </div></div>
 
 <!-- PASSWORD CHANGE MODAL -->
@@ -9356,6 +11335,9 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Destination</label><input id="e_destination_country"></div>
 <div class="fgp"><label>Date of Request</label><input type="date" id="e_date_of_request"></div>
 <div class="fgp"><label>Priority</label><select id="e_priority"><option value="">Normal</option><option>High</option><option>Medium</option><option>Low</option></select></div>
+<div class="fgp"><label>Note Verbal No.</label><input id="e_note_verbal_number" placeholder="MOFA reference"></div>
+<div class="fgp"><label>Note Verbal Date</label><input id="e_note_verbal_date" placeholder="e.g. 15/03/2026"></div>
+<div class="fgp"><label>Approval Serial (MOFA)</label><input id="e_mofa_approval_serial" placeholder="List serial from PDF"></div>
 <div class="fgp" style="grid-column:1/-1"><label>Remarks</label><textarea id="e_remarks" rows="2"></textarea></div>
 </div>
 <div class="bg">
@@ -9381,7 +11363,7 @@ let charts={},allRecords=[];
 const F=['name','passport','cnic','gender','country','civil_id','border_crossing','mobile','company',
 'visa_status','travel_status','departure_date','airline','ticket_number','departure_airport','destination_country',
 'date_of_request','email','dob','emergency_contact','medical','family_group_id','dependents',
-'accommodation','priority','remarks'];
+'accommodation','priority','remarks','note_verbal_number','note_verbal_date','mofa_approval_serial'];
 
 function autoFillDepartDate(status){
 if((status==='Departed'||status==='Returned')&&!document.getElementById('e_departure_date').value){
@@ -9393,6 +11375,11 @@ document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active')
 document.getElementById('tab-'+tab).classList.add('active');
 btn.classList.add('active');
 if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}if(tab==='review')loadReviewQueue();if(tab==='iraq-public')loadIraqPublicPortal();
+}
+function goToApprovalPdfSection(){
+const admBtn=[...document.querySelectorAll('.nav button')].find(b=>(b.textContent||'').trim()==='Admin');
+if(admBtn) go('admin',admBtn);
+setTimeout(()=>{const el=document.getElementById('approvalPdfSection');if(el) el.scrollIntoView({behavior:'smooth',block:'start'})},500);
 }
 
 async function api(url,opts){const r=await fetch(url,opts);if(r.status===302||r.redirected){window.location='/login';return null}return r.json()}
@@ -9502,6 +11489,39 @@ ${rk.corrected_from_evacuees>0?'<div class="kc w" style="background:#fff8e1;bord
 `;
 }
 }
+async function loadApprovalBatches(){
+const el=document.getElementById('approvalBatchList'); if(!el)return;
+const r=await api('/api/approval-batches'); if(!r||!r.success){el.innerHTML='<p style="color:var(--tl)">Could not load approval batches.</p>';return}
+if(!r.batches.length){el.innerHTML='<p style="color:var(--tl)">No batches yet. Upload a PDF to start.</p>';return}
+let h='<table style="width:100%;border-collapse:collapse"><thead><tr><th>Batch ID</th><th>File</th><th>Uploaded</th><th>Status</th><th>Rows</th><th>Actions</th></tr></thead><tbody>';
+r.batches.forEach(b=>{
+const bid=String(b.batch_id||'').replace(/"/g,'&quot;');
+const canParse=(b.status==='uploaded'||b.status==='parse_failed');
+h+=`<tr><td style="font-weight:600;color:#1b5e20">${bid}</td><td>${String(b.original_filename||'').replace(/</g,'&lt;')}</td><td>${b.uploaded_at||''}</td><td>${b.status||''}</td><td>${b.total_rows_extracted||0}</td><td style="white-space:nowrap">
+<button type="button" class="btn btn-i" style="padding:4px 10px;font-size:.78em" ${canParse?'':'disabled'} onclick="approvalRunParse('${bid}')">Parse OCR</button>
+<a class="btn btn-p" style="padding:4px 10px;font-size:.78em;text-decoration:none;display:inline-block;margin-left:6px" href="/approval-review?batch_id=${encodeURIComponent(b.batch_id)}">Review</a>
+</td></tr>`;
+});
+h+='</tbody></table>'; el.innerHTML=h;
+}
+async function approvalPdfUpload(e){
+e.preventDefault();
+const inp=document.getElementById('approvalPdfInput'); if(!inp||!inp.files||!inp.files[0]){toast('Choose a PDF');return false}
+const fd=new FormData(); fd.append('file',inp.files[0]);
+try{
+const res=await fetch('/api/approval-upload',{method:'POST',body:fd});
+const d=await res.json();
+if(d.success){toast('Uploaded batch '+d.batch_id); inp.value=''; loadApprovalBatches();
+if(confirm('Run parse now? Searchable PDFs use pypdf (pip install pypdf). Scanned PDFs need Tesseract, Pillow, pdf2image, Poppler.')) approvalRunParse(d.batch_id);
+}else toast(d.error||'Upload failed');
+}catch(err){toast('Upload error: '+err.message)}
+return false}
+async function approvalRunParse(batchId){
+const r=await api('/api/approval-parse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batchId})});
+if(!r){return}
+if(r.success){toast('OCR complete — rows: '+(r.rows_extracted||0)); loadApprovalBatches();}
+else toast(r.error||'Parse failed');
+}
 function mkChart(id,type,data,opts){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),{type,data,options:{responsive:true,...opts}})}
 
 // RECORDS
@@ -9514,7 +11534,7 @@ const ge=document.getElementById('fGender').value;if(ge)p.set('gender',ge);
 const du=document.getElementById('fDup').value;if(du)p.set('dup',du);
 allRecords=await api('/api/records?'+p.toString());if(!allRecords)return;
 document.getElementById('recCount').textContent=`Showing ${allRecords.length} records`;
-let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>Route</th><th>Actions</th></tr></thead><tbody>';
+let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>NV No.</th><th>NV Date</th><th>Route</th><th>Actions</th></tr></thead><tbody>';
 allRecords.forEach((r,i)=>{
 const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':r.travel_status==='Returned'?'bdg-rej':'bdg-vis';
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
@@ -9527,7 +11547,11 @@ if(r.record_locked==1)routeBdg+='<span style="display:inline-block;padding:1px 5
 if(r.location_review_flag==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9">\ud83c\udf10 IP</span> ';
 if(!routeBdg)routeBdg='<span style="color:#bbb;font-size:.75em">-</span>';
 const rowBg=r.route_mismatch==1?'style="background:#fff8e1"':'';
-h+=`<tr ${rowBg}><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td>${routeBdg}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button> <button style="padding:2px 6px;font-size:.68em;border:1px solid #ffcc80;background:#fff8e1;color:#e65100;border-radius:5px;cursor:pointer" onclick="flagForRouteReview(${r.id})" title="Flag for route review">\u2691</button></td></tr>`;
+const nvNo=(r.note_verbal_number||'').trim();
+const nvDt=(r.note_verbal_date||'').trim();
+const nvNoDisp=nvNo?`<span style="font-size:.78em;font-weight:600;color:#1b5e20" title="${String(nvNo).replace(/"/g,'&quot;')}">${nvNo.length>14?nvNo.slice(0,12)+'\u2026':nvNo}</span>`:'<span style="color:#bbb;font-size:.75em">\u2014</span>';
+const nvDtDisp=nvDt?`<span style="font-size:.78em">${nvDt.length>12?nvDt.slice(0,10)+'\u2026':nvDt}</span>`:'<span style="color:#bbb;font-size:.75em">\u2014</span>';
+h+=`<tr ${rowBg}><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td>${nvNoDisp}</td><td>${nvDtDisp}</td><td>${routeBdg}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button> <button style="padding:2px 6px;font-size:.68em;border:1px solid #ffcc80;background:#fff8e1;color:#e65100;border-radius:5px;cursor:pointer" onclick="flagForRouteReview(${r.id})" title="Flag for route review">\u2691</button></td></tr>`;
 });h+='</tbody>';document.getElementById('recTbl').innerHTML=h;
 }
 
@@ -9586,6 +11610,37 @@ html+=sec('Travel Details',[
 ['Airline',r.airline],['Ticket Number',r.ticket_number],
 ['Departure Airport',r.departure_airport],['Destination',r.destination_country]
 ]);
+(function(){
+const need=['ticket_number','airline','departure_date','departure_airport','destination_country','note_verbal_number','note_verbal_date','mofa_approval_serial'];
+const lr=(r.visa_status||'')==='Approved'&&need.every(k=>String(r[k]||'').trim()!=='');
+const tip=lr?'':'Fill all travel fields and note verbal details below to enable printing.';
+const vq=(s)=>String(s==null?'':s).replace(/"/g,'&quot;');
+const letterIssued=r.embassy_letter_issued_at?String(r.embassy_letter_issued_at)+' by '+(r.embassy_letter_issued_by||''):'\u2014';
+const printCnt=r.embassy_letter_print_count!=null?String(r.embassy_letter_print_count):'0';
+if(USER_ROLE!=='viewer'){
+html+=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#1b5e20;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #c8e6c9;margin-bottom:8px">Embassy letter \u2014 Note verbal &amp; approval</div>
+<p style="font-size:.78em;color:#666;margin:0 0 10px;line-height:1.45">Enter or correct <strong>Note Verbal number</strong> and <strong>date</strong> manually, then click <strong>Save these fields</strong>. They are stored on this applicant and used for the printable embassy letter (with travel details and MOFA list serial).</p>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin-bottom:10px">
+<div><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Note Verbal number</label><input id="view_nv_number" type="text" value="${vq(r.note_verbal_number)}" placeholder="e.g. NV-KW/2026/123" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>
+<div><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Note Verbal date</label><input id="view_nv_date" type="text" value="${vq(r.note_verbal_date)}" placeholder="e.g. 29/03/2026" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>
+<div style="grid-column:1/-1"><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">MOFA approval serial (from list)</label><input id="view_nv_serial" type="text" value="${vq(r.mofa_approval_serial)}" placeholder="Serial number on approval list" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>
+</div>
+<button type="button" class="btn btn-p" style="padding:8px 18px;margin-bottom:10px" onclick="saveViewEmbassyFields()">Save note verbal &amp; serial</button>
+<div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Letter issued:</strong> ${letterIssued} &nbsp;|&nbsp; <strong>Print count:</strong> ${printCnt}</div>
+</div>`;
+}else{
+html+=sec('Embassy Letter Approval',[
+['Note Verbal Number',r.note_verbal_number||'\u2014'],
+['Note Verbal Date',r.note_verbal_date||'\u2014'],
+['MOFA Approval Serial',r.mofa_approval_serial||'\u2014'],
+['Letter issued',letterIssued],
+['Print count',printCnt]
+]);
+}
+html+=`<div style="margin:12px 0;padding:12px;background:#f1f8e9;border-radius:8px;border:1px solid #c5e1a5">
+<button type="button" class="btn btn-p" style="padding:8px 18px" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter?id='+viewRec.id,'_blank')">\ud83d\udcc4 Print Embassy Letter</button>
+<span style="font-size:.8em;color:#558b2f;margin-left:10px">${lr?'Ready to print.':tip}</span></div>`;
+})();
 html+=sec('Status & Processing',[
 ['KSA Visa Status',r.visa_status],['Travel Status',r.travel_status],
 ['MOFA Status',r.mofa_status||'\u2014'],['Duplicate Flag',r.dup_flag],
@@ -9678,6 +11733,11 @@ html+=sec('Travel Details',[
 ['Airline',inp('airline',r.airline)],['Ticket Number',inp('ticket_number',r.ticket_number)],
 ['Departure Airport',inp('departure_airport',r.departure_airport)],['Destination',inp('destination_country',r.destination_country)]
 ]);
+html+=sec('Embassy Letter Approval (editing)',[
+['Note Verbal Number',inp('note_verbal_number',r.note_verbal_number)],
+['Note Verbal Date',inp('note_verbal_date',r.note_verbal_date)],
+['MOFA Approval Serial',inp('mofa_approval_serial',r.mofa_approval_serial)]
+]);
 html+=sec('Status & Processing',[
 ['KSA Visa Status',sel('visa_status',['Approved','Pending','Rejected'],r.visa_status)],
 ['Travel Status',sel('travel_status',['Pending','Visa Obtained','Departed','Returned'],r.travel_status)],
@@ -9707,6 +11767,23 @@ document.getElementById('viewSaveBtn').style.display='none';
 openView(viewRec.id);
 loadRecords();loadDash();
 }else{toast('Error: '+(r?.error||'Save failed'))}
+}catch(err){toast('Error: '+err.message)}
+}
+async function saveViewEmbassyFields(){
+if(!viewRec||USER_ROLE==='viewer')return;
+const n1=document.getElementById('view_nv_number');
+const n2=document.getElementById('view_nv_date');
+const n3=document.getElementById('view_nv_serial');
+if(!n1||!n2||!n3){toast('Open the applicant profile first');return}
+const data={id:viewRec.id,note_verbal_number:n1.value.trim(),note_verbal_date:n2.value.trim(),mofa_approval_serial:n3.value.trim()};
+try{
+const res=await api('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+if(res&&res.success){
+toast('Note verbal & approval serial saved');
+Object.assign(viewRec,data);
+loadRecords();loadDash();
+openView(viewRec.id);
+}else{toast('Error: '+(res?.error||'Save failed'))}
 }catch(err){toast('Error: '+err.message)}
 }
 async function viewDelete(){
@@ -10182,7 +12259,7 @@ const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
 a.slice(0,50).forEach(x=>{h+=`<tr><td>${x.created_at}</td><td>${x.action}</td><td>${x.user||'-'}</td><td>${x.record_id||'-'}</td></tr>`});
 h+='</tbody>';document.getElementById('auditTbl').innerHTML=h}
-loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount()}
+loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount();loadApprovalBatches()}
 async function createUser(){
 const data={username:document.getElementById('nu_user').value,password:document.getElementById('nu_pass').value,
 full_name:document.getElementById('nu_name').value,role:document.getElementById('nu_role').value};
@@ -10772,15 +12849,11 @@ return;
 if(USER_ROLE==='viewer'){
 document.querySelectorAll('.nav button').forEach(b=>{
 const tab=b.textContent.trim();
-if(['New Registration','CSV Import','MOFA Export','Admin','Iraq Public (MOFA KW)'].includes(tab)){b.style.display='none'}});
+if(['New Registration','CSV Import','MOFA Export','Admin','MOFA Approval PDF','Iraq Public (MOFA KW)'].includes(tab)){b.style.display='none'}});
 document.querySelectorAll('.btn-d').forEach(b=>b.style.display='none');// hide delete buttons
 }
-// Operator: can register, import, edit, but NOT delete data, export, or manage users
+// Operator: same as admin for daily ops, but user management / SMTP / backups / audit are data-admin-only (hidden below)
 if(USER_ROLE==='operator'){
-document.querySelectorAll('.nav button').forEach(b=>{
-const tab=b.textContent.trim();
-if(tab==='Admin')b.style.display='none'});
-// Hide dangerous buttons
 document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
 }
 // Admin: full access (nothing hidden)
