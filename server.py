@@ -5743,14 +5743,19 @@ def _approval_write_evacuee_pdf_nv_fields(db, rec_id, batch, row, batch_id, user
          matched_by,
          user, user, rec_id])
 
-def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None, note_verbal_date=None):
-    """Apply approval updates to selected rows. Only updates confirmed/matched rows."""
+def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None, note_verbal_date=None, finalize_batch=True):
+    """Apply approval updates to selected rows. Only updates confirmed/matched rows.
+    Optimised for large batches: pre-fetches rows & evacuees in bulk, uses a
+    single explicit transaction, and supports chunked calls from the client
+    (finalize_batch=False keeps the batch open for further chunks).
+    """
     db = get_db()
     try:
         batch = db.execute("SELECT * FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
         if not batch:
             return {'success': False, 'error': 'Batch not found'}
         batch = dict(batch)
+
         if note_verbal_number is not None or note_verbal_date is not None:
             nv_n = (note_verbal_number if note_verbal_number is not None else (batch.get('note_verbal_number') or ''))
             nv_d = (note_verbal_date if note_verbal_date is not None else (batch.get('note_verbal_date') or ''))
@@ -5771,12 +5776,43 @@ def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None
         skipped = 0
         errors = []
 
+        # ── Bulk pre-fetch: all selected rows in one query ──
+        if not selected_row_ids:
+            if finalize_batch:
+                db.execute("""UPDATE approval_uploads SET status = 'applied', applied_at = CURRENT_TIMESTAMP, applied_by = ?
+                    WHERE batch_id = ?""", [user, batch_id])
+            db.commit()
+            return {'success': True, 'applied': 0, 'skipped': 0, 'errors': []}
+
+        placeholders = ','.join('?' for _ in selected_row_ids)
+        all_rows = db.execute(
+            f"SELECT * FROM approval_upload_rows WHERE id IN ({placeholders}) AND batch_id = ?",
+            list(selected_row_ids) + [batch_id]).fetchall()
+        rows_by_id = {r['id']: dict(r) for r in all_rows}
+
+        # Collect all matched_record_ids for bulk evacuee fetch
+        rec_ids_needed = set()
         for row_id in selected_row_ids:
-            row = db.execute("SELECT * FROM approval_upload_rows WHERE id = ? AND batch_id = ?", [row_id, batch_id]).fetchone()
+            row = rows_by_id.get(row_id)
+            if row and row.get('matched_record_id'):
+                rec_ids_needed.add(row['matched_record_id'])
+
+        evacuees_by_id = {}
+        if rec_ids_needed:
+            rec_placeholders = ','.join('?' for _ in rec_ids_needed)
+            all_evacs = db.execute(
+                f"SELECT * FROM evacuees WHERE id IN ({rec_placeholders})",
+                list(rec_ids_needed)).fetchall()
+            evacuees_by_id = {e['id']: dict(e) for e in all_evacs}
+
+        # ── Process each selected row using pre-fetched data ──
+        email_queue_list = []  # collect emails to queue after commit
+
+        for row_id in selected_row_ids:
+            row = rows_by_id.get(row_id)
             if not row:
                 errors.append(f'Row {row_id} not found')
                 continue
-            row = dict(row)
             if not row['matched_record_id']:
                 skipped += 1
                 continue
@@ -5785,13 +5821,11 @@ def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None
                 continue
 
             rec_id = row['matched_record_id']
-            ev = db.execute(
-                "SELECT id, visa_status, approval_batch_id FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+            ev = evacuees_by_id.get(rec_id)
             if not ev:
                 errors.append(f'Evacuee {rec_id} not found')
                 skipped += 1
                 continue
-            ev = dict(ev)
             same_batch = str(ev.get('approval_batch_id') or '') == str(batch_id)
             prior_pdf_batch = str(ev.get('approval_batch_id') or '').strip()
 
@@ -5861,8 +5895,11 @@ def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None
                  matched_by,
                  user, user, rec_id])
 
-            # Trigger workflow rules
-            apply_workflow_rules(db, rec_id, 'visa_status', 'Approved', user)
+            # Inline workflow rule: visa_status → Approved ⇒ travel_status Pending → Visa Obtained
+            if ev.get('travel_status') == 'Pending':
+                db.execute("UPDATE evacuees SET travel_status = 'Visa Obtained', updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?", [user, rec_id])
+                db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('workflow', ?, ?, ?)",
+                           (rec_id, user, 'Travel status auto-updated: Pending → Visa Obtained (visa approved)'))
 
             # Mark row as applied
             db.execute("UPDATE approval_upload_rows SET review_status = 'applied', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [row_id])
@@ -5870,18 +5907,41 @@ def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None
             db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('approval_applied', ?, ?, ?)",
                        [rec_id, user, json.dumps({'batch_id': batch_id, 'row_id': row_id, 'match_method': row.get('match_method', '')})])
 
-            # Queue approval email
-            fresh = db.execute("SELECT id, name, passport, email FROM evacuees WHERE id = ?", [rec_id]).fetchone()
-            if fresh:
-                _queue_visa_approved_email(dict(fresh), user)
+            # Collect email info (queue after commit, not during)
+            email_queue_list.append((rec_id, user))
 
             applied += 1
 
-        db.execute("""UPDATE approval_uploads SET status = 'applied', applied_at = CURRENT_TIMESTAMP, applied_by = ?
-            WHERE batch_id = ?""", [user, batch_id])
+        # ── Finalize batch status only on the last chunk ──
+        if finalize_batch:
+            db.execute("""UPDATE approval_uploads SET status = 'applied', applied_at = CURRENT_TIMESTAMP, applied_by = ?
+                WHERE batch_id = ?""", [user, batch_id])
+
         db.commit()
 
+        # Queue emails outside the transaction (non-blocking, queue only)
+        if email_queue_list:
+            try:
+                eq_placeholders = ','.join('?' for _ in email_queue_list)
+                eq_ids = [e[0] for e in email_queue_list]
+                fresh_rows = db.execute(
+                    f"SELECT id, name, passport, email FROM evacuees WHERE id IN ({eq_placeholders})",
+                    eq_ids).fetchall()
+                fresh_by_id = {r['id']: dict(r) for r in fresh_rows}
+                for rec_id, changed_by in email_queue_list:
+                    fresh = fresh_by_id.get(rec_id)
+                    if fresh:
+                        _queue_visa_approved_email(fresh, changed_by)
+            except Exception:
+                pass  # email queuing is best-effort; don't fail the apply
+
         return {'success': True, 'applied': applied, 'skipped': skipped, 'errors': errors}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {'success': False, 'error': str(exc)}
     finally:
         db.close()
 
@@ -6512,6 +6572,7 @@ async function saveBatchNoteVerbal(){
 }
 
 async function applyApprovals(){
+  const CHUNK_SIZE=20;
   const bid=String(BATCH_ID||'').trim();
   if(!bid){toast('Missing batch_id in the page URL. Open this screen from the Admin approval batch list.');return}
   const raw=[...document.querySelectorAll('.match-chk:checked')].map(c=>parseInt(c.getAttribute('data-id')||'',10));
@@ -6519,16 +6580,32 @@ async function applyApprovals(){
   if(!ids.length){toast('No rows selected');return}
   if(!confirm(`Apply approval updates to ${ids.length} matched records? This will set their visa_status to Approved (or refresh Note Verbal / serial if already linked to this batch).`))return;
   const nv=batchNvPayload();
-  const bodyObj={batch_id:bid,selected_row_ids:ids,note_verbal_number:nv.note_verbal_number,note_verbal_date:nv.note_verbal_date};
-  let bodyJson; try{bodyJson=JSON.stringify(bodyObj)}catch(e){toast('Could not build request: '+e.message);return}
+  const url=(window.location.origin||'')+'/api/approval-apply';
+  // Split ids into chunks to avoid Render 30s proxy timeout
+  const chunks=[];
+  for(let i=0;i<ids.length;i+=CHUNK_SIZE) chunks.push(ids.slice(i,i+CHUNK_SIZE));
+  let totalApplied=0,totalSkipped=0,totalErrors=[];
+  const btn=document.querySelector('[onclick*="applyApprovals"]')||document.getElementById('apply-btn');
+  const origText=btn?btn.textContent:'';
+  if(btn){btn.disabled=true}
   try{
-    const url=(window.location.origin||'')+'/api/approval-apply';
-    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:bodyJson});
-    const txt=await r.text();
-    let d=null; try{d=txt?JSON.parse(txt):null}catch(parseErr){toast('Server did not return JSON ('+r.status+'). '+txt.slice(0,200));return}
-    if(d&&d.success){toast(`Applied: ${d.applied}, Skipped: ${d.skipped}`+(d.errors&&d.errors.length?` — ${d.errors.length} notes`:''));loadBatch()}
-    else toast('Error: '+(d&&d.error?d.error:'Unknown'));
+    for(let ci=0;ci<chunks.length;ci++){
+      const isLast=(ci===chunks.length-1);
+      if(btn) btn.textContent=`Processing batch ${ci+1}/${chunks.length} (${chunks[ci].length} rows)…`;
+      const bodyObj={batch_id:bid,selected_row_ids:chunks[ci],note_verbal_number:nv.note_verbal_number,note_verbal_date:nv.note_verbal_date,finalize_batch:isLast};
+      let bodyJson; try{bodyJson=JSON.stringify(bodyObj)}catch(e){toast('Could not build request: '+e.message);return}
+      const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:bodyJson});
+      const txt=await r.text();
+      let d=null; try{d=txt?JSON.parse(txt):null}catch(parseErr){toast('Server did not return JSON ('+r.status+') on batch '+(ci+1)+'. '+txt.slice(0,200));return}
+      if(!d||!d.success){toast('Error on batch '+(ci+1)+': '+(d&&d.error?d.error:'Unknown'));return}
+      totalApplied+=(d.applied||0);
+      totalSkipped+=(d.skipped||0);
+      if(d.errors&&d.errors.length) totalErrors=totalErrors.concat(d.errors);
+    }
+    toast(`Applied: ${totalApplied}, Skipped: ${totalSkipped}`+(totalErrors.length?` — ${totalErrors.length} notes`:''));
+    loadBatch();
   }catch(e){toast('Error: '+(e&&e.message?e.message:String(e)))}
+  finally{if(btn){btn.disabled=false;btn.textContent=origText}}
 }
 
 async function saveCorrection(rowId){
@@ -8239,7 +8316,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 nv_n = None
             if 'note_verbal_date' not in data:
                 nv_d = None
-            self.send_json(api_approval_apply(bid, ids, user['user'], nv_n, nv_d))
+            finalize = data.get('finalize_batch', True)
+            self.send_json(api_approval_apply(bid, ids, user['user'], nv_n, nv_d, finalize_batch=finalize))
 
         elif path == '/api/approval-batch-nv':
             user = self.require_auth()
