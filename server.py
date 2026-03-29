@@ -3288,6 +3288,16 @@ def api_route_review_action(data, user):
         new_route_mismatch = rec.get('route_mismatch', 0)
         new_review_status = 'pending'
 
+    # When review is finalized, clear IP/location hold signals so MOFA lists and badges match "cleared" state
+    if new_review_status == 'finalized':
+        new_loc_flag = 0
+        new_loc_reason = ''
+        new_ip_loc = ''
+    else:
+        new_loc_flag = rec.get('location_review_flag') or 0
+        new_loc_reason = rec.get('location_review_reason') or ''
+        new_ip_loc = rec.get('ip_location_status') or ''
+
     db.execute("""UPDATE evacuees SET
         effective_route = ?,
         route_mismatch = ?,
@@ -3301,12 +3311,16 @@ def api_route_review_action(data, user):
         admin_override_by = ?,
         admin_override_at = ?,
         admin_override_notes = ?,
+        location_review_flag = ?,
+        location_review_reason = ?,
+        ip_location_status = ?,
         updated_at = CURRENT_TIMESTAMP,
         updated_by = ?
     WHERE id = ?""",
     [new_effective_route, new_route_mismatch, physical_location,
      new_review_status, decision, user, now, review_notes, flag_reason,
      user, now, data.get('admin_override_notes', review_notes),
+     new_loc_flag, new_loc_reason, new_ip_loc,
      user, rec_id])
 
     db.execute("""INSERT INTO audit_log (action, record_id, user, details) VALUES ('route_review', ?, ?, ?)""",
@@ -6291,24 +6305,24 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
           <div><label>Visa Status</label><select id="scopeVisaStatus"><option value="">— Any —</option><option value="Pending">Pending</option><option value="Approved">Approved</option></select></div>
           <div><label>MOFA Status</label><select id="scopeMofaStatus"><option value="">— Any —</option><option value="Sent to MOFA">Sent to MOFA</option></select></div>
         </div>
-        <button class="btn btn-i" onclick="loadPortalNotFound()" style="margin-top:10px">🔍 Compare Portal Records</button>
+        <button type="button" class="btn btn-i" onclick="loadPortalNotFound()" style="margin-top:10px">🔍 Compare Portal Records</button>
       </div>
     </div>
     <!-- Tabs -->
     <div class="tabs">
-      <button class="active" onclick="switchTab('matched',this)">✅ Matched (<span id="tabMatchedCount">0</span>)</button>
-      <button onclick="switchTab('pdfnf',this)">⚠️ PDF Not in Portal (<span id="tabPdfNfCount">0</span>)</button>
-      <button onclick="switchTab('portalnf',this)">🔍 Portal Not in PDF (<span id="tabPortalNfCount">0</span>)</button>
-      <button onclick="switchTab('lowconf',this)">🔴 Low Confidence (<span id="tabLowConfCount">0</span>)</button>
+      <button type="button" class="active" onclick="switchTab('matched',this)">✅ Matched (<span id="tabMatchedCount">0</span>)</button>
+      <button type="button" onclick="switchTab('pdfnf',this)">⚠️ PDF Not in Portal (<span id="tabPdfNfCount">0</span>)</button>
+      <button type="button" onclick="switchTab('portalnf',this)">🔍 Portal Not in PDF (<span id="tabPortalNfCount">0</span>)</button>
+      <button type="button" onclick="switchTab('lowconf',this)">🔴 Low Confidence (<span id="tabLowConfCount">0</span>)</button>
     </div>
     <!-- Tab 1: Matched -->
     <div class="tab-content active" id="tab-matched">
       <div class="action-bar">
-        <button class="btn btn-p" onclick="selectAllMatched()">☑ Select All</button>
-        <button class="btn btn-outline" onclick="deselectAllMatched()">☐ Deselect All</button>
+        <button type="button" class="btn btn-p" onclick="selectAllMatched()">☑ Select All</button>
+        <button type="button" class="btn btn-outline" onclick="deselectAllMatched()">☐ Deselect All</button>
         <span id="selectedCount" style="font-size:.85em;color:var(--tl)">0 selected</span>
         <div style="flex:1"></div>
-        <button class="btn btn-p" onclick="applyApprovals()" id="btnApply">✅ Apply Approval Updates</button>
+        <button type="button" class="btn btn-p" onclick="applyApprovals()" id="btnApply">✅ Apply Approval Updates</button>
       </div>
       <div class="tc"><div id="matchedTable"></div></div>
     </div>
@@ -6498,15 +6512,23 @@ async function saveBatchNoteVerbal(){
 }
 
 async function applyApprovals(){
-  const ids=[];document.querySelectorAll('.match-chk:checked').forEach(c=>ids.push(parseInt(c.dataset.id)));
+  const bid=String(BATCH_ID||'').trim();
+  if(!bid){toast('Missing batch_id in the page URL. Open this screen from the Admin approval batch list.');return}
+  const raw=[...document.querySelectorAll('.match-chk:checked')].map(c=>parseInt(c.getAttribute('data-id')||'',10));
+  const ids=raw.filter(n=>Number.isFinite(n)&&n>0);
   if(!ids.length){toast('No rows selected');return}
-  if(!confirm(`Apply approval updates to ${ids.length} matched records? This will set their visa_status to Approved.`))return;
+  if(!confirm(`Apply approval updates to ${ids.length} matched records? This will set their visa_status to Approved (or refresh Note Verbal / serial if already linked to this batch).`))return;
+  const nv=batchNvPayload();
+  const bodyObj={batch_id:bid,selected_row_ids:ids,note_verbal_number:nv.note_verbal_number,note_verbal_date:nv.note_verbal_date};
+  let bodyJson; try{bodyJson=JSON.stringify(bodyObj)}catch(e){toast('Could not build request: '+e.message);return}
   try{
-    const r=await fetch('/api/approval-apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:BATCH_ID,selected_row_ids:ids,...batchNvPayload()})});
-    const d=await r.json();
-    if(d.success){toast(`Applied: ${d.applied}, Skipped: ${d.skipped}`);loadBatch()}
-    else toast('Error: '+(d.error||'Unknown'));
-  }catch(e){toast('Error: '+e.message)}
+    const url=(window.location.origin||'')+'/api/approval-apply';
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:bodyJson});
+    const txt=await r.text();
+    let d=null; try{d=txt?JSON.parse(txt):null}catch(parseErr){toast('Server did not return JSON ('+r.status+'). '+txt.slice(0,200));return}
+    if(d&&d.success){toast(`Applied: ${d.applied}, Skipped: ${d.skipped}`+(d.errors&&d.errors.length?` — ${d.errors.length} notes`:''));loadBatch()}
+    else toast('Error: '+(d&&d.error?d.error:'Unknown'));
+  }catch(e){toast('Error: '+(e&&e.message?e.message:String(e)))}
 }
 
 async function saveCorrection(rowId){
@@ -11574,10 +11596,11 @@ const r=await api('/api/approval-batches'); if(!r||!r.success){el.innerHTML='<p 
 if(!r.batches.length){el.innerHTML='<p style="color:var(--tl)">No batches yet. Upload a PDF to start.</p>';return}
 let h='<table style="width:100%;border-collapse:collapse"><thead><tr><th>Batch ID</th><th>File</th><th>Uploaded</th><th>Status</th><th>Rows</th><th>Actions</th></tr></thead><tbody>';
 r.batches.forEach(b=>{
-const bid=String(b.batch_id||'').replace(/"/g,'&quot;');
+const bidDisp=String(b.batch_id||'').replace(/</g,'&lt;').replace(/&/g,'&amp;');
+const bidAttr=String(b.batch_id||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
 const canParse=(b.status==='uploaded'||b.status==='parse_failed');
-h+=`<tr><td style="font-weight:600;color:#1b5e20">${bid}</td><td>${String(b.original_filename||'').replace(/</g,'&lt;')}</td><td>${b.uploaded_at||''}</td><td>${b.status||''}</td><td>${b.total_rows_extracted||0}</td><td style="white-space:nowrap">
-<button type="button" class="btn btn-i" style="padding:4px 10px;font-size:.78em" ${canParse?'':'disabled'} onclick="approvalRunParse('${bid}')">Parse OCR</button>
+h+=`<tr><td style="font-weight:600;color:#1b5e20">${bidDisp}</td><td>${String(b.original_filename||'').replace(/</g,'&lt;')}</td><td>${b.uploaded_at||''}</td><td>${b.status||''}</td><td>${b.total_rows_extracted||0}</td><td style="white-space:nowrap">
+<button type="button" class="btn btn-i" style="padding:4px 10px;font-size:.78em" ${canParse?'':'disabled'} data-batch-id="${bidAttr}" onclick="approvalRunParseBtn(this)">Parse OCR</button>
 <a class="btn btn-p" style="padding:4px 10px;font-size:.78em;text-decoration:none;display:inline-block;margin-left:6px" href="/approval-review?batch_id=${encodeURIComponent(b.batch_id)}">Review</a>
 </td></tr>`;
 });
@@ -11595,6 +11618,11 @@ if(confirm('Run parse now? Searchable PDFs use pypdf (pip install pypdf). Scanne
 }else toast(d.error||'Upload failed');
 }catch(err){toast('Upload error: '+err.message)}
 return false}
+function approvalRunParseBtn(btn){
+const id=btn&&btn.getAttribute('data-batch-id');
+if(!id){toast('Missing batch id');return}
+approvalRunParse(id);
+}
 async function approvalRunParse(batchId){
 const r=await api('/api/approval-parse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batchId})});
 if(!r){return}
@@ -11620,12 +11648,14 @@ const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-re
 const db=(!r.dup_flag||r.dup_flag==='CLEAR')?'bdg-clr':'bdg-dup';
 const ms=r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20;font-size:.7em">Sent</span>':'-';
 const cmpBtn=r.dup_flag==='DUPLICATE'?`<button class="btn btn-d" style="padding:2px 6px;font-size:.7em;margin-left:4px" onclick="compareDup(${r.id})">Compare</button>`:'';
+const revDone=(r.review_status||'')==='finalized';
 let routeBdg='';
-if(r.route_mismatch==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#fff3e0;color:#e65100;border:1px solid #ffcc80">MISMATCH</span> ';
+if(r.route_mismatch==1&&!revDone)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#fff3e0;color:#e65100;border:1px solid #ffcc80">MISMATCH</span> ';
+if(r.route_mismatch==1&&revDone)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">REVIEWED</span> ';
 if(r.record_locked==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#ffebee;color:#c62828;border:1px solid #ef9a9a">\ud83d\udd12</span> ';
-if(r.location_review_flag==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9">\ud83c\udf10 IP</span> ';
+if(r.location_review_flag==1&&!revDone)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9">\ud83c\udf10 IP</span> ';
 if(!routeBdg)routeBdg='<span style="color:#bbb;font-size:.75em">-</span>';
-const rowBg=r.route_mismatch==1?'style="background:#fff8e1"':'';
+const rowBg=(r.route_mismatch==1&&!revDone)?'style="background:#fff8e1"':'';
 const nvNo=(r.note_verbal_number||'').trim();
 const nvDt=(r.note_verbal_date||'').trim();
 const nvNoDisp=nvNo?`<span style="font-size:.78em;font-weight:600;color:#1b5e20" title="${String(nvNo).replace(/"/g,'&quot;')}">${nvNo.length>14?nvNo.slice(0,12)+'\u2026':nvNo}</span>`:'<span style="color:#bbb;font-size:.75em">\u2014</span>';
@@ -11662,7 +11692,8 @@ document.getElementById('viewBadges').innerHTML=`
 <span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>
 ${r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;color:#1b5e20">MOFA Sent</span>':''}
 ${r.priority&&r.priority!=='Normal'?'<span class="bdg" style="background:#fff3e0;color:#e65100">Priority: '+r.priority+'</span>':''}
-${r.route_mismatch==1?'<span class="bdg" style="background:#fff3e0;color:#e65100;border:1px solid #ffcc80">\u26a0 ROUTE MISMATCH</span>':''}
+${r.route_mismatch==1&&(r.review_status||'')!=='finalized'?'<span class="bdg" style="background:#fff3e0;color:#e65100;border:1px solid #ffcc80">\u26a0 ROUTE MISMATCH</span>':''}
+${r.route_mismatch==1&&(r.review_status||'')==='finalized'?'<span class="bdg" style="background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">ROUTE REVIEWED</span>':''}
 ${r.record_locked==1?'<span class="bdg" style="background:#ffebee;color:#c62828;border:1px solid #ef9a9a">\ud83d\udd12 MOFA LOCKED</span>':''}`;
 // Build profile sections
 const sec=(title,fields)=>{
@@ -11674,12 +11705,20 @@ return s+'</div></div>';
 };
 const routeMap={kw_to_pk:'Kuwait \u2192 Pakistan',pk_to_kw:'Pakistan \u2192 Kuwait'};
 let html='';
-if(r.route_mismatch==1){
+if(r.route_mismatch==1&&(r.review_status||'')!=='finalized'){
 html+=`<div style="margin-bottom:14px;padding:12px;background:#fff3e0;border:1px solid #ffcc80;border-radius:8px;font-size:.88em">
 <strong style="color:#e65100">\u26a0 Route Mismatch Detected</strong><br>
 This person registered through the <strong>${routeMap[r.original_form_source]||'KW\u2192PK'}</strong> form but actually belongs to the <strong>${routeMap[r.effective_route]||r.effective_route}</strong> transit route.
 Physical location: <strong>${(r.physical_location||'unknown').toUpperCase()}</strong>.
 ${r.record_locked==1?'<br><span style="color:#c62828">Record is MOFA-locked \u2014 core fields cannot be edited.</span>':''}
+${r.reviewed_by?'<br>Reviewed by: <strong>'+r.reviewed_by+'</strong> on '+(r.reviewed_at||'')+'. Decision: <strong>'+(r.review_decision||'-')+'</strong>':''}
+${r.admin_override_notes?'<br>Notes: '+r.admin_override_notes:''}
+</div>`;
+}
+if(r.route_mismatch==1&&(r.review_status||'')==='finalized'){
+html+=`<div style="margin-bottom:14px;padding:12px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;font-size:.88em">
+<strong style="color:#2e7d32">Route review finalized</strong><br>
+Staff confirmed the correct route. Effective route: <strong>${routeMap[r.effective_route]||r.effective_route||'\u2014'}</strong>.
 ${r.reviewed_by?'<br>Reviewed by: <strong>'+r.reviewed_by+'</strong> on '+(r.reviewed_at||'')+'. Decision: <strong>'+(r.review_decision||'-')+'</strong>':''}
 ${r.admin_override_notes?'<br>Notes: '+r.admin_override_notes:''}
 </div>`;
