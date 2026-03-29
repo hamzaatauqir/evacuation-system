@@ -645,7 +645,10 @@ def init_db():
 
     # ── Backfill: mark existing unreviewed suspects as pending review ──
     # This ensures records that match suspect heuristics but were created before
-    # the review workflow existed are held from MOFA until staff reviews them
+    # the review workflow existed are held from MOFA until staff reviews them.
+    # Only strong Pakistan signals trigger auto-flag (country or mobile).
+    # Missing civil_id alone does NOT flag — many legitimate Kuwait residents
+    # lack a civil_id but have a Kuwait mobile and Kuwait country.
     db.execute("""UPDATE evacuees SET review_status = 'pending',
         flag_reason = COALESCE(NULLIF(flag_reason,''), 'Auto-flagged: matches route suspect heuristics')
         WHERE (review_status IS NULL OR review_status = '')
@@ -654,9 +657,19 @@ def init_db():
         AND dup_flag = 'CLEAR'
         AND (
             LOWER(COALESCE(country,'')) LIKE '%pakistan%'
-            OR (civil_id IS NULL OR civil_id = '')
             OR mobile LIKE '+92%' OR mobile LIKE '03%' OR mobile LIKE '92%'
         )""")
+
+    # ── Cleanup: un-flag records that were auto-flagged ONLY because of missing civil_id ──
+    # These records have non-Pakistan country + non-Pakistan mobile, so the only trigger
+    # was civil_id IS NULL — which is no longer a standalone flag reason.
+    db.execute("""UPDATE evacuees SET review_status = NULL, flag_reason = NULL
+        WHERE review_status = 'pending'
+        AND flag_reason = 'Auto-flagged: matches route suspect heuristics'
+        AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+        AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+        AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+        AND (route_mismatch = 0 OR route_mismatch IS NULL)""")
 
     db.commit()
     db.close()
@@ -3187,13 +3200,15 @@ def api_route_review_queue(params):
             AND (record_locked IS NULL OR record_locked = 0 OR record_locked = '0')
             AND (mofa_status IS NULL OR mofa_status = '' OR LOWER(mofa_status) NOT IN ('sent', 'submitted', 'approved', 'received'))"""
 
-    # Only queue records with an actual inconsistency signal.
-    # This prevents manually-flagged/no-issue records from filling the staff queue.
+    # Only queue records with an actual inconsistency signal OR pending review status.
+    # This prevents no-issue records from filling the staff queue, while ensuring
+    # auto-flagged records (review_status='pending') always appear for staff action.
     inconsistency_clause = """
             AND (
                 COALESCE(route_mismatch,0) = 1
                 OR COALESCE(location_review_flag,0) = 1
                 OR COALESCE(ip_location_status,'') = 'needs_review'
+                OR review_status = 'pending'
             )"""
 
     if filter_type == 'suspects':
@@ -7006,7 +7021,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              OR (
                                  (review_status IS NULL OR review_status = '')
                                  AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-                                 AND COALESCE(civil_id,'') != ''
                                  AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
                              )
                          ))
@@ -7107,7 +7121,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         OR (
                             (review_status IS NULL OR review_status = '')
                             AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-                            AND COALESCE(civil_id,'') != ''
                             AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
                         )
                     )
