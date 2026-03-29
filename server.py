@@ -5741,7 +5741,7 @@ def _approval_write_evacuee_pdf_nv_fields(db, rec_id, batch, row, batch_id, user
          batch_id,
          row.get('match_confidence', 0),
          matched_by,
-         user, user, rec_id])
+         user, rec_id])
 
 def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None, note_verbal_date=None, finalize_batch=True):
     """Apply approval updates to selected rows. Only updates confirmed/matched rows.
