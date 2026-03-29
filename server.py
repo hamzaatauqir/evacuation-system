@@ -6067,7 +6067,7 @@ def is_letter_print_ready(record):
     return True
 
 def generate_embassy_letter_html(record):
-    """Generate printable A4 embassy letter: page 1 English, page 2 Arabic; seal logo; QR at foot of each sheet."""
+    """Generate printable A4 embassy letter: page 1 English, page 2 Arabic."""
     name = esc(record.get('name', ''))
     passport = esc(record.get('passport', ''))
     nv_number = esc(record.get('note_verbal_number', ''))
@@ -6084,15 +6084,6 @@ def generate_embassy_letter_html(record):
     prefix = 'Ms.' if gender in ('female', 'f') else 'Mr.'
     prefix_ar = 'السيدة' if gender in ('female', 'f') else 'السيد'
     holder_ar = 'حاملة' if gender in ('female', 'f') else 'حامل'
-
-    verify_url = 'https://evacuation-system.onrender.com/'
-    qr_src = 'https://api.qrserver.com/v1/create-qr-code/?size=120x120&margin=0&data=' + quote(verify_url, safe='')
-
-    lh_data = _embassy_letterhead_data_url()
-    emblem_img = (
-        f'<img src="{lh_data}" class="letterhead-emblem" alt="">'
-        if lh_data else '<div class="letterhead-emblem-fallback" aria-hidden="true"></div>'
-    )
 
     footer_html = f'''<footer class="footer-wrap">
     <hr class="footer-rule">
@@ -6122,17 +6113,25 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
 .sheet:last-of-type {{ page-break-after: auto; break-after: auto; }}
 .sheet-body {{ flex: 1 1 auto; }}
 .sheet-foot {{ flex: 0 0 auto; margin-top: auto; padding-top: 8px; }}
-.letterhead-row {{ display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #006600; }}
-.sheet--ar .letterhead-row {{ flex-direction: row-reverse; }}
-.letterhead-left {{
-  width: 82px; height: 82px; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
+.letterhead-row {{ margin-bottom: 10px; padding-bottom: 10px; border-bottom: 2px solid #006600; text-align: center; }}
+.titles-en {{
+  text-align: center;
+  font-size: 17.5pt;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #005a2b;
+  line-height: 1.2;
 }}
-.letterhead-emblem {{ max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; object-position: center; display: block; }}
-.letterhead-emblem-fallback {{ width: 76px; height: 76px; border: 1px solid #ccc; border-radius: 50%; background: #f5f5f5; }}
-.titles-en {{ text-align: right; font-size: 10.5pt; font-weight: 700; letter-spacing: 0.05em; color: #006600; line-height: 1.3; }}
-.titles-en .line2 {{ margin-top: 2px; }}
-.titles-ar {{ direction: rtl; text-align: right; font-family: Arial, 'Segoe UI', Tahoma, sans-serif; font-size: 10.5pt; font-weight: 700; color: #006600; line-height: 1.4; }}
+.titles-en .line2 {{ margin-top: 3px; font-size: 15pt; letter-spacing: 0.12em; }}
+.titles-ar {{
+  direction: rtl;
+  text-align: center;
+  font-family: Arial, 'Segoe UI', Tahoma, sans-serif;
+  font-size: 17pt;
+  font-weight: 700;
+  color: #005a2b;
+  line-height: 1.25;
+}}
 .meta {{ display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 9pt; color: #444; }}
 .subject {{ text-align: center; font-weight: 700; font-size: 11pt; margin: 6px 0 8px; color: #111; }}
 .body-text {{ text-align: justify; margin-bottom: 8px; font-size: 9.5pt; }}
@@ -6140,16 +6139,12 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
 .details-table {{ width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-size: 8.8pt; }}
 .details-table td {{ padding: 3px 7px; border: 1px solid #ccc; vertical-align: top; }}
 .details-table td:first-child {{ font-weight: 600; width: 36%; background: #f3f9f3; color: #1b5e20; }}
-.qr-block {{
-  text-align: center; padding: 8px 10px 6px; border: 1px solid #006600; background: #fafcfa;
-  max-width: 220px; margin: 0 auto 6px; page-break-inside: avoid;
-}}
-.qr-block img {{ display: block; margin: 0 auto 6px; width: 120px; height: 120px; }}
-.qr-caption-en {{ font-size: 8pt; color: #333; line-height: 1.35; }}
-.qr-url {{ font-size: 7.5pt; color: #006600; word-break: break-all; margin-top: 2px; }}
-.qr-caption-ar {{ direction: rtl; font-size: 8pt; color: #333; margin-top: 5px; line-height: 1.4; font-family: Arial, Tahoma, sans-serif; }}
 .issue-note {{ text-align: center; font-size: 9pt; color: #333; margin: 4px 0 3px; line-height: 1.4; }}
 .computer-gen {{ text-align: center; font-size: 7.8pt; color: #666; margin: 4px 8px 6px; line-height: 1.35; }}
+.sign-block {{ margin: 6px 0 10px; text-align: right; page-break-inside: avoid; }}
+.sheet--ar .sign-block {{ text-align: left; }}
+.sign-name {{ font-size: 11pt; font-weight: 700; color: #1b5e20; margin-bottom: 2px; }}
+.sign-title {{ font-size: 9pt; color: #333; line-height: 1.35; }}
 .footer-wrap {{ page-break-inside: avoid; padding-top: 4px; }}
 .footer-rule {{ border: none; border-top: 1px solid #222; margin: 0 auto 6px; width: 90%; }}
 .footer-contact {{ text-align: center; font-size: 8pt; color: #333; line-height: 1.45; }}
@@ -6175,10 +6170,7 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
   <section class="sheet sheet--en" lang="en">
     <div class="sheet-body">
       <header class="letterhead-row">
-        <div class="letterhead-left">{emblem_img}</div>
-        <div class="letterhead-right">
-          <div class="titles-en">EMBASSY OF PAKISTAN<div class="line2">KUWAIT</div></div>
-        </div>
+        <div class="titles-en">EMBASSY OF PAKISTAN<div class="line2">KUWAIT</div></div>
       </header>
       <div class="meta">
         <div>Ref: CWA/KWT/{nv_number}/{serial}</div>
@@ -6205,13 +6197,12 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
         <tr><td>Destination</td><td>{dest_country}</td></tr>
       </table>
       <div class="body-text"><p>This certificate is issued for record and travel facilitation only.</p></div>
+      <div class="sign-block">
+        <div class="sign-name">Hamza Tauqir</div>
+        <div class="sign-title">First Secretary (CWA Kuwait)</div>
+      </div>
     </div>
     <div class="sheet-foot">
-      <div class="qr-block">
-        <img src="{qr_src}" width="120" height="120" alt="Verification QR">
-        <div class="qr-caption-en">Verifiable online by Embassy of Pakistan Kuwait</div>
-        <div class="qr-url">{verify_url}</div>
-      </div>
       <div class="issue-note">Issued electronically by Embassy of Pakistan, Kuwait</div>
       <div class="computer-gen">This is a computer generated document and does not require signature.</div>
       {footer_html}
@@ -6222,10 +6213,7 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
   <section class="sheet sheet--ar" lang="ar" dir="rtl">
     <div class="sheet-body">
       <header class="letterhead-row">
-        <div class="letterhead-left">{emblem_img}</div>
-        <div class="letterhead-right">
-          <div class="titles-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
-        </div>
+        <div class="titles-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
       </header>
       <div class="meta" dir="rtl">
         <div>التاريخ: {issue_date}</div>
@@ -6252,13 +6240,12 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
         <tr><td>الوجهة</td><td>{dest_country}</td></tr>
       </table>
       <div class="body-text ar"><p>أُصدرت هذه الشهادة لأغراض السجل وتسهيل السفر فقط.</p></div>
+      <div class="sign-block">
+        <div class="sign-name">حمزہ توقیر</div>
+        <div class="sign-title">السكرتير الأول (CWA Kuwait)</div>
+      </div>
     </div>
     <div class="sheet-foot" dir="rtl">
-      <div class="qr-block">
-        <img src="{qr_src}" width="120" height="120" alt="QR">
-        <div class="qr-caption-ar">يمكن التحقق من هذه الوثيقة إلكترونياً عبر سفارة باكستان - الكويت</div>
-        <div class="qr-url" dir="ltr" style="text-align:center">{verify_url}</div>
-      </div>
       <div class="issue-note">صادرة إلكترونياً عن سفارة جمهورية باكستان الإسلامية لدى دولة الكويت</div>
       <div class="computer-gen">هذه وثيقة صادرة آلياً من النظام ولا تتطلب توقيعاً.</div>
       {footer_html}
@@ -8124,7 +8111,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             OR (
                                 (review_status IS NULL OR review_status = '')
                                 AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-                                AND COALESCE(civil_id,'') != ''
                                 AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
                             )
                         )
@@ -8150,7 +8136,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             OR (
                                 (review_status IS NULL OR review_status = '')
                                 AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-                                AND COALESCE(civil_id,'') != ''
                                 AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
                             )
                         )
