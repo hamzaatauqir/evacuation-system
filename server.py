@@ -5683,7 +5683,7 @@ def api_approval_search_portal(query, batch_id=None):
         db.close()
 
 def api_approval_batch_save_nv(batch_id, note_verbal_number, note_verbal_date, user):
-    """Persist note verbal number/date on the batch before apply (review page)."""
+    """Persist note verbal number/date on the batch (review page). Allowed after apply so staff can correct NV and re-sync records."""
     db = get_db()
     try:
         if not batch_id:
@@ -5691,8 +5691,6 @@ def api_approval_batch_save_nv(batch_id, note_verbal_number, note_verbal_date, u
         row = db.execute("SELECT batch_id, status FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
         if not row:
             return {'success': False, 'error': 'Batch not found'}
-        if row['status'] == 'applied':
-            return {'success': False, 'error': 'This batch is already applied; note verbal cannot be changed here.'}
         db.execute(
             "UPDATE approval_uploads SET note_verbal_number = ?, note_verbal_date = ? WHERE batch_id = ?",
             [note_verbal_number or '', note_verbal_date or '', batch_id])
@@ -5700,6 +5698,36 @@ def api_approval_batch_save_nv(batch_id, note_verbal_number, note_verbal_date, u
         return {'success': True}
     finally:
         db.close()
+
+def _approval_write_evacuee_pdf_nv_fields(db, rec_id, batch, row, batch_id, user):
+    """Update note verbal, MOFA list serial, and PDF metadata on evacuee (no visa / email side effects)."""
+    serial = (row.get('serial_no') or '').strip() or str(row.get('row_index', ''))
+    matched_by = '%s|%s' % (row.get('match_method') or 'unknown', user)
+    db.execute("""UPDATE evacuees SET
+        note_verbal_number = ?,
+        note_verbal_date = ?,
+        mofa_approval_serial = ?,
+        approval_pdf_filename = ?,
+        approval_pdf_uploaded_at = ?,
+        approval_pdf_uploaded_by = ?,
+        approval_batch_id = ?,
+        approval_source = 'approval_pdf_ocr',
+        approval_confidence = ?,
+        approval_matched_by = ?,
+        approval_review_status = 'approved_applied',
+        updated_at = CURRENT_TIMESTAMP,
+        updated_by = ?
+        WHERE id = ?""",
+        [batch.get('note_verbal_number', ''),
+         batch.get('note_verbal_date', ''),
+         serial,
+         batch.get('original_filename', ''),
+         batch.get('uploaded_at', ''),
+         batch.get('uploaded_by', ''),
+         batch_id,
+         row.get('match_confidence', 0),
+         matched_by,
+         user, user, rec_id])
 
 def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None, note_verbal_date=None):
     """Apply approval updates to selected rows. Only updates confirmed/matched rows."""
@@ -5738,9 +5766,33 @@ def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None
             if not row['matched_record_id']:
                 skipped += 1
                 continue
-            if row['review_status'] in ('skipped', 'applied'):
+            if row['review_status'] == 'skipped':
                 skipped += 1
                 continue
+
+            rec_id = row['matched_record_id']
+            ev = db.execute(
+                "SELECT id, visa_status, approval_batch_id FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+            if not ev:
+                errors.append(f'Evacuee {rec_id} not found')
+                skipped += 1
+                continue
+            ev = dict(ev)
+            same_batch = str(ev.get('approval_batch_id') or '') == str(batch_id)
+            prior_pdf_batch = str(ev.get('approval_batch_id') or '').strip()
+
+            # ── Re-sync: this evacuee was already updated from this PDF batch — refresh NV/serial (e.g. corrected NV or re-apply)
+            if same_batch:
+                _approval_write_evacuee_pdf_nv_fields(db, rec_id, batch, row, batch_id, user)
+                db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('approval_nv_resync', ?, ?, ?)",
+                           [rec_id, user, json.dumps({'batch_id': batch_id, 'row_id': row_id})])
+                applied += 1
+                continue
+
+            if row['review_status'] == 'applied':
+                skipped += 1
+                continue
+
             ext_low = (row.get('extraction_confidence') or 0) < LOW_CONFIDENCE_THRESHOLD
             manual_link = row.get('match_method') == 'manual_link' or row.get('match_status') == 'manually_linked'
             staff_confirmed = row.get('review_status') == 'confirmed'
@@ -5751,11 +5803,16 @@ def api_approval_apply(batch_id, selected_row_ids, user, note_verbal_number=None
                 skipped += 1
                 continue
 
-            rec_id = row['matched_record_id']
-            existing = db.execute(
-                "SELECT approval_batch_id, visa_status FROM evacuees WHERE id = ?", [rec_id]).fetchone()
-            if existing and existing['visa_status'] == 'Approved':
-                skipped += 1
+            # ── Visa already Approved (e.g. manual) but no prior approval-PDF link: attach NV/serial only, no duplicate visa email
+            if ev.get('visa_status') == 'Approved':
+                if not prior_pdf_batch:
+                    _approval_write_evacuee_pdf_nv_fields(db, rec_id, batch, row, batch_id, user)
+                    db.execute("UPDATE approval_upload_rows SET review_status = 'applied', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [row_id])
+                    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('approval_nv_attached', ?, ?, ?)",
+                               [rec_id, user, json.dumps({'batch_id': batch_id, 'row_id': row_id, 'match_method': row.get('match_method', '')})])
+                    applied += 1
+                else:
+                    skipped += 1
                 continue
 
             serial = (row.get('serial_no') or '').strip() or str(row.get('row_index', ''))
@@ -6332,11 +6389,11 @@ function renderAll(){
     <div class="bi-item"><div class="bi-label">File</div><div class="bi-value">${b.original_filename||''}</div></div>
     <div class="bi-item"><div class="bi-label">Uploaded By</div><div class="bi-value">${b.uploaded_by||''}</div></div>
     <div class="bi-item"><div class="bi-label">Uploaded At</div><div class="bi-value">${b.uploaded_at||''}</div></div>
-    <div class="bi-item"><div class="bi-label">Note Verbal No.</div><input type="text" class="nv-input" id="batchNvNumber" value="${escAttr(b.note_verbal_number)}" placeholder="e.g. 001-47-243463" ${b.status==='applied'?'disabled':''}></div>
-    <div class="bi-item"><div class="bi-label">Note Verbal Date</div><input type="text" class="nv-input" id="batchNvDate" value="${escAttr(b.note_verbal_date)}" placeholder="e.g. 12.09.1447" ${b.status==='applied'?'disabled':''}></div>
+    <div class="bi-item"><div class="bi-label">Note Verbal No.</div><input type="text" class="nv-input" id="batchNvNumber" value="${escAttr(b.note_verbal_number)}" placeholder="e.g. 001-47-243463"></div>
+    <div class="bi-item"><div class="bi-label">Note Verbal Date</div><input type="text" class="nv-input" id="batchNvDate" value="${escAttr(b.note_verbal_date)}" placeholder="e.g. 12.09.1447"></div>
     <div class="bi-item" style="grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:4px">
-      <button type="button" class="btn btn-outline btn-sm" onclick="saveBatchNoteVerbal()" id="btnSaveNv" ${b.status==='applied'?'disabled':''}>💾 Save note verbal to batch</button>
-      <span style="font-size:.78em;color:var(--tl)">Values in these fields are written to each approved record when you click <strong>Apply Approval Updates</strong> (you can save early with the button above).</span>
+      <button type="button" class="btn btn-outline btn-sm" onclick="saveBatchNoteVerbal()" id="btnSaveNv">💾 Save note verbal to batch</button>
+      <span style="font-size:.78em;color:var(--tl)">These values are copied to selected portal records when you click <strong>Apply Approval Updates</strong>. After a batch is applied, you can still edit them here and apply again on the same selected rows to refresh Note Verbal / serial on those records.</span>
     </div>
     <div class="bi-item"><div class="bi-label">Status</div><div class="bi-value">${statusBdg(b.status)}</div></div>`;
   // Summary
