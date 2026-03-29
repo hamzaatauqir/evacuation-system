@@ -2075,6 +2075,16 @@ def api_dashboard_stats():
 
 def api_records(params):
     db = get_db()
+    # Single-record fetch (fresh data for View modal after approval PDF / other updates)
+    if params.get('id'):
+        try:
+            rid = int(str(params['id']).strip())
+        except (TypeError, ValueError):
+            rid = 0
+        if rid > 0:
+            row = db.execute("SELECT * FROM evacuees WHERE id = ?", [rid]).fetchone()
+            db.close()
+            return [dict(row)] if row else []
     where = ["1=1"]
     qparams = []
     if params.get('search'):
@@ -6831,7 +6841,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     FROM evacuees
                     WHERE dup_flag='CLEAR' AND (
                         (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
-                         AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                         AND (
+                             (route_mismatch = 0 OR route_mismatch IS NULL)
+                             OR review_status = 'finalized'
+                         )
                          AND (
                              review_status = 'finalized'
                              OR (
@@ -6929,7 +6942,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
                     WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
-                    AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                    AND (
+                        (route_mismatch = 0 OR route_mismatch IS NULL)
+                        OR review_status = 'finalized'
+                    )
                     AND (
                         review_status = 'finalized'
                         OR (
@@ -7930,7 +7946,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         mofa_submitted=1, record_locked=1,
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
-                        AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                        AND (
+                            (route_mismatch = 0 OR route_mismatch IS NULL)
+                            OR review_status = 'finalized'
+                        )
                         AND (
                             review_status = 'finalized'
                             OR (
@@ -7953,7 +7972,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         mofa_submitted=1, record_locked=1,
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
                         WHERE id IN ({placeholders})
-                        AND (route_mismatch = 0 OR route_mismatch IS NULL)
+                        AND (
+                            (route_mismatch = 0 OR route_mismatch IS NULL)
+                            OR review_status = 'finalized'
+                        )
                         AND (
                             review_status = 'finalized'
                             OR (
@@ -11557,13 +11579,20 @@ h+=`<tr ${rowBg}><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.p
 
 // VIEW RECORD
 let viewRec=null;
-function openView(id){
-viewRec=allRecords.find(x=>x.id===id);
-if(!viewRec){toast('Record not found');return}
+async function openView(id){
+let r=null;
+try{
+const fresh=await api('/api/records?id='+encodeURIComponent(id));
+if(Array.isArray(fresh)&&fresh.length===1)r=fresh[0];
+}catch(e){}
+if(!r)r=allRecords.find(x=>x.id===id);
+if(!r){toast('Record not found');return}
+viewRec=r;
+const ix=allRecords.findIndex(x=>x.id===id);
+if(ix>=0)allRecords[ix]=r;
 viewEditMode=false;
 document.getElementById('viewEditBtn').style.display='';
 document.getElementById('viewSaveBtn').style.display='none';
-const r=viewRec;
 document.getElementById('viewId').textContent='#'+r.id;
 document.getElementById('viewTracking').textContent='PKE-'+String(r.id).padStart(4,'0');
 // Status badges
@@ -11764,7 +11793,7 @@ Object.keys(data).forEach(k=>{if(k!=='id')viewRec[k]=data[k]});
 viewEditMode=false;
 document.getElementById('viewEditBtn').style.display='';
 document.getElementById('viewSaveBtn').style.display='none';
-openView(viewRec.id);
+await openView(viewRec.id);
 loadRecords();loadDash();
 }else{toast('Error: '+(r?.error||'Save failed'))}
 }catch(err){toast('Error: '+err.message)}
@@ -11782,7 +11811,7 @@ if(res&&res.success){
 toast('Note verbal & approval serial saved');
 Object.assign(viewRec,data);
 loadRecords();loadDash();
-openView(viewRec.id);
+await openView(viewRec.id);
 }else{toast('Error: '+(res?.error||'Save failed'))}
 }catch(err){toast('Error: '+err.message)}
 }
