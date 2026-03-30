@@ -270,7 +270,8 @@ def init_db():
         db.commit()
     except sqlite3.OperationalError:
         pass
-    for col, coltype in [('mofa_kw_portal_visible', 'INTEGER DEFAULT 0'), ('mofa_kw_portal_sent_at', 'TIMESTAMP')]:
+    for col, coltype in [('mofa_kw_portal_visible', 'INTEGER DEFAULT 0'), ('mofa_kw_portal_sent_at', 'TIMESTAMP'),
+                          ('ksa_mofa_status', "TEXT DEFAULT ''")]:
         try:
             db.execute(f"ALTER TABLE iraq_public_submissions ADD COLUMN {col} {coltype}")
             db.commit()
@@ -1986,7 +1987,7 @@ def _iraq_mission_dashboard_kpi(db):
     requests_received = int(pub_total) + int(batch_apps)
     mofa_kw_approved_total = int(pub_mofa_app) + int(v_app)
 
-    # KSA approval count: union iraq_applicants + evacuees (de-duplicate by normalized passport)
+    # KSA approval count: union all three Iraq-related tables (de-duplicate by normalized passport)
     ksa_mofa_approved = db.execute("""
         SELECT COUNT(*) c FROM (
             SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) AS pp
@@ -1994,6 +1995,9 @@ def _iraq_mission_dashboard_kpi(db):
             UNION
             SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport,'')), ' ', ''), '-', '')) AS pp
             FROM evacuees WHERE LOWER(COALESCE(mofa_ksa_status,''))='approved'
+            UNION
+            SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) AS pp
+            FROM iraq_public_submissions WHERE LOWER(COALESCE(ksa_mofa_status,''))='approved'
         ) combined WHERE pp != ''
     """).fetchone()['c']
 
@@ -3587,7 +3591,7 @@ def api_iraq_stats(user_filter=None, include_visa_stats=True):
         result['visa_approved'] = visa_approved
         result['visa_pending'] = visa_pending
         result['visa_rejected'] = visa_rejected
-        # KSA approval count: union iraq_applicants + evacuees (de-duplicate by normalized passport)
+        # KSA approval count: union all three Iraq-related tables (de-duplicate by normalized passport)
         result['ksa_mofa_approved'] = db.execute("""
             SELECT COUNT(*) c FROM (
                 SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(a.passport_number,'')), ' ', ''), '-', '')) AS pp
@@ -3596,6 +3600,9 @@ def api_iraq_stats(user_filter=None, include_visa_stats=True):
                 UNION
                 SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport,'')), ' ', ''), '-', '')) AS pp
                 FROM evacuees WHERE LOWER(COALESCE(mofa_ksa_status,''))='approved'
+                UNION
+                SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) AS pp
+                FROM iraq_public_submissions WHERE LOWER(COALESCE(ksa_mofa_status,''))='approved'
             ) combined WHERE pp != ''
         """, aparams).fetchone()['c']
         result['waiting_travel_iraq'] = db.execute(
@@ -4482,6 +4489,8 @@ def api_bulk_ksa_approval(passports_text, user='system'):
     updated = 0
     iraq_applicants_matched = 0
     iraq_applicants_updated = 0
+    iraq_public_matched = 0
+    iraq_public_updated = 0
     not_found = []
     for pp in unique:
         found_any = False
@@ -4502,8 +4511,7 @@ def api_bulk_ksa_approval(passports_text, user='system'):
                     updated += 1
                 _queue_iraq_final_approval_if_ready(db, r['id'], user)
 
-        # ── 2. Also update iraq_applicants table (mission batch records) ──
-        # This ensures Iraq Transit Visas KPI cards reflect bulk KSA approvals.
+        # ── 2. Update iraq_applicants table (mission batch records) ──
         iraq_rows = db.execute("""SELECT id, COALESCE(ksa_mofa_status,'') AS ksa_mofa_status
             FROM iraq_applicants WHERE UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) = ?""", [pp]).fetchall()
         if iraq_rows:
@@ -4514,21 +4522,38 @@ def api_bulk_ksa_approval(passports_text, user='system'):
                     db.execute("""UPDATE iraq_applicants SET ksa_mofa_status='Approved' WHERE id=?""", [ir['id']])
                     iraq_applicants_updated += 1
 
+        # ── 3. Update iraq_public_submissions table (public intake records) ──
+        pub_rows = db.execute("""SELECT id, full_name, COALESCE(ksa_mofa_status,'') AS ksa_mofa_status
+            FROM iraq_public_submissions
+            WHERE UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) = ?""", [pp]).fetchall()
+        if pub_rows:
+            found_any = True
+            iraq_public_matched += len(pub_rows)
+            for pr in pub_rows:
+                if (pr['ksa_mofa_status'] or '').strip().lower() != 'approved':
+                    db.execute("""UPDATE iraq_public_submissions SET ksa_mofa_status='Approved' WHERE id=?""", [pr['id']])
+                    iraq_public_updated += 1
+
         if not found_any:
             not_found.append(pp)
 
+    total_matched = matched + iraq_applicants_matched + iraq_public_matched
+    total_updated = updated + iraq_applicants_updated + iraq_public_updated
     db.execute("INSERT INTO audit_log (action, user, details) VALUES ('bulk_ksa_approval', ?, ?)",
-               [user, json.dumps({'total_pasted': total_pasted, 'matched': matched, 'updated': updated,
+               [user, json.dumps({'total_pasted': total_pasted, 'matched': total_matched, 'updated': total_updated,
+                                   'evacuees_matched': matched, 'evacuees_updated': updated,
                                    'iraq_applicants_matched': iraq_applicants_matched,
                                    'iraq_applicants_updated': iraq_applicants_updated,
+                                   'iraq_public_matched': iraq_public_matched,
+                                   'iraq_public_updated': iraq_public_updated,
                                    'not_found': not_found})])
     db.commit()
     db.close()
     return {
         'success': True,
         'total_pasted': total_pasted,
-        'matched': matched + iraq_applicants_matched,
-        'updated': updated + iraq_applicants_updated,
+        'matched': total_matched,
+        'updated': total_updated,
         'not_found': len(not_found),
         'not_found_list': not_found
     }
@@ -12915,24 +12940,28 @@ if(!document.getElementById('ippSentDate').value)document.getElementById('ippSen
 document.getElementById('ippCount').textContent=d.length+' record(s) in current filter';
 const newRows=d.filter(x=>!x.has_nv_dispatch);
 const sentRows=d.filter(x=>x.has_nv_dispatch);
-const hdr='<tr><th style="width:36px"><input type="checkbox" title="Select all eligible" onchange="ippToggleAll(this.checked)"></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>Submitted</th><th>Portal sent</th><th></th></tr>';
+const hdr='<tr><th style="width:36px"><input type="checkbox" title="Select all eligible" onchange="ippToggleAll(this.checked)"></th><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>MOFA KSA</th><th>Submitted</th><th>Portal sent</th><th></th></tr>';
 let hNew=hdr;
 newRows.forEach(x=>{
 const kw=ippNormKw(x.kw_transit_visa_status);
-hNew+='<tr style="background:#fffbeb"><td><input type="checkbox" class="ipp-sel" value="'+x.id+'"></td><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td>'+((x.mofa_kw_portal_sent_at||'').slice(0,19)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
+const ksaSt=x.ksa_mofa_status||'';
+const ksaBdg=ksaSt.toLowerCase()==='approved'?'<span style="color:#2e7d32;font-weight:600;font-size:.78em">Approved</span>':(ksaSt?'<span style="font-size:.78em">'+ippEsc(ksaSt)+'</span>':'<span style="color:#999;font-size:.78em">\u2014</span>');
+hNew+='<tr style="background:#fffbeb"><td><input type="checkbox" class="ipp-sel" value="'+x.id+'"></td><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td>'+ksaBdg+'</td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td>'+((x.mofa_kw_portal_sent_at||'').slice(0,19)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
 });
-if(newRows.length===0)hNew+='<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--tl)">No pending NV dispatch records</td></tr>';
+if(newRows.length===0)hNew+='<tr><td colspan="12" style="text-align:center;padding:20px;color:var(--tl)">No pending NV dispatch records</td></tr>';
 document.getElementById('ippTblNew').innerHTML=hNew;
 document.getElementById('ippNewCount').textContent='('+newRows.length+')';
-const hdrS='<tr><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>Note Verbale #</th><th>NV Date</th><th>Submitted</th><th></th></tr>';
+const hdrS='<tr><th>ID</th><th>Ref</th><th>Name</th><th>Passport</th><th>CNIC</th><th>Status</th><th>KW transit visa</th><th>MOFA KSA</th><th>Note Verbale #</th><th>NV Date</th><th>Submitted</th><th></th></tr>';
 let hSent=hdrS;
 sentRows.forEach(x=>{
 const kw=ippNormKw(x.kw_transit_visa_status);
 const nvNum=x.nv_number||'';
 const nvDate=x.nv_date||'';
-hSent+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td><span style="color:#2e7d32;font-weight:600;font-size:.8em" title="Note Verbale: '+(nvNum||'N/A')+'">'+(nvNum?'&#128196; '+ippEsc(nvNum):'<span style="color:#999">&#10003;</span>')+'</span></td><td style="font-size:.78em;color:#555">'+ippEsc(nvDate||'-')+'</td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
+const ksaStS=x.ksa_mofa_status||'';
+const ksaBdgS=ksaStS.toLowerCase()==='approved'?'<span style="color:#2e7d32;font-weight:600;font-size:.78em">Approved</span>':(ksaStS?'<span style="font-size:.78em">'+ippEsc(ksaStS)+'</span>':'<span style="color:#999;font-size:.78em">\u2014</span>');
+hSent+='<tr><td>'+x.id+'</td><td>'+ippEsc(x.reference_number||'-')+'</td><td>'+ippEsc(x.full_name||'')+'</td><td>'+ippEsc(x.passport_number||'')+'</td><td>'+ippEsc(x.cnic||'')+'</td><td>'+ippEsc(x.status||'')+'</td><td><select data-ipp-kw="'+x.id+'" data-prev="'+kw+'" onchange="ippSetKwVisa(this)" style="font-size:.78em;padding:4px;max-width:120px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td><td>'+ksaBdgS+'</td><td><span style="color:#2e7d32;font-weight:600;font-size:.8em" title="Note Verbale: '+(nvNum||'N/A')+'">'+(nvNum?'&#128196; '+ippEsc(nvNum):'<span style="color:#999">&#10003;</span>')+'</span></td><td style="font-size:.78em;color:#555">'+ippEsc(nvDate||'-')+'</td><td>'+((x.created_at||'').slice(0,10)||'-')+'</td><td><button class="btn btn-p" style="padding:4px 10px;font-size:.78em" onclick="ippView('+x.id+')">View / Track</button></td></tr>';
 });
-if(sentRows.length===0)hSent+='<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--tl)">No dispatched records yet</td></tr>';
+if(sentRows.length===0)hSent+='<tr><td colspan="12" style="text-align:center;padding:20px;color:var(--tl)">No dispatched records yet</td></tr>';
 document.getElementById('ippTblSent').innerHTML=hSent;
 document.getElementById('ippSentCount').textContent='('+sentRows.length+')';
 // Load NV dispatch history
@@ -12982,6 +13011,7 @@ h+='<div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-
 '<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">CNIC</div><div style="color:#334155;font-weight:500">'+ippEsc(x.cnic||'\u2014')+'</div></div>'+
 '<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">City (Iraq)</div><div style="color:#334155;font-weight:500">'+ippEsc(x.current_city||'\u2014')+'</div></div>'+
 '<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">KW Transit Visa</div><div style="color:'+kwColor+';font-weight:600">'+ippEsc(kwTxt)+'</div></div>'+
+'<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">MOFA KSA</div><div style="color:'+((x.ksa_mofa_status||'').toLowerCase()==='approved'?'#2e7d32':'#94a3b8')+';font-weight:600">'+ippEsc(x.ksa_mofa_status||'\u2014')+'</div></div>'+
 '<div style="font-size:.82em"><div style="color:#94a3b8;font-size:.85em">Submitted</div><div style="color:#334155;font-weight:500">'+ippEsc((x.created_at||'').slice(0,10)||'\u2014')+'</div></div>'+
 '</div>'+
 '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'+stBdg+nvBdg+'</div>'+
@@ -13002,6 +13032,9 @@ const kwM=ippNormKw(x.kw_transit_visa_status);
 let h='<table style="width:100%;border-collapse:collapse;font-size:.88em"><tbody>';
 rows.forEach(kv=>{h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">'+ippEsc(kv[0])+'</td><td style="padding:6px 8px;border-bottom:1px solid #eee;word-break:break-word">'+ippEsc(kv[1])+'</td></tr>'});
 h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">Kuwait transit visa</td><td style="padding:6px 8px;border-bottom:1px solid #eee"><select data-ipp-kw="'+x.id+'" data-prev="'+kwM+'" onchange="ippSetKwVisa(this)" style="padding:6px;min-width:140px">'+ippKwVisaOptions(x.kw_transit_visa_status)+'</select></td></tr>';
+const ksaV=x.ksa_mofa_status||'';
+const ksaD=ksaV.toLowerCase()==='approved'?'<span style="color:#2e7d32;font-weight:700">Approved</span>':(ksaV||'<span style="color:#999">\u2014</span>');
+h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">MOFA KSA status</td><td style="padding:6px 8px;border-bottom:1px solid #eee">'+ksaD+'</td></tr>';
 h+='</tbody></table>';
 document.getElementById('ippBody').innerHTML=h;
 document.getElementById('ippEditBtn').style.display='';
