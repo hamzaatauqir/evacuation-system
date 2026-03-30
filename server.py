@@ -1985,9 +1985,18 @@ def _iraq_mission_dashboard_kpi(db):
 
     requests_received = int(pub_total) + int(batch_apps)
     mofa_kw_approved_total = int(pub_mofa_app) + int(v_app)
-    ksa_mofa_approved = db.execute(
-        "SELECT COUNT(*) c FROM iraq_applicants WHERE ksa_mofa_status='Approved'"
-    ).fetchone()['c']
+
+    # KSA approval count: union iraq_applicants + evacuees (de-duplicate by normalized passport)
+    ksa_mofa_approved = db.execute("""
+        SELECT COUNT(*) c FROM (
+            SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) AS pp
+            FROM iraq_applicants WHERE ksa_mofa_status='Approved'
+            UNION
+            SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport,'')), ' ', ''), '-', '')) AS pp
+            FROM evacuees WHERE LOWER(COALESCE(mofa_ksa_status,''))='approved'
+        ) combined WHERE pp != ''
+    """).fetchone()['c']
+
     waiting_travel_iraq = db.execute(
         "SELECT COUNT(*) c FROM iraq_applicants WHERE movement_status='waiting_iraq'"
     ).fetchone()['c']
@@ -3578,9 +3587,17 @@ def api_iraq_stats(user_filter=None, include_visa_stats=True):
         result['visa_approved'] = visa_approved
         result['visa_pending'] = visa_pending
         result['visa_rejected'] = visa_rejected
-        result['ksa_mofa_approved'] = db.execute(
-            f"SELECT COUNT(*) c FROM iraq_applicants a JOIN iraq_batches b ON a.batch_id=b.id WHERE a.ksa_mofa_status='Approved'{awhere}",
-            aparams).fetchone()['c']
+        # KSA approval count: union iraq_applicants + evacuees (de-duplicate by normalized passport)
+        result['ksa_mofa_approved'] = db.execute("""
+            SELECT COUNT(*) c FROM (
+                SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(a.passport_number,'')), ' ', ''), '-', '')) AS pp
+                FROM iraq_applicants a JOIN iraq_batches b ON a.batch_id=b.id
+                WHERE a.ksa_mofa_status='Approved'""" + awhere + """
+                UNION
+                SELECT UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport,'')), ' ', ''), '-', '')) AS pp
+                FROM evacuees WHERE LOWER(COALESCE(mofa_ksa_status,''))='approved'
+            ) combined WHERE pp != ''
+        """, aparams).fetchone()['c']
         result['waiting_travel_iraq'] = db.execute(
             f"SELECT COUNT(*) c FROM iraq_applicants a JOIN iraq_batches b ON a.batch_id=b.id WHERE a.movement_status='waiting_iraq'{awhere}",
             aparams).fetchone()['c']
@@ -4463,32 +4480,55 @@ def api_bulk_ksa_approval(passports_text, user='system'):
     db = get_db()
     matched = 0
     updated = 0
+    iraq_applicants_matched = 0
+    iraq_applicants_updated = 0
     not_found = []
     for pp in unique:
+        found_any = False
+
+        # ── 1. Update evacuees table (main portal records) ──
         rows = db.execute("""SELECT id, COALESCE(mofa_ksa_status,'') AS mofa_ksa_status
             FROM evacuees WHERE UPPER(REPLACE(REPLACE(COALESCE(passport,''),' ',''),'-','')) = ?""", [pp]).fetchall()
-        if not rows:
+        if rows:
+            found_any = True
+            matched += len(rows)
+            for r in rows:
+                if (r['mofa_ksa_status'] or '').strip().lower() != 'approved':
+                    db.execute("""UPDATE evacuees
+                        SET mofa_ksa_status='Approved',
+                            mofa_ksa_approved_at=COALESCE(mofa_ksa_approved_at, CURRENT_TIMESTAMP),
+                            updated_at=CURRENT_TIMESTAMP, updated_by=?
+                        WHERE id=?""", [user, r['id']])
+                    updated += 1
+                _queue_iraq_final_approval_if_ready(db, r['id'], user)
+
+        # ── 2. Also update iraq_applicants table (mission batch records) ──
+        # This ensures Iraq Transit Visas KPI cards reflect bulk KSA approvals.
+        iraq_rows = db.execute("""SELECT id, COALESCE(ksa_mofa_status,'') AS ksa_mofa_status
+            FROM iraq_applicants WHERE UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) = ?""", [pp]).fetchall()
+        if iraq_rows:
+            found_any = True
+            iraq_applicants_matched += len(iraq_rows)
+            for ir in iraq_rows:
+                if (ir['ksa_mofa_status'] or '').strip().lower() != 'approved':
+                    db.execute("""UPDATE iraq_applicants SET ksa_mofa_status='Approved' WHERE id=?""", [ir['id']])
+                    iraq_applicants_updated += 1
+
+        if not found_any:
             not_found.append(pp)
-            continue
-        matched += len(rows)
-        for r in rows:
-            if (r['mofa_ksa_status'] or '').strip().lower() != 'approved':
-                db.execute("""UPDATE evacuees
-                    SET mofa_ksa_status='Approved',
-                        mofa_ksa_approved_at=COALESCE(mofa_ksa_approved_at, CURRENT_TIMESTAMP),
-                        updated_at=CURRENT_TIMESTAMP, updated_by=?
-                    WHERE id=?""", [user, r['id']])
-                updated += 1
-            _queue_iraq_final_approval_if_ready(db, r['id'], user)
+
     db.execute("INSERT INTO audit_log (action, user, details) VALUES ('bulk_ksa_approval', ?, ?)",
-               [user, json.dumps({'total_pasted': total_pasted, 'matched': matched, 'updated': updated, 'not_found': not_found})])
+               [user, json.dumps({'total_pasted': total_pasted, 'matched': matched, 'updated': updated,
+                                   'iraq_applicants_matched': iraq_applicants_matched,
+                                   'iraq_applicants_updated': iraq_applicants_updated,
+                                   'not_found': not_found})])
     db.commit()
     db.close()
     return {
         'success': True,
         'total_pasted': total_pasted,
-        'matched': matched,
-        'updated': updated,
+        'matched': matched + iraq_applicants_matched,
+        'updated': updated + iraq_applicants_updated,
         'not_found': len(not_found),
         'not_found_list': not_found
     }
