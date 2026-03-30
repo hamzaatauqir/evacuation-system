@@ -2358,23 +2358,9 @@ def api_save_record(data, user):
         # (e.g. viewSave sends ~30 fields but the full list has 33+)
         update_fields = [f for f in fields if f in data]
 
-        # ── Record Locking: prevent edits to IDENTITY fields if locked ──
-        # Only lock fields that were submitted to MOFA (identity & routing).
-        # Operational fields (visa_status, travel_status, departure_airport,
-        # airline, ticket_number, etc.) must remain editable for workflow.
-        LOCKED_FIELDS = {'name','passport','cnic','gender','country','civil_id','dob'}
-        if old_rec.get('record_locked') == 1 or old_rec.get('record_locked') == '1':
-            # Keep comparisons stable for normalized fields (e.g. border crossing),
-            # so locked saves don't fail when a UI submits the same value.
-            old_rec['border_crossing'] = normalize_border(old_rec.get('border_crossing'))
-            # Only check fields actually being submitted, not all fields
-            changed_locked = [
-                f for f in LOCKED_FIELDS
-                if f in data and str(data.get(f, '') or '') != str(old_rec.get(f, '') or '')
-            ]
-            if changed_locked:
-                db.close()
-                return {'success': False, 'error': f'Record is locked (sent to MOFA KSA). Cannot edit: {", ".join(changed_locked)}'}
+        # ── Record Locking: DISABLED — staff can now edit all fields ──
+        # Previously, identity fields were locked after MOFA submission.
+        # All records are now fully editable by authenticated staff.
 
         sets = [f"{f} = ?" for f in update_fields]
         vals = [data.get(f, '') for f in update_fields]
@@ -4210,9 +4196,10 @@ def api_iraq_public_submission_update(data, user):
     if not existing:
         db.close()
         return {'success': False, 'error': 'Submission not found'}
-    if int(existing['mofa_kw_portal_visible'] or 0) == 1:
-        db.close()
-        return {'success': False, 'error': 'Record is locked after being sent to Kuwait main portal. Editing is not allowed.'}
+    # Lock check DISABLED — staff can now edit all records regardless of portal visibility
+    # if int(existing['mofa_kw_portal_visible'] or 0) == 1:
+    #     db.close()
+    #     return {'success': False, 'error': 'Record is locked after being sent to Kuwait main portal. Editing is not allowed.'}
 
     editable_fields = [
         'full_name', 'passport_number', 'cnic', 'nationality', 'date_of_birth', 'gender',
@@ -4254,9 +4241,10 @@ def api_iraq_public_submission_delete(sid, user):
     if not row:
         db.close()
         return {'success': False, 'error': 'Submission not found'}
-    if int(row['mofa_kw_portal_visible'] or 0) == 1:
-        db.close()
-        return {'success': False, 'error': 'Record is locked after being sent to Kuwait main portal. Deletion is not allowed.'}
+    # Lock check DISABLED — staff can now delete records regardless of portal visibility
+    # if int(row['mofa_kw_portal_visible'] or 0) == 1:
+    #     db.close()
+    #     return {'success': False, 'error': 'Record is locked after being sent to Kuwait main portal. Deletion is not allowed.'}
     db.execute("DELETE FROM iraq_dispatch_applicants WHERE public_submission_id = ?", [sid])
     db.execute("DELETE FROM iraq_applicant_decisions WHERE public_submission_id = ?", [sid])
     db.execute("DELETE FROM iraq_batch_applicants WHERE public_submission_id = ?", [sid])
@@ -4369,9 +4357,10 @@ def api_iraq_public_update_status(data, user):
     if not row:
         db.close()
         return {'success': False, 'error': 'Submission not found'}
-    if int(row['mofa_kw_portal_visible'] or 0) == 1:
-        db.close()
-        return {'success': False, 'error': 'Record is locked after being sent to Kuwait main portal. Status cannot be changed.'}
+    # Lock check DISABLED — staff can now change status regardless of portal visibility
+    # if int(row['mofa_kw_portal_visible'] or 0) == 1:
+    #     db.close()
+    #     return {'success': False, 'error': 'Record is locked after being sent to Kuwait main portal. Status cannot be changed.'}
     db.execute("""UPDATE iraq_public_submissions
         SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
         WHERE id = ?""", [status, user, sid])
@@ -10181,9 +10170,9 @@ let h='<table style="width:100%;border-collapse:collapse;font-size:.9em"><tbody>
 rows.forEach(function(kv){h+='<tr><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#555;width:40%;vertical-align:top">'+esc(kv[0])+'</td><td style="padding:8px 10px;border-bottom:1px solid #eee;word-break:break-word">'+esc(kv[1])+'</td></tr>';});
 h+='</tbody></table>';
 document.getElementById('iraqPubViewBody').innerHTML=h;
-const locked=!!x.mofa_kw_portal_visible;
-document.getElementById('iraqPubEditBtn').style.display=locked?'none':'';
-document.querySelector('#iraqPubViewMo .btn.d').style.display=locked?'none':'';
+// Lock check DISABLED — Edit/Delete always visible for staff
+document.getElementById('iraqPubEditBtn').style.display='';
+document.querySelector('#iraqPubViewMo .btn.d').style.display='';
 document.getElementById('iraqPubSaveBtn').style.display='none';
 document.getElementById('iraqPubViewMo').classList.add('show');
 }
@@ -10210,7 +10199,7 @@ document.getElementById('iraqPubSaveBtn').style.display='';
 }
 async function saveIraqPubEdit(){
 if(!_iraqPubCurrent)return;
-if(_iraqPubCurrent.mofa_kw_portal_visible){alert('Record is locked after being sent to Kuwait main portal.');return}
+// Lock check DISABLED — staff can save edits regardless of portal visibility
 const payload={id:_iraqPubCurrent.id};
 document.querySelectorAll('#iraqPubViewBody [data-f]').forEach(function(el){payload[el.getAttribute('data-f')]=(el.value||'').trim();});
 if(payload.cnic && !/^\d{13}$/.test(payload.cnic)){alert('CNIC must be exactly 13 digits');return}
@@ -10224,7 +10213,7 @@ loadSubs();
 }
 function closeIraqPubView(){document.getElementById('iraqPubViewMo').classList.remove('show');}
 async function deleteIraqPub(){
-if(_iraqPubCurrent&&_iraqPubCurrent.mofa_kw_portal_visible){alert('Record is locked after being sent to Kuwait main portal.');return}
+// Lock check DISABLED — staff can delete regardless of portal visibility
 if(!_iraqPubCurrent||!confirm('Permanently delete registration #'+_iraqPubCurrent.id+'? This cannot be undone.'))return;
 const r=await fetch('/api/iraq-public-submission-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:_iraqPubCurrent.id})});
 const j=await r.json();
@@ -11140,7 +11129,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 
 <div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap">
 <span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#fff3e0;color:#e65100;border:1px solid #ffcc80">&#9888; Route Mismatch</span>
-<span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#ffebee;color:#c62828;border:1px solid #ef9a9a">&#128274; MOFA Locked</span>
+<span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">&#9989; MOFA Submitted</span>
 <span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9">&#9989; Finalized</span>
 <span style="display:inline-flex;align-items:center;gap:4px;font-size:.78em;padding:3px 8px;border-radius:10px;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">&#10004; PK Location</span>
 </div>
@@ -11159,7 +11148,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <option value="">-- Select Decision --</option>
 <option value="correct_to_pk_to_kw">Correct to Pakistan &rarr; Kuwait (mark mismatch)</option>
 <option value="keep_kw_to_pk">Keep as Kuwait &rarr; Pakistan (no mismatch)</option>
-<option value="annotate_only">Annotate Only (MOFA locked, mark mismatch)</option>
+<option value="annotate_only">Annotate Only (MOFA submitted, mark mismatch)</option>
 <option value="needs_contact">Needs Contact (insufficient evidence)</option>
 <option value="reject_mismatch">Reject Mismatch (suspicion was incorrect)</option>
 </select>
@@ -11724,7 +11713,7 @@ const revDone=(r.review_status||'')==='finalized';
 let routeBdg='';
 if(r.route_mismatch==1&&!revDone)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#fff3e0;color:#e65100;border:1px solid #ffcc80">MISMATCH</span> ';
 if(r.route_mismatch==1&&revDone)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">REVIEWED</span> ';
-if(r.record_locked==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#ffebee;color:#c62828;border:1px solid #ef9a9a">\ud83d\udd12</span> ';
+if(r.record_locked==1)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">MOFA</span> ';
 if(r.location_review_flag==1&&!revDone)routeBdg+='<span style="display:inline-block;padding:1px 5px;border-radius:6px;font-size:.68em;font-weight:600;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9">\ud83c\udf10 IP</span> ';
 if(!routeBdg)routeBdg='<span style="color:#bbb;font-size:.75em">-</span>';
 const rowBg=(r.route_mismatch==1&&!revDone)?'style="background:#fff8e1"':'';
@@ -11766,7 +11755,7 @@ ${r.mofa_status==='Sent to MOFA'?'<span class="bdg" style="background:#c8e6c9;co
 ${r.priority&&r.priority!=='Normal'?'<span class="bdg" style="background:#fff3e0;color:#e65100">Priority: '+r.priority+'</span>':''}
 ${r.route_mismatch==1&&(r.review_status||'')!=='finalized'?'<span class="bdg" style="background:#fff3e0;color:#e65100;border:1px solid #ffcc80">\u26a0 ROUTE MISMATCH</span>':''}
 ${r.route_mismatch==1&&(r.review_status||'')==='finalized'?'<span class="bdg" style="background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">ROUTE REVIEWED</span>':''}
-${r.record_locked==1?'<span class="bdg" style="background:#ffebee;color:#c62828;border:1px solid #ef9a9a">\ud83d\udd12 MOFA LOCKED</span>':''}`;
+${r.record_locked==1?'<span class="bdg" style="background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">MOFA Submitted</span>':''}`;
 // Build profile sections
 const sec=(title,fields)=>{
 let s=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#006600;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #e8f5e9;margin-bottom:8px">${title}</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px">`;
@@ -11782,7 +11771,7 @@ html+=`<div style="margin-bottom:14px;padding:12px;background:#fff3e0;border:1px
 <strong style="color:#e65100">\u26a0 Route Mismatch Detected</strong><br>
 This person registered through the <strong>${routeMap[r.original_form_source]||'KW\u2192PK'}</strong> form but actually belongs to the <strong>${routeMap[r.effective_route]||r.effective_route}</strong> transit route.
 Physical location: <strong>${(r.physical_location||'unknown').toUpperCase()}</strong>.
-${r.record_locked==1?'<br><span style="color:#c62828">Record is MOFA-locked \u2014 core fields cannot be edited.</span>':''}
+${r.record_locked==1?'<br><span style="color:#2e7d32">Record was submitted to MOFA \u2014 all fields remain editable by staff.</span>':''}
 ${r.reviewed_by?'<br>Reviewed by: <strong>'+r.reviewed_by+'</strong> on '+(r.reviewed_at||'')+'. Decision: <strong>'+(r.review_decision||'-')+'</strong>':''}
 ${r.admin_override_notes?'<br>Notes: '+r.admin_override_notes:''}
 </div>`;
@@ -11849,7 +11838,7 @@ html+=sec('Route & Review',[
 ['Route Mismatch',r.route_mismatch==1?'YES':'No'],
 ['Physical Location',(r.physical_location||'unknown').toUpperCase()],
 ['MOFA Submitted',r.mofa_submitted==1?'Yes':'No'],
-['Record Locked',r.record_locked==1?'LOCKED':'Editable'],
+['Record Locked',r.record_locked==1?'MOFA Submitted (Editable)':'Editable'],
 ['Review Status',r.review_status||'\u2014'],
 ['Review Decision',r.review_decision||'\u2014'],
 ['Reviewed By',r.reviewed_by||'\u2014'],
@@ -12020,21 +12009,11 @@ el.value=v;
 el.value=v;
 }
 });
-// MOFA-locked records: identity fields remain read-only, operational fields stay editable
-const isLocked=(r.record_locked==1||r.record_locked==='1');
-const lockFields=['name','passport','cnic','gender','country','civil_id'];
-lockFields.forEach(f=>{
-const el=document.getElementById('e_'+f);
-if(!el)return;
-el.disabled=isLocked;
-el.style.background=isLocked?'#f5f5f5':'';
-el.style.cursor=isLocked?'not-allowed':'';
-});
-if(isLocked){toast('Record is MOFA-locked: core identity fields are read-only. You can still update visa/travel status, airline, ticket, and departure details.')}
+// Record locking DISABLED — all fields are now editable by staff
 document.getElementById('editModal').classList.add('show')}
 function closeEdit(){document.getElementById('editModal').classList.remove('show')}
 async function saveEdit(e){e.preventDefault();const data={id:parseInt(document.getElementById('e_id').value)};
-F.forEach(f=>{const el=document.getElementById('e_'+f);if(el&&!el.disabled)data[f]=el.value});
+F.forEach(f=>{const el=document.getElementById('e_'+f);if(el)data[f]=el.value});
 const r=await api('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 if(r&&r.success){closeEdit();loadRecords();loadDash();toast('Updated'+(r.dup_details?.length?' — '+r.dup_details.join('; '):''))}return false}
 async function delRecord(){const id=parseInt(document.getElementById('e_id').value);
@@ -13220,7 +13199,7 @@ const isPk=(r.physical_location||'').toLowerCase()==='pakistan';
 const isFinalized=r.review_status==='finalized';
 let badges='';
 if(isMismatch)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#fff3e0;color:#e65100;border:1px solid #ffcc80;margin:1px">MISMATCH</span> ';
-if(isLocked)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#ffebee;color:#c62828;border:1px solid #ef9a9a;margin:1px">LOCKED</span> ';
+if(isLocked)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7;margin:1px">MOFA</span> ';
 if(isPk)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7;margin:1px">IN PK</span> ';
 if(isFinalized)badges+='<span style="display:inline-block;padding:2px 6px;border-radius:8px;font-size:.72em;font-weight:600;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9;margin:1px">DONE</span> ';
 const routeMap={kw_to_pk:'KW\u2192PK',pk_to_kw:'PK\u2192KW'};
@@ -13322,7 +13301,7 @@ ${r.mobile?'<a href="https://wa.me/'+r.mobile.replace(/[^0-9]/g,'')+'" target="_
 ${r.email?'<a href="mailto:'+r.email+'" style="display:inline-flex;align-items:center;gap:4px;padding:6px 12px;background:#fff;border:1px solid #90caf9;border-radius:6px;color:#1565c0;text-decoration:none;font-weight:600;font-size:.88em">\u2709 '+r.email+'</a>':'<span style="color:#999;font-size:.88em">No email</span>'}
 </div>
 </div>
-${r.record_locked==1?'<div style="margin-top:8px;padding:8px;background:#ffebee;border:1px solid #ef9a9a;border-radius:6px;font-size:.85em;color:#c62828"><strong>\u26a0 This record is MOFA-locked.</strong> Core fields cannot be changed. You can annotate the mismatch and physical location.</div>':''}
+${r.record_locked==1?'<div style="margin-top:8px;padding:8px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:6px;font-size:.85em;color:#2e7d32"><strong>\u2139 MOFA Submitted.</strong> All fields remain editable by staff.</div>':''}
 ${r.flag_reason?'<div style="margin-top:6px;font-size:.85em"><strong>Flag reason:</strong> '+r.flag_reason+'</div>':''}
 ${r.review_notes?'<div style="margin-top:4px;font-size:.85em"><strong>Previous notes:</strong> '+r.review_notes+'</div>':''}
 <div style="margin-top:10px;padding:10px;background:${r.clarification_email_sent==1?'#e8f5e9':'#f5f5f5'};border:1px solid ${r.clarification_email_sent==1?'#a5d6a7':'#e0e0e0'};border-radius:8px">
