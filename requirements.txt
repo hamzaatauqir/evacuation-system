@@ -3,6 +3,6 @@
 pypdf>=4.0.0
 
 # Optional — only if you enable full raster OCR on the server (heavy setup: Tesseract + Poppler on the image):
-# Pillow>=10.0.0
-# pytesseract>=0.3.10
-# pdf2image>=1.16.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+pdf2image>=1.16.0
