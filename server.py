@@ -3182,6 +3182,100 @@ def _nv_auto_link_upload(db, upload_id):
     db.commit()
     return {'linked': linked, 'suggested': suggested}
 
+def _nv_process_upload_by_id(upload_id, actor='system'):
+    """
+    Background processor for NV uploads.
+    Keeps heavy extraction/matching out of HTTP request path (Render-friendly).
+    """
+    db = get_db()
+    try:
+        up = db.execute("SELECT * FROM note_verbal_uploads WHERE id=?", [upload_id]).fetchone()
+        if not up:
+            return
+        up = dict(up)
+        fp = NOTE_VERBAL_UPLOADS_DIR / (up.get('file_path') or '')
+        if not fp.exists():
+            db.execute("""UPDATE note_verbal_uploads
+                          SET processing_status='failed', ocr_status='failed',
+                              parse_error='Stored file missing on server'
+                          WHERE id=?""", [upload_id])
+            db.commit()
+            return
+        db.execute("UPDATE note_verbal_uploads SET processing_status='processing', ocr_status='processing' WHERE id=?", [upload_id])
+        db.commit()
+        try:
+            text, ocr_status, ex_meta = _extract_full_pdf_text_with_fallback(str(fp))
+        except Exception as e:
+            err = f'background extraction: {type(e).__name__}: {str(e)[:120]}'
+            print(f"[NV Upload] {err}", flush=True)
+            text, ocr_status, ex_meta = '', 'failed', {'total_pages': 0, 'pages_processed': 0, 'pages_ocrd': 0, 'error': err}
+
+        res = {'linked': 0, 'suggested': 0}
+        parse_error = ex_meta.get('error', '') or ''
+        if text:
+            db.execute("UPDATE note_verbal_uploads SET extracted_text=? WHERE id=?", [text, upload_id])
+            db.commit()
+            res = _nv_auto_link_upload(db, upload_id)
+        final_status = 'processed'
+        if ocr_status in ('failed', 'ocr_unavailable'):
+            final_status = 'failed' if not text else 'processed_with_warnings'
+        elif ocr_status == 'partial_success':
+            final_status = 'partial_success'
+        elif parse_error:
+            final_status = 'processed_with_warnings'
+        if text and res.get('linked', 0) == 0 and res.get('suggested', 0) == 0:
+            final_status = 'processed_with_warnings'
+            if not parse_error:
+                parse_error = 'Text extracted but no applicant matches found'
+        if not text and not parse_error:
+            parse_error = 'No extractable text found'
+        db.execute("""
+            UPDATE note_verbal_uploads
+            SET extracted_text=?,
+                ocr_status=?,
+                processing_status=?,
+                total_pages=?,
+                pages_processed=?,
+                pages_ocrd=?,
+                confirmed_count=?,
+                suggested_count=?,
+                parse_error=?
+            WHERE id=?
+        """, [
+            text or '',
+            ocr_status,
+            final_status,
+            int(ex_meta.get('total_pages') or 0),
+            int(ex_meta.get('pages_processed') or 0),
+            int(ex_meta.get('pages_ocrd') or 0),
+            int(res.get('linked') or 0),
+            int(res.get('suggested') or 0),
+            parse_error[:300],
+            upload_id
+        ])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_uploaded', ?, ?, ?)",
+                   [upload_id, actor, json.dumps({
+                       'background': True,
+                       'ocr_status': ocr_status,
+                       'processing_status': final_status,
+                       'total_pages': ex_meta.get('total_pages', 0),
+                       'pages_processed': ex_meta.get('pages_processed', 0),
+                       'pages_ocrd': ex_meta.get('pages_ocrd', 0),
+                       'parse_error': parse_error,
+                       **res
+                   })])
+        db.commit()
+    except Exception as e:
+        try:
+            db.execute("UPDATE note_verbal_uploads SET processing_status='failed', ocr_status='failed', parse_error=? WHERE id=?",
+                       [f'background_worker_error: {type(e).__name__}: {str(e)[:180]}', upload_id])
+            db.commit()
+        except Exception:
+            pass
+        print(f"[NV Upload] background worker fatal error for upload {upload_id}: {e}", flush=True)
+    finally:
+        db.close()
+
 def _nv_auto_reprocess_upload_if_needed(db, upload_row):
     """
     Backfill matcher for older uploads that extracted text successfully
@@ -3237,9 +3331,6 @@ def api_nv_upload(file_data, original_filename, data, user):
     p = NOTE_VERBAL_UPLOADS_DIR / stored
     with open(p, 'wb') as f:
         f.write(file_data)
-    text = ''
-    ocr_status = 'uploaded'
-    ex_meta = {'total_pages': 0, 'pages_processed': 0, 'pages_ocrd': 0, 'error': ''}
     db = get_db()
     try:
         cur = db.execute("""
@@ -3255,80 +3346,17 @@ def api_nv_upload(file_data, original_filename, data, user):
             (data.get('note_verbal_date') or '').strip(),
             (data.get('source') or '').strip(),
             user,
-            'uploaded',
-            'uploaded',
+            'queued',
+            'queued',
             (data.get('remarks') or '').strip(),
             0, 0, 0
         ])
         uid = cur.lastrowid
         db.commit()
-        db.execute("UPDATE note_verbal_uploads SET processing_status='processing', ocr_status='processing' WHERE id=?", [uid])
-        db.commit()
-        try:
-            text, ocr_status, ex_meta = _extract_full_pdf_text_with_fallback(str(p))
-        except Exception as e:
-            err = f'api_nv_upload extraction: {type(e).__name__}: {str(e)[:120]}'
-            print(f'[NV Upload] {err}', flush=True)
-            text, ocr_status, ex_meta = '', 'failed', {'total_pages': 0, 'pages_processed': 0, 'pages_ocrd': 0, 'error': err}
-
-        res = {'linked': 0, 'suggested': 0}
-        parse_error = ex_meta.get('error', '') or ''
-        if text:
-            res = _nv_auto_link_upload(db, uid)
-        final_status = 'processed'
-        if ocr_status in ('failed', 'ocr_unavailable'):
-            final_status = 'failed' if not text else 'processed_with_warnings'
-        elif ocr_status == 'partial_success':
-            final_status = 'partial_success'
-        elif parse_error:
-            final_status = 'processed_with_warnings'
-        if text and res.get('linked', 0) == 0 and res.get('suggested', 0) == 0:
-            final_status = 'processed_with_warnings'
-            if not parse_error:
-                parse_error = 'Text extracted but no applicant matches found'
-        if not text and not parse_error:
-            parse_error = 'No extractable text found'
-        db.execute("""
-            UPDATE note_verbal_uploads
-            SET extracted_text=?,
-                ocr_status=?,
-                processing_status=?,
-                total_pages=?,
-                pages_processed=?,
-                pages_ocrd=?,
-                confirmed_count=?,
-                suggested_count=?,
-                parse_error=?
-            WHERE id=?
-        """, [
-            text or '',
-            ocr_status,
-            final_status,
-            int(ex_meta.get('total_pages') or 0),
-            int(ex_meta.get('pages_processed') or 0),
-            int(ex_meta.get('pages_ocrd') or 0),
-            int(res.get('linked') or 0),
-            int(res.get('suggested') or 0),
-            parse_error[:300],
-            uid
-        ])
-        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_uploaded', ?, ?, ?)",
-                   [uid, user, json.dumps({
-                       'filename': original_filename,
-                       'ocr_status': ocr_status,
-                       'processing_status': final_status,
-                       'total_pages': ex_meta.get('total_pages', 0),
-                       'pages_processed': ex_meta.get('pages_processed', 0),
-                       'pages_ocrd': ex_meta.get('pages_ocrd', 0),
-                       'parse_error': parse_error,
-                       **res
-                   })])
-        db.commit()
-        return {'success': True, 'upload_id': uid, 'ocr_status': ocr_status, 'processing_status': final_status,
-                'total_pages': int(ex_meta.get('total_pages') or 0),
-                'pages_processed': int(ex_meta.get('pages_processed') or 0),
-                'pages_ocrd': int(ex_meta.get('pages_ocrd') or 0),
-                'parse_error': parse_error[:300], **res}
+        t = threading.Thread(target=_nv_process_upload_by_id, args=(uid, user), daemon=True)
+        t.start()
+        return {'success': True, 'upload_id': uid, 'queued': True, 'ocr_status': 'queued',
+                'processing_status': 'queued', 'linked': 0, 'suggested': 0}
     finally:
         db.close()
 
