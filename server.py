@@ -3129,9 +3129,7 @@ def _nv_auto_link_upload(db, upload_id):
     linked = 0
     suggested = 0
     processed = 0
-    chunk_size = 20  # Render-friendly batching (same style as approval chunking)
-    db.execute("UPDATE note_verbal_uploads SET processing_status='processing' WHERE id=?", [upload_id])
-    db.commit()
+    chunk_size = 20
     for c in candidates:
         passport = (c.get('passport_number') or '').strip().upper()
         full_name = (c.get('full_name') or '').strip()
@@ -3144,12 +3142,11 @@ def _nv_auto_link_upload(db, upload_id):
             method = 'passport_exact'; conf = 0.99
         elif p_comp and p_comp in compact_txt:
             method = 'passport_normalized'; conf = 0.95
-        elif name_comp and len(name_comp) >= 8 and name_comp in compact_txt:
-            method = 'name_normalized'; conf = 0.80
         elif passport and name_comp and passport in up_txt and name_comp in compact_txt:
             method = 'passport_name_combo'; conf = 0.97
+        elif name_comp and len(name_comp) >= 8 and name_comp in compact_txt:
+            method = 'name_normalized'; conf = 0.80
         else:
-            # OCR-noisy fallback: token overlap from applicant name
             name_tokens = [t for t in re.findall(r'[A-Z]{3,}', full_name.upper()) if t not in common_name_tokens]
             token_hits = [t for t in name_tokens if t in up_word_set]
             if len(token_hits) >= 2:
@@ -3182,99 +3179,232 @@ def _nv_auto_link_upload(db, upload_id):
     db.commit()
     return {'linked': linked, 'suggested': suggested}
 
-def _nv_process_upload_by_id(upload_id, actor='system'):
-    """
-    Background processor for NV uploads.
-    Keeps heavy extraction/matching out of HTTP request path (Render-friendly).
-    """
-    db = get_db()
+
+# ---------------------------------------------------------------------------
+# Deterministic, resume-safe NV upload processor (replaces daemon threads)
+# ---------------------------------------------------------------------------
+# Processing phases for a queued upload:
+#   Phase 1 (extracting): page-by-page text extraction, persisted incrementally
+#   Phase 2 (matching):   candidate matching against extracted text
+# The function processes one bounded chunk per call and persists progress,
+# so it can be called repeatedly from normal HTTP handlers until done.
+# ---------------------------------------------------------------------------
+
+def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, max_seconds=18):
+    """Extract text from pages [pages_done+1 .. total_pages] in a time-bounded chunk.
+    Appends text to extracted_text in DB and updates pages_processed / pages_ocrd.
+    Returns (new_pages_done, new_pages_ocrd, ocr_status_hint, error_msg)."""
+    import time as _time
+    start = _time.time()
+    ocr_ok, _ocr_msg = _check_ocr_deps()
+    max_ocr_pages = 60
+    # Load current accumulated state
+    row = db.execute("SELECT extracted_text, pages_ocrd FROM note_verbal_uploads WHERE id=?", [upload_id]).fetchone()
+    accumulated_text = (row['extracted_text'] or '') if row else ''
+    pages_ocrd = int(row['pages_ocrd'] or 0) if row else 0
+    new_texts = []
+    cur_page = pages_done
+    error_msg = ''
+
+    # Pre-extract text layers (cheap) for remaining pages
+    per_page = {}
     try:
-        up = db.execute("SELECT * FROM note_verbal_uploads WHERE id=?", [upload_id]).fetchone()
-        if not up:
-            return
-        up = dict(up)
-        fp = NOTE_VERBAL_UPLOADS_DIR / (up.get('file_path') or '')
-        if not fp.exists():
-            db.execute("""UPDATE note_verbal_uploads
-                          SET processing_status='failed', ocr_status='failed',
-                              parse_error='Stored file missing on server'
-                          WHERE id=?""", [upload_id])
-            db.commit()
-            return
+        pypdf_pages = _extract_pdf_text_per_page(pdf_path) or []
+        for item in pypdf_pages:
+            if isinstance(item, tuple) and len(item) >= 2:
+                try:
+                    pno = int(item[0])
+                except Exception:
+                    continue
+                per_page[pno] = str(item[1] or '').strip()
+        if not per_page:
+            for pno, ptxt in (_extract_pdf_text_via_pdftotext(pdf_path) or []):
+                per_page[int(pno)] = str(ptxt or '').strip()
+    except Exception as e:
+        error_msg = f'text_layer_extract: {type(e).__name__}: {str(e)[:100]}'
+        print(f"[NV Extract Chunk] {error_msg}", flush=True)
+
+    for pno in range(pages_done + 1, total_pages + 1):
+        if _time.time() - start > max_seconds:
+            break  # time budget exceeded — save and resume next call
+        ptxt = str(per_page.get(pno) or '').strip()
+        if ptxt:
+            new_texts.append(ptxt)
+            cur_page = pno
+            continue
+        # OCR fallback for this page
+        if not ocr_ok or pages_ocrd >= max_ocr_pages:
+            cur_page = pno
+            continue
+        try:
+            im = _pdf_page_to_image(pdf_path, pno)
+            if im is not None:
+                otxt = str(_ocr_image(_prepare_image_for_ocr(im)) or '').strip()
+                if otxt:
+                    new_texts.append(otxt)
+                pages_ocrd += 1
+        except Exception as e:
+            print(f"[NV Extract Chunk] OCR error page {pno}: {e}", flush=True)
+        cur_page = pno
+        if _time.time() - start > max_seconds:
+            break
+
+    # Append new text to accumulated
+    if new_texts:
+        if accumulated_text:
+            accumulated_text = accumulated_text + '\n\n' + '\n\n'.join(new_texts)
+        else:
+            accumulated_text = '\n\n'.join(new_texts)
+        if len(accumulated_text) > 2000000:
+            accumulated_text = accumulated_text[:2000000]
+
+    # Determine ocr_status hint
+    ocr_hint = 'pdf_text'
+    if pages_ocrd > 0:
+        ocr_hint = 'ocr'
+    if not ocr_ok and any(not str(per_page.get(p) or '').strip() for p in range(1, total_pages + 1)):
+        ocr_hint = 'partial_success' if accumulated_text.strip() else 'ocr_unavailable'
+
+    # Persist progress
+    db.execute("""UPDATE note_verbal_uploads
+                  SET extracted_text=?, pages_processed=?, pages_ocrd=?, ocr_status=?
+                  WHERE id=?""",
+               [accumulated_text, cur_page, pages_ocrd, ocr_hint, upload_id])
+    db.commit()
+    print(f"[NV Extract Chunk] upload={upload_id} pages_done={cur_page}/{total_pages} ocrd={pages_ocrd} elapsed={_time.time()-start:.1f}s", flush=True)
+    return cur_page, pages_ocrd, ocr_hint, error_msg
+
+
+def process_one_pending_nv_upload(db, max_seconds=20):
+    """Pick one queued/processing NV upload and advance it by one bounded chunk.
+    Called from api_nv_uploads (and optionally a cron) to make progress without threads.
+    Returns dict with upload_id and progress info, or None if nothing to do."""
+    import time as _time
+    start = _time.time()
+
+    # Pick the oldest incomplete upload
+    row = db.execute("""SELECT * FROM note_verbal_uploads
+                        WHERE processing_status IN ('queued', 'processing')
+                        ORDER BY id ASC LIMIT 1""").fetchone()
+    if not row:
+        return None
+    row = dict(row)
+    upload_id = int(row['id'])
+    print(f"[NV JobRunner] picked upload_id={upload_id} status={row.get('processing_status')} pages={row.get('pages_processed')}/{row.get('total_pages')}", flush=True)
+
+    fp = NOTE_VERBAL_UPLOADS_DIR / (row.get('file_path') or '')
+    if not fp.exists():
+        db.execute("""UPDATE note_verbal_uploads
+                      SET processing_status='failed', ocr_status='failed',
+                          parse_error='Stored file missing on server'
+                      WHERE id=?""", [upload_id])
+        db.commit()
+        print(f"[NV JobRunner] upload={upload_id} FAILED: file missing", flush=True)
+        return {'upload_id': upload_id, 'status': 'failed', 'reason': 'file_missing'}
+
+    # Transition queued -> processing, determine total_pages if needed
+    total_pages = int(row.get('total_pages') or 0)
+    pages_done = int(row.get('pages_processed') or 0)
+    if row.get('processing_status') == 'queued' or total_pages == 0:
         db.execute("UPDATE note_verbal_uploads SET processing_status='processing', ocr_status='processing' WHERE id=?", [upload_id])
         db.commit()
         try:
-            text, ocr_status, ex_meta = _extract_full_pdf_text_with_fallback(str(fp))
+            total_pages = _pdf_page_count(str(fp))
         except Exception as e:
-            err = f'background extraction: {type(e).__name__}: {str(e)[:120]}'
-            print(f"[NV Upload] {err}", flush=True)
-            text, ocr_status, ex_meta = '', 'failed', {'total_pages': 0, 'pages_processed': 0, 'pages_ocrd': 0, 'error': err}
-
-        res = {'linked': 0, 'suggested': 0}
-        parse_error = ex_meta.get('error', '') or ''
-        if text:
-            db.execute("UPDATE note_verbal_uploads SET extracted_text=? WHERE id=?", [text, upload_id])
+            total_pages = 0
+            print(f"[NV JobRunner] page count error: {e}", flush=True)
+        if total_pages <= 0:
+            db.execute("""UPDATE note_verbal_uploads
+                          SET processing_status='failed', ocr_status='failed', total_pages=0,
+                              parse_error='No pages detected in uploaded PDF'
+                          WHERE id=?""", [upload_id])
             db.commit()
-            res = _nv_auto_link_upload(db, upload_id)
-        final_status = 'processed'
-        if ocr_status in ('failed', 'ocr_unavailable'):
-            final_status = 'failed' if not text else 'processed_with_warnings'
-        elif ocr_status == 'partial_success':
-            final_status = 'partial_success'
-        elif parse_error:
-            final_status = 'processed_with_warnings'
-        if text and res.get('linked', 0) == 0 and res.get('suggested', 0) == 0:
-            final_status = 'processed_with_warnings'
-            if not parse_error:
-                parse_error = 'Text extracted but no applicant matches found'
-        if not text and not parse_error:
-            parse_error = 'No extractable text found'
-        db.execute("""
-            UPDATE note_verbal_uploads
-            SET extracted_text=?,
-                ocr_status=?,
-                processing_status=?,
-                total_pages=?,
-                pages_processed=?,
-                pages_ocrd=?,
-                confirmed_count=?,
-                suggested_count=?,
-                parse_error=?
-            WHERE id=?
-        """, [
-            text or '',
-            ocr_status,
-            final_status,
-            int(ex_meta.get('total_pages') or 0),
-            int(ex_meta.get('pages_processed') or 0),
-            int(ex_meta.get('pages_ocrd') or 0),
-            int(res.get('linked') or 0),
-            int(res.get('suggested') or 0),
-            parse_error[:300],
-            upload_id
-        ])
-        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_uploaded', ?, ?, ?)",
-                   [upload_id, actor, json.dumps({
-                       'background': True,
-                       'ocr_status': ocr_status,
-                       'processing_status': final_status,
-                       'total_pages': ex_meta.get('total_pages', 0),
-                       'pages_processed': ex_meta.get('pages_processed', 0),
-                       'pages_ocrd': ex_meta.get('pages_ocrd', 0),
-                       'parse_error': parse_error,
-                       **res
-                   })])
+            print(f"[NV JobRunner] upload={upload_id} FAILED: 0 pages", flush=True)
+            return {'upload_id': upload_id, 'status': 'failed', 'reason': 'no_pages'}
+        db.execute("UPDATE note_verbal_uploads SET total_pages=? WHERE id=?", [total_pages, upload_id])
         db.commit()
-    except Exception as e:
-        try:
-            db.execute("UPDATE note_verbal_uploads SET processing_status='failed', ocr_status='failed', parse_error=? WHERE id=?",
-                       [f'background_worker_error: {type(e).__name__}: {str(e)[:180]}', upload_id])
+        pages_done = 0  # start fresh
+
+    # --- Phase 1: page extraction (if not all pages done) ---
+    remaining_time = max(max_seconds - (_time.time() - start), 2)
+    if pages_done < total_pages:
+        print(f"[NV JobRunner] EXTRACTION CHUNK start upload={upload_id} pages {pages_done+1}..{total_pages}", flush=True)
+        pages_done, pages_ocrd, ocr_hint, extract_err = _nv_extract_pages_chunk(
+            db, upload_id, str(fp), pages_done, total_pages, max_seconds=remaining_time
+        )
+        if pages_done < total_pages:
+            # Still more pages — save progress and return (will resume next call)
+            db.execute("UPDATE note_verbal_uploads SET processing_status='processing' WHERE id=?", [upload_id])
             db.commit()
-        except Exception:
-            pass
-        print(f"[NV Upload] background worker fatal error for upload {upload_id}: {e}", flush=True)
-    finally:
-        db.close()
+            print(f"[NV JobRunner] EXTRACTION CHUNK end upload={upload_id} pages_done={pages_done}/{total_pages} (will resume)", flush=True)
+            return {'upload_id': upload_id, 'status': 'processing', 'pages_done': pages_done, 'total_pages': total_pages}
+
+    # --- Phase 2: all pages extracted, now do matching ---
+    remaining_time = max(max_seconds - (_time.time() - start), 2)
+    up_fresh = db.execute("SELECT * FROM note_verbal_uploads WHERE id=?", [upload_id]).fetchone()
+    up_fresh = dict(up_fresh) if up_fresh else row
+    text = (up_fresh.get('extracted_text') or '').strip()
+    ocr_status = (up_fresh.get('ocr_status') or 'pdf_text')
+    pages_ocrd_final = int(up_fresh.get('pages_ocrd') or 0)
+
+    res = {'linked': 0, 'suggested': 0}
+    parse_error = ''
+    if text:
+        print(f"[NV JobRunner] MATCHING start upload={upload_id} text_len={len(text)}", flush=True)
+        try:
+            res = _nv_auto_link_upload(db, upload_id)
+        except Exception as e:
+            parse_error = f'matching_error: {type(e).__name__}: {str(e)[:120]}'
+            print(f"[NV JobRunner] matching error: {parse_error}", flush=True)
+        print(f"[NV JobRunner] MATCHING end upload={upload_id} confirmed={res.get('linked',0)} suggested={res.get('suggested',0)}", flush=True)
+
+    # Determine final status
+    final_status = 'processed'
+    if ocr_status in ('failed', 'ocr_unavailable'):
+        final_status = 'failed' if not text else 'processed_with_warnings'
+    elif ocr_status == 'partial_success':
+        final_status = 'partial_success'
+    elif parse_error:
+        final_status = 'processed_with_warnings'
+    if text and res.get('linked', 0) == 0 and res.get('suggested', 0) == 0:
+        final_status = 'processed_with_warnings'
+        if not parse_error:
+            parse_error = 'Text extracted but no applicant matches found'
+    if not text and not parse_error:
+        parse_error = 'No extractable text found'
+        if final_status == 'processed':
+            final_status = 'failed'
+
+    db.execute("""
+        UPDATE note_verbal_uploads
+        SET ocr_status=?,
+            processing_status=?,
+            confirmed_count=?,
+            suggested_count=?,
+            parse_error=?
+        WHERE id=?
+    """, [
+        ocr_status,
+        final_status,
+        int(res.get('linked') or 0),
+        int(res.get('suggested') or 0),
+        parse_error[:300],
+        upload_id
+    ])
+    db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_uploaded', ?, ?, ?)",
+               [upload_id, 'system', json.dumps({
+                   'deterministic_runner': True,
+                   'ocr_status': ocr_status,
+                   'processing_status': final_status,
+                   'total_pages': total_pages,
+                   'pages_processed': pages_done,
+                   'pages_ocrd': pages_ocrd_final,
+                   'parse_error': parse_error,
+                   **res
+               })])
+    db.commit()
+    print(f"[NV JobRunner] DONE upload={upload_id} status={final_status} confirmed={res.get('linked',0)} suggested={res.get('suggested',0)}", flush=True)
+    return {'upload_id': upload_id, 'status': final_status, 'linked': res.get('linked', 0), 'suggested': res.get('suggested', 0)}
 
 def _nv_auto_reprocess_upload_if_needed(db, upload_row):
     """
@@ -3325,6 +3455,9 @@ def _nv_best_link_for_record(db, source_table, source_id):
     return dict(row) if row else None
 
 def api_nv_upload(file_data, original_filename, data, user):
+    """Save uploaded NV PDF and queue for deterministic processing.
+    Returns immediately — actual extraction/matching happens via process_one_pending_nv_upload
+    called from api_nv_uploads (or any polling endpoint)."""
     NOTE_VERBAL_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', original_filename or 'note_verbal.pdf')
     stored = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}_{safe_name}"
@@ -3353,61 +3486,43 @@ def api_nv_upload(file_data, original_filename, data, user):
         ])
         uid = cur.lastrowid
         db.commit()
-        size_bytes = len(file_data or b'')
-        inline_limit = 8 * 1024 * 1024  # process small/normal PDFs inline for reliability on Render
-        if size_bytes <= inline_limit:
-            # Keep small uploads fully synchronous so counts are immediately available.
-            db.close()
-            _nv_process_upload_by_id(uid, user)
-            db2 = get_db()
-            try:
-                r = db2.execute("""SELECT processing_status, ocr_status, confirmed_count, suggested_count,
-                                          total_pages, pages_processed, pages_ocrd, parse_error
-                                   FROM note_verbal_uploads WHERE id=?""", [uid]).fetchone()
-                if not r:
-                    return {'success': True, 'upload_id': uid, 'queued': False, 'processing_status': 'processed'}
-                rr = dict(r)
-                return {
-                    'success': True,
-                    'upload_id': uid,
-                    'queued': False,
-                    'processing_status': rr.get('processing_status') or 'processed',
-                    'ocr_status': rr.get('ocr_status') or '',
-                    'linked': int(rr.get('confirmed_count') or 0),
-                    'suggested': int(rr.get('suggested_count') or 0),
-                    'total_pages': int(rr.get('total_pages') or 0),
-                    'pages_processed': int(rr.get('pages_processed') or 0),
-                    'pages_ocrd': int(rr.get('pages_ocrd') or 0),
-                    'parse_error': rr.get('parse_error') or ''
-                }
-            finally:
-                db2.close()
-        # For larger files, keep background processing to avoid request timeout.
-        t = threading.Thread(target=_nv_process_upload_by_id, args=(uid, user), daemon=True)
-        t.start()
-        return {'success': True, 'upload_id': uid, 'queued': True, 'ocr_status': 'queued',
-                'processing_status': 'queued', 'linked': 0, 'suggested': 0,
-                'message': 'Large file queued for background processing. Refresh in a few seconds.'}
+        print(f"[NV Upload] QUEUED upload_id={uid} file={safe_name} size={len(file_data or b'')} bytes", flush=True)
+        # Kick off first chunk of processing immediately (bounded, Render-safe)
+        try:
+            process_one_pending_nv_upload(db, max_seconds=18)
+        except Exception as e:
+            print(f"[NV Upload] first-chunk processing error (non-fatal): {e}", flush=True)
+        # Return current state (may be partially processed or still queued)
+        r = db.execute("""SELECT processing_status, ocr_status, confirmed_count, suggested_count,
+                                  total_pages, pages_processed, pages_ocrd, parse_error
+                           FROM note_verbal_uploads WHERE id=?""", [uid]).fetchone()
+        rr = dict(r) if r else {}
+        return {
+            'success': True,
+            'upload_id': uid,
+            'queued': rr.get('processing_status', 'queued') in ('queued', 'processing'),
+            'processing_status': rr.get('processing_status') or 'queued',
+            'ocr_status': rr.get('ocr_status') or 'queued',
+            'linked': int(rr.get('confirmed_count') or 0),
+            'suggested': int(rr.get('suggested_count') or 0),
+            'total_pages': int(rr.get('total_pages') or 0),
+            'pages_processed': int(rr.get('pages_processed') or 0),
+            'pages_ocrd': int(rr.get('pages_ocrd') or 0),
+            'parse_error': rr.get('parse_error') or ''
+        }
     finally:
         db.close()
 
 def api_nv_uploads(params):
     db = get_db()
     try:
-        # Render-safe fallback: if background thread did not run, process one queued small upload here.
-        qrow = db.execute("""SELECT id, file_path FROM note_verbal_uploads
-                             WHERE processing_status IN ('queued')
-                             ORDER BY id ASC LIMIT 1""").fetchone()
-        if qrow:
-            try:
-                fp = NOTE_VERBAL_UPLOADS_DIR / (qrow['file_path'] or '')
-                if fp.exists() and fp.stat().st_size <= (8 * 1024 * 1024):
-                    qid = int(qrow['id'])
-                    db.close()
-                    _nv_process_upload_by_id(qid, 'system_fallback')
-                    db = get_db()
-            except Exception as _qe:
-                print(f"[NV Uploads] queued fallback process skipped: {_qe}", flush=True)
+        # Deterministic job runner: advance one pending upload per list-fetch (Render-safe, bounded)
+        try:
+            result = process_one_pending_nv_upload(db, max_seconds=20)
+            if result:
+                print(f"[NV Uploads] job runner result: {result}", flush=True)
+        except Exception as _qe:
+            print(f"[NV Uploads] job runner error (non-fatal): {_qe}", flush=True)
         rows = [dict(r) for r in db.execute("""
             SELECT u.*,
               (SELECT COUNT(*) FROM note_verbal_record_links l WHERE l.upload_id=u.id AND l.link_status='confirmed') confirmed_links,
