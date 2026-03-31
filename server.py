@@ -34,8 +34,10 @@ SESSIONS = {}  # token -> {user, role, expires}
 # Approval PDF uploads directory
 if RENDER_DISK.exists() and RENDER_DISK.is_dir():
     APPROVAL_UPLOADS_DIR = RENDER_DISK / 'approval_uploads'
+    NOTE_VERBAL_UPLOADS_DIR = RENDER_DISK / 'note_verbal_uploads'
 else:
     APPROVAL_UPLOADS_DIR = Path(__file__).parent / 'approval_uploads'
+    NOTE_VERBAL_UPLOADS_DIR = Path(__file__).parent / 'note_verbal_uploads'
 
 # OneDrive secondary backup (Microsoft Graph). Set on Render: ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_REFRESH_TOKEN
 
@@ -264,6 +266,80 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_iraq_pub_batch_status ON iraq_batches_public(status);
     CREATE INDEX IF NOT EXISTS idx_iraq_dispatch_status ON iraq_mofa_dispatches(status);
     """)
+    # ── Visa Fee Collections ──────────────────────────────────────
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS fee_collections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_table TEXT NOT NULL,
+        source_id INTEGER NOT NULL,
+        passport_number TEXT DEFAULT '',
+        tracking_or_reference TEXT DEFAULT '',
+        fee_amount REAL DEFAULT 2.0,
+        fee_currency TEXT DEFAULT 'KWD',
+        fee_status TEXT NOT NULL DEFAULT 'pending',
+        receipt_notes TEXT DEFAULT '',
+        paid_at TIMESTAMP,
+        paid_by TEXT DEFAULT '',
+        waived_at TIMESTAMP,
+        waiver_approved_by TEXT DEFAULT '',
+        waiver_reason TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_fee_source ON fee_collections(source_table, source_id);
+    CREATE INDEX IF NOT EXISTS idx_fee_status ON fee_collections(fee_status);
+    CREATE INDEX IF NOT EXISTS idx_fee_passport ON fee_collections(passport_number);
+    CREATE TABLE IF NOT EXISTS fee_distributions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        distribution_date TEXT DEFAULT '',
+        amount REAL NOT NULL DEFAULT 0,
+        currency TEXT DEFAULT 'KWD',
+        wing TEXT NOT NULL DEFAULT 'community_wing',
+        action_type TEXT NOT NULL DEFAULT 'allocated',
+        handed_over_by TEXT DEFAULT '',
+        received_by TEXT DEFAULT '',
+        entered_by TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        receipt_number TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_fee_dist_date ON fee_distributions(distribution_date);
+    CREATE INDEX IF NOT EXISTS idx_fee_dist_wing ON fee_distributions(wing);
+    CREATE INDEX IF NOT EXISTS idx_fee_dist_action ON fee_distributions(action_type);
+    CREATE INDEX IF NOT EXISTS idx_fee_dist_receipt ON fee_distributions(receipt_number);
+    CREATE TABLE IF NOT EXISTS note_verbal_uploads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        extracted_text TEXT DEFAULT '',
+        note_verbal_number TEXT DEFAULT '',
+        note_verbal_date TEXT DEFAULT '',
+        source TEXT DEFAULT '',
+        uploaded_by TEXT DEFAULT '',
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        processing_status TEXT DEFAULT 'uploaded',
+        ocr_status TEXT DEFAULT '',
+        remarks TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS note_verbal_record_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        upload_id INTEGER NOT NULL REFERENCES note_verbal_uploads(id),
+        source_table TEXT NOT NULL,
+        source_id INTEGER NOT NULL,
+        match_method TEXT DEFAULT '',
+        matched_passport TEXT DEFAULT '',
+        matched_name TEXT DEFAULT '',
+        match_confidence REAL DEFAULT 0,
+        link_status TEXT DEFAULT 'suggested',
+        reviewed_by TEXT DEFAULT '',
+        reviewed_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(upload_id, source_table, source_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_nv_upload_status ON note_verbal_uploads(processing_status);
+    CREATE INDEX IF NOT EXISTS idx_nv_link_upload ON note_verbal_record_links(upload_id);
+    CREATE INDEX IF NOT EXISTS idx_nv_link_record ON note_verbal_record_links(source_table, source_id);
+    """)
     # Migration: add CNIC to iraq_public_submissions if missing
     try:
         db.execute("ALTER TABLE iraq_public_submissions ADD COLUMN cnic TEXT DEFAULT ''")
@@ -271,7 +347,31 @@ def init_db():
     except sqlite3.OperationalError:
         pass
     for col, coltype in [('mofa_kw_portal_visible', 'INTEGER DEFAULT 0'), ('mofa_kw_portal_sent_at', 'TIMESTAMP'),
-                          ('ksa_mofa_status', "TEXT DEFAULT ''")]:
+                          ('ksa_mofa_status', "TEXT DEFAULT ''"),
+                          ('note_verbal_number', "TEXT DEFAULT ''"),
+                          ('note_verbal_date', "TEXT DEFAULT ''"),
+                          ('mofa_approval_serial', "TEXT DEFAULT ''"),
+                          ('embassy_letter_issued_at', 'TIMESTAMP'),
+                          ('embassy_letter_issued_by', "TEXT DEFAULT ''"),
+                          ('embassy_letter_print_count', 'INTEGER DEFAULT 0')]:
+        try:
+            db.execute(f"ALTER TABLE iraq_public_submissions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    for col, coltype in [
+        ('fee_status', "TEXT DEFAULT 'pending'"),
+        ('fee_amount', 'REAL DEFAULT 2.0'),
+        ('fee_currency', "TEXT DEFAULT 'KWD'"),
+        ('fee_paid_at', 'TIMESTAMP'),
+        ('fee_paid_by', "TEXT DEFAULT ''"),
+        ('fee_waived_at', 'TIMESTAMP'),
+        ('fee_waived_by', "TEXT DEFAULT ''"),
+        ('fee_waiver_reason', "TEXT DEFAULT ''"),
+        ('fee_released', 'INTEGER DEFAULT 0'),
+        ('fee_released_at', 'TIMESTAMP'),
+        ('fee_released_by_logic', "TEXT DEFAULT ''")
+    ]:
         try:
             db.execute(f"ALTER TABLE iraq_public_submissions ADD COLUMN {col} {coltype}")
             db.commit()
@@ -285,12 +385,37 @@ def init_db():
                          ('visa_status', "TEXT DEFAULT 'Pending'"),
                          ('visa_approved_date', "TEXT DEFAULT ''"),
                          ('ksa_mofa_status', "TEXT DEFAULT 'Pending'"),
-                         ('movement_status', "TEXT DEFAULT ''")]:
+                         ('movement_status', "TEXT DEFAULT ''"),
+                         ('note_verbal_number', "TEXT DEFAULT ''"),
+                         ('note_verbal_date', "TEXT DEFAULT ''"),
+                         ('mofa_approval_serial', "TEXT DEFAULT ''"),
+                         ('embassy_letter_issued_at', 'TIMESTAMP'),
+                         ('embassy_letter_issued_by', "TEXT DEFAULT ''"),
+                         ('embassy_letter_print_count', 'INTEGER DEFAULT 0')]:
         try:
             db.execute(f"ALTER TABLE iraq_applicants ADD COLUMN {col} {coltype}")
             db.commit()
         except sqlite3.OperationalError:
             pass
+    for col, coltype in [
+        ('fee_status', "TEXT DEFAULT 'pending'"),
+        ('fee_amount', 'REAL DEFAULT 2.0'),
+        ('fee_currency', "TEXT DEFAULT 'KWD'"),
+        ('fee_paid_at', 'TIMESTAMP'),
+        ('fee_paid_by', "TEXT DEFAULT ''"),
+        ('fee_waived_at', 'TIMESTAMP'),
+        ('fee_waived_by', "TEXT DEFAULT ''"),
+        ('fee_waiver_reason', "TEXT DEFAULT ''"),
+        ('fee_released', 'INTEGER DEFAULT 0'),
+        ('fee_released_at', 'TIMESTAMP'),
+        ('fee_released_by_logic', "TEXT DEFAULT ''")
+    ]:
+        try:
+            db.execute(f"ALTER TABLE iraq_applicants ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    # Fee-status backfill is executed later after all table migrations.
 
     # ── Travel Facilitation & Demand Assessment tables ──────────────
     db.executescript("""
@@ -469,6 +594,24 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+    for col, coltype in [
+        ('fee_status', "TEXT DEFAULT 'pending'"),
+        ('fee_amount', 'REAL DEFAULT 2.0'),
+        ('fee_currency', "TEXT DEFAULT 'KWD'"),
+        ('fee_paid_at', 'TIMESTAMP'),
+        ('fee_paid_by', "TEXT DEFAULT ''"),
+        ('fee_waived_at', 'TIMESTAMP'),
+        ('fee_waived_by', "TEXT DEFAULT ''"),
+        ('fee_waiver_reason', "TEXT DEFAULT ''"),
+        ('fee_released', 'INTEGER DEFAULT 0'),
+        ('fee_released_at', 'TIMESTAMP'),
+        ('fee_released_by_logic', "TEXT DEFAULT ''")
+    ]:
+        try:
+            db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
     # Migrate users table: add password_plain column
     try:
         db.execute("ALTER TABLE users ADD COLUMN password_plain TEXT DEFAULT ''")
@@ -671,6 +814,12 @@ def init_db():
         AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
         AND (route_mismatch = 0 OR route_mismatch IS NULL)""")
+
+    # ── Safe fee-status backfill (guarded for legacy DBs) ─────────
+    for tbl in ('evacuees', 'iraq_applicants', 'iraq_public_submissions'):
+        cols = [c[1] for c in db.execute(f"PRAGMA table_info({tbl})").fetchall()]
+        if 'fee_status' in cols:
+            db.execute(f"UPDATE {tbl} SET fee_status='pending' WHERE fee_status IS NULL OR TRIM(fee_status)=''")
 
     db.commit()
     db.close()
@@ -2084,6 +2233,44 @@ def api_dashboard_stats():
     corrected_to_pk = db.execute("SELECT COUNT(*) c FROM evacuees WHERE effective_route = 'pk_to_kw' AND route_mismatch = 1").fetchone()['c']
 
     iraq_mission = _iraq_mission_dashboard_kpi(db)
+    fee_today_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at))=date('now')").fetchone()['s']
+    fee_today_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at))=date('now')").fetchone()['s']
+    fee_total_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid'").fetchone()['s']
+    fee_total_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived'").fetchone()['s']
+    fee_paid_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='paid'").fetchone()['c']
+    fee_waived_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='waived'").fetchone()['c']
+    fee_people_served_today = db.execute("""
+        SELECT COUNT(*) c FROM (
+            SELECT source_table, source_id
+            FROM fee_collections
+            WHERE fee_status IN ('paid','waived')
+              AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
+            GROUP BY source_table, source_id
+        ) t
+    """).fetchone()['c']
+    fee_released_today = db.execute("""
+        SELECT COUNT(*) c FROM (
+            SELECT source_table, source_id, MAX(COALESCE(paid_at,waived_at,created_at)) rel_at
+            FROM fee_collections
+            WHERE fee_status IN ('paid','waived')
+            GROUP BY source_table, source_id
+            HAVING date(rel_at)=date('now')
+        ) x
+    """).fetchone()['c']
+    fee_released_total = db.execute("""
+        SELECT COUNT(*) c FROM (
+            SELECT source_table, source_id
+            FROM fee_collections
+            WHERE fee_status IN ('paid','waived')
+            GROUP BY source_table, source_id
+        ) x
+    """).fetchone()['c']
+    fee_pending_count = db.execute("""
+        SELECT
+          (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='pending')
+          + (SELECT COUNT(*) FROM iraq_applicants WHERE COALESCE(fee_status,'pending')='pending')
+          + (SELECT COUNT(*) FROM iraq_public_submissions WHERE COALESCE(fee_status,'pending')='pending') AS c
+    """).fetchone()['c']
 
     db.close()
     return {
@@ -2093,7 +2280,17 @@ def api_dashboard_stats():
                 'returned': returned, 'returned_today': returned_today,
                 'jazeera_departed': jazeera_departed,
                 'mismatch_total': mismatch_total, 'mismatch_pending_review': mismatch_pending_review,
-                'corrected_to_pk': corrected_to_pk},
+                'corrected_to_pk': corrected_to_pk,
+                'fee_today_collected': float(fee_today_collected or 0),
+                'fee_today_waived': float(fee_today_waived or 0),
+                'fee_total_collected': float(fee_total_collected or 0),
+                'fee_total_waived': float(fee_total_waived or 0),
+                'fee_people_served_today': int(fee_people_served_today or 0),
+                'fee_released_today': int(fee_released_today or 0),
+                'fee_released_total': int(fee_released_total or 0),
+                'fee_pending_count': int(fee_pending_count or 0),
+                'fee_paid_count': int(fee_paid_count or 0),
+                'fee_waived_count': int(fee_waived_count or 0)},
         'iraq_mission': iraq_mission,
         'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
         'by_visa': by_visa, 'by_border': by_border
@@ -2109,8 +2306,18 @@ def api_records(params):
             rid = 0
         if rid > 0:
             row = db.execute("SELECT * FROM evacuees WHERE id = ?", [rid]).fetchone()
+            if row:
+                rec = dict(row)
+                ln = _nv_best_link_for_record(db, 'evacuees', rid)
+                if ln:
+                    rec['linked_nv_upload_id'] = ln.get('upload_id')
+                    rec['linked_nv_filename'] = ln.get('filename', '')
+                    rec['linked_nv_number'] = ln.get('note_verbal_number', '')
+                    rec['linked_nv_date'] = ln.get('note_verbal_date', '')
+                db.close()
+                return [rec]
             db.close()
-            return [dict(row)] if row else []
+            return []
     where = ["1=1"]
     qparams = []
     if params.get('search'):
@@ -2139,6 +2346,9 @@ def api_records(params):
     if params.get('dup'):
         where.append("dup_flag = ?")
         qparams.append(params['dup'])
+    if params.get('fee_status'):
+        where.append("COALESCE(fee_status,'pending') = ?")
+        qparams.append(params['fee_status'])
     # ── Route mismatch filters ──
     if params.get('effective_route'):
         where.append("effective_route = ?")
@@ -2425,6 +2635,637 @@ def api_save_record(data, user):
                    (new_id, user, json.dumps(data)))
         db.commit(); db.close()
         return {'success': True, 'id': new_id, 'dup_flag': dup_flag, 'dup_details': dup_flags}
+
+def _norm_compact(val):
+    return re.sub(r'[\s\-]+', '', (val or '').strip().upper())
+
+def _fee_state(record):
+    s = (record.get('fee_status') or 'pending').strip().lower()
+    return s if s in ('pending', 'paid', 'waived') else 'pending'
+
+def _fee_is_cleared(record):
+    return _fee_state(record) in ('paid', 'waived')
+
+def _fee_source_meta(source):
+    if source == 'evacuees':
+        return {'table': 'evacuees', 'id_col': 'id', 'name_col': 'name', 'passport_col': 'passport', 'ref_expr': "('PKE-' || id)"}
+    if source == 'iraq_applicants':
+        return {'table': 'iraq_applicants', 'id_col': 'id', 'name_col': 'full_name', 'passport_col': 'passport_number', 'ref_expr': "('IRAQ-APP-' || id)"}
+    if source == 'iraq_public_submissions':
+        return {'table': 'iraq_public_submissions', 'id_col': 'id', 'name_col': 'full_name', 'passport_col': 'passport_number', 'ref_expr': "COALESCE(reference_number, ('IRQ-' || id))"}
+    return None
+
+def api_fee_lookup(params):
+    q_raw = (params.get('q') or '').strip()
+    if not q_raw:
+        return {'success': False, 'error': 'Search term required'}
+    q = _norm_compact(q_raw)
+    db = get_db()
+    results = []
+    try:
+        tm = re.match(r'^PKE(\d+)$', q)
+        if tm or q.isdigit():
+            rid = int(tm.group(1)) if tm else int(q)
+            row = db.execute("SELECT * FROM evacuees WHERE id = ?", [rid]).fetchone()
+            if row:
+                r = dict(row)
+                results.append({
+                    'source': 'evacuees', 'id': r['id'], 'name': r.get('name', ''),
+                    'passport': r.get('passport', ''), 'tracking_or_reference': f"PKE-{r['id']}",
+                    'status': r.get('travel_status', ''), 'fee_status': _fee_state(r),
+                    'ticket_details_filled': all((r.get(k) or '').strip() for k in ('ticket_number', 'airline', 'departure_date', 'departure_airport', 'destination_country')),
+                    'print_unlocked': is_letter_print_ready(r),
+                })
+            return {'success': True, 'results': results}
+
+        evac_rows = db.execute("""
+            SELECT * FROM evacuees
+            WHERE UPPER(REPLACE(REPLACE(COALESCE(passport,''),' ',''),'-','')) = ?
+               OR UPPER(name) LIKE UPPER(?)
+            ORDER BY id DESC LIMIT 20
+        """, [q, f"%{q_raw}%"]).fetchall()
+        for rr in evac_rows:
+            r = dict(rr)
+            results.append({
+                'source': 'evacuees', 'id': r['id'], 'name': r.get('name', ''),
+                'passport': r.get('passport', ''), 'tracking_or_reference': f"PKE-{r['id']}",
+                'status': r.get('travel_status', ''), 'fee_status': _fee_state(r),
+                'ticket_details_filled': all((r.get(k) or '').strip() for k in ('ticket_number', 'airline', 'departure_date', 'departure_airport', 'destination_country')),
+                'print_unlocked': is_letter_print_ready(r),
+            })
+
+        app_rows = db.execute("""
+            SELECT * FROM iraq_applicants
+            WHERE UPPER(REPLACE(REPLACE(COALESCE(passport_number,''),' ',''),'-','')) = ?
+               OR UPPER(full_name) LIKE UPPER(?)
+            ORDER BY id DESC LIMIT 20
+        """, [q, f"%{q_raw}%"]).fetchall()
+        for rr in app_rows:
+            r = dict(rr)
+            results.append({
+                'source': 'iraq_applicants', 'id': r['id'], 'name': r.get('full_name', ''),
+                'passport': r.get('passport_number', ''), 'tracking_or_reference': f"IRAQ-APP-{r['id']}",
+                'status': r.get('individual_status', ''), 'fee_status': _fee_state(r),
+                'ticket_details_filled': True, 'print_unlocked': is_iraq_letter_print_ready(r),
+            })
+
+        pub_rows = db.execute("""
+            SELECT * FROM iraq_public_submissions
+            WHERE UPPER(REPLACE(REPLACE(COALESCE(passport_number,''),' ',''),'-','')) = ?
+               OR UPPER(REPLACE(REPLACE(COALESCE(reference_number,''),' ',''),'-','')) = ?
+               OR UPPER(full_name) LIKE UPPER(?)
+            ORDER BY id DESC LIMIT 20
+        """, [q, q, f"%{q_raw}%"]).fetchall()
+        for rr in pub_rows:
+            r = dict(rr)
+            results.append({
+                'source': 'iraq_public_submissions', 'id': r['id'], 'name': r.get('full_name', ''),
+                'passport': r.get('passport_number', ''), 'tracking_or_reference': r.get('reference_number') or f"IRQ-{r['id']}",
+                'status': r.get('status', ''), 'fee_status': _fee_state(r),
+                'ticket_details_filled': True, 'print_unlocked': is_iraq_letter_print_ready(r),
+            })
+        return {'success': True, 'results': results}
+    finally:
+        db.close()
+
+def _upsert_fee_for_record(db, source, rec_id, action, user, amount=2.0, waiver_reason='', receipt_notes=''):
+    meta = _fee_source_meta(source)
+    if not meta:
+        return {'success': False, 'error': 'Unsupported source'}
+    row = db.execute(f"SELECT * FROM {meta['table']} WHERE {meta['id_col']} = ?", [rec_id]).fetchone()
+    if not row:
+        return {'success': False, 'error': 'Record not found'}
+    rec = dict(row)
+    cur_status = _fee_state(rec)
+    if cur_status in ('paid', 'waived'):
+        return {'success': False, 'error': f"Fee already {cur_status}"}
+    passport = (rec.get(meta['passport_col']) or '').strip()
+    ref = db.execute(f"SELECT {meta['ref_expr']} ref FROM {meta['table']} WHERE {meta['id_col']} = ?", [rec_id]).fetchone()['ref']
+    if action == 'paid':
+        cur = db.execute(f"""UPDATE {meta['table']} SET
+            fee_status='paid', fee_amount=?, fee_currency='KWD',
+            fee_paid_at=CURRENT_TIMESTAMP, fee_paid_by=?,
+            fee_released=1, fee_released_at=CURRENT_TIMESTAMP, fee_released_by_logic='paid'
+            WHERE {meta['id_col']} = ? AND COALESCE(fee_status,'pending')='pending'""", [amount, user, rec_id])
+        if cur.rowcount <= 0:
+            return {'success': False, 'error': 'Unable to mark paid (already processed)'}
+        db.execute("""INSERT INTO fee_collections
+            (source_table, source_id, passport_number, tracking_or_reference, fee_amount, fee_currency, fee_status, receipt_notes, paid_at, paid_by)
+            VALUES (?, ?, ?, ?, ?, 'KWD', 'paid', ?, CURRENT_TIMESTAMP, ?)""",
+            [source, rec_id, passport, ref, amount, receipt_notes or '', user])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('fee_collected', ?, ?, ?)",
+                   [rec_id, user, json.dumps({'source': source, 'amount': amount, 'currency': 'KWD', 'reference': ref})])
+    elif action == 'waived':
+        cur = db.execute(f"""UPDATE {meta['table']} SET
+            fee_status='waived', fee_amount=?, fee_currency='KWD',
+            fee_waived_at=CURRENT_TIMESTAMP, fee_waived_by=?, fee_waiver_reason=?,
+            fee_released=1, fee_released_at=CURRENT_TIMESTAMP, fee_released_by_logic='waived'
+            WHERE {meta['id_col']} = ? AND COALESCE(fee_status,'pending')='pending'""", [amount, user, waiver_reason or '', rec_id])
+        if cur.rowcount <= 0:
+            return {'success': False, 'error': 'Unable to waive (already processed)'}
+        db.execute("""INSERT INTO fee_collections
+            (source_table, source_id, passport_number, tracking_or_reference, fee_amount, fee_currency, fee_status, waived_at, waiver_approved_by, waiver_reason)
+            VALUES (?, ?, ?, ?, ?, 'KWD', 'waived', CURRENT_TIMESTAMP, ?, ?)""",
+            [source, rec_id, passport, ref, amount, user, waiver_reason or ''])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('fee_waived', ?, ?, ?)",
+                   [rec_id, user, json.dumps({'source': source, 'amount': amount, 'currency': 'KWD', 'reference': ref, 'reason': waiver_reason or ''})])
+    else:
+        return {'success': False, 'error': 'Invalid action'}
+    return {'success': True}
+
+def api_fee_collect(data, user):
+    source = (data.get('source') or '').strip()
+    rec_id = int(data.get('id') or 0)
+    amount = float(data.get('amount') or 2.0)
+    notes = (data.get('receipt_notes') or '').strip()
+    if rec_id <= 0 or not source:
+        return {'success': False, 'error': 'source and id required'}
+    db = get_db()
+    try:
+        out = _upsert_fee_for_record(db, source, rec_id, 'paid', user, amount=amount, receipt_notes=notes)
+        if out.get('success'):
+            db.commit()
+        return out
+    finally:
+        db.close()
+
+def api_fee_waive(data, user):
+    source = (data.get('source') or '').strip()
+    rec_id = int(data.get('id') or 0)
+    amount = float(data.get('amount') or 2.0)
+    reason = (data.get('waiver_reason') or '').strip()
+    if rec_id <= 0 or not source:
+        return {'success': False, 'error': 'source and id required'}
+    db = get_db()
+    try:
+        out = _upsert_fee_for_record(db, source, rec_id, 'waived', user, amount=amount, waiver_reason=reason)
+        if out.get('success'):
+            db.commit()
+        return out
+    finally:
+        db.close()
+
+def api_fee_reset_pending(data, user):
+    source = (data.get('source') or '').strip()
+    rec_id = int(data.get('id') or 0)
+    reason = (data.get('reason') or '').strip()
+    if rec_id <= 0 or not source:
+        return {'success': False, 'error': 'source and id required'}
+    meta = _fee_source_meta(source)
+    if not meta:
+        return {'success': False, 'error': 'Unsupported source'}
+    db = get_db()
+    try:
+        row = db.execute(f"SELECT * FROM {meta['table']} WHERE {meta['id_col']} = ?", [rec_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Record not found'}
+        old = dict(row)
+        db.execute(f"""UPDATE {meta['table']} SET
+            fee_status='pending',
+            fee_paid_at=NULL, fee_paid_by='',
+            fee_waived_at=NULL, fee_waived_by='',
+            fee_waiver_reason='',
+            fee_released=0, fee_released_at=NULL, fee_released_by_logic='correction_reset'
+            WHERE {meta['id_col']}=?""", [rec_id])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('fee_reset_pending', ?, ?, ?)",
+                   [rec_id, user, json.dumps({'source': source, 'previous_fee_status': _fee_state(old), 'reason': reason})])
+        db.commit()
+        return {'success': True}
+    finally:
+        db.close()
+
+def _fee_cash_in_hand(db, actor=''):
+    if actor:
+        collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND paid_by = ?", [actor]).fetchone()['s']
+        outflow = db.execute("""
+            SELECT COALESCE(SUM(amount),0) s
+            FROM fee_distributions
+            WHERE action_type IN ('handed_over','withdrawn')
+              AND COALESCE(NULLIF(handed_over_by,''), entered_by) = ?
+        """, [actor]).fetchone()['s']
+    else:
+        collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid'").fetchone()['s']
+        outflow = db.execute("SELECT COALESCE(SUM(amount),0) s FROM fee_distributions WHERE action_type IN ('handed_over','withdrawn')").fetchone()['s']
+    return float(collected or 0) - float(outflow or 0)
+
+def _next_fee_receipt_no(db):
+    v = db.execute("SELECT COUNT(*) c FROM fee_distributions WHERE receipt_number != ''").fetchone()['c']
+    return f"FDR-{datetime.now().strftime('%Y%m%d')}-{int(v)+1:04d}"
+
+def api_fee_settlement_entry(data, user):
+    wing = (data.get('wing') or '').strip().lower()
+    action = (data.get('action_type') or '').strip().lower()
+    amount = float(data.get('amount') or 0)
+    notes = (data.get('notes') or '').strip()
+    received_by = (data.get('received_by') or '').strip()
+    handed_over_by = (data.get('handed_over_by') or '').strip() or user
+    d = (data.get('distribution_date') or '').strip()
+    if wing not in ('community_wing', 'diplomatic'):
+        return {'success': False, 'error': 'wing must be community_wing or diplomatic'}
+    if action not in ('allocated', 'handed_over', 'withdrawn', 'adjusted'):
+        return {'success': False, 'error': 'Invalid action_type'}
+    if amount <= 0:
+        return {'success': False, 'error': 'amount must be greater than 0'}
+    if d and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', d):
+        return {'success': False, 'error': 'distribution_date must be YYYY-MM-DD'}
+    if action == 'handed_over' and not received_by:
+        return {'success': False, 'error': 'received_by is required for handover'}
+
+    db = get_db()
+    try:
+        if action in ('handed_over', 'withdrawn'):
+            cash = _fee_cash_in_hand(db, handed_over_by)
+            if amount > cash + 1e-9:
+                return {'success': False, 'error': f'Insufficient cash in hand. Available: {cash:.2f} KWD'}
+        receipt_no = _next_fee_receipt_no(db) if action == 'handed_over' else ''
+        dist_date = d or datetime.now().strftime('%Y-%m-%d')
+        cur = db.execute("""
+            INSERT INTO fee_distributions (
+                distribution_date, amount, currency, wing, action_type,
+                handed_over_by, received_by, entered_by, notes, receipt_number,
+                created_at, updated_at
+            ) VALUES (?, ?, 'KWD', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """, [dist_date, amount, wing, action, handed_over_by, received_by, user, notes, receipt_no])
+        dist_id = cur.lastrowid
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('fee_distribution_entry', ?, ?, ?)",
+                   [dist_id, user, json.dumps({'wing': wing, 'action_type': action, 'amount': amount, 'received_by': received_by, 'receipt_number': receipt_no, 'distribution_date': dist_date, 'handed_over_by': handed_over_by, 'notes': notes})])
+        db.commit()
+        return {'success': True, 'id': dist_id, 'receipt_number': receipt_no}
+    finally:
+        db.close()
+
+def api_fee_settlement_report(params, user):
+    db = get_db()
+    try:
+        status = (params.get('status') or '').strip().lower()
+        dfrom = (params.get('from') or '').strip()
+        dto = (params.get('to') or '').strip()
+        actor = (params.get('collected_by') or '').strip()
+        s = (params.get('search') or '').strip()
+        own_only = (params.get('scope') or '').strip().lower() == 'mine' or user.get('role') == 'fee_collector'
+        target_actor = user.get('user') if own_only else actor
+
+        cw = ["1=1"]
+        cq = []
+        if status in ('paid', 'waived', 'pending'):
+            cw.append("f.fee_status = ?")
+            cq.append(status)
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dfrom):
+            cw.append("date(COALESCE(f.paid_at,f.waived_at,f.created_at)) >= date(?)")
+            cq.append(dfrom)
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dto):
+            cw.append("date(COALESCE(f.paid_at,f.waived_at,f.created_at)) <= date(?)")
+            cq.append(dto)
+        if target_actor:
+            cw.append("(f.paid_by = ? OR f.waiver_approved_by = ?)")
+            cq.extend([target_actor, target_actor])
+        if s:
+            sk = f"%{s}%"
+            cw.append("(f.passport_number LIKE ? OR f.tracking_or_reference LIKE ? OR CAST(f.source_id AS TEXT)=?)")
+            cq.extend([sk, sk, s])
+
+        dw = ["1=1"]
+        dq = []
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dfrom):
+            dw.append("date(distribution_date) >= date(?)")
+            dq.append(dfrom)
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dto):
+            dw.append("date(distribution_date) <= date(?)")
+            dq.append(dto)
+        if target_actor:
+            dw.append("(entered_by = ? OR handed_over_by = ?)")
+            dq.extend([target_actor, target_actor])
+        if s:
+            sk = f"%{s}%"
+            dw.append("(received_by LIKE ? OR receipt_number LIKE ? OR notes LIKE ?)")
+            dq.extend([sk, sk, sk])
+
+        collected_total = db.execute(f"SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections f WHERE f.fee_status='paid' AND {' AND '.join(cw)}", cq).fetchone()['s']
+        today_collected = db.execute(f"SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections f WHERE f.fee_status='paid' AND date(COALESCE(f.paid_at,f.created_at))=date('now') AND {' AND '.join(cw)}", cq).fetchone()['s']
+        today_people = db.execute(f"""
+            SELECT COUNT(DISTINCT f.source_table||':'||f.source_id) c
+            FROM fee_collections f
+            WHERE f.fee_status IN ('paid','waived')
+              AND date(COALESCE(f.paid_at,f.waived_at,f.created_at))=date('now')
+              AND {' AND '.join(cw)}
+        """, cq).fetchone()['c']
+
+        dist_tot = db.execute(f"""
+            SELECT
+              COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='community_wing' THEN amount ELSE 0 END),0) community_assigned,
+              COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' THEN amount ELSE 0 END),0) diplomatic_assigned,
+              COALESCE(SUM(CASE WHEN action_type='handed_over' AND wing='community_wing' THEN amount ELSE 0 END),0) community_handed_over,
+              COALESCE(SUM(CASE WHEN action_type='handed_over' AND wing='diplomatic' THEN amount ELSE 0 END),0) diplomatic_handed_over,
+              COALESCE(SUM(CASE WHEN action_type='handed_over' THEN amount ELSE 0 END),0) total_handed_over,
+              COALESCE(SUM(CASE WHEN action_type='withdrawn' THEN amount ELSE 0 END),0) total_withdrawn,
+              COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='community_wing' AND date(distribution_date)=date('now') THEN amount ELSE 0 END),0) today_community_assigned,
+              COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' AND date(distribution_date)=date('now') THEN amount ELSE 0 END),0) today_diplomatic_assigned,
+              COALESCE(SUM(CASE WHEN action_type='handed_over' AND date(distribution_date)=date('now') THEN amount ELSE 0 END),0) today_handed_over
+            FROM fee_distributions
+            WHERE {' AND '.join(dw)}
+        """, dq).fetchone()
+        cash_in_hand = float(collected_total or 0) - float(dist_tot['total_handed_over'] or 0) - float(dist_tot['total_withdrawn'] or 0)
+        today_balance = float(today_collected or 0) - float(dist_tot['today_handed_over'] or 0)
+
+        daily = [dict(r) for r in db.execute(f"""
+            SELECT
+              x.day,
+              COALESCE(c.collected_total,0) total_collected,
+              COALESCE(d.community_assigned,0) community_wing,
+              COALESCE(d.diplomatic_assigned,0) diplomatic,
+              COALESCE(d.handed_over_total,0) handed_over,
+              (COALESCE(c.collected_total,0) - COALESCE(d.handed_over_total,0) - COALESCE(d.withdrawn_total,0)) cash_in_hand,
+              COALESCE(d.txn_count,0) remarks_count
+            FROM (
+              SELECT day FROM (
+                SELECT date(COALESCE(f.paid_at,f.waived_at,f.created_at)) day FROM fee_collections f WHERE {' AND '.join(cw)}
+                UNION
+                SELECT date(distribution_date) day FROM fee_distributions WHERE {' AND '.join(dw)}
+              ) t GROUP BY day
+            ) x
+            LEFT JOIN (
+              SELECT date(COALESCE(f.paid_at,f.waived_at,f.created_at)) day,
+                     SUM(CASE WHEN f.fee_status='paid' THEN f.fee_amount ELSE 0 END) collected_total
+              FROM fee_collections f
+              WHERE {' AND '.join(cw)}
+              GROUP BY day
+            ) c ON c.day=x.day
+            LEFT JOIN (
+              SELECT date(distribution_date) day,
+                     SUM(CASE WHEN action_type='allocated' AND wing='community_wing' THEN amount ELSE 0 END) community_assigned,
+                     SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' THEN amount ELSE 0 END) diplomatic_assigned,
+                     SUM(CASE WHEN action_type='handed_over' THEN amount ELSE 0 END) handed_over_total,
+                     SUM(CASE WHEN action_type='withdrawn' THEN amount ELSE 0 END) withdrawn_total,
+                     COUNT(*) txn_count
+              FROM fee_distributions
+              WHERE {' AND '.join(dw)}
+              GROUP BY day
+            ) d ON d.day=x.day
+            WHERE x.day IS NOT NULL AND x.day!=''
+            ORDER BY x.day DESC
+            LIMIT 120
+        """, cq + dq + cq + dq).fetchall()]
+
+        rows = [dict(r) for r in db.execute(f"""
+            SELECT id, distribution_date, amount, currency, wing, action_type, entered_by, handed_over_by, received_by, receipt_number, notes, created_at
+            FROM fee_distributions
+            WHERE {' AND '.join(dw)}
+            ORDER BY id DESC
+            LIMIT 2000
+        """, dq).fetchall()]
+
+        summary = {
+            'total_collected': float(collected_total or 0),
+            'community_wing_total': float(dist_tot['community_assigned'] or 0),
+            'diplomatic_total': float(dist_tot['diplomatic_assigned'] or 0),
+            'total_handed_over': float(dist_tot['total_handed_over'] or 0),
+            'cash_in_hand': float(cash_in_hand or 0),
+            'today_collected': float(today_collected or 0),
+            'today_community_wing': float(dist_tot['today_community_assigned'] or 0),
+            'today_diplomatic': float(dist_tot['today_diplomatic_assigned'] or 0),
+            'today_handovers': float(dist_tot['today_handed_over'] or 0),
+            'today_balance': float(today_balance or 0),
+            'today_people_served': int(today_people or 0),
+            'community_handed_over': float(dist_tot['community_handed_over'] or 0),
+            'diplomatic_handed_over': float(dist_tot['diplomatic_handed_over'] or 0),
+            'community_pending_settlement': float((dist_tot['community_assigned'] or 0) - (dist_tot['community_handed_over'] or 0)),
+            'diplomatic_pending_settlement': float((dist_tot['diplomatic_assigned'] or 0) - (dist_tot['diplomatic_handed_over'] or 0)),
+            'total_withdrawn': float(dist_tot['total_withdrawn'] or 0),
+        }
+        return {'success': True, 'summary': summary, 'daily': daily, 'rows': rows}
+    finally:
+        db.close()
+
+def api_fee_settlement_export_csv(params, user, kind='history'):
+    data = api_fee_settlement_report(params, user)
+    if not data.get('success'):
+        return ''
+    out = io.StringIO()
+    w = csv.writer(out)
+    if kind == 'daily':
+        w.writerow(['Date', 'Total Collected (KWD)', 'Community Wing (KWD)', 'Diplomatic (KWD)', 'Handed Over (KWD)', 'Cash in Hand (KWD)', 'Remarks/Count'])
+        for r in data.get('daily') or []:
+            w.writerow([
+                r.get('day', ''),
+                f"{float(r.get('total_collected') or 0):.2f}",
+                f"{float(r.get('community_wing') or 0):.2f}",
+                f"{float(r.get('diplomatic') or 0):.2f}",
+                f"{float(r.get('handed_over') or 0):.2f}",
+                f"{float(r.get('cash_in_hand') or 0):.2f}",
+                int(r.get('remarks_count') or 0)
+            ])
+    else:
+        w.writerow(['Date/Time', 'Action Type', 'Amount', 'Currency', 'Wing', 'Entered By', 'Handed Over By', 'Received By', 'Receipt Number', 'Notes'])
+        for r in data.get('rows') or []:
+            w.writerow([
+                r.get('created_at') or r.get('distribution_date') or '',
+                r.get('action_type') or '',
+                f"{float(r.get('amount') or 0):.2f}",
+                r.get('currency') or 'KWD',
+                r.get('wing') or '',
+                r.get('entered_by') or '',
+                r.get('handed_over_by') or '',
+                r.get('received_by') or '',
+                r.get('receipt_number') or '',
+                r.get('notes') or ''
+            ])
+    return out.getvalue()
+
+def _norm_name_compact(v):
+    return re.sub(r'[^A-Z0-9]+', '', (v or '').upper())
+
+def _collect_nv_candidate_records(db):
+    out = []
+    for r in db.execute("SELECT id, name AS full_name, passport AS passport_number FROM evacuees").fetchall():
+        d = dict(r); d['source_table'] = 'evacuees'; out.append(d)
+    for r in db.execute("SELECT id, full_name, passport_number FROM iraq_applicants").fetchall():
+        d = dict(r); d['source_table'] = 'iraq_applicants'; out.append(d)
+    for r in db.execute("SELECT id, full_name, passport_number FROM iraq_public_submissions").fetchall():
+        d = dict(r); d['source_table'] = 'iraq_public_submissions'; out.append(d)
+    return out
+
+def _nv_get_record_label(db, source_table, source_id):
+    if source_table == 'evacuees':
+        r = db.execute("SELECT name n, passport p FROM evacuees WHERE id=?", [source_id]).fetchone()
+    elif source_table == 'iraq_applicants':
+        r = db.execute("SELECT full_name n, passport_number p FROM iraq_applicants WHERE id=?", [source_id]).fetchone()
+    elif source_table == 'iraq_public_submissions':
+        r = db.execute("SELECT full_name n, passport_number p FROM iraq_public_submissions WHERE id=?", [source_id]).fetchone()
+    else:
+        r = None
+    if not r:
+        return {'name': '', 'passport': ''}
+    return {'name': r['n'] or '', 'passport': r['p'] or ''}
+
+def _nv_auto_link_upload(db, upload_id):
+    up = db.execute("SELECT * FROM note_verbal_uploads WHERE id = ?", [upload_id]).fetchone()
+    if not up:
+        return {'linked': 0, 'suggested': 0}
+    txt = (up['extracted_text'] or '')
+    up_txt = txt.upper()
+    compact_txt = _norm_name_compact(txt)
+    candidates = _collect_nv_candidate_records(db)
+    linked = 0
+    suggested = 0
+    for c in candidates:
+        passport = (c.get('passport_number') or '').strip().upper()
+        full_name = (c.get('full_name') or '').strip()
+        name_comp = _norm_name_compact(full_name)
+        p_comp = re.sub(r'[^A-Z0-9]+', '', passport)
+        method = ''
+        conf = 0.0
+        if passport and passport in up_txt:
+            method = 'passport_exact'; conf = 0.99
+        elif p_comp and p_comp in compact_txt:
+            method = 'passport_normalized'; conf = 0.95
+        elif name_comp and len(name_comp) >= 8 and name_comp in compact_txt:
+            method = 'name_normalized'; conf = 0.80
+        elif passport and name_comp and passport in up_txt and name_comp in compact_txt:
+            method = 'passport_name_combo'; conf = 0.97
+        if not method:
+            continue
+        status = 'confirmed' if conf >= 0.95 else 'suggested'
+        db.execute("""
+            INSERT INTO note_verbal_record_links
+            (upload_id, source_table, source_id, match_method, matched_passport, matched_name, match_confidence, link_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(upload_id, source_table, source_id) DO UPDATE SET
+              match_method=excluded.match_method,
+              matched_passport=excluded.matched_passport,
+              matched_name=excluded.matched_name,
+              match_confidence=excluded.match_confidence,
+              link_status=excluded.link_status
+        """, [upload_id, c['source_table'], c['id'], method, passport, full_name, conf, status])
+        if status == 'confirmed': linked += 1
+        else: suggested += 1
+    db.execute("UPDATE note_verbal_uploads SET processing_status='processed' WHERE id=?", [upload_id])
+    return {'linked': linked, 'suggested': suggested}
+
+def _nv_best_link_for_record(db, source_table, source_id):
+    row = db.execute("""
+        SELECT l.*, u.filename, u.note_verbal_number, u.note_verbal_date, u.file_path
+        FROM note_verbal_record_links l
+        JOIN note_verbal_uploads u ON u.id=l.upload_id
+        WHERE l.source_table=? AND l.source_id=? AND l.link_status='confirmed'
+        ORDER BY l.reviewed_at DESC, l.id DESC
+        LIMIT 1
+    """, [source_table, source_id]).fetchone()
+    return dict(row) if row else None
+
+def api_nv_upload(file_data, original_filename, data, user):
+    NOTE_VERBAL_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', original_filename or 'note_verbal.pdf')
+    stored = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}_{safe_name}"
+    p = NOTE_VERBAL_UPLOADS_DIR / stored
+    with open(p, 'wb') as f:
+        f.write(file_data)
+    text, ocr_status = _extract_full_pdf_text_with_fallback(str(p))
+    db = get_db()
+    try:
+        cur = db.execute("""
+            INSERT INTO note_verbal_uploads
+            (filename, file_path, extracted_text, note_verbal_number, note_verbal_date, source, uploaded_by, processing_status, ocr_status, remarks)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            original_filename or stored,
+            stored,
+            text or '',
+            (data.get('note_verbal_number') or '').strip(),
+            (data.get('note_verbal_date') or '').strip(),
+            (data.get('source') or '').strip(),
+            user,
+            'processing',
+            ocr_status,
+            (data.get('remarks') or '').strip()
+        ])
+        uid = cur.lastrowid
+        res = _nv_auto_link_upload(db, uid)
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_uploaded', ?, ?, ?)",
+                   [uid, user, json.dumps({'filename': original_filename, 'ocr_status': ocr_status, **res})])
+        db.commit()
+        return {'success': True, 'upload_id': uid, 'ocr_status': ocr_status, **res}
+    finally:
+        db.close()
+
+def api_nv_uploads(params):
+    db = get_db()
+    try:
+        rows = [dict(r) for r in db.execute("""
+            SELECT u.*,
+              (SELECT COUNT(*) FROM note_verbal_record_links l WHERE l.upload_id=u.id AND l.link_status='confirmed') confirmed_links,
+              (SELECT COUNT(*) FROM note_verbal_record_links l WHERE l.upload_id=u.id AND l.link_status='suggested') suggested_links
+            FROM note_verbal_uploads u
+            ORDER BY u.id DESC LIMIT 300
+        """).fetchall()]
+        return {'success': True, 'rows': rows}
+    finally:
+        db.close()
+
+def api_nv_links(params):
+    db = get_db()
+    try:
+        where = ["1=1"]
+        q = []
+        if params.get('upload_id'):
+            where.append("l.upload_id = ?"); q.append(int(params.get('upload_id') or 0))
+        if params.get('status'):
+            where.append("l.link_status = ?"); q.append((params.get('status') or '').strip())
+        rows = []
+        for r in db.execute(f"""
+            SELECT l.*, u.filename, u.note_verbal_number, u.note_verbal_date
+            FROM note_verbal_record_links l
+            JOIN note_verbal_uploads u ON u.id=l.upload_id
+            WHERE {' AND '.join(where)}
+            ORDER BY l.id DESC
+            LIMIT 1000
+        """, q).fetchall():
+            d = dict(r)
+            lbl = _nv_get_record_label(db, d['source_table'], d['source_id'])
+            d['record_name'] = lbl['name']
+            d['record_passport'] = lbl['passport']
+            rows.append(d)
+        return {'success': True, 'rows': rows}
+    finally:
+        db.close()
+
+def api_nv_link_update(data, user):
+    lid = int(data.get('id') or 0)
+    status = (data.get('link_status') or '').strip()
+    if lid <= 0 or status not in ('confirmed', 'rejected', 'suggested'):
+        return {'success': False, 'error': 'id and valid link_status required'}
+    db = get_db()
+    try:
+        db.execute("UPDATE note_verbal_record_links SET link_status=?, reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
+                   [status, user, lid])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_link_reviewed', ?, ?, ?)",
+                   [lid, user, json.dumps({'link_status': status})])
+        db.commit()
+        return {'success': True}
+    finally:
+        db.close()
+
+def api_nv_manual_assign(data, user):
+    upload_id = int(data.get('upload_id') or 0)
+    source_table = (data.get('source_table') or '').strip()
+    source_id = int(data.get('source_id') or 0)
+    if upload_id <= 0 or source_id <= 0 or source_table not in ('evacuees', 'iraq_applicants', 'iraq_public_submissions'):
+        return {'success': False, 'error': 'upload_id, source_table, source_id required'}
+    db = get_db()
+    try:
+        lbl = _nv_get_record_label(db, source_table, source_id)
+        db.execute("""
+            INSERT INTO note_verbal_record_links
+            (upload_id, source_table, source_id, match_method, matched_passport, matched_name, match_confidence, link_status, reviewed_by, reviewed_at)
+            VALUES (?, ?, ?, 'manual_assign', ?, ?, 1.0, 'confirmed', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(upload_id, source_table, source_id) DO UPDATE SET
+              match_method='manual_assign', match_confidence=1.0, link_status='confirmed', reviewed_by=excluded.reviewed_by, reviewed_at=CURRENT_TIMESTAMP
+        """, [upload_id, source_table, source_id, lbl.get('passport',''), lbl.get('name',''), user])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_manual_assign', ?, ?, ?)",
+                   [upload_id, user, json.dumps({'source_table': source_table, 'source_id': source_id})])
+        db.commit()
+        return {'success': True}
+    finally:
+        db.close()
 
 # ═══════════════════════════════════════════════════════════════
 # TRAVEL FACILITATION — PERSON MASTER & CHARTER INTEREST LOGIC
@@ -3434,6 +4275,148 @@ def api_audit_log():
     db.close()
     return logs
 
+def api_fee_report(params):
+    db = get_db()
+    try:
+        where = ["1=1"]
+        q = []
+        status = (params.get('status') or '').strip().lower()
+        if status in ('paid', 'waived', 'pending'):
+            where.append("fee_status = ?")
+            q.append(status)
+        start_date = (params.get('from') or '').strip()
+        end_date = (params.get('to') or '').strip()
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', start_date):
+            where.append("date(COALESCE(paid_at, waived_at, created_at)) >= date(?)")
+            q.append(start_date)
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', end_date):
+            where.append("date(COALESCE(paid_at, waived_at, created_at)) <= date(?)")
+            q.append(end_date)
+        s = (params.get('search') or '').strip()
+        if s:
+            sk = f"%{s}%"
+            where.append("(passport_number LIKE ? OR tracking_or_reference LIKE ? OR source_table LIKE ? OR CAST(source_id AS TEXT) = ?)")
+            q.extend([sk, sk, sk, s])
+        rows = [dict(r) for r in db.execute(
+            f"""SELECT id, source_table, source_id, passport_number, tracking_or_reference,
+                       fee_amount, fee_currency, fee_status, paid_at, paid_by,
+                       waived_at, waiver_approved_by, waiver_reason, receipt_notes, created_at
+                FROM fee_collections
+                WHERE {' AND '.join(where)}
+                ORDER BY id DESC
+                LIMIT 1000""", q).fetchall()]
+        totals = db.execute(f"""
+            SELECT
+              COALESCE(SUM(CASE WHEN fee_status='paid' THEN fee_amount ELSE 0 END),0) collected_total,
+              COALESCE(SUM(CASE WHEN fee_status='waived' THEN fee_amount ELSE 0 END),0) waived_total,
+              SUM(CASE WHEN fee_status='paid' THEN 1 ELSE 0 END) paid_count,
+              SUM(CASE WHEN fee_status='waived' THEN 1 ELSE 0 END) waived_count
+            FROM fee_collections
+            WHERE {' AND '.join(where)}
+        """, q).fetchone()
+        return {'success': True, 'rows': rows, 'totals': dict(totals)}
+    finally:
+        db.close()
+
+def api_fee_statement(params, user):
+    db = get_db()
+    try:
+        search = (params.get('search') or '').strip()
+        status = (params.get('status') or '').strip().lower()
+        actor = (params.get('collected_by') or '').strip()
+        dfrom = (params.get('from') or '').strip()
+        dto = (params.get('to') or '').strip()
+
+        where = ["1=1"]
+        q = []
+        if status in ('paid', 'waived', 'pending'):
+            where.append("f.fee_status = ?")
+            q.append(status)
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dfrom):
+            where.append("date(COALESCE(f.paid_at,f.waived_at,f.created_at)) >= date(?)")
+            q.append(dfrom)
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dto):
+            where.append("date(COALESCE(f.paid_at,f.waived_at,f.created_at)) <= date(?)")
+            q.append(dto)
+        if actor:
+            where.append("(f.paid_by = ? OR f.waiver_approved_by = ?)")
+            q.extend([actor, actor])
+        if search:
+            s = f"%{search}%"
+            where.append("(f.passport_number LIKE ? OR f.tracking_or_reference LIKE ? OR CAST(f.source_id AS TEXT)=?)")
+            q.extend([s, s, search])
+
+        summary = db.execute("""
+            SELECT
+              (SELECT COUNT(*) FROM evacuees) + (SELECT COUNT(*) FROM iraq_applicants) + (SELECT COUNT(*) FROM iraq_public_submissions) AS total_applicants,
+              (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='paid')
+                + (SELECT COUNT(*) FROM iraq_applicants WHERE COALESCE(fee_status,'pending')='paid')
+                + (SELECT COUNT(*) FROM iraq_public_submissions WHERE COALESCE(fee_status,'pending')='paid') AS paid_cases,
+              (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='waived')
+                + (SELECT COUNT(*) FROM iraq_applicants WHERE COALESCE(fee_status,'pending')='waived')
+                + (SELECT COUNT(*) FROM iraq_public_submissions WHERE COALESCE(fee_status,'pending')='waived') AS waived_cases,
+              (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='pending')
+                + (SELECT COUNT(*) FROM iraq_applicants WHERE COALESCE(fee_status,'pending')='pending')
+                + (SELECT COUNT(*) FROM iraq_public_submissions WHERE COALESCE(fee_status,'pending')='pending') AS pending_cases
+        """).fetchone()
+
+        amounts = db.execute(f"""
+            SELECT
+              COALESCE(SUM(CASE WHEN f.fee_status='paid' THEN f.fee_amount ELSE 0 END),0) total_collected,
+              COALESCE(SUM(CASE WHEN f.fee_status='waived' THEN f.fee_amount ELSE 0 END),0) total_waived,
+              COALESCE(SUM(CASE WHEN f.fee_status='paid' AND date(COALESCE(f.paid_at,f.created_at))=date('now') THEN f.fee_amount ELSE 0 END),0) today_collected,
+              COUNT(DISTINCT CASE WHEN f.fee_status IN ('paid','waived') AND date(COALESCE(f.paid_at,f.waived_at,f.created_at))=date('now')
+                    THEN f.source_table||':'||f.source_id ELSE NULL END) today_people_served
+            FROM fee_collections f
+            WHERE {' AND '.join(where)}
+        """, q).fetchone()
+
+        daily = [dict(r) for r in db.execute(f"""
+            SELECT
+              date(COALESCE(f.paid_at,f.waived_at,f.created_at)) day,
+              SUM(CASE WHEN f.fee_status='paid' THEN 1 ELSE 0 END) paid_cases,
+              SUM(CASE WHEN f.fee_status='waived' THEN 1 ELSE 0 END) waived_cases,
+              COALESCE(SUM(CASE WHEN f.fee_status='paid' THEN f.fee_amount ELSE 0 END),0) collected_amount,
+              COALESCE(SUM(CASE WHEN f.fee_status='waived' THEN f.fee_amount ELSE 0 END),0) waived_amount,
+              COUNT(DISTINCT CASE WHEN f.fee_status IN ('paid','waived') THEN f.source_table||':'||f.source_id ELSE NULL END) people_entertained,
+              COUNT(DISTINCT CASE WHEN f.fee_status IN ('paid','waived') THEN f.source_table||':'||f.source_id ELSE NULL END) print_released_count
+            FROM fee_collections f
+            WHERE {' AND '.join(where)}
+            GROUP BY day
+            ORDER BY day DESC
+            LIMIT 120
+        """, q).fetchall()]
+
+        rows = [dict(r) for r in db.execute(f"""
+            SELECT
+              f.id, COALESCE(f.paid_at,f.waived_at,f.created_at) action_at,
+              f.source_table, f.source_id,
+              CASE
+                WHEN f.source_table='evacuees' THEN (SELECT e.name FROM evacuees e WHERE e.id=f.source_id)
+                WHEN f.source_table='iraq_applicants' THEN (SELECT a.full_name FROM iraq_applicants a WHERE a.id=f.source_id)
+                WHEN f.source_table='iraq_public_submissions' THEN (SELECT p.full_name FROM iraq_public_submissions p WHERE p.id=f.source_id)
+                ELSE ''
+              END applicant_name,
+              f.passport_number, f.tracking_or_reference, f.fee_status, f.fee_amount, f.fee_currency,
+              f.paid_by, f.waiver_approved_by, f.waiver_reason, f.receipt_notes,
+              CASE WHEN f.fee_status IN ('paid','waived') THEN 1 ELSE 0 END print_released
+            FROM fee_collections f
+            WHERE {' AND '.join(where)}
+            ORDER BY f.id DESC
+            LIMIT 2000
+        """, q).fetchall()]
+
+        settlement = api_fee_settlement_report(params, user)
+        return {
+            'success': True,
+            'summary': {**dict(summary), **dict(amounts), **(settlement.get('summary') or {})},
+            'daily': settlement.get('daily') or daily,
+            'rows': settlement.get('rows') or rows,
+            'fee_activity_rows': rows
+        }
+    finally:
+        db.close()
+
 # ═══════════════════════════════════════════════════════════════
 # WORD DOCUMENT GENERATOR (pure Python, no dependencies)
 # ═══════════════════════════════════════════════════════════════
@@ -3644,7 +4627,16 @@ def api_iraq_batch_detail(batch_id, user_filter=None):
     if user_filter and batch['uploaded_by'] != user_filter:
         db.close()
         return {'error': 'Access denied'}
-    applicants = [dict(r) for r in db.execute("SELECT * FROM iraq_applicants WHERE batch_id = ? ORDER BY id", [batch_id]).fetchall()]
+    applicants = []
+    for rr in db.execute("SELECT * FROM iraq_applicants WHERE batch_id = ? ORDER BY id", [batch_id]).fetchall():
+        a = dict(rr)
+        ln = _nv_best_link_for_record(db, 'iraq_applicants', a['id'])
+        if ln:
+            a['linked_nv_upload_id'] = ln.get('upload_id')
+            a['linked_nv_filename'] = ln.get('filename', '')
+            a['linked_nv_number'] = ln.get('note_verbal_number', '')
+            a['linked_nv_date'] = ln.get('note_verbal_date', '')
+        applicants.append(a)
     db.close()
     batch['applicants'] = applicants
     return batch
@@ -4207,6 +5199,12 @@ def api_iraq_public_submission_detail(sub_id):
         d['nv_number'] = ''
         d['nv_date'] = ''
         d['nv_sent_date'] = ''
+    ln = _nv_best_link_for_record(db, 'iraq_public_submissions', sub_id)
+    if ln:
+        d['linked_nv_upload_id'] = ln.get('upload_id')
+        d['linked_nv_filename'] = ln.get('filename', '')
+        d['linked_nv_number'] = ln.get('note_verbal_number', '')
+        d['linked_nv_date'] = ln.get('note_verbal_date', '')
     db.close()
     return {'success': True, 'submission': d}
 
@@ -5057,6 +6055,23 @@ def _extract_pdf_text_via_pdftotext(pdf_path):
     except Exception as e:
         print(f'[ApprovalPDF] pdftotext error: {e}', flush=True)
         return []
+
+def _extract_full_pdf_text_with_fallback(pdf_path):
+    pages = _embedded_pdf_pages_for_parse(pdf_path)
+    if _pdf_text_layer_usable(pages):
+        return '\n\n'.join((p or '').strip() for p in pages if (p or '').strip()), 'pdf_text'
+    ok, _msg = _check_ocr_deps()
+    if not ok:
+        return '', 'ocr_unavailable'
+    imgs = _pdf_to_images(pdf_path)
+    if not imgs:
+        return '', 'ocr_failed'
+    ocr_pages = []
+    for im in imgs:
+        txt = _ocr_image(_prepare_image_for_ocr(im))
+        if txt and txt.strip():
+            ocr_pages.append(txt)
+    return '\n\n'.join(ocr_pages), 'ocr'
 
 def _embedded_pdf_pages_for_parse(pdf_path):
     """Combine pypdf per-page text with optional pdftotext fallback."""
@@ -6115,6 +7130,8 @@ def is_letter_print_ready(record):
                 'destination_country', 'note_verbal_number', 'note_verbal_date', 'mofa_approval_serial']
     if record.get('visa_status') != 'Approved':
         return False
+    if not _fee_is_cleared(record):
+        return False
     for f in required:
         if not (record.get(f) or '').strip():
             return False
@@ -6303,6 +7320,249 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
   </section>
 </div>
 </body></html>'''
+
+# ---------- Iraq Transit Visa — Embassy Letter helpers ----------
+
+def is_iraq_letter_print_ready(record):
+    """Check if an Iraq transit visa record has all required fields for embassy letter printing.
+    Works for both iraq_public_submissions and iraq_applicants rows."""
+    # Must have passport
+    if not (record.get('passport_number') or '').strip():
+        return False
+    if not _fee_is_cleared(record):
+        return False
+    # Must have note verbal data + serial
+    for f in ('note_verbal_number', 'note_verbal_date', 'mofa_approval_serial'):
+        if not (record.get(f) or '').strip():
+            return False
+    # Must have a name
+    if not (record.get('full_name') or '').strip():
+        return False
+    return True
+
+
+def generate_iraq_embassy_letter_html(record, source_type='public'):
+    """Generate printable A4 embassy letter for Iraq Transit Visa applicant.
+    Page 1 English, page 2 Arabic — mirrors the evacuee letter format."""
+    name = esc(record.get('full_name', ''))
+    passport = esc(record.get('passport_number', ''))
+    nv_number = esc(record.get('note_verbal_number', ''))
+    nv_date = esc(record.get('note_verbal_date', ''))
+    serial = esc(record.get('mofa_approval_serial', ''))
+    nationality = esc(record.get('nationality', ''))
+    issue_date = esc(datetime.now().strftime('%d %B %Y'))
+
+    # Source-specific fields
+    if source_type == 'applicant':
+        travel_route = esc(record.get('destination', '') or record.get('current_location', ''))
+        travel_date = esc(record.get('expected_travel_date', ''))
+        employer = esc(record.get('employer', ''))
+    else:
+        travel_route = esc(record.get('travel_route', ''))
+        travel_date = ''
+        employer = esc(record.get('employer', ''))
+
+    gender = (record.get('gender') or '').strip().lower()
+    prefix = 'Ms.' if gender in ('female', 'f') else 'Mr.'
+    prefix_ar = 'السيدة' if gender in ('female', 'f') else 'السيد'
+    holder_ar = 'حاملة' if gender in ('female', 'f') else 'حامل'
+
+    footer_html = '''<footer class="footer-wrap">
+    <hr class="footer-rule">
+    <div class="footer-contact">
+      Villa 440, Street 108, Block 12, Jabriya, Kuwait<br>
+      Tel.: +965-25327647, +96555977292 &nbsp;|&nbsp; Fax: +965-25327648 &nbsp;|&nbsp; E-mail: parepkuwait@mofa.gov.pk
+    </div>
+  </footer>'''
+
+    return f'''<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>Embassy Letter — Iraq Transit — {name}</title>
+<style>
+@page {{ size: A4; margin: 9mm 12mm 10mm 12mm; }}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; line-height: 1.45; color: #222; background: #e8e8e8; }}
+.doc {{ max-width: 210mm; margin: 0 auto; background: #fff; }}
+.sheet {{
+  padding: 0 2mm 2mm;
+  page-break-after: always;
+  break-after: page;
+  background: #fff;
+}}
+.sheet:last-of-type {{ page-break-after: auto; break-after: auto; }}
+.sheet-body {{ display: block; }}
+.sheet-foot {{ margin-top: 4px; padding-top: 4px; }}
+.letterhead-row {{ margin-bottom: 7px; padding-bottom: 7px; border-bottom: 2px solid #006600; text-align: center; }}
+.titles-en {{
+  text-align: center;
+  font-size: 16.5pt;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #005a2b;
+  line-height: 1.2;
+}}
+.titles-en .line2 {{ margin-top: 2px; font-size: 14pt; letter-spacing: 0.11em; }}
+.titles-ar {{
+  direction: rtl;
+  text-align: center;
+  font-family: Arial, 'Segoe UI', Tahoma, sans-serif;
+  font-size: 16pt;
+  font-weight: 700;
+  color: #005a2b;
+  line-height: 1.25;
+}}
+.meta {{ display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 8.7pt; color: #444; }}
+.subject {{ text-align: center; font-weight: 700; font-size: 10.5pt; margin: 4px 0 6px; color: #111; }}
+.body-text {{ text-align: justify; margin-bottom: 6px; font-size: 9.1pt; }}
+.body-text.ar {{ direction: rtl; text-align: right; font-family: Arial, Tahoma, sans-serif; }}
+.details-table {{ width: 100%; border-collapse: collapse; margin: 4px 0 6px; font-size: 8.5pt; }}
+.details-table td {{ padding: 2px 6px; border: 1px solid #ccc; vertical-align: top; }}
+.details-table td:first-child {{ font-weight: 600; width: 36%; background: #f3f9f3; color: #1b5e20; }}
+.issue-note {{ text-align: center; font-size: 9pt; color: #333; margin: 4px 0 3px; line-height: 1.4; }}
+.computer-gen {{ text-align: center; font-size: 7.8pt; color: #666; margin: 4px 8px 6px; line-height: 1.35; }}
+.sign-block {{ margin: 4px 0 7px; text-align: right; page-break-inside: avoid; }}
+.sheet--ar .sign-block {{ text-align: left; }}
+.sign-name {{ font-size: 11pt; font-weight: 700; color: #1b5e20; margin-bottom: 2px; }}
+.sign-title {{ font-size: 9pt; color: #333; line-height: 1.35; }}
+.footer-wrap {{ page-break-inside: avoid; padding-top: 4px; }}
+.footer-rule {{ border: none; border-top: 1px solid #222; margin: 0 auto 6px; width: 90%; }}
+.footer-contact {{ text-align: center; font-size: 8pt; color: #333; line-height: 1.45; }}
+@media print {{
+  body {{ background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  .doc {{ max-width: none; }}
+  .sheet {{
+    padding: 0;
+    page-break-after: always;
+    break-after: page;
+  }}
+  .sheet:last-of-type {{ page-break-after: auto; break-after: auto; }}
+  .no-print {{ display: none !important; }}
+}}
+</style></head><body>
+<div class="no-print" style="text-align:center;padding:10px;background:#006600;color:#fff">
+  <button type="button" onclick="window.print()" style="padding:10px 28px;font-size:13pt;cursor:pointer;border:none;border-radius:6px;background:#fff;color:#006600;font-weight:bold">Print letter (2 pages)</button>
+  <button type="button" onclick="window.close()" style="padding:10px 18px;font-size:12pt;cursor:pointer;border:1px solid #fff;border-radius:6px;background:transparent;color:#fff;margin-left:10px">Close</button>
+</div>
+<div class="doc">
+  <!-- —— Page 1: English —— -->
+  <section class="sheet sheet--en" lang="en">
+    <div class="sheet-body">
+      <header class="letterhead-row">
+        <div class="titles-en">EMBASSY OF PAKISTAN<div class="line2">KUWAIT</div></div>
+      </header>
+      <div class="meta">
+        <div>Ref: CWA/IRQ/{nv_number}/{serial}</div>
+        <div>Date: {issue_date}</div>
+      </div>
+      <div class="subject">IRAQ TRANSIT VISA — TRAVEL FACILITATION CERTIFICATE</div>
+      <div class="body-text">
+        <p>This is to certify that <strong>{prefix} {name}</strong>, holder of Passport No. <strong>{passport}</strong>,
+        nationality <strong>{nationality}</strong>,
+        has been facilitated for transit travel to <strong>Iraq</strong> via Kuwait on the basis of a Note Verbal No. <strong>{nv_number}</strong>
+        dated <strong>{nv_date}</strong> (approval serial <strong>{serial}</strong>).</p>
+        <p style="margin-top:6px">The applicant is transiting through Kuwait en route to Iraq.{' Expected travel date: <strong>' + travel_date + '</strong>.' if travel_date else ''}{' Travel route: <strong>' + travel_route + '</strong>.' if travel_route else ''}</p>
+      </div>
+      <table class="details-table">
+        <tr><td>Full name</td><td>{name}</td></tr>
+        <tr><td>Passport No.</td><td>{passport}</td></tr>
+        <tr><td>Nationality</td><td>{nationality}</td></tr>
+        <tr><td>Note Verbal No.</td><td>{nv_number}</td></tr>
+        <tr><td>Note Verbal Date</td><td>{nv_date}</td></tr>
+        <tr><td>Approval serial</td><td>{serial}</td></tr>
+        {('<tr><td>Travel route</td><td>' + travel_route + '</td></tr>') if travel_route else ''}
+        {('<tr><td>Expected travel date</td><td>' + travel_date + '</td></tr>') if travel_date else ''}
+        {('<tr><td>Employer</td><td>' + employer + '</td></tr>') if employer else ''}
+      </table>
+      <div class="body-text"><p>This certificate is issued for record and transit travel facilitation through the State of Kuwait to the Republic of Iraq.</p></div>
+      <div class="sign-block">
+        <div class="sign-name">Hamza Tauqir</div>
+        <div class="sign-title">First Secretary (CWA Kuwait)</div>
+      </div>
+    </div>
+    <div class="sheet-foot">
+      <div class="issue-note">Issued electronically by Embassy of Pakistan, Kuwait</div>
+      <div class="computer-gen">This is a computer generated document and does not require signature.</div>
+      {footer_html}
+    </div>
+  </section>
+
+  <!-- —— Page 2: Arabic —— -->
+  <section class="sheet sheet--ar" lang="ar" dir="rtl">
+    <div class="sheet-body">
+      <header class="letterhead-row">
+        <div class="titles-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
+      </header>
+      <div class="meta" dir="rtl">
+        <div>التاريخ: {issue_date}</div>
+        <div>المرجع: CWA/IRQ/{nv_number}/{serial}</div>
+      </div>
+      <div class="subject">تأشيرة عبور العراق — شهادة تسهيل السفر</div>
+      <div class="body-text ar">
+        <p>يشهد سفارة جمهورية باكستان الإسلامية لدى دولة الكويت بأن <strong>{prefix_ar} {name}</strong>، {holder_ar} جواز السفر رقم <strong>{passport}</strong>،
+        الجنسية <strong>{nationality}</strong>،
+        قد تم تسهيل سفره/سفرها عبر الكويت إلى <strong>العراق</strong> استناداً إلى إشعار خطي رقم <strong>{nv_number}</strong> بتاريخ <strong>{nv_date}</strong>
+        (رقم الموافقة <strong>{serial}</strong>).</p>
+        <p style="margin-top:6px">المتقدم/المتقدمة يعبر/تعبر دولة الكويت في طريقه/طريقها إلى جمهورية العراق.{' تاريخ السفر المتوقع: <strong>' + travel_date + '</strong>.' if travel_date else ''}{' مسار السفر: <strong>' + travel_route + '</strong>.' if travel_route else ''}</p>
+      </div>
+      <table class="details-table">
+        <tr><td>الاسم الكامل</td><td>{name}</td></tr>
+        <tr><td>رقم الجواز</td><td>{passport}</td></tr>
+        <tr><td>الجنسية</td><td>{nationality}</td></tr>
+        <tr><td>رقم الإشعار الخطي</td><td>{nv_number}</td></tr>
+        <tr><td>تاريخ الإشعار الخطي</td><td>{nv_date}</td></tr>
+        <tr><td>رقم الموافقة</td><td>{serial}</td></tr>
+        {('<tr><td>مسار السفر</td><td>' + travel_route + '</td></tr>') if travel_route else ''}
+        {('<tr><td>تاريخ السفر المتوقع</td><td>' + travel_date + '</td></tr>') if travel_date else ''}
+        {('<tr><td>جهة العمل</td><td>' + employer + '</td></tr>') if employer else ''}
+      </table>
+      <div class="body-text ar"><p>أُصدرت هذه الشهادة لأغراض السجل وتسهيل عبور دولة الكويت إلى جمهورية العراق.</p></div>
+      <div class="sign-block">
+        <div class="sign-name">حمزہ توقیر</div>
+        <div class="sign-title">السكرتير الأول (CWA Kuwait)</div>
+      </div>
+    </div>
+    <div class="sheet-foot" dir="rtl">
+      <div class="issue-note">صادرة إلكترونياً عن سفارة جمهورية باكستان الإسلامية لدى دولة الكويت</div>
+      <div class="computer-gen">هذه وثيقة صادرة آلياً من النظام ولا تتطلب توقيعاً.</div>
+      {footer_html}
+    </div>
+  </section>
+</div>
+</body></html>'''
+
+
+def api_iraq_save_nv_fields(data, user):
+    """Save Note Verbal number, date, and serial on an Iraq record (public or applicant)."""
+    source = (data.get('source') or 'public').strip()
+    rec_id = data.get('id')
+    if not rec_id:
+        return {'success': False, 'error': 'Record ID required'}
+    db = get_db()
+    try:
+        if source == 'applicant':
+            table = 'iraq_applicants'
+        else:
+            table = 'iraq_public_submissions'
+        row = db.execute(f"SELECT id FROM {table} WHERE id = ?", [rec_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Record not found'}
+        sets = []
+        vals = []
+        for f in ('note_verbal_number', 'note_verbal_date', 'mofa_approval_serial'):
+            if f in data:
+                sets.append(f"{f} = ?")
+                vals.append((data.get(f) or '').strip())
+        if not sets:
+            return {'success': False, 'error': 'No fields provided'}
+        vals.append(rec_id)
+        db.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE id = ?", vals)
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                   [f'iraq_{source}_nv_save', rec_id, user, json.dumps({k: data.get(k, '') for k in ('note_verbal_number', 'note_verbal_date', 'mofa_approval_serial')})])
+        db.commit()
+        return {'success': True}
+    finally:
+        db.close()
+
 
 # ═══════════════════════════════════════════════════════════════
 # APPROVAL REVIEW PAGE (full staff-only HTML page)
@@ -6943,14 +8203,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] == 'iraq_cwa':
                 app_html = IRAQ_CWA_V2_PAGE.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
                 self.send_html(app_html)
+            elif user['role'] == 'fee_collector':
+                self.send_html(FEE_COLLECTION_PAGE.replace('__USER_NAME__', user['user']).replace('__USER_ROLE__', user['role']))
             else:
                 # Inject user role into the page
                 app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
                 self.send_html(app_html)
+        elif path == '/fee-collection':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('fee_collector', 'admin'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_html(FEE_COLLECTION_PAGE.replace('__USER_NAME__', user['user']).replace('__USER_ROLE__', user['role']))
         elif path == '/iraq-embassy-admin':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_html(IRAQ_EMBASSY_ADMIN_PAGE.replace('__USER_NAME__', user['user']))
         elif path == '/api/stats':
@@ -6959,6 +8227,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/records':
             if not self.require_auth(): return
             self.send_json(api_records(params))
+        elif path == '/api/fee-lookup':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('fee_collector', 'admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_fee_lookup(params))
         elif path == '/api/returnees':
             if not self.require_auth(): return
             self.send_json(api_returnees(params))
@@ -7257,13 +8531,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/iraq-public-submissions':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_iraq_public_submissions(params))
         elif path == '/api/iraq-public-submission':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             sid = int(params.get('id', 0))
             if not sid:
@@ -7272,44 +8546,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/iraq-public-portal-submissions':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_iraq_public_portal_submissions(params))
         elif path == '/api/iraq-public-portal-stats':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_iraq_public_portal_stats())
         elif path == '/api/iraq-public-batches':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_iraq_batches_public(params))
         elif path == '/api/iraq-public-batch-detail':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             bid = int(params.get('id', 0))
             self.send_json(api_iraq_batch_public_detail(bid))
         elif path == '/api/iraq-embassy-dashboard':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_iraq_embassy_dashboard())
         elif path == '/api/iraq-dispatches':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_iraq_dispatches())
         elif path == '/api/iraq-public-export':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             fkey = (params.get('filter') or 'all').strip()
             dispatch_id = None
@@ -7332,14 +8606,81 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/iraq-cwa-daily-summary':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_iraq_cwa_daily_sent_summary(params))
+        elif path == '/api/fee-statement':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_fee_statement(params, user))
+        elif path == '/api/fee-settlement-report':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_fee_settlement_report(params, user))
+        elif path == '/api/fee-settlement-export':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            kind = (params.get('kind') or 'history').strip().lower()
+            if kind not in ('history', 'daily'):
+                kind = 'history'
+            csv_data = api_fee_settlement_export_csv(params, user, kind=kind)
+            body = csv_data.encode('utf-8-sig')
+            fname = f"fee_settlement_{kind}_{datetime.now().strftime('%Y%m%d')}.csv"
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == '/api/audit':
             user = self.require_auth()
             if not user: return
             if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_audit_log())
+        elif path == '/api/fee-report':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin': self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_fee_report(params))
+        elif path == '/api/note-verbal-uploads':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_nv_uploads(params))
+        elif path == '/api/note-verbal-links':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_nv_links(params))
+        elif path == '/note-verbal-file':
+            user = self.require_auth()
+            if not user: return
+            upload_id = int(params.get('upload_id', 0) or 0)
+            if upload_id <= 0:
+                self.send_html('<p>Invalid upload id.</p>', 400); return
+            db = get_db()
+            row = db.execute("SELECT filename, file_path FROM note_verbal_uploads WHERE id=?", [upload_id]).fetchone()
+            db.close()
+            if not row:
+                self.send_html('<p>File not found.</p>', 404); return
+            fp = NOTE_VERBAL_UPLOADS_DIR / row['file_path']
+            if not fp.exists():
+                self.send_html('<p>Stored file missing.</p>', 404); return
+            body = fp.read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/pdf')
+            self.send_header('Content-Disposition', f'inline; filename="{row["filename"]}"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
         elif path == '/api/backups':
             user = self.require_auth()
             if not user: return
@@ -7391,7 +8732,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/approval-review':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             html = APPROVAL_REVIEW_PAGE.replace('__USER_NAME__', esc(user['user']))
             self.send_html(html)
@@ -7399,14 +8740,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-batches':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_approval_batches_list())
 
         elif path == '/api/approval-review':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             batch_id = (params.get('batch_id') or '').strip()
             if not batch_id:
@@ -7423,7 +8764,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-export':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             batch_id = (params.get('batch_id') or '').strip()
             ex_type = (params.get('type') or 'pdf_not_found').strip()
@@ -7442,7 +8783,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-search':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             q = (params.get('q') or '').strip()
             self.send_json(api_approval_search_portal(q, params.get('batch_id')))
@@ -7450,7 +8791,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/print/embassy-letter':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 rid = int(params.get('id', 0) or 0)
@@ -7466,7 +8807,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             rec = dict(rec)
             if not is_letter_print_ready(rec):
                 db.close()
-                self.send_html('<p>This record is not ready for printing. Required: approved visa, travel details, and note verbal fields.</p>', 400); return
+                self.send_html('<p>This record is not ready for printing. Required: fee cleared (paid/waived), approved visa, travel details, and note verbal fields.</p>', 400); return
             db.execute("""UPDATE evacuees SET
                 embassy_letter_print_count = COALESCE(embassy_letter_print_count, 0) + 1,
                 embassy_letter_issued_at = CURRENT_TIMESTAMP,
@@ -7478,6 +8819,123 @@ class Handler(http.server.BaseHTTPRequestHandler):
             db.commit()
             db.close()
             self.send_html(generate_embassy_letter_html(rec))
+        elif path == '/print/embassy-letter-with-note-verbal':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            rid = int(params.get('id', 0) or 0)
+            if rid <= 0:
+                self.send_html('<p>Invalid record.</p>', 400); return
+            db = get_db()
+            rec = db.execute("SELECT * FROM evacuees WHERE id = ?", [rid]).fetchone()
+            if not rec:
+                db.close(); self.send_html('<p>Record not found.</p>', 404); return
+            rec = dict(rec)
+            ln = _nv_best_link_for_record(db, 'evacuees', rid)
+            db.close()
+            if not is_letter_print_ready(rec):
+                self.send_html('<p>Record is not print-ready.</p>', 400); return
+            letter = generate_embassy_letter_html(rec)
+            pdf_html = ''
+            if ln:
+                pdf_html = f'<hr><h3>Linked Full Note Verbal PDF</h3><iframe src="/note-verbal-file?upload_id={int(ln.get("upload_id") or 0)}" style="width:100%;height:900px;border:1px solid #ccc"></iframe>'
+            self.send_html(f'<!DOCTYPE html><html><body>{letter}{pdf_html}</body></html>')
+
+        # Iraq Transit Visa — Embassy Letter Print
+        elif path == '/print/iraq-embassy-letter':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            source = (params.get('source', 'public') or 'public').strip()
+            try:
+                rid = int(params.get('id', 0) or 0)
+            except (TypeError, ValueError):
+                rid = 0
+            if rid <= 0:
+                self.send_html('<p>Invalid record.</p>', 400); return
+            db = get_db()
+            if source == 'applicant':
+                rec = db.execute("SELECT * FROM iraq_applicants WHERE id = ?", [rid]).fetchone()
+            else:
+                rec = db.execute("SELECT * FROM iraq_public_submissions WHERE id = ?", [rid]).fetchone()
+            if not rec:
+                db.close()
+                self.send_html('<p>Iraq record not found.</p>', 404); return
+            rec = dict(rec)
+            if not is_iraq_letter_print_ready(rec):
+                db.close()
+                self.send_html('<p>This Iraq record is not ready for printing. Required: fee cleared (paid/waived), full name, passport number, note verbal number, note verbal date, and approval serial.</p>', 400); return
+            table = 'iraq_applicants' if source == 'applicant' else 'iraq_public_submissions'
+            db.execute(f"""UPDATE {table} SET
+                embassy_letter_print_count = COALESCE(embassy_letter_print_count, 0) + 1,
+                embassy_letter_issued_at = CURRENT_TIMESTAMP,
+                embassy_letter_issued_by = ?
+                WHERE id = ?""", [user['user'], rid])
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                       [f'iraq_{source}_letter_printed', rid, user['user'], json.dumps({'source': source})])
+            db.commit()
+            db.close()
+            self.send_html(generate_iraq_embassy_letter_html(rec, source))
+        elif path == '/print/iraq-embassy-letter-with-note-verbal':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            source = (params.get('source', 'public') or 'public').strip()
+            rid = int(params.get('id', 0) or 0)
+            if rid <= 0:
+                self.send_html('<p>Invalid record.</p>', 400); return
+            db = get_db()
+            if source == 'applicant':
+                rec = db.execute("SELECT * FROM iraq_applicants WHERE id = ?", [rid]).fetchone()
+                s_table = 'iraq_applicants'
+            else:
+                rec = db.execute("SELECT * FROM iraq_public_submissions WHERE id = ?", [rid]).fetchone()
+                s_table = 'iraq_public_submissions'
+            if not rec:
+                db.close(); self.send_html('<p>Record not found.</p>', 404); return
+            rec = dict(rec)
+            ln = _nv_best_link_for_record(db, s_table, rid)
+            db.close()
+            if not is_iraq_letter_print_ready(rec):
+                self.send_html('<p>Record is not print-ready.</p>', 400); return
+            letter = generate_iraq_embassy_letter_html(rec, source)
+            pdf_html = ''
+            if ln:
+                pdf_html = f'<hr><h3>Linked Full Note Verbal PDF</h3><iframe src="/note-verbal-file?upload_id={int(ln.get("upload_id") or 0)}" style="width:100%;height:900px;border:1px solid #ccc"></iframe>'
+            self.send_html(f'<!DOCTYPE html><html><body>{letter}{pdf_html}</body></html>')
+        elif path == '/print/fee-distribution-receipt':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            rid = int(params.get('id', 0) or 0)
+            if rid <= 0:
+                self.send_html('<p>Invalid receipt id.</p>', 400); return
+            db = get_db()
+            row = db.execute("SELECT * FROM fee_distributions WHERE id = ?", [rid]).fetchone()
+            db.close()
+            if not row:
+                self.send_html('<p>Receipt not found.</p>', 404); return
+            r = dict(row)
+            if not (r.get('receipt_number') or '').strip():
+                self.send_html('<p>No receipt generated for this entry.</p>', 400); return
+            self.send_html(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Receipt {esc(r.get('receipt_number',''))}</title>
+            <style>body{{font-family:Arial,sans-serif;margin:24px}}.box{{max-width:760px;border:1px solid #ddd;border-radius:10px;padding:18px}}
+            h2{{margin:0 0 12px;color:#0d47a1}}.r{{margin:6px 0}}.k{{display:inline-block;min-width:190px;font-weight:700}}</style></head><body>
+            <div class="box"><h2>Fee Hand-over Receipt</h2>
+            <div class="r"><span class="k">Receipt Number:</span> {esc(r.get('receipt_number',''))}</div>
+            <div class="r"><span class="k">Date:</span> {esc(r.get('distribution_date') or '')}</div>
+            <div class="r"><span class="k">Wing:</span> {esc((r.get('wing') or '').replace('_',' ').title())}</div>
+            <div class="r"><span class="k">Action:</span> {esc((r.get('action_type') or '').replace('_',' ').title())}</div>
+            <div class="r"><span class="k">Amount:</span> {float(r.get('amount') or 0):.2f} {esc(r.get('currency') or 'KWD')}</div>
+            <div class="r"><span class="k">Handed Over By:</span> {esc(r.get('handed_over_by') or '-')}</div>
+            <div class="r"><span class="k">Received By:</span> {esc(r.get('received_by') or '-')}</div>
+            <div class="r"><span class="k">Entered By:</span> {esc(r.get('entered_by') or '-')}</div>
+            <div class="r"><span class="k">Remarks:</span> {esc(r.get('notes') or '-')}</div>
+            </div></body></html>""")
 
         # MS Forms webhook endpoint (public, uses API key)
         elif path == '/api/webhook/forms':
@@ -7715,28 +9173,102 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/record/delete':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Only admin or operator can delete records'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special'): self.send_json({'error': 'Only admin or operator can delete records'}, 403); return
             data = json.loads(body)
             self.send_json(api_delete_record(data['id'], user['user']))
+        elif path == '/api/fee-collect':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('fee_collector', 'admin'):
+                self.send_json({'error': 'Only fee collector/admin can collect fee'}, 403); return
+            data = json.loads(body)
+            result = api_fee_collect(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/fee-waive':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'error': 'Only admin can waive fee'}, 403); return
+            data = json.loads(body)
+            result = api_fee_waive(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/fee-reset-pending':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'error': 'Only admin can reset fee status'}, 403); return
+            data = json.loads(body)
+            result = api_fee_reset_pending(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/fee-settlement-entry':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'fee_collector'):
+                self.send_json({'error': 'Only fee collector/admin can record settlements'}, 403); return
+            data = json.loads(body)
+            result = api_fee_settlement_entry(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/note-verbal-upload':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            ct = self.headers.get('Content-Type', '')
+            orig, raw = extract_multipart_upload(body, ct, field_names=('file', 'pdf', 'note_verbal_pdf'))
+            if not raw:
+                self.send_json({'success': False, 'error': 'PDF file required'}, 400); return
+            if not (orig.lower().endswith('.pdf') or raw[:4] == b'%PDF'):
+                self.send_json({'success': False, 'error': 'Only PDF uploads are allowed'}, 400); return
+            m = {}
+            if 'multipart/form-data' in ct and 'boundary=' in ct:
+                boundary = ct.split('boundary=')[1].strip()
+                parts = body.split(f'--{boundary}'.encode())
+                for part in parts:
+                    ps = part.decode('latin-1', errors='ignore')
+                    m0 = re.search(r'name="([^"]+)"', ps)
+                    if not m0:
+                        continue
+                    key = m0.group(1)
+                    if key in ('note_verbal_number', 'note_verbal_date', 'source', 'remarks'):
+                        val = ps.split('\r\n\r\n', 1)[1].rsplit('\r\n', 1)[0].strip() if '\r\n\r\n' in ps else ''
+                        m[key] = val
+            res = api_nv_upload(raw, orig, m, user['user'])
+            self.send_json(res, 200 if res.get('success') else 400)
+        elif path == '/api/note-verbal-link-update':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            res = api_nv_link_update(data, user['user'])
+            self.send_json(res, 200 if res.get('success') else 400)
+        elif path == '/api/note-verbal-manual-assign':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            res = api_nv_manual_assign(data, user['user'])
+            self.send_json(res, 200 if res.get('success') else 400)
 
         elif path == '/api/returnee/save':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Unauthorized'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special'): self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_save_returnee(data, user['user']))
 
         elif path == '/api/returnee/delete':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Unauthorized'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special'): self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_delete_returnee(data['id'], user['user']))
 
         elif path == '/api/upload-returnees-csv':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Unauthorized'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special'): self.send_json({'error': 'Unauthorized'}, 403); return
             content_type = self.headers.get('Content-Type', '')
             if 'multipart/form-data' in content_type:
                 boundary = content_type.split('boundary=')[1].strip()
@@ -7841,21 +9373,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/iraq-batch':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'iraq_cwa'): self.send_json({'error': 'Unauthorized'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special', 'iraq_cwa'): self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_create_batch(data, user['user']))
 
         elif path == '/api/iraq-batch-update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Only admin can update Iraq batches'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special'): self.send_json({'error': 'Only admin can update Iraq batches'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_batch_update(data, user['user']))
 
         elif path == '/api/iraq-upload-csv':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'iraq_cwa'): self.send_json({'error': 'Unauthorized'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special', 'iraq_cwa'): self.send_json({'error': 'Unauthorized'}, 403); return
             content_type = self.headers.get('Content-Type', '')
             if 'multipart/form-data' in content_type:
                 boundary = content_type.split('boundary=')[1].strip()
@@ -7882,7 +9414,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/iraq-bulk-visa-approval':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Only admin can approve Iraq visas'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special'): self.send_json({'error': 'Only admin can approve Iraq visas'}, 403); return
             content_type = self.headers.get('Content-Type', '')
             if 'multipart/form-data' in content_type:
                 boundary = content_type.split('boundary=')[1].strip()
@@ -7906,55 +9438,63 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/iraq-visa-update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'): self.send_json({'error': 'Only admin can update Iraq visa status'}, 403); return
+            if user['role'] not in ('admin', 'operator', 'operator_special'): self.send_json({'error': 'Only admin can update Iraq visa status'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_update_individual_visa(data, user['user']))
         elif path == '/api/iraq-public-update-status':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_public_update_status(data, user['user']))
         elif path == '/api/iraq-public-batch-create':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_create_public_batch(data, user['user']))
         elif path == '/api/iraq-public-batch-forward':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_forward_batch_to_embassy(data, user['user']))
         elif path == '/api/iraq-dispatch-create':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_create_dispatch(data, user['user']))
         elif path == '/api/iraq-decision':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_update_decision(data, user['user']))
+        elif path == '/api/iraq-save-nv-fields':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            data = json.loads(body)
+            self.send_json(api_iraq_save_nv_fields(data, user['user']))
+
         elif path == '/api/iraq-public-submission-update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body)
             self.send_json(api_iraq_public_submission_update(data, user['user']))
         elif path == '/api/iraq-public-submission-delete':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('iraq_cwa', 'admin', 'operator'):
+            if user['role'] not in ('iraq_cwa', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -8263,7 +9803,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/bulk-ksa-approval':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Only admin/operator can bulk approve KSA'}, 403); return
             data = json.loads(body)
             passports_text = data.get('passports') or ''
@@ -8317,7 +9857,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-upload':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             ct = self.headers.get('Content-Type', '')
             orig, raw = extract_multipart_upload(body, ct)
@@ -8330,7 +9870,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-parse':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -8344,7 +9884,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-apply':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -8370,7 +9910,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-batch-nv':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -8388,7 +9928,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-row-update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -8403,7 +9943,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-rematch':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -8417,7 +9957,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-search':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             # GET-style via POST body for consistency with other approval APIs
             try:
@@ -8442,6 +9982,124 @@ class Handler(http.server.BaseHTTPRequestHandler):
 # ═══════════════════════════════════════════════════════════════
 # LOGIN PAGE
 # ═══════════════════════════════════════════════════════════════
+FEE_COLLECTION_PAGE = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fee Collection - Embassy Portal</title>
+<style>
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;margin:0}
+.hdr{background:#006600;color:#fff;padding:12px 18px;display:flex;justify-content:space-between;align-items:center}
+.ctr{max-width:980px;margin:0 auto;padding:16px}
+.card{background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:14px;margin-bottom:12px}
+input,textarea,button{font-size:14px} input,textarea{padding:8px;border:1px solid #bbb;border-radius:6px}
+button{padding:8px 12px;border:none;border-radius:6px;cursor:pointer}
+.btn{background:#006600;color:#fff}.warn{background:#ef6c00;color:#fff}
+.muted{color:#666;font-size:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:12px;background:#e8f5e9;color:#1b5e20}
+</style></head><body>
+<div class="hdr"><div><strong>Visa Fee Collection</strong> <span class="muted">KWD 2 Saudi Govt Processing Fee</span></div><div>__USER_NAME__ (__USER_ROLE__) | <a href="/logout" style="color:#fff">Logout</a></div></div>
+<div class="ctr">
+<div class="card">
+<div class="row">
+<input id="q" placeholder="Passport / PKE-Tracking / Reference number" style="flex:1;min-width:260px">
+<button class="btn" onclick="runSearch()">Search</button>
+</div>
+<div class="muted" style="margin-top:8px">Search by Passport, Tracking Number (`PKE-...`), or Iraq Reference Number.</div>
+</div>
+<div id="list"></div>
+<div class="card">
+<h3 style="margin:0 0 10px">Fee Settlement Ledger</h3>
+<div id="settCards" class="row"></div>
+<div class="row" style="margin-top:8px">
+<select id="stAction"><option value="allocated">Allocate</option><option value="handed_over">Handed Over</option><option value="withdrawn">Withdrawn</option><option value="adjusted">Adjusted</option></select>
+<select id="stWing"><option value="community_wing">Community Wing</option><option value="diplomatic">Diplomatic</option></select>
+<input id="stAmount" type="number" step="0.01" min="0.01" placeholder="Amount (KWD)">
+<input id="stDate" type="date">
+<input id="stReceivedBy" placeholder="Received by (handover)">
+<input id="stNotes" placeholder="Notes / remarks" style="flex:1;min-width:240px">
+<button class="btn" onclick="saveSettlement()">Save Entry</button>
+</div>
+<div class="muted" style="margin-top:8px">Diplomatic hand-over entries generate receipt numbers automatically.</div>
+</div>
+<div class="card">
+<h3 style="margin:0 0 10px">Recent Settlement History</h3>
+<div style="overflow:auto"><table id="settTbl" style="width:100%;border-collapse:collapse"></table></div>
+</div>
+</div>
+<script>
+async function api(u,o){const r=await fetch(u,o); if(r.redirected){location='/login';return null;} return r.json();}
+const USER_ROLE='__USER_ROLE__';
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
+function fmt(n){return Number(n||0).toFixed(2)}
+async function runSearch(){
+  const q=document.getElementById('q').value.trim();
+  if(!q){return;}
+  const d=await api('/api/fee-lookup?q='+encodeURIComponent(q)); if(!d||!d.success){return;}
+  const list=document.getElementById('list');
+  list.innerHTML=(d.results||[]).map(r=>{
+    const clr=r.fee_status==='paid'||r.fee_status==='waived';
+    const st=esc((r.fee_status||'pending').toUpperCase());
+    return `<div class="card">
+      <div class="row" style="justify-content:space-between"><strong>${esc(r.name||'')}</strong><span class="badge">${st}</span></div>
+      <div class="muted">Passport: ${esc(r.passport||'-')} | Ref: ${esc(r.tracking_or_reference||'-')} | Source: ${esc(r.source||'')}</div>
+      <div class="muted">Status: ${esc(r.status||'-')} | Ticket details: ${r.ticket_details_filled?'Yes':'No'} | Print unlocked: ${r.print_unlocked?'Yes':'No'}</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" ${clr?'disabled':''} onclick="collectFee('${r.source}',${r.id})">Collect KWD 2</button>
+        ${USER_ROLE==='admin'?`<button class="warn" ${clr?'disabled':''} onclick="waiveFee('${r.source}',${r.id})">Waive (Gratis)</button>`:''}
+        ${clr?'<span class="muted">Already processed.</span>':''}
+      </div>
+    </div>`;
+  }).join('') || '<div class="card">No matching records.</div>';
+}
+async function collectFee(source,id){
+  if(!confirm('Confirm KWD 2 fee received?')) return;
+  const d=await api('/api/fee-collect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,id,amount:2.0})});
+  if(d&&d.success){alert('Fee marked as paid. Record released for printing if all other conditions are met.'); runSearch();}
+  else alert((d&&d.error)||'Failed');
+}
+async function waiveFee(source,id){
+  const reason=prompt('Waiver reason (optional):','')||'';
+  const d=await api('/api/fee-waive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,id,amount:2.0,waiver_reason:reason})});
+  if(d&&d.success){alert('Fee waived. Record released for printing if all other conditions are met.'); runSearch();}
+  else alert((d&&d.error)||'Failed');
+}
+async function loadSettlement(){
+  const d=await api('/api/fee-settlement-report?scope=mine'); if(!d||!d.success)return;
+  const s=d.summary||{};
+  const cards=document.getElementById('settCards');
+  if(cards) cards.innerHTML=`
+    <span class="badge">Collected: ${fmt(s.total_collected)} KWD</span>
+    <span class="badge">Community: ${fmt(s.community_wing_total)} KWD</span>
+    <span class="badge">Diplomatic: ${fmt(s.diplomatic_total)} KWD</span>
+    <span class="badge">Handed over: ${fmt(s.total_handed_over)} KWD</span>
+    <span class="badge">Cash in hand: ${fmt(s.cash_in_hand)} KWD</span>`;
+  let h='<thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Date</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Action</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Wing</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Amount</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Received By</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Receipt</th></tr></thead><tbody>';
+  (d.rows||[]).slice(0,40).forEach(r=>{h+=`<tr><td style="padding:6px">${esc(r.distribution_date||'')}</td><td style="padding:6px">${esc(r.action_type||'')}</td><td style="padding:6px">${esc((r.wing||'').replace('_',' '))}</td><td style="padding:6px">${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td style="padding:6px">${esc(r.received_by||'-')}</td><td style="padding:6px">${r.receipt_number?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">${esc(r.receipt_number)}</a>`:'-'}</td></tr>`});
+  h+='</tbody>';
+  const t=document.getElementById('settTbl'); if(t)t.innerHTML=h;
+}
+async function saveSettlement(){
+  const data={
+    action_type:document.getElementById('stAction').value,
+    wing:document.getElementById('stWing').value,
+    amount:Number(document.getElementById('stAmount').value||0),
+    distribution_date:document.getElementById('stDate').value||'',
+    received_by:document.getElementById('stReceivedBy').value.trim(),
+    notes:document.getElementById('stNotes').value.trim()
+  };
+  if(!(data.amount>0)){alert('Enter a valid amount');return;}
+  const d=await api('/api/fee-settlement-entry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(d&&d.success){
+    alert('Settlement saved'+(d.receipt_number?(' | Receipt: '+d.receipt_number):''));
+    document.getElementById('stAmount').value='';
+    document.getElementById('stReceivedBy').value='';
+    document.getElementById('stNotes').value='';
+    loadSettlement();
+  }else alert((d&&d.error)||'Failed');
+}
+loadSettlement();
+</script></body></html>"""
+
 LOGIN_PAGE = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Login - Citizen Support for Transit KSA</title>
@@ -10819,6 +12477,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <button onclick="go('sitrep',this)">SITREP Editor</button>
 <button onclick="go('iraq',this)" style="color:#1565c0">Iraq Transit Visas</button>
 <button onclick="go('iraq-public',this)" style="color:#0d47a1">Iraq Public (MOFA KW)</button>
+<button onclick="go('fee-report',this)" data-fee-report-nav>Fee Reporting</button>
 <button onclick="go('admin',this)">Admin</button>
 </div>
 
@@ -10894,6 +12553,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="sb">
 <input id="sInput" placeholder="Search name, passport, CNIC, mobile, or tracking # (PKE-0001)..." oninput="loadRecords()">
 <select id="fStatus" onchange="loadRecords()"><option value="">All Status</option><option>Departed</option><option>Visa Obtained</option><option>Pending</option><option>Returned</option></select>
+<select id="fFee" onchange="loadRecords()"><option value="">All Fee</option><option value="pending">Fee Pending</option><option value="paid">Fee Paid</option><option value="waived">Fee Waived</option></select>
 <select id="fCountry" onchange="loadRecords()"><option value="">All Countries</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>US</option><option>KSA</option><option>UAE</option><option>Dubai</option></select>
 <select id="fGender" onchange="loadRecords()"><option value="">All Gender</option><option>Male</option><option>Female</option><option>Child</option></select>
 <select id="fDup" onchange="loadRecords()"><option value="">All</option><option value="DUPLICATE">Duplicates Only</option><option value="CLEAR">Clean Only</option></select>
@@ -11348,6 +13008,39 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 </div></div>
 
+<!-- FEE REPORTING -->
+<div id="tab-fee-report" class="tab"><div class="ctr">
+<div class="fs" style="border-left:3px solid #0d47a1;background:linear-gradient(135deg,#e3f2fd,#fff)">
+<h3>Fee Collection Statement</h3>
+<div class="sb" style="margin-bottom:10px">
+<input id="feeStmtSearch" placeholder="Search passport / tracking / reference / case id" oninput="loadFeeStatement()">
+<select id="feeStmtStatus" onchange="loadFeeStatement()"><option value="">All Status</option><option value="paid">Paid</option><option value="waived">Waived</option><option value="pending">Pending</option></select>
+<input type="date" id="feeStmtFrom" onchange="loadFeeStatement()">
+<input type="date" id="feeStmtTo" onchange="loadFeeStatement()">
+<input id="feeStmtBy" placeholder="Collected/Waived by username" oninput="loadFeeStatement()">
+<a href="#" class="btn btn-i" style="text-decoration:none;color:#fff" onclick="exportFeeSettlement('history');return false;">Export Settlement CSV</a>
+<a href="#" class="btn btn-w" style="text-decoration:none;color:#fff" onclick="exportFeeSettlement('daily');return false;">Export Daily CSV</a>
+</div>
+<div id="feeStmtCards" class="kg" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px"></div>
+</div>
+<div class="fs" style="border-left:3px solid #2e7d32">
+<h3>Wing-wise Settlement Summary</h3>
+<div class="scroll-t"><table id="feeWingSummaryTbl"></table></div>
+</div>
+<div class="fs" style="border-left:3px solid #00695c">
+<h3>Daily Settlement Statement</h3>
+<div class="scroll-t"><table id="feeStmtDailyTbl"></table></div>
+</div>
+<div class="fs" style="border-left:3px solid #455a64">
+<h3>Complete Fee Collection History</h3>
+<div class="scroll-t"><table id="feeCollectionHistTbl"></table></div>
+</div>
+<div class="fs" style="border-left:3px solid #6a1b9a">
+<h3>Detailed Distribution &amp; Hand-over History</h3>
+<div class="scroll-t"><table id="feeStmtTxnTbl"></table></div>
+</div>
+</div></div>
+
 <!-- ADMIN -->
 <div id="tab-admin" class="tab"><div class="ctr">
 <div class="fs" data-admin-only><h3>User Management</h3>
@@ -11355,7 +13048,7 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Username</label><input id="nu_user"></div>
 <div class="fgp"><label>Password</label><input id="nu_pass" type="password"></div>
 <div class="fgp"><label>Full Name</label><input id="nu_name"></div>
-<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>admin</option><option>viewer</option><option>iraq_cwa</option><option>other</option></select></div>
+<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>operator_special</option><option>admin</option><option>fee_collector</option><option>viewer</option><option>iraq_cwa</option><option>other</option></select></div>
 </div>
 <button class="btn btn-p" onclick="createUser()">Create User</button>
 <div style="margin-top:14px"><table id="usersTbl"></table></div>
@@ -11506,6 +13199,39 @@ No deterioration in ground security situation so far.</textarea>
 <button class="btn btn-p" style="margin-top:10px" onclick="changePw()">Change Password</button>
 </div>
 <div class="fs" data-admin-only><h3>Audit Log (Recent)</h3><div class="scroll-t"><table id="auditTbl"></table></div></div>
+<div class="fs" data-admin-only style="border-left:3px solid #0d47a1">
+<h3>Fee Collection Report (Total Sheet)</h3>
+<div class="sb" style="margin-bottom:10px">
+<input id="feeRepSearch" placeholder="Search passport, tracking/reference, source id" oninput="loadFeeReport()">
+<select id="feeRepStatus" onchange="loadFeeReport()"><option value="">All</option><option value="paid">Paid</option><option value="waived">Waived</option><option value="pending">Pending Entries</option></select>
+<input type="date" id="feeRepFrom" onchange="loadFeeReport()">
+<input type="date" id="feeRepTo" onchange="loadFeeReport()">
+</div>
+<div id="feeRepSummary" style="font-size:.84em;color:#444;margin-bottom:8px"></div>
+<div class="scroll-t"><table id="feeRepTbl"></table></div>
+</div>
+<div class="fs" data-admin-only style="border-left:3px solid #1565c0">
+<h3>MOFA Note Verbal Uploads (Full PDF Linking)</h3>
+<p style="margin-bottom:10px;font-size:.85em;color:#555">Upload full Note Verbal PDFs. System extracts text (PDF text first, OCR fallback) and links whole PDF to matching applicants by passport/name.</p>
+<div class="fg" style="margin-bottom:8px">
+<div class="fgp"><label>PDF file</label><input type="file" id="nvFile" accept=".pdf,application/pdf"></div>
+<div class="fgp"><label>Note Verbal No.</label><input id="nvNo"></div>
+<div class="fgp"><label>Note Verbal Date</label><input id="nvDate" type="date"></div>
+<div class="fgp"><label>Source</label><input id="nvSource" placeholder="MOFA / Embassy / Other"></div>
+</div>
+<div class="fgp" style="margin-bottom:8px"><label>Remarks</label><input id="nvRemarks"></div>
+<button class="btn btn-p" onclick="uploadNoteVerbalPdf()">Upload & Auto-Link</button>
+<div id="nvUploadMsg" style="font-size:.82em;color:#555;margin-top:8px"></div>
+<div class="scroll-t" style="margin-top:10px"><table id="nvUploadsTbl"></table></div>
+</div>
+<div class="fs" data-admin-only style="border-left:3px solid #6a1b9a">
+<h3>Note Verbal Link Review</h3>
+<div class="sb" style="margin-bottom:8px">
+<input id="nvLinkUploadId" placeholder="Filter by Upload ID" oninput="loadNvLinks()">
+<select id="nvLinkStatus" onchange="loadNvLinks()"><option value="">All</option><option value="suggested">Suggested</option><option value="confirmed">Confirmed</option><option value="rejected">Rejected</option></select>
+</div>
+<div class="scroll-t"><table id="nvLinksTbl"></table></div>
+</div>
 </div></div>
 
 <!-- PASSWORD CHANGE MODAL -->
@@ -11601,7 +13327,7 @@ document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
 document.getElementById('tab-'+tab).classList.add('active');
 btn.classList.add('active');
-if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}if(tab==='review')loadReviewQueue();if(tab==='iraq-public')loadIraqPublicPortal();
+if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}if(tab==='review')loadReviewQueue();if(tab==='iraq-public')loadIraqPublicPortal();if(tab==='fee-report')loadFeeStatement();
 }
 function goToApprovalPdfSection(){
 const admBtn=[...document.querySelectorAll('.nav button')].find(b=>(b.textContent||'').trim()==='Admin');
@@ -11762,6 +13488,7 @@ async function loadRecords(){
 const p=new URLSearchParams();
 const s=document.getElementById('sInput').value;if(s)p.set('search',s);
 const st=document.getElementById('fStatus').value;if(st)p.set('status',st);
+const fs=document.getElementById('fFee').value;if(fs)p.set('fee_status',fs);
 const co=document.getElementById('fCountry').value;if(co)p.set('country',co);
 const ge=document.getElementById('fGender').value;if(ge)p.set('gender',ge);
 const du=document.getElementById('fDup').value;if(du)p.set('dup',du);
@@ -11863,11 +13590,15 @@ html+=sec('Travel Details',[
 ]);
 (function(){
 const need=['ticket_number','airline','departure_date','departure_airport','destination_country','note_verbal_number','note_verbal_date','mofa_approval_serial'];
-const lr=(r.visa_status||'')==='Approved'&&need.every(k=>String(r[k]||'').trim()!=='');
-const tip=lr?'':'Fill all travel fields and note verbal details below to enable printing.';
+const feeState=(r.fee_status||'pending').toLowerCase();
+const feeCleared=(feeState==='paid'||feeState==='waived');
+const lr=(r.visa_status||'')==='Approved'&&feeCleared&&need.every(k=>String(r[k]||'').trim()!=='');
+const tip=lr?'':(!feeCleared?'Fee must be paid or waived before printing.':'Fill all travel fields and note verbal details below to enable printing.');
 const vq=(s)=>String(s==null?'':s).replace(/"/g,'&quot;');
 const letterIssued=r.embassy_letter_issued_at?String(r.embassy_letter_issued_at)+' by '+(r.embassy_letter_issued_by||''):'\u2014';
 const printCnt=r.embassy_letter_print_count!=null?String(r.embassy_letter_print_count):'0';
+const feeActor=(feeState==='paid')?(r.fee_paid_by||''):(feeState==='waived'?(r.fee_waived_by||''):'');
+const feeAt=(feeState==='paid')?(r.fee_paid_at||''):(feeState==='waived'?(r.fee_waived_at||''):'');
 if(USER_ROLE!=='viewer'){
 html+=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#1b5e20;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #c8e6c9;margin-bottom:8px">Embassy letter \u2014 Note verbal &amp; approval</div>
 <p style="font-size:.78em;color:#666;margin:0 0 10px;line-height:1.45">Enter or correct <strong>Note Verbal number</strong> and <strong>date</strong> manually, then click <strong>Save these fields</strong>. They are stored on this applicant and used for the printable embassy letter (with travel details and MOFA list serial).</p>
@@ -11877,6 +13608,10 @@ html+=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85
 <div style="grid-column:1/-1"><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">MOFA approval serial (from list)</label><input id="view_nv_serial" type="text" value="${vq(r.mofa_approval_serial)}" placeholder="Serial number on approval list" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>
 </div>
 <button type="button" class="btn btn-p" style="padding:8px 18px;margin-bottom:10px" onclick="saveViewEmbassyFields()">Save note verbal &amp; serial</button>
+<div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Fee status:</strong> ${(r.fee_status||'pending').toUpperCase()} ${feeAt?(' | '+feeAt):''} ${feeActor?(' by '+feeActor):''}</div>
+${r.linked_nv_upload_id?`<div style="font-size:.8em;color:#1565c0;margin-bottom:8px"><strong>Linked full Note Verbal:</strong> ${vq(r.linked_nv_filename||'PDF')} ${r.linked_nv_number?('| NV# '+vq(r.linked_nv_number)):''} ${r.linked_nv_date?('| '+vq(r.linked_nv_date)):''}</div>`:''}
+${USER_ROLE==='admin'?`<div style="margin:0 0 10px"><button type="button" class="btn btn-i" style="padding:6px 12px" ${feeCleared?'disabled':''} onclick="collectFeeFromView()">Collect KWD 2</button> <button type="button" class="btn btn-w" style="padding:6px 12px" ${feeCleared?'disabled':''} onclick="waiveFeeFromView()">Waive (Gratis)</button></div>`:''}
+${USER_ROLE==='admin'?`<div style="margin:0 0 10px"><button type="button" class="btn" style="padding:6px 12px;background:#37474f;color:#fff" onclick="resetFeePendingFromView()">Fee Correction: Reset Pending</button></div>`:''}
 <div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Letter issued:</strong> ${letterIssued} &nbsp;|&nbsp; <strong>Print count:</strong> ${printCnt}</div>
 </div>`;
 }else{
@@ -11890,12 +13625,15 @@ html+=sec('Embassy Letter Approval',[
 }
 html+=`<div style="margin:12px 0;padding:12px;background:#f1f8e9;border-radius:8px;border:1px solid #c5e1a5">
 <button type="button" class="btn btn-p" style="padding:8px 18px" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter?id='+viewRec.id,'_blank')">\ud83d\udcc4 Print Embassy Letter</button>
+${r.linked_nv_upload_id?`<button type="button" class="btn btn-i" style="padding:8px 14px;margin-left:8px" onclick="window.open('/note-verbal-file?upload_id=${r.linked_nv_upload_id}','_blank')">\ud83d\udcce Print Linked Note Verbal</button>`:''}
+${r.linked_nv_upload_id?`<button type="button" class="btn" style="padding:8px 14px;margin-left:8px;background:#455a64;color:#fff" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter-with-note-verbal?id='+viewRec.id,'_blank')">\ud83e\uddfe Print Embassy Letter + Full Note Verbal PDF</button>`:''}
 <span style="font-size:.8em;color:#558b2f;margin-left:10px">${lr?'Ready to print.':tip}</span></div>`;
 })();
 html+=sec('Status & Processing',[
 ['KSA Visa Status',r.visa_status],['Travel Status',r.travel_status],
 ['MOFA Status',r.mofa_status||'\u2014'],['Duplicate Flag',r.dup_flag],
-['Priority',r.priority],['Date of Request',r.date_of_request]
+['Fee Status',(r.fee_status||'pending').toUpperCase()],['Fee Paid By',r.fee_paid_by||'\u2014'],
+['Fee Waived By',r.fee_waived_by||'\u2014'],['Priority',r.priority],['Date of Request',r.date_of_request]
 ]);
 html+=sec('Route & Review',[
 ['Original Form Source',routeMap[r.original_form_source]||r.original_form_source||'KW\u2192PK'],
@@ -12036,6 +13774,31 @@ loadRecords();loadDash();
 await openView(viewRec.id);
 }else{toast('Error: '+(res?.error||'Save failed'))}
 }catch(err){toast('Error: '+err.message)}
+}
+async function collectFeeFromView(){
+if(!viewRec)return;
+if(!confirm('Confirm KWD 2 fee received for this record?'))return;
+const res=await api('/api/fee-collect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'evacuees',id:viewRec.id,amount:2.0})});
+if(res&&res.success){toast('Fee collected successfully');await openView(viewRec.id);loadRecords();loadDash();}
+else{toast('Error: '+(res?.error||'Fee collect failed'))}
+}
+async function waiveFeeFromView(){
+if(!viewRec)return;
+const reason=prompt('Optional waiver reason:','')||'';
+const source='evacuees';
+const res=await api('/api/fee-waive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,id:viewRec.id,amount:2.0,waiver_reason:reason})});
+if(res&&res.success){toast('Fee waived successfully');await openView(viewRec.id);loadRecords();loadDash();}
+else{toast('Error: '+(res?.error||'Fee waive failed'))}
+}
+async function resetFeePendingFromView(){
+if(!viewRec)return;
+if(USER_ROLE!=='admin'){toast('Only admin allowed');return;}
+const reason=prompt('Fee correction reason (required for audit):','')||'';
+if(!reason.trim()){toast('Reason is required');return;}
+if(!confirm('Reset fee status to pending for this record?'))return;
+const res=await api('/api/fee-reset-pending',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'evacuees',id:viewRec.id,reason:reason.trim()})});
+if(res&&res.success){toast('Fee reset to pending');await openView(viewRec.id);loadRecords();loadDash();}
+else{toast('Error: '+(res?.error||'Reset failed'))}
 }
 async function viewDelete(){
 if(!viewRec)return;
@@ -12492,7 +14255,7 @@ if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</t
 u.forEach(x=>{
 h+=`<tr><td><strong>${x.username}</strong></td><td>${x.full_name||'-'}</td>
 <td><select onchange="updateUserRole(${x.id},this.value)" style="padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:.85em">
-<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='other'?' selected':''}>other</option></select></td>
+<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='operator_special'?' selected':''}>operator_special</option><option${x.role==='fee_collector'?' selected':''}>fee_collector</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='other'?' selected':''}>other</option></select></td>
 <td style="font-size:.8em">${x.created_at}</td>
 <td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminResetPw(${x.id},'${x.username}')">Reset PW</button><button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="adminDeleteUser(${x.id},'${x.username}')">Delete</button></td></tr>`});
 h+='</tbody>';document.getElementById('usersTbl').innerHTML=h}
@@ -12500,7 +14263,123 @@ const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
 a.slice(0,50).forEach(x=>{h+=`<tr><td>${x.created_at}</td><td>${x.action}</td><td>${x.user||'-'}</td><td>${x.record_id||'-'}</td></tr>`});
 h+='</tbody>';document.getElementById('auditTbl').innerHTML=h}
-loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount();loadApprovalBatches()}
+loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount();loadApprovalBatches();loadFeeReport();loadNvUploads();loadNvLinks()}
+async function uploadNoteVerbalPdf(){
+const f=document.getElementById('nvFile')?.files?.[0];
+if(!f){toast('Select PDF file');return;}
+const fd=new FormData();
+fd.append('file',f);
+fd.append('note_verbal_number',document.getElementById('nvNo')?.value||'');
+fd.append('note_verbal_date',document.getElementById('nvDate')?.value||'');
+fd.append('source',document.getElementById('nvSource')?.value||'');
+fd.append('remarks',document.getElementById('nvRemarks')?.value||'');
+const r=await fetch('/api/note-verbal-upload',{method:'POST',body:fd});
+const d=await r.json();
+if(d&&d.success){
+const msg=document.getElementById('nvUploadMsg'); if(msg)msg.textContent=`Uploaded. OCR: ${d.ocr_status||'-'} | Confirmed links: ${d.linked||0} | Suggested: ${d.suggested||0}`;
+toast('Note Verbal uploaded and processed');
+loadNvUploads();loadNvLinks();
+}else toast((d&&d.error)||'Upload failed');
+}
+async function loadNvUploads(){
+const d=await api('/api/note-verbal-uploads'); if(!d||!d.success)return;
+let h='<thead><tr><th>ID</th><th>File</th><th>NV #</th><th>NV Date</th><th>Status</th><th>OCR</th><th>Confirmed</th><th>Suggested</th><th>Uploaded By</th><th>Open PDF</th></tr></thead><tbody>';
+(d.rows||[]).forEach(r=>{h+=`<tr><td>${r.id}</td><td>${r.filename||'-'}</td><td>${r.note_verbal_number||'-'}</td><td>${r.note_verbal_date||'-'}</td><td>${r.processing_status||'-'}</td><td>${r.ocr_status||'-'}</td><td>${r.confirmed_links||0}</td><td>${r.suggested_links||0}</td><td>${r.uploaded_by||'-'}</td><td><a href="/note-verbal-file?upload_id=${r.id}" target="_blank">Open</a></td></tr>`});
+h+='</tbody>'; const t=document.getElementById('nvUploadsTbl'); if(t)t.innerHTML=h;
+}
+async function loadNvLinks(){
+const p=new URLSearchParams();
+const up=(document.getElementById('nvLinkUploadId')?.value||'').trim(); if(up)p.set('upload_id',up);
+const st=document.getElementById('nvLinkStatus')?.value||''; if(st)p.set('status',st);
+const d=await api('/api/note-verbal-links?'+p.toString()); if(!d||!d.success)return;
+let h='<thead><tr><th>ID</th><th>Upload</th><th>Record</th><th>Name</th><th>Passport</th><th>Method</th><th>Confidence</th><th>Status</th><th>Actions</th><th>Manual Assign</th></tr></thead><tbody>';
+(d.rows||[]).forEach(r=>{h+=`<tr><td>${r.id}</td><td>${r.upload_id}</td><td>${r.source_table}#${r.source_id}</td><td>${r.record_name||'-'}</td><td>${r.record_passport||'-'}</td><td>${r.match_method||'-'}</td><td>${Number(r.match_confidence||0).toFixed(2)}</td><td>${r.link_status||'-'}</td><td><button class="btn btn-p" style="padding:2px 8px;font-size:.75em" onclick="setNvLinkStatus(${r.id},'confirmed')">Confirm</button> <button class="btn btn-w" style="padding:2px 8px;font-size:.75em" onclick="setNvLinkStatus(${r.id},'suggested')">Suggest</button> <button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="setNvLinkStatus(${r.id},'rejected')">Reject</button></td><td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="manualAssignNv(${r.upload_id})">Assign...</button></td></tr>`});
+h+='</tbody>'; const t=document.getElementById('nvLinksTbl'); if(t)t.innerHTML=h;
+}
+async function setNvLinkStatus(id,status){
+const d=await api('/api/note-verbal-link-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,link_status:status})});
+if(d&&d.success){toast('Link updated');loadNvLinks();}else toast((d&&d.error)||'Failed');
+}
+async function manualAssignNv(uploadId){
+const source_table=prompt('Source table (evacuees / iraq_applicants / iraq_public_submissions):','evacuees')||'';
+const source_id=Number(prompt('Record ID:','')||0);
+if(!source_table||!source_id){toast('Source and record id required');return;}
+const d=await api('/api/note-verbal-manual-assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:uploadId,source_table,source_id})});
+if(d&&d.success){toast('Assigned');loadNvLinks();}else toast((d&&d.error)||'Failed');
+}
+async function loadFeeStatement(){
+const p=new URLSearchParams();
+const s=document.getElementById('feeStmtSearch')?.value?.trim()||''; if(s)p.set('search',s);
+const st=document.getElementById('feeStmtStatus')?.value||''; if(st)p.set('status',st);
+const f=document.getElementById('feeStmtFrom')?.value||''; if(f)p.set('from',f);
+const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('to',t);
+const by=document.getElementById('feeStmtBy')?.value?.trim()||''; if(by)p.set('collected_by',by);
+const d=await api('/api/fee-statement?'+p.toString()); if(!d||d.error)return;
+const s0=d.summary||{};
+const cards=document.getElementById('feeStmtCards');
+if(cards) cards.innerHTML=`
+<div class="kc s"><div class="lb">Total Fee Collected (KWD)</div><div class="vl">${Number(s0.total_collected||0).toFixed(2)}</div></div>
+<div class="kc i"><div class="lb">Community Wing Total</div><div class="vl">${Number(s0.community_wing_total||0).toFixed(2)}</div></div>
+<div class="kc i"><div class="lb">Diplomatic Total</div><div class="vl">${Number(s0.diplomatic_total||0).toFixed(2)}</div></div>
+<div class="kc w"><div class="lb">Total Handed Over</div><div class="vl">${Number(s0.total_handed_over||0).toFixed(2)}</div></div>
+<div class="kc d"><div class="lb">Cash in Hand / Balance</div><div class="vl">${Number(s0.cash_in_hand||0).toFixed(2)}</div></div>
+<div class="kc s"><div class="lb">Today's Collection</div><div class="vl">${Number(s0.today_collected||0).toFixed(2)}</div></div>
+<div class="kc i"><div class="lb">Today's Community Wing</div><div class="vl">${Number(s0.today_community_wing||0).toFixed(2)}</div></div>
+<div class="kc i"><div class="lb">Today's Diplomatic</div><div class="vl">${Number(s0.today_diplomatic||0).toFixed(2)}</div></div>
+<div class="kc w"><div class="lb">Today's Handovers</div><div class="vl">${Number(s0.today_handovers||0).toFixed(2)}</div></div>
+<div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${Number(s0.today_balance||0).toFixed(2)}</div></div>`;
+
+const ws=document.getElementById('feeWingSummaryTbl');
+if(ws) ws.innerHTML=`<thead><tr><th>Wing</th><th>Total Assigned</th><th>Total Handed Over</th><th>Pending Settlement</th></tr></thead><tbody>
+<tr><td>Community Wing</td><td>${Number(s0.community_wing_total||0).toFixed(2)} KWD</td><td>${Number(s0.community_handed_over||0).toFixed(2)} KWD</td><td>${Number(s0.community_pending_settlement||0).toFixed(2)} KWD</td></tr>
+<tr><td>Diplomatic</td><td>${Number(s0.diplomatic_total||0).toFixed(2)} KWD</td><td>${Number(s0.diplomatic_handed_over||0).toFixed(2)} KWD</td><td>${Number(s0.diplomatic_pending_settlement||0).toFixed(2)} KWD</td></tr>
+</tbody>`;
+
+let dh='<thead><tr><th>Date</th><th>Total Collected</th><th>Community Wing</th><th>Diplomatic</th><th>Handed Over</th><th>Cash in Hand</th><th>Remarks/Count</th></tr></thead><tbody>';
+(d.daily||[]).forEach(r=>{dh+=`<tr><td>${r.day||'-'}</td><td>${Number(r.total_collected||0).toFixed(2)}</td><td>${Number(r.community_wing||0).toFixed(2)}</td><td>${Number(r.diplomatic||0).toFixed(2)}</td><td>${Number(r.handed_over||0).toFixed(2)}</td><td>${Number(r.cash_in_hand||0).toFixed(2)}</td><td>${r.remarks_count||0}</td></tr>`});
+dh+='</tbody>';
+const dt=document.getElementById('feeStmtDailyTbl'); if(dt)dt.innerHTML=dh;
+
+let ch='<thead><tr><th>Date/Time</th><th>Applicant</th><th>Passport</th><th>Tracking/Ref</th><th>Workflow</th><th>Status</th><th>Amount</th><th>Collected By</th><th>Waived By</th><th>Waiver Reason</th></tr></thead><tbody>';
+(d.fee_activity_rows||[]).forEach(r=>{ch+=`<tr><td>${r.action_at||'-'}</td><td>${r.applicant_name||'-'}</td><td>${r.passport_number||'-'}</td><td>${r.tracking_or_reference||'-'}</td><td>${r.source_table||'-'}</td><td>${r.fee_status||'-'}</td><td>${Number(r.fee_amount||0).toFixed(2)} ${r.fee_currency||'KWD'}</td><td>${r.paid_by||'-'}</td><td>${r.waiver_approved_by||'-'}</td><td>${r.waiver_reason||'-'}</td></tr>`});
+ch+='</tbody>';
+const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.innerHTML=ch;
+
+let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Receipt</th></tr></thead><tbody>';
+(d.rows||[]).forEach(r=>{th+=`<tr><td>${r.created_at||r.distribution_date||'-'}</td><td>${r.action_type||'-'}</td><td>${Number(r.amount||0).toFixed(2)} ${r.currency||'KWD'}</td><td>${(r.wing||'-').replace('_',' ')}</td><td>${r.entered_by||'-'}</td><td>${r.handed_over_by||'-'}</td><td>${r.received_by||'-'}</td><td>${r.receipt_number||'-'}</td><td>${r.notes||'-'}</td><td>${r.receipt_number?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">View</a>`:'-'}</td></tr>`});
+th+='</tbody>';
+const tt=document.getElementById('feeStmtTxnTbl'); if(tt)tt.innerHTML=th;
+}
+function exportFeeSettlement(kind){
+const p=new URLSearchParams();
+const s=document.getElementById('feeStmtSearch')?.value?.trim()||''; if(s)p.set('search',s);
+const st=document.getElementById('feeStmtStatus')?.value||''; if(st)p.set('status',st);
+const f=document.getElementById('feeStmtFrom')?.value||''; if(f)p.set('from',f);
+const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('to',t);
+const by=document.getElementById('feeStmtBy')?.value?.trim()||''; if(by)p.set('collected_by',by);
+p.set('kind',kind==='daily'?'daily':'history');
+window.location='/api/fee-settlement-export?'+p.toString();
+}
+async function loadFeeReport(){
+const p=new URLSearchParams();
+const s=document.getElementById('feeRepSearch')?.value?.trim()||''; if(s)p.set('search',s);
+const st=document.getElementById('feeRepStatus')?.value||''; if(st)p.set('status',st);
+const f=document.getElementById('feeRepFrom')?.value||''; if(f)p.set('from',f);
+const t=document.getElementById('feeRepTo')?.value||''; if(t)p.set('to',t);
+const d=await api('/api/fee-report?'+p.toString()); if(!d||d.error)return;
+const tt=d.totals||{};
+const sum=document.getElementById('feeRepSummary');
+if(sum) sum.innerHTML=`<strong>Collected:</strong> ${Number(tt.collected_total||0).toFixed(2)} KWD | <strong>Waived:</strong> ${Number(tt.waived_total||0).toFixed(2)} KWD | <strong>Paid cases:</strong> ${tt.paid_count||0} | <strong>Waived cases:</strong> ${tt.waived_count||0}`;
+let h='<thead><tr><th>Fee ID</th><th>Source</th><th>Case ID</th><th>Passport</th><th>Tracking/Ref</th><th>Status</th><th>Amount</th><th>Actor</th><th>Action Time</th><th>Reason/Notes</th></tr></thead><tbody>';
+(d.rows||[]).forEach(r=>{
+const actor=r.fee_status==='paid'?(r.paid_by||'-'):(r.waiver_approved_by||'-');
+const at=r.fee_status==='paid'?(r.paid_at||r.created_at):(r.waived_at||r.created_at);
+const rn=r.fee_status==='waived'?(r.waiver_reason||'-'):(r.receipt_notes||'-');
+h+=`<tr><td>${r.id}</td><td>${r.source_table||'-'}</td><td>${r.source_id||'-'}</td><td>${r.passport_number||'-'}</td><td>${r.tracking_or_reference||'-'}</td><td>${r.fee_status||'-'}</td><td>${Number(r.fee_amount||0).toFixed(2)} ${r.fee_currency||'KWD'}</td><td>${actor}</td><td>${at||'-'}</td><td>${rn||'-'}</td></tr>`;
+});
+h+='</tbody>';
+const tb=document.getElementById('feeRepTbl'); if(tb)tb.innerHTML=h;
+}
 async function createUser(){
 const data={username:document.getElementById('nu_user').value,password:document.getElementById('nu_pass').value,
 full_name:document.getElementById('nu_name').value,role:document.getElementById('nu_role').value};
@@ -13036,6 +14915,28 @@ const ksaV=x.ksa_mofa_status||'';
 const ksaD=ksaV.toLowerCase()==='approved'?'<span style="color:#2e7d32;font-weight:700">Approved</span>':(ksaV||'<span style="color:#999">\u2014</span>');
 h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;color:#666;width:38%">MOFA KSA status</td><td style="padding:6px 8px;border-bottom:1px solid #eee">'+ksaD+'</td></tr>';
 h+='</tbody></table>';
+// Embassy Letter — Note Verbal & Approval section (Iraq Public)
+const ippVq=(s)=>String(s==null?'':s).replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const ippFeeClear=(String(x.fee_status||'pending').toLowerCase()==='paid'||String(x.fee_status||'pending').toLowerCase()==='waived');
+const ippNvReady=ippFeeClear&&String(x.full_name||'').trim()!==''&&String(x.passport_number||'').trim()!==''&&String(x.note_verbal_number||'').trim()!==''&&String(x.note_verbal_date||'').trim()!==''&&String(x.mofa_approval_serial||'').trim()!=='';
+const ippLtrTip=ippNvReady?'':(!ippFeeClear?'Fee must be paid or waived before printing.':'Fill full name, passport, note verbal number, date, and serial to enable printing.');
+const ippLtrIssued=x.embassy_letter_issued_at?String(x.embassy_letter_issued_at)+' by '+(x.embassy_letter_issued_by||''):'\u2014';
+const ippPrintCnt=x.embassy_letter_print_count!=null?String(x.embassy_letter_print_count):'0';
+h+='<div style="margin-top:14px;padding:14px;background:#f1f8e9;border-radius:8px;border:1px solid #c5e1a5">';
+h+='<div style="font-weight:700;font-size:.85em;color:#1b5e20;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #c8e6c9;margin-bottom:8px">Iraq Embassy Letter \u2014 Note Verbal &amp; Approval</div>';
+h+='<p style="font-size:.78em;color:#666;margin:0 0 10px;line-height:1.45">Enter <strong>Note Verbal number</strong>, <strong>date</strong>, and <strong>serial</strong>, then click <strong>Save NV fields</strong>. These are stored on this record and used for the printable embassy letter.</p>';
+h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin-bottom:10px">';
+h+='<div><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Note Verbal number</label><input id="ipp_nv_number" type="text" value="'+ippVq(x.note_verbal_number)+'" placeholder="e.g. NV-KW/IRQ/2026/123" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>';
+h+='<div><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Note Verbal date</label><input id="ipp_nv_date" type="text" value="'+ippVq(x.note_verbal_date)+'" placeholder="e.g. 29/03/2026" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>';
+h+='<div style="grid-column:1/-1"><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Approval serial (from MOFA list)</label><input id="ipp_nv_serial" type="text" value="'+ippVq(x.mofa_approval_serial)+'" placeholder="Serial number on approval list" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>';
+h+='</div>';
+h+='<button type="button" class="btn btn-p" style="padding:8px 18px;margin-bottom:10px" onclick="ippSaveNvFields()">Save NV fields</button>';
+h+=x.linked_nv_upload_id?('<div style="font-size:.8em;color:#1565c0;margin-bottom:6px"><strong>Linked full Note Verbal:</strong> '+ippVq(x.linked_nv_filename||'PDF')+'</div>'):'';
+h+='<div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Letter issued:</strong> '+ippLtrIssued+' &nbsp;|&nbsp; <strong>Print count:</strong> '+ippPrintCnt+'</div>';
+h+='<button type="button" class="btn btn-p" style="padding:8px 18px" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)window.open(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,\'_blank\')">&#128196; Print Iraq Embassy Letter</button>';
+h+=x.linked_nv_upload_id?(' <button type="button" class="btn btn-i" style="padding:8px 14px;margin-left:8px" onclick="window.open(\'/note-verbal-file?upload_id='+x.linked_nv_upload_id+'\',\'_blank\')">&#128206; Print Linked Note Verbal</button> <button type="button" class="btn" style="padding:8px 14px;margin-left:8px;background:#455a64;color:#fff" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)window.open(\'/print/iraq-embassy-letter-with-note-verbal?source=public&id=\'+_ippCur.id,\'_blank\')">&#129534; Print Letter + Full Note Verbal PDF</button>'):'';
+h+=' <span style="font-size:.8em;color:#558b2f;margin-left:10px">'+(ippNvReady?'Ready to print.':ippLtrTip)+'</span>';
+h+='</div>';
 document.getElementById('ippBody').innerHTML=h;
 document.getElementById('ippEditBtn').style.display='';
 document.getElementById('ippSaveBtn').style.display='none';
@@ -13074,6 +14975,20 @@ const j=await r.json();
 if(!j.success){toast(j.error||'Delete failed');return}
 toast('Deleted');closeIpp();loadIraqPublicPortal();
 }
+async function ippSaveNvFields(){
+if(!_ippCur){toast('Open a record first');return}
+const n1=document.getElementById('ipp_nv_number');
+const n2=document.getElementById('ipp_nv_date');
+const n3=document.getElementById('ipp_nv_serial');
+if(!n1||!n2||!n3){toast('NV fields not found');return}
+const payload={id:_ippCur.id,source:'public',note_verbal_number:n1.value.trim(),note_verbal_date:n2.value.trim(),mofa_approval_serial:n3.value.trim()};
+try{
+const r=await fetch('/api/iraq-save-nv-fields',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const j=await r.json();
+if(j.success){toast('Note verbal & serial saved');ippView(_ippCur.id);}
+else{toast(j.error||'Save failed');}
+}catch(e){toast('Error: '+e.message);}
+}
 function closeIpp(){document.getElementById('ippMo').classList.remove('show');_ippCur=null;}
 
 // ROLE-BASED ACCESS CONTROL
@@ -13098,12 +15013,18 @@ return;
 if(USER_ROLE==='viewer'){
 document.querySelectorAll('.nav button').forEach(b=>{
 const tab=b.textContent.trim();
-if(['New Registration','CSV Import','MOFA Export','Admin','MOFA Approval PDF','Iraq Public (MOFA KW)'].includes(tab)){b.style.display='none'}});
+if(['New Registration','CSV Import','MOFA Export','Admin','MOFA Approval PDF','Iraq Public (MOFA KW)','Fee Reporting'].includes(tab)){b.style.display='none'}});
 document.querySelectorAll('.btn-d').forEach(b=>b.style.display='none');// hide delete buttons
 }
 // Operator: same as admin for daily ops, but user management / SMTP / backups / audit are data-admin-only (hidden below)
 if(USER_ROLE==='operator'){
 document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
+document.querySelectorAll('[data-fee-report-nav]').forEach(el=>el.style.display='none');
+}
+if(USER_ROLE==='operator_special'){
+document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
+const adm=[...document.querySelectorAll('.nav button')].find(b=>(b.textContent||'').trim()==='Admin');
+if(adm)adm.style.display='none';
 }
 // Admin: full access (nothing hidden)
 }
@@ -13171,7 +15092,7 @@ document.getElementById('iraqBatchStatus').value=d.status||'Pending';
 document.getElementById('iraqMofaRef').value=d.mofa_reference||'';
 document.getElementById('iraqMofaSentDate').value=d.mofa_sent_date||'';
 document.getElementById('iraqAdminRemarks').value=d.admin_remarks||'';
-let ah='<tr><th>#</th><th>Full Name</th><th>Passport</th><th>Nationality</th><th>DOB</th><th>Gender</th><th>Employer</th><th>Mobile</th><th>Email</th><th>Travel Date</th><th>Location</th><th>Batch Status</th><th>KW transit</th><th>MOFA KSA</th><th>Movement</th></tr>';
+let ah='<tr><th>#</th><th>Full Name</th><th>Passport</th><th>Nationality</th><th>DOB</th><th>Gender</th><th>Employer</th><th>Mobile</th><th>Email</th><th>Travel Date</th><th>Location</th><th>Batch Status</th><th>KW transit</th><th>MOFA KSA</th><th>Movement</th><th>NV# / Date / Serial</th><th>Letter</th></tr>';
 (d.applicants||[]).forEach((a,i)=>{
 const ast=a.individual_status==='Pending'?'bdg-pen':a.individual_status==='Sent to MOFA Kuwait'?'bdg-vis':'bdg-dep';
 const ksa=a.ksa_mofa_status||'Pending';
@@ -13189,7 +15110,22 @@ ah+=`<option value="Rejected"${ksa==='Rejected'?' selected':''}>Rejected</option
 ah+=`<td><select onchange="updateIraqApplicantOps(${a.id},{movement_status:this.value})" style="padding:3px 6px;font-size:.8em;border:1px solid #ccc;border-radius:4px">`;
 ah+=`<option value=""${mov===''?' selected':''}>\u2014</option>`;
 ah+=`<option value="waiting_iraq"${mov==='waiting_iraq'?' selected':''}>Waiting travel (Iraq)</option>`;
-ah+=`<option value="waiting_kw"${mov==='waiting_kw'?' selected':''}>Waiting transit (Kuwait)</option></select></td></tr>`;
+ah+=`<option value="waiting_kw"${mov==='waiting_kw'?' selected':''}>Waiting transit (Kuwait)</option></select></td>`;
+// NV / Serial / Print columns
+const nvQ=(s)=>String(s==null?'':s).replace(/"/g,'&quot;');
+ah+=`<td style="min-width:200px">`;
+ah+=`<input id="irq_nv_${a.id}" value="${nvQ(a.note_verbal_number)}" placeholder="NV #" style="width:100%;padding:3px 5px;font-size:.78em;border:1px solid #c5e1a5;border-radius:4px;margin-bottom:3px;box-sizing:border-box">`;
+ah+=`<input id="irq_nvd_${a.id}" value="${nvQ(a.note_verbal_date)}" placeholder="NV date" style="width:100%;padding:3px 5px;font-size:.78em;border:1px solid #c5e1a5;border-radius:4px;margin-bottom:3px;box-sizing:border-box">`;
+ah+=`<input id="irq_ser_${a.id}" value="${nvQ(a.mofa_approval_serial)}" placeholder="Serial" style="width:100%;padding:3px 5px;font-size:.78em;border:1px solid #c5e1a5;border-radius:4px;margin-bottom:3px;box-sizing:border-box">`;
+ah+=`<button type="button" class="btn btn-p" style="padding:2px 8px;font-size:.72em" onclick="iraqAppSaveNv(${a.id})">Save NV</button>`;
+ah+=`</td>`;
+const appNvOk=String(a.full_name||'').trim()!==''&&String(a.passport_number||'').trim()!==''&&String(a.note_verbal_number||'').trim()!==''&&String(a.note_verbal_date||'').trim()!==''&&String(a.mofa_approval_serial||'').trim()!=='';
+const appFeeClear=(String(a.fee_status||'pending').toLowerCase()==='paid'||String(a.fee_status||'pending').toLowerCase()==='waived');
+ah+=`<td><button type="button" class="btn btn-p" style="padding:3px 10px;font-size:.75em" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)window.open('/print/iraq-embassy-letter?source=applicant&id=${a.id}','_blank')">&#128196; Print</button>`;
+if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn btn-i" style="padding:2px 8px;font-size:.68em;margin-top:3px" onclick="window.open('/note-verbal-file?upload_id=${a.linked_nv_upload_id}','_blank')">&#128206; Note Verbal</button>`;
+if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#455a64;color:#fff" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)window.open('/print/iraq-embassy-letter-with-note-verbal?source=applicant&id=${a.id}','_blank')">&#129534; Print + NV</button>`;
+if(a.embassy_letter_print_count>0) ah+=`<br><span style="font-size:.68em;color:#999">Printed: ${a.embassy_letter_print_count}x</span>`;
+ah+=`</td></tr>`;
 });
 document.getElementById('iraqApplicantsTbl').innerHTML=ah;
 document.getElementById('iraqDetailModal').classList.add('show');
@@ -13200,6 +15136,20 @@ const r=await fetch('/api/iraq-visa-update',{method:'POST',headers:{'Content-Typ
 const d=await r.json();
 if(d.success){toast('Updated');loadIraqStats();if(_iraqCurrentBatchId)openIraqDetail(_iraqCurrentBatchId);}
 else{toast('Error: '+(d.error||'Unknown'));}
+}
+
+async function iraqAppSaveNv(appId){
+const n1=document.getElementById('irq_nv_'+appId);
+const n2=document.getElementById('irq_nvd_'+appId);
+const n3=document.getElementById('irq_ser_'+appId);
+if(!n1||!n2||!n3){toast('Fields not found');return}
+const payload={id:appId,source:'applicant',note_verbal_number:n1.value.trim(),note_verbal_date:n2.value.trim(),mofa_approval_serial:n3.value.trim()};
+try{
+const r=await fetch('/api/iraq-save-nv-fields',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const d=await r.json();
+if(d.success){toast('NV fields saved for applicant #'+appId);if(_iraqCurrentBatchId)openIraqDetail(_iraqCurrentBatchId);}
+else{toast(d.error||'Save failed');}
+}catch(e){toast('Error: '+e.message);}
 }
 
 async function saveIraqBatchUpdate(){
