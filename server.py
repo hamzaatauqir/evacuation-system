@@ -9203,15 +9203,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 user = self.require_auth()
                 if not user: return
+                source = (params.get('source') or '').strip()
+                try:
+                    source_id = int(str(params.get('id', 0) or 0).strip())
+                except Exception:
+                    source_id = 0
                 try:
                     upload_id = int(str(params.get('upload_id', 0) or 0).strip())
                 except Exception:
                     upload_id = 0
                 db = get_db()
                 try:
+                    # If called from a record context, enforce fee-cleared gate and link consistency.
+                    if source in ('evacuees', 'iraq_applicants', 'iraq_public_submissions') and source_id > 0:
+                        if source == 'evacuees':
+                            rec = db.execute("SELECT * FROM evacuees WHERE id = ?", [source_id]).fetchone()
+                        elif source == 'iraq_applicants':
+                            rec = db.execute("SELECT * FROM iraq_applicants WHERE id = ?", [source_id]).fetchone()
+                        else:
+                            rec = db.execute("SELECT * FROM iraq_public_submissions WHERE id = ?", [source_id]).fetchone()
+                        if not rec:
+                            self.send_html('<p>Record not found.</p>', 404); return
+                        if not _fee_is_cleared(dict(rec)):
+                            self.send_html('<p>Fee must be paid or waived before printing.</p>', 403); return
+                        ln = _nv_best_link_for_record(db, source, source_id)
+                        if not ln:
+                            self.send_html('<p>No confirmed linked Note Verbal found for this record.</p>', 404); return
+                        linked_upload_id = int(ln.get('upload_id') or 0)
+                        if upload_id > 0 and linked_upload_id > 0 and upload_id != linked_upload_id:
+                            self.send_html('<p>Requested Note Verbal does not match the linked record.</p>', 400); return
+                        upload_id = linked_upload_id
                     # Fallback resolver for callers that only provide record source/id.
                     if upload_id <= 0:
-                        source = (params.get('source') or '').strip()
                         try:
                             rid = int(str(params.get('id', 0) or 0).strip())
                         except Exception:
@@ -14487,8 +14510,8 @@ html+=sec('Embassy Letter Approval',[
 html+=`<div style="margin:12px 0;padding:14px;background:#f8fbf4;border-radius:10px;border:1px solid #cfe3ba">
 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
 <button type="button" class="btn btn-p" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter?id='+viewRec.id,'_blank')">\ud83d\udcc4 Print Embassy Letter</button>
-${r.linked_nv_upload_id?`<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open('/note-verbal-file?upload_id=${r.linked_nv_upload_id}','_blank')">\ud83d\udcce Print Linked Note Verbal</button>`:''}
-${r.linked_nv_upload_id?`<button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)openCombinedLetterWithNV('/print/embassy-letter?id='+viewRec.id, ${Number(r.linked_nv_upload_id||0)})">\ud83e\uddfe Print Letter + Full Note Verbal PDF</button>`:''}
+${r.linked_nv_upload_id?`<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" ${feeCleared?'':'disabled title="Fee must be paid or waived before printing."'} onclick="if(!this.disabled)window.open('/note-verbal-file?upload_id=${r.linked_nv_upload_id}&source=evacuees&id='+viewRec.id,'_blank')">\ud83d\udcce Print Linked Note Verbal</button>`:''}
+${r.linked_nv_upload_id?`<button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)openCombinedLetterWithNV('/print/embassy-letter?id='+viewRec.id, ${Number(r.linked_nv_upload_id||0)}, 'evacuees', viewRec.id)">\ud83e\uddfe Print Letter + Full Note Verbal PDF</button>`:''}
 </div>
 <div style="font-size:.8em;color:#558b2f;margin-top:8px">${lr?'Ready to print.':tip}</div></div>`;
 })();
@@ -14638,11 +14661,13 @@ await openView(viewRec.id);
 }else{toast('Error: '+(res?.error||'Save failed'))}
 }catch(err){toast('Error: '+err.message)}
 }
-function openCombinedLetterWithNV(letterUrl, uploadId){
+function openCombinedLetterWithNV(letterUrl, uploadId, source, recordId){
 const uid=Number(uploadId||0);
 if(!uid){toast('No linked Note Verbal PDF found for this record');return;}
 const w1=window.open(letterUrl,'_blank');
-const w2=window.open('/note-verbal-file?upload_id='+uid,'_blank');
+let nvUrl='/note-verbal-file?upload_id='+uid;
+if(source&&recordId){nvUrl+='&source='+encodeURIComponent(String(source))+'&id='+encodeURIComponent(String(recordId))}
+const w2=window.open(nvUrl,'_blank');
 if(!w1||!w2)toast('Popup blocked. Please allow popups for this site.');
 }
 async function collectFeeFromView(){
@@ -15825,7 +15850,7 @@ h+=x.linked_nv_upload_id?('<div style="font-size:.8em;color:#1565c0;margin-botto
 h+='<div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Letter issued:</strong> '+ippLtrIssued+' &nbsp;|&nbsp; <strong>Print count:</strong> '+ippPrintCnt+'</div>';
 h+='<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">';
 h+='<button type="button" class="btn btn-p" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)window.open(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,\'_blank\')">&#128196; Print Iraq Embassy Letter</button>';
-h+=x.linked_nv_upload_id?('<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open(\'/note-verbal-file?upload_id='+x.linked_nv_upload_id+'\',\'_blank\')">&#128206; Print Linked Note Verbal</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)openCombinedLetterWithNV(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,'+Number(x.linked_nv_upload_id||0)+')">&#129534; Print Letter + Full Note Verbal PDF</button>'):'';
+h+=x.linked_nv_upload_id?('<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" '+(ippFeeClear?'':'disabled title="Fee must be paid or waived before printing."')+' onclick="if(!this.disabled)window.open(\'/note-verbal-file?upload_id='+x.linked_nv_upload_id+'&source=iraq_public_submissions&id=\'+_ippCur.id,\'_blank\')">&#128206; Print Linked Note Verbal</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)openCombinedLetterWithNV(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,'+Number(x.linked_nv_upload_id||0)+',\'iraq_public_submissions\',_ippCur.id)">&#129534; Print Letter + Full Note Verbal PDF</button>'):'';
 h+='</div><div style="font-size:.8em;color:#558b2f;margin-top:8px">'+(ippNvReady?'Ready to print.':ippLtrTip)+'</div>';
 h+='</div>';
 document.getElementById('ippBody').innerHTML=h;
@@ -16013,8 +16038,8 @@ ah+=`</td>`;
 const appNvOk=String(a.full_name||'').trim()!==''&&String(a.passport_number||'').trim()!==''&&String(a.note_verbal_number||'').trim()!==''&&String(a.note_verbal_date||'').trim()!==''&&String(a.mofa_approval_serial||'').trim()!=='';
 const appFeeClear=(String(a.fee_status||'pending').toLowerCase()==='paid'||String(a.fee_status||'pending').toLowerCase()==='waived');
 ah+=`<td><button type="button" class="btn btn-p" style="padding:3px 10px;font-size:.75em" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)window.open('/print/iraq-embassy-letter?source=applicant&id=${a.id}','_blank')">&#128196; Print</button>`;
-if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn btn-i" style="padding:2px 8px;font-size:.68em;margin-top:3px" onclick="window.open('/note-verbal-file?upload_id=${a.linked_nv_upload_id}','_blank')">&#128206; Note Verbal</button>`;
-if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#455a64;color:#fff" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)openCombinedLetterWithNV('/print/iraq-embassy-letter?source=applicant&id=${a.id}', ${Number(a.linked_nv_upload_id||0)})">&#129534; Print + NV</button>`;
+if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn btn-i" style="padding:2px 8px;font-size:.68em;margin-top:3px" ${appFeeClear?'':'disabled title="Fee must be paid or waived before printing."'} onclick="if(!this.disabled)window.open('/note-verbal-file?upload_id=${a.linked_nv_upload_id}&source=iraq_applicants&id=${a.id}','_blank')">&#128206; Note Verbal</button>`;
+if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#455a64;color:#fff" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)openCombinedLetterWithNV('/print/iraq-embassy-letter?source=applicant&id=${a.id}', ${Number(a.linked_nv_upload_id||0)}, 'iraq_applicants', ${a.id})">&#129534; Print + NV</button>`;
 if(a.embassy_letter_print_count>0) ah+=`<br><span style="font-size:.68em;color:#999">Printed: ${a.embassy_letter_print_count}x</span>`;
 ah+=`</td></tr>`;
 });
