@@ -7689,6 +7689,10 @@ def generate_embassy_letter_html(record):
     dep_date = esc(record.get('departure_date', ''))
     dest_country = esc(record.get('destination_country', ''))
     issue_date = esc(datetime.now().strftime('%d %B %Y'))
+    rec_id = int(record.get('id') or 0)
+    tracking_ref = f"PKE-{str(rec_id).zfill(4)}" if rec_id > 0 else "PKE-UNKNOWN"
+    qr_payload = f"Embassy Letter Verification | Ref:{tracking_ref} | Passport:{record.get('passport','')} | NV:{record.get('note_verbal_number','')} | Serial:{record.get('mofa_approval_serial','')}"
+    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=140x140&data={quote(qr_payload)}"
 
     gender = (record.get('gender') or '').strip().lower()
     prefix = 'Ms.' if gender in ('female', 'f') else 'Mr.'
@@ -7755,6 +7759,9 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
 .footer-wrap {{ page-break-inside: avoid; padding-top: 4px; }}
 .footer-rule {{ border: none; border-top: 1px solid #222; margin: 0 auto 6px; width: 90%; }}
 .footer-contact {{ text-align: center; font-size: 8pt; color: #333; line-height: 1.45; }}
+.verify-qr-wrap {{ display:flex; justify-content:center; margin: 2px 0 6px; }}
+.verify-qr-card {{ text-align:center; border:1px solid #d8d8d8; border-radius:8px; padding:4px; background:#fff; }}
+.verify-qr-card img {{ width:72px; height:72px; display:block; }}
 @media print {{
   body {{ background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
   .doc {{ max-width: none; }}
@@ -7809,6 +7816,11 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
       </div>
     </div>
     <div class="sheet-foot">
+      <div class="verify-qr-wrap">
+        <div class="verify-qr-card">
+          <img src="{qr_url}" alt="Verification QR">
+        </div>
+      </div>
       <div class="issue-note">Issued electronically by Embassy of Pakistan, Kuwait</div>
       <div class="computer-gen">This is a computer generated document and does not require signature.</div>
       {footer_html}
@@ -7852,6 +7864,11 @@ body {{ font-family: Arial, Helvetica, 'Segoe UI', sans-serif; font-size: 10pt; 
       </div>
     </div>
     <div class="sheet-foot" dir="rtl">
+      <div class="verify-qr-wrap">
+        <div class="verify-qr-card">
+          <img src="{qr_url}" alt="Verification QR">
+        </div>
+      </div>
       <div class="issue-note">صادرة إلكترونياً عن سفارة جمهورية باكستان الإسلامية لدى دولة الكويت</div>
       <div class="computer-gen">هذه وثيقة صادرة آلياً من النظام ولا تتطلب توقيعاً.</div>
       {footer_html}
