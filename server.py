@@ -3192,6 +3192,8 @@ def _nv_auto_link_upload(db, upload_id):
 
 def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, max_seconds=18):
     """Extract text from pages [pages_done+1 .. total_pages] in a time-bounded chunk.
+    Uses pdftotext (system binary) as primary method — memory-efficient even for 400+ page PDFs.
+    Falls back to pypdf per-page only if pdftotext unavailable.
     Appends text to extracted_text in DB and updates pages_processed / pages_ocrd.
     Returns (new_pages_done, new_pages_ocrd, ocr_status_hint, error_msg)."""
     import time as _time
@@ -3206,22 +3208,56 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
     cur_page = pages_done
     error_msg = ''
 
-    # Pre-extract text layers (cheap) for remaining pages
+    # --- Strategy: extract all page text via pdftotext ONCE (it's a system binary,
+    # handles large PDFs efficiently without Python memory pressure) ---
     per_page = {}
-    try:
-        pypdf_pages = _extract_pdf_text_per_page(pdf_path) or []
-        for item in pypdf_pages:
-            if isinstance(item, tuple) and len(item) >= 2:
-                try:
-                    pno = int(item[0])
-                except Exception:
-                    continue
-                per_page[pno] = str(item[1] or '').strip()
-        if not per_page:
-            for pno, ptxt in (_extract_pdf_text_via_pdftotext(pdf_path) or []):
-                per_page[int(pno)] = str(ptxt or '').strip()
-    except Exception as e:
-        error_msg = f'text_layer_extract: {type(e).__name__}: {str(e)[:100]}'
+    pdftotext_exe = shutil.which('pdftotext')
+    if pdftotext_exe and not per_page:
+        try:
+            print(f"[NV Extract Chunk] using pdftotext for upload={upload_id}", flush=True)
+            r = subprocess.run(
+                [pdftotext_exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
+                capture_output=True, text=True, timeout=180, check=False)
+            if r.returncode == 0 and r.stdout:
+                parts = r.stdout.split('\f')
+                for i, p in enumerate(parts):
+                    per_page[i + 1] = p.strip()
+                print(f"[NV Extract Chunk] pdftotext got {len(per_page)} pages of text", flush=True)
+        except Exception as e:
+            print(f"[NV Extract Chunk] pdftotext error: {e}", flush=True)
+
+    # Fallback: pypdf per-page (only if pdftotext gave nothing)
+    if not per_page:
+        try:
+            if _PYPDF_AVAILABLE and PdfReader:
+                print(f"[NV Extract Chunk] falling back to pypdf for upload={upload_id}", flush=True)
+                with open(pdf_path, 'rb') as f:
+                    reader = PdfReader(f)
+                    for i, page in enumerate(reader.pages):
+                        if _time.time() - start > max_seconds:
+                            break
+                        pno = i + 1
+                        if pno <= pages_done:
+                            continue  # skip already-done pages
+                        t = ''
+                        try:
+                            fn = getattr(page, 'extract_text', None)
+                            if fn:
+                                try:
+                                    t = fn(extraction_mode='layout') or ''
+                                except TypeError:
+                                    t = ''
+                                if not (t and t.strip()):
+                                    t = fn() or ''
+                        except Exception:
+                            t = ''
+                        per_page[pno] = (t or '').strip()
+        except Exception as e:
+            error_msg = f'pypdf_extract: {type(e).__name__}: {str(e)[:100]}'
+            print(f"[NV Extract Chunk] {error_msg}", flush=True)
+
+    if not per_page and not error_msg:
+        error_msg = 'No text extraction tool available (pdftotext not found, pypdf unavailable)'
         print(f"[NV Extract Chunk] {error_msg}", flush=True)
 
     for pno in range(pages_done + 1, total_pages + 1):
@@ -3232,14 +3268,14 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
             new_texts.append(ptxt)
             cur_page = pno
             continue
-        # OCR fallback for this page
+        # OCR fallback for this page (only if deps available)
         if not ocr_ok or pages_ocrd >= max_ocr_pages:
             cur_page = pno
             continue
         try:
             im = _pdf_page_to_image(pdf_path, pno)
             if im is not None:
-                otxt = str(_ocr_image(_prepare_image_for_ocr(im)) or '').strip()
+                otxt = str(_ocr_image(_preprocess_image(im)) or '').strip()
                 if otxt:
                     new_texts.append(otxt)
                 pages_ocrd += 1
@@ -3262,7 +3298,8 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
     ocr_hint = 'pdf_text'
     if pages_ocrd > 0:
         ocr_hint = 'ocr'
-    if not ocr_ok and any(not str(per_page.get(p) or '').strip() for p in range(1, total_pages + 1)):
+    has_empty_pages = any(not str(per_page.get(p) or '').strip() for p in range(pages_done + 1, cur_page + 1))
+    if not ocr_ok and has_empty_pages:
         ocr_hint = 'partial_success' if accumulated_text.strip() else 'ocr_unavailable'
 
     # Persist progress
@@ -3271,7 +3308,7 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
                   WHERE id=?""",
                [accumulated_text, cur_page, pages_ocrd, ocr_hint, upload_id])
     db.commit()
-    print(f"[NV Extract Chunk] upload={upload_id} pages_done={cur_page}/{total_pages} ocrd={pages_ocrd} elapsed={_time.time()-start:.1f}s", flush=True)
+    print(f"[NV Extract Chunk] upload={upload_id} pages_done={cur_page}/{total_pages} ocrd={pages_ocrd} text_len={len(accumulated_text)} elapsed={_time.time()-start:.1f}s", flush=True)
     return cur_page, pages_ocrd, ocr_hint, error_msg
 
 
@@ -3281,6 +3318,11 @@ def process_one_pending_nv_upload(db, max_seconds=20):
     Returns dict with upload_id and progress info, or None if nothing to do."""
     import time as _time
     start = _time.time()
+
+    # Diagnostic: log available extraction tools (once per call, cheap)
+    _pdftotext_ok = bool(shutil.which('pdftotext'))
+    _pdfinfo_ok = bool(shutil.which('pdfinfo'))
+    print(f"[NV JobRunner] deps: pypdf={_PYPDF_AVAILABLE} pdftotext={_pdftotext_ok} pdfinfo={_pdfinfo_ok} ocr={_OCR_AVAILABLE} pdf2img={_PDF2IMG_AVAILABLE}", flush=True)
 
     # Pick the oldest incomplete upload
     row = db.execute("""SELECT * FROM note_verbal_uploads
@@ -6449,7 +6491,7 @@ def _extract_full_pdf_text_with_fallback(pdf_path):
                 continue
             im = _pdf_page_to_image(pdf_path, pno)
             if im is not None:
-                otxt = str(_ocr_image(_prepare_image_for_ocr(im)) or '').strip()
+                otxt = str(_ocr_image(_preprocess_image(im)) or '').strip()
                 if otxt:
                     text_pages.append(otxt)
                 meta['pages_ocrd'] += 1
@@ -6589,13 +6631,44 @@ def _pdf_page_to_image(pdf_path, page_no):
         return None
 
 def _pdf_page_count(pdf_path):
-    """Best-effort page count, lightweight and safe."""
+    """Best-effort page count with multiple fallbacks (Render-safe)."""
+    # Method 1: pdfinfo (system binary, very lightweight — no Python memory pressure)
+    try:
+        pdfinfo_exe = shutil.which('pdfinfo')
+        if pdfinfo_exe:
+            r = subprocess.run([pdfinfo_exe, str(pdf_path)], capture_output=True, text=True, timeout=30, check=False)
+            if r.returncode == 0:
+                for line in (r.stdout or '').splitlines():
+                    if line.lower().startswith('pages:'):
+                        n = int(line.split(':', 1)[1].strip())
+                        if n > 0:
+                            print(f"[NV Extract] page-count via pdfinfo: {n}", flush=True)
+                            return n
+    except Exception as e:
+        print(f'[NV Extract] pdfinfo page-count error: {e}', flush=True)
+    # Method 2: pdftotext page-form-feed count (parses PDF natively, low memory)
+    try:
+        pdftotext_exe = shutil.which('pdftotext')
+        if pdftotext_exe:
+            r = subprocess.run([pdftotext_exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
+                               capture_output=True, text=True, timeout=180, check=False)
+            if r.returncode == 0 and r.stdout:
+                n = r.stdout.count('\f') + 1
+                if n > 0:
+                    print(f"[NV Extract] page-count via pdftotext: {n}", flush=True)
+                    return n
+    except Exception as e:
+        print(f'[NV Extract] pdftotext page-count error: {e}', flush=True)
+    # Method 3: pypdf (loads whole file into Python — may OOM on large PDFs on Render)
     try:
         if _PYPDF_AVAILABLE and PdfReader:
             with open(pdf_path, 'rb') as f:
-                return len(PdfReader(f).pages)
+                n = len(PdfReader(f).pages)
+                if n > 0:
+                    print(f"[NV Extract] page-count via pypdf: {n}", flush=True)
+                    return n
     except Exception as e:
-        print(f'[NV Extract] page-count error: {e}', flush=True)
+        print(f'[NV Extract] pypdf page-count error: {e}', flush=True)
     return 0
 
 def _preprocess_image(img):
