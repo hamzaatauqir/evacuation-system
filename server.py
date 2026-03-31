@@ -3129,6 +3129,9 @@ def _nv_auto_link_upload(db, upload_id):
     linked = 0
     suggested = 0
     processed = 0
+    chunk_size = 20  # Render-friendly batching (same style as approval chunking)
+    db.execute("UPDATE note_verbal_uploads SET processing_status='processing' WHERE id=?", [upload_id])
+    db.commit()
     for c in candidates:
         passport = (c.get('passport_number') or '').strip().upper()
         full_name = (c.get('full_name') or '').strip()
@@ -3170,10 +3173,13 @@ def _nv_auto_link_upload(db, upload_id):
         if status == 'confirmed': linked += 1
         else: suggested += 1
         processed += 1
-        if processed % 250 == 0:
+        if processed % chunk_size == 0:
             db.execute("UPDATE note_verbal_uploads SET confirmed_count=?, suggested_count=? WHERE id=?",
                        [linked, suggested, upload_id])
             db.commit()
+    db.execute("UPDATE note_verbal_uploads SET confirmed_count=?, suggested_count=? WHERE id=?",
+               [linked, suggested, upload_id])
+    db.commit()
     return {'linked': linked, 'suggested': suggested}
 
 def _nv_auto_reprocess_upload_if_needed(db, upload_row):
