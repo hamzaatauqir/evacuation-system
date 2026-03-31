@@ -3208,13 +3208,12 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
     cur_page = pages_done
     error_msg = ''
 
-    # --- Strategy: extract all page text via pdftotext ONCE (it's a system binary,
-    # handles large PDFs efficiently without Python memory pressure) ---
+    # --- Strategy 1: pdftotext (system binary, memory-efficient for large PDFs) ---
     per_page = {}
     pdftotext_exe = shutil.which('pdftotext')
-    if pdftotext_exe and not per_page:
+    if pdftotext_exe:
         try:
-            print(f"[NV Extract Chunk] using pdftotext for upload={upload_id}", flush=True)
+            print(f"[NV Extract Chunk] trying pdftotext for upload={upload_id}", flush=True)
             r = subprocess.run(
                 [pdftotext_exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
                 capture_output=True, text=True, timeout=180, check=False)
@@ -3222,19 +3221,24 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
                 parts = r.stdout.split('\f')
                 for i, p in enumerate(parts):
                     per_page[i + 1] = p.strip()
-                print(f"[NV Extract Chunk] pdftotext got {len(per_page)} pages of text", flush=True)
+                usable_pages = sum(1 for v in per_page.values() if v)
+                print(f"[NV Extract Chunk] pdftotext returned {len(per_page)} pages, {usable_pages} with text", flush=True)
+                if usable_pages == 0:
+                    per_page = {}  # pdftotext ran but got no actual text — clear and try pypdf
         except Exception as e:
             print(f"[NV Extract Chunk] pdftotext error: {e}", flush=True)
 
-    # Fallback: pypdf per-page (only if pdftotext gave nothing)
-    if not per_page:
+    # --- Strategy 2: pypdf per-page (if pdftotext gave no usable text) ---
+    if not any(v for v in per_page.values()):
+        per_page = {}  # ensure clean slate
         try:
             if _PYPDF_AVAILABLE and PdfReader:
-                print(f"[NV Extract Chunk] falling back to pypdf for upload={upload_id}", flush=True)
+                print(f"[NV Extract Chunk] trying pypdf for upload={upload_id}", flush=True)
                 with open(pdf_path, 'rb') as f:
                     reader = PdfReader(f)
                     for i, page in enumerate(reader.pages):
                         if _time.time() - start > max_seconds:
+                            print(f"[NV Extract Chunk] pypdf time limit reached at page {i+1}", flush=True)
                             break
                         pno = i + 1
                         if pno <= pages_done:
@@ -3252,6 +3256,8 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
                         except Exception:
                             t = ''
                         per_page[pno] = (t or '').strip()
+                usable_pypdf = sum(1 for v in per_page.values() if v)
+                print(f"[NV Extract Chunk] pypdf returned {len(per_page)} pages, {usable_pypdf} with text", flush=True)
         except Exception as e:
             error_msg = f'pypdf_extract: {type(e).__name__}: {str(e)[:100]}'
             print(f"[NV Extract Chunk] {error_msg}", flush=True)
@@ -6424,26 +6430,63 @@ def _extract_pdf_text_via_pdftotext(pdf_path):
     exe = shutil.which('pdftotext')
     if not exe:
         return []
+    def _parse_stdout_to_pages(stdout_text):
+        txt = (stdout_text or '').strip()
+        if not txt:
+            return []
+        parts = txt.split('\f')
+        if len(parts) > 1:
+            out = []
+            for i, p in enumerate(parts, start=1):
+                pp = (p or '').strip()
+                if pp:
+                    out.append((i, pp))
+            return out
+        return [(1, txt)]
+
+    # Fast path: whole-file extraction (works for many PDFs)
     try:
         r = subprocess.run(
             [exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=420,
             check=False,
         )
-        if r.returncode != 0:
-            return []
-        txt = (r.stdout or '').strip()
-        if not txt:
-            return []
-        parts = txt.split('\f')
-        if len(parts) > 1:
-            return [(i + 1, p) for i, p in enumerate(parts)]
-        return [(1, txt)]
+        if r.returncode == 0:
+            pages = _parse_stdout_to_pages(r.stdout or '')
+            if pages:
+                return pages
     except Exception as e:
-        print(f'[ApprovalPDF] pdftotext error: {e}', flush=True)
+        print(f'[ApprovalPDF] pdftotext full-file path error: {e}', flush=True)
+
+    # Render-safe fallback: chunk page ranges so large PDFs do not fail as one giant call
+    page_count = _pdf_page_count(pdf_path)
+    if page_count <= 0:
         return []
+    out_pages = []
+    chunk = 40
+    for start in range(1, page_count + 1, chunk):
+        end = min(start + chunk - 1, page_count)
+        try:
+            rr = subprocess.run(
+                [exe, '-layout', '-enc', 'UTF-8', '-f', str(start), '-l', str(end), str(pdf_path), '-'],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+            if rr.returncode != 0:
+                continue
+            chunk_pages = _parse_stdout_to_pages(rr.stdout or '')
+            for local_idx, ptxt in chunk_pages:
+                if ptxt:
+                    out_pages.append((start + local_idx - 1, ptxt))
+        except Exception as ee:
+            print(f'[ApprovalPDF] pdftotext chunk {start}-{end} error: {ee}', flush=True)
+            continue
+    out_pages.sort(key=lambda x: x[0])
+    return out_pages
 
 def _extract_full_pdf_text_with_fallback(pdf_path):
     """
@@ -9197,6 +9240,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception as e:
                 self.send_html(f"<p>Unable to open linked Note Verbal PDF.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
+
+        # ── Serve Approval PDF file (source PDF linked to matched records) ──
+        elif path == '/approval-pdf-file':
+            try:
+                user = self.require_auth()
+                if not user: return
+                batch_id = (params.get('batch_id') or '').strip()
+                # Fallback: resolve from record id
+                if not batch_id:
+                    try:
+                        rid = int(str(params.get('id', 0) or 0).strip())
+                    except Exception:
+                        rid = 0
+                    if rid > 0:
+                        db = get_db()
+                        try:
+                            ev = db.execute("SELECT approval_batch_id FROM evacuees WHERE id = ?", [rid]).fetchone()
+                        finally:
+                            db.close()
+                        if ev and ev['approval_batch_id']:
+                            batch_id = ev['approval_batch_id']
+                if not batch_id:
+                    self.send_html('<p>No linked approval PDF found for this record.</p>', 404); return
+                db = get_db()
+                try:
+                    row = db.execute("SELECT filename, original_filename FROM approval_uploads WHERE batch_id = ?", [batch_id]).fetchone()
+                finally:
+                    db.close()
+                if not row:
+                    self.send_html('<p>Approval PDF batch not found.</p>', 404); return
+                fp = APPROVAL_UPLOADS_DIR / row['filename']
+                if not fp.exists():
+                    self.send_html('<p>Stored approval PDF file is missing on server.</p>', 404); return
+                body = fp.read_bytes()
+                safe_filename = re.sub(r'[\r\n"]+', '_', str(row['original_filename'] or row['filename'] or 'approval.pdf'))
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/pdf')
+                self.send_header('Content-Disposition', f'inline; filename="{safe_filename}"')
+                self.send_header('Content-Length', len(body))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_html(f"<p>Unable to open approval PDF.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
+
         elif path == '/api/backups':
             user = self.require_auth()
             if not user: return
