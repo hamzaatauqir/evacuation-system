@@ -3353,16 +3353,61 @@ def api_nv_upload(file_data, original_filename, data, user):
         ])
         uid = cur.lastrowid
         db.commit()
+        size_bytes = len(file_data or b'')
+        inline_limit = 8 * 1024 * 1024  # process small/normal PDFs inline for reliability on Render
+        if size_bytes <= inline_limit:
+            # Keep small uploads fully synchronous so counts are immediately available.
+            db.close()
+            _nv_process_upload_by_id(uid, user)
+            db2 = get_db()
+            try:
+                r = db2.execute("""SELECT processing_status, ocr_status, confirmed_count, suggested_count,
+                                          total_pages, pages_processed, pages_ocrd, parse_error
+                                   FROM note_verbal_uploads WHERE id=?""", [uid]).fetchone()
+                if not r:
+                    return {'success': True, 'upload_id': uid, 'queued': False, 'processing_status': 'processed'}
+                rr = dict(r)
+                return {
+                    'success': True,
+                    'upload_id': uid,
+                    'queued': False,
+                    'processing_status': rr.get('processing_status') or 'processed',
+                    'ocr_status': rr.get('ocr_status') or '',
+                    'linked': int(rr.get('confirmed_count') or 0),
+                    'suggested': int(rr.get('suggested_count') or 0),
+                    'total_pages': int(rr.get('total_pages') or 0),
+                    'pages_processed': int(rr.get('pages_processed') or 0),
+                    'pages_ocrd': int(rr.get('pages_ocrd') or 0),
+                    'parse_error': rr.get('parse_error') or ''
+                }
+            finally:
+                db2.close()
+        # For larger files, keep background processing to avoid request timeout.
         t = threading.Thread(target=_nv_process_upload_by_id, args=(uid, user), daemon=True)
         t.start()
         return {'success': True, 'upload_id': uid, 'queued': True, 'ocr_status': 'queued',
-                'processing_status': 'queued', 'linked': 0, 'suggested': 0}
+                'processing_status': 'queued', 'linked': 0, 'suggested': 0,
+                'message': 'Large file queued for background processing. Refresh in a few seconds.'}
     finally:
         db.close()
 
 def api_nv_uploads(params):
     db = get_db()
     try:
+        # Render-safe fallback: if background thread did not run, process one queued small upload here.
+        qrow = db.execute("""SELECT id, file_path FROM note_verbal_uploads
+                             WHERE processing_status IN ('queued')
+                             ORDER BY id ASC LIMIT 1""").fetchone()
+        if qrow:
+            try:
+                fp = NOTE_VERBAL_UPLOADS_DIR / (qrow['file_path'] or '')
+                if fp.exists() and fp.stat().st_size <= (8 * 1024 * 1024):
+                    qid = int(qrow['id'])
+                    db.close()
+                    _nv_process_upload_by_id(qid, 'system_fallback')
+                    db = get_db()
+            except Exception as _qe:
+                print(f"[NV Uploads] queued fallback process skipped: {_qe}", flush=True)
         rows = [dict(r) for r in db.execute("""
             SELECT u.*,
               (SELECT COUNT(*) FROM note_verbal_record_links l WHERE l.upload_id=u.id AND l.link_status='confirmed') confirmed_links,
