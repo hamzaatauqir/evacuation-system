@@ -3159,7 +3159,11 @@ def api_nv_upload(file_data, original_filename, data, user):
     p = NOTE_VERBAL_UPLOADS_DIR / stored
     with open(p, 'wb') as f:
         f.write(file_data)
-    text, ocr_status = _extract_full_pdf_text_with_fallback(str(p))
+    try:
+        text, ocr_status = _extract_full_pdf_text_with_fallback(str(p))
+    except Exception as e:
+        print(f'[NV Upload] OCR/text extraction failed: {e}', flush=True)
+        text, ocr_status = '', f'extraction_error: {str(e)[:120]}'
     db = get_db()
     try:
         cur = db.execute("""
@@ -8833,14 +8837,73 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 db.close(); self.send_html('<p>Record not found.</p>', 404); return
             rec = dict(rec)
             ln = _nv_best_link_for_record(db, 'evacuees', rid)
-            db.close()
             if not is_letter_print_ready(rec):
+                db.close()
                 self.send_html('<p>Record is not print-ready.</p>', 400); return
+            # Update print count
+            db.execute("""UPDATE evacuees SET
+                embassy_letter_print_count = COALESCE(embassy_letter_print_count, 0) + 1,
+                embassy_letter_issued_at = CURRENT_TIMESTAMP,
+                embassy_letter_issued_by = ?,
+                updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                WHERE id = ?""", [user['user'], user['user'], rid])
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('embassy_letter_with_nv_printed', ?, ?, ?)",
+                       [rid, user['user'], json.dumps({'batch': rec.get('approval_batch_id') or '', 'has_nv': bool(ln)})])
+            db.commit()
+            db.close()
             letter = generate_embassy_letter_html(rec)
-            pdf_html = ''
             if ln:
-                pdf_html = f'<hr><h3>Linked Full Note Verbal PDF</h3><iframe src="/note-verbal-file?upload_id={int(ln.get("upload_id") or 0)}" style="width:100%;height:900px;border:1px solid #ccc"></iframe>'
-            self.send_html(f'<!DOCTYPE html><html><body>{letter}{pdf_html}</body></html>')
+                nv_upload_id = int(ln.get('upload_id') or 0)
+                nv_url = f'/note-verbal-file?upload_id={nv_upload_id}'
+                nv_filename = esc(ln.get('filename') or 'Note Verbal PDF')
+                nv_number = esc(ln.get('note_verbal_number') or '')
+                # Combined page: print the letter, then open the Note Verbal PDF
+                combined = f'''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Combined Print — Embassy Letter + Note Verbal</title>
+<style>
+body {{ margin:0; font-family: Arial, sans-serif; }}
+.toolbar {{ background:#006600; color:#fff; padding:12px 20px; text-align:center; }}
+.toolbar button {{ padding:10px 22px; font-size:12pt; cursor:pointer; border:none; border-radius:6px; margin:0 6px; font-weight:bold; }}
+.toolbar .btn-print {{ background:#fff; color:#006600; }}
+.toolbar .btn-nv {{ background:#1565c0; color:#fff; }}
+.toolbar .btn-close {{ background:transparent; color:#fff; border:1px solid #fff; }}
+.nv-info {{ background:#e3f2fd; padding:10px 20px; font-size:10pt; color:#0d47a1; border-bottom:1px solid #90caf9; }}
+.letter-frame {{ width:100%; border:none; min-height:90vh; }}
+.nv-embed {{ width:100%; height:85vh; border:none; margin-top:4px; }}
+@media print {{ .toolbar, .nv-info {{ display:none !important; }} }}
+</style></head><body>
+<div class="toolbar">
+  <button class="btn-print" onclick="printLetter()">1. Print Embassy Letter</button>
+  <button class="btn-nv" onclick="printNV()">2. Print Note Verbal PDF</button>
+  <button class="btn-print" onclick="printBoth()">3. Print Both (Letter + Note Verbal)</button>
+  <button class="btn-close" onclick="window.close()">Close</button>
+</div>
+<div class="nv-info">
+  Linked Note Verbal: <strong>{nv_filename}</strong>{(' — NV# ' + nv_number) if nv_number else ''}
+  &nbsp;|&nbsp; <a href="{nv_url}" target="_blank">Open PDF separately</a>
+</div>
+<div id="letterContainer"></div>
+<script>
+const letterUrl = '/print/embassy-letter?id={rid}';
+const nvUrl = '{nv_url}';
+// Load letter into container via fetch
+fetch(letterUrl).then(r=>r.text()).then(html=>{{
+  document.getElementById('letterContainer').innerHTML = html;
+}});
+function printLetter(){{ window.open(letterUrl, '_blank'); }}
+function printNV(){{ window.open(nvUrl, '_blank'); }}
+function printBoth(){{
+  // Open letter for printing
+  const lw = window.open(letterUrl, '_blank');
+  // After a short delay, open the Note Verbal PDF
+  setTimeout(function(){{ window.open(nvUrl, '_blank'); }}, 800);
+}}
+</script>
+</body></html>'''
+                self.send_html(combined)
+            else:
+                # No linked Note Verbal — just show the letter
+                self.send_html(letter)
 
         # Iraq Transit Visa — Embassy Letter Print
         elif path == '/print/iraq-embassy-letter':
@@ -8898,44 +8961,225 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 db.close(); self.send_html('<p>Record not found.</p>', 404); return
             rec = dict(rec)
             ln = _nv_best_link_for_record(db, s_table, rid)
-            db.close()
             if not is_iraq_letter_print_ready(rec):
+                db.close()
                 self.send_html('<p>Record is not print-ready.</p>', 400); return
-            letter = generate_iraq_embassy_letter_html(rec, source)
-            pdf_html = ''
+            table = 'iraq_applicants' if source == 'applicant' else 'iraq_public_submissions'
+            db.execute(f"""UPDATE {table} SET
+                embassy_letter_print_count = COALESCE(embassy_letter_print_count, 0) + 1,
+                embassy_letter_issued_at = CURRENT_TIMESTAMP,
+                embassy_letter_issued_by = ?
+                WHERE id = ?""", [user['user'], rid])
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                       [f'iraq_{source}_letter_with_nv_printed', rid, user['user'], json.dumps({'source': source, 'has_nv': bool(ln)})])
+            db.commit()
+            db.close()
+            letter_url_source = f'source={source}&' if source != 'public' else f'source={source}&'
             if ln:
-                pdf_html = f'<hr><h3>Linked Full Note Verbal PDF</h3><iframe src="/note-verbal-file?upload_id={int(ln.get("upload_id") or 0)}" style="width:100%;height:900px;border:1px solid #ccc"></iframe>'
-            self.send_html(f'<!DOCTYPE html><html><body>{letter}{pdf_html}</body></html>')
+                nv_upload_id = int(ln.get('upload_id') or 0)
+                nv_url = f'/note-verbal-file?upload_id={nv_upload_id}'
+                nv_filename = esc(ln.get('filename') or 'Note Verbal PDF')
+                nv_number = esc(ln.get('note_verbal_number') or '')
+                letter_print_url = f'/print/iraq-embassy-letter?{letter_url_source}id={rid}'
+                combined = f'''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Combined Print — Iraq Embassy Letter + Note Verbal</title>
+<style>
+body {{ margin:0; font-family: Arial, sans-serif; }}
+.toolbar {{ background:#006600; color:#fff; padding:12px 20px; text-align:center; }}
+.toolbar button {{ padding:10px 22px; font-size:12pt; cursor:pointer; border:none; border-radius:6px; margin:0 6px; font-weight:bold; }}
+.toolbar .btn-print {{ background:#fff; color:#006600; }}
+.toolbar .btn-nv {{ background:#1565c0; color:#fff; }}
+.toolbar .btn-close {{ background:transparent; color:#fff; border:1px solid #fff; }}
+.nv-info {{ background:#e3f2fd; padding:10px 20px; font-size:10pt; color:#0d47a1; border-bottom:1px solid #90caf9; }}
+@media print {{ .toolbar, .nv-info {{ display:none !important; }} }}
+</style></head><body>
+<div class="toolbar">
+  <button class="btn-print" onclick="printLetter()">1. Print Embassy Letter</button>
+  <button class="btn-nv" onclick="printNV()">2. Print Note Verbal PDF</button>
+  <button class="btn-print" onclick="printBoth()">3. Print Both (Letter + Note Verbal)</button>
+  <button class="btn-close" onclick="window.close()">Close</button>
+</div>
+<div class="nv-info">
+  Linked Note Verbal: <strong>{nv_filename}</strong>{(' — NV# ' + nv_number) if nv_number else ''}
+  &nbsp;|&nbsp; <a href="{nv_url}" target="_blank">Open PDF separately</a>
+</div>
+<div id="letterContainer"></div>
+<script>
+const letterUrl = '{letter_print_url}';
+const nvUrl = '{nv_url}';
+fetch(letterUrl).then(r=>r.text()).then(html=>{{
+  document.getElementById('letterContainer').innerHTML = html;
+}});
+function printLetter(){{ window.open(letterUrl, '_blank'); }}
+function printNV(){{ window.open(nvUrl, '_blank'); }}
+function printBoth(){{
+  const lw = window.open(letterUrl, '_blank');
+  setTimeout(function(){{ window.open(nvUrl, '_blank'); }}, 800);
+}}
+</script>
+</body></html>'''
+                self.send_html(combined)
+            else:
+                letter = generate_iraq_embassy_letter_html(rec, source)
+                self.send_html(letter)
         elif path == '/print/fee-distribution-receipt':
+            try:
+                user = self.require_auth()
+                if not user: return
+                if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
+                    self.send_json({'error': 'Unauthorized'}, 403); return
+                try:
+                    rid = int(str(params.get('id', 0) or 0).strip())
+                except Exception:
+                    rid = 0
+                if rid <= 0:
+                    self.send_html('<p>Invalid receipt id.</p>', 400); return
+                db = get_db()
+                row = db.execute("SELECT * FROM fee_distributions WHERE id = ?", [rid]).fetchone()
+                db.close()
+                if not row:
+                    self.send_html('<p>Receipt not found.</p>', 404); return
+                r = dict(row)
+                receipt_no = (r.get('receipt_number') or '').strip()
+                if not receipt_no:
+                    self.send_html('<p>No receipt generated for this entry.</p>', 400); return
+                qr_data = quote(receipt_no)
+                qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={qr_data}"
+                try:
+                    amount_value = float(str(r.get('amount') if r.get('amount') is not None else 0).replace(',', '').strip() or 0)
+                except Exception:
+                    amount_value = 0.0
+                self.send_html(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Receipt {esc(receipt_no)}</title>
+            <style>
+            body{{font-family:'Segoe UI',Arial,sans-serif;background:#f5f7fb;margin:0;padding:24px}}
+            .box{{max-width:760px;margin:0 auto;background:#fff;border:1px solid #dfe3eb;border-radius:14px;padding:22px;box-shadow:0 6px 20px rgba(10,26,47,.08)}}
+            h2{{margin:0 0 14px;color:#0d47a1;font-size:1.35rem}}
+            .meta{{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}}
+            .rows{{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}}
+            .r{{padding:10px 12px;background:#f8fafc;border:1px solid #e6ebf2;border-radius:8px}}
+            .k{{display:block;font-size:.78rem;color:#5b6b7f;margin-bottom:4px;font-weight:600}}
+            .v{{font-size:.98rem;color:#0f172a;font-weight:700}}
+            .qr{{text-align:center;padding:8px 10px;border:1px dashed #b8c4d4;border-radius:10px;background:#fbfdff}}
+            .qr img{{width:170px;height:170px;display:block;margin:0 auto}}
+            .foot{{margin-top:14px;font-size:.78rem;color:#64748b;text-align:center}}
+            </style></head><body>
+            <div class="box">
+              <div class="meta">
+                <div>
+                  <h2>Fee Hand-over Receipt</h2>
+                  <div class="v">{esc(receipt_no)}</div>
+                </div>
+                <div class="qr">
+                  <img src="{qr_url}" alt="Receipt QR">
+                  <div style="font-size:.72rem;color:#475569;margin-top:4px">Scan to verify receipt number</div>
+                </div>
+              </div>
+              <div class="rows">
+                <div class="r"><span class="k">Date</span><span class="v">{esc(r.get('distribution_date') or '')}</span></div>
+                <div class="r"><span class="k">Wing</span><span class="v">{esc((r.get('wing') or '').replace('_',' ').title())}</span></div>
+                <div class="r"><span class="k">Action</span><span class="v">{esc((r.get('action_type') or '').replace('_',' ').title())}</span></div>
+                <div class="r"><span class="k">Amount</span><span class="v">{amount_value:.2f} {esc(r.get('currency') or 'KWD')}</span></div>
+                <div class="r"><span class="k">Received By</span><span class="v">{esc(r.get('received_by') or '-')}</span></div>
+                <div class="r"><span class="k">Remarks</span><span class="v">{esc(r.get('notes') or '-')}</span></div>
+              </div>
+              <div class="foot">Generated electronically</div>
+            </div></body></html>""")
+            except Exception as e:
+                self.send_html(f"<p>Unable to render receipt right now.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
+
+        elif path == '/print/fee-receipt':
             user = self.require_auth()
             if not user: return
             if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            rid = int(params.get('id', 0) or 0)
-            if rid <= 0:
-                self.send_html('<p>Invalid receipt id.</p>', 400); return
+            source = (params.get('source') or '').strip()
+            try:
+                rid = int(str(params.get('id', 0) or 0).strip())
+            except Exception:
+                rid = 0
+            if rid <= 0 or not source:
+                self.send_html('<p>Invalid parameters.</p>', 400); return
+            meta = _fee_source_meta(source)
+            if not meta:
+                self.send_html('<p>Invalid source.</p>', 400); return
             db = get_db()
-            row = db.execute("SELECT * FROM fee_distributions WHERE id = ?", [rid]).fetchone()
-            db.close()
+            row = db.execute(f"SELECT * FROM {meta['table']} WHERE {meta['id_col']} = ?", [rid]).fetchone()
             if not row:
-                self.send_html('<p>Receipt not found.</p>', 404); return
-            r = dict(row)
-            if not (r.get('receipt_number') or '').strip():
-                self.send_html('<p>No receipt generated for this entry.</p>', 400); return
-            self.send_html(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Receipt {esc(r.get('receipt_number',''))}</title>
-            <style>body{{font-family:Arial,sans-serif;margin:24px}}.box{{max-width:760px;border:1px solid #ddd;border-radius:10px;padding:18px}}
-            h2{{margin:0 0 12px;color:#0d47a1}}.r{{margin:6px 0}}.k{{display:inline-block;min-width:190px;font-weight:700}}</style></head><body>
-            <div class="box"><h2>Fee Hand-over Receipt</h2>
-            <div class="r"><span class="k">Receipt Number:</span> {esc(r.get('receipt_number',''))}</div>
-            <div class="r"><span class="k">Date:</span> {esc(r.get('distribution_date') or '')}</div>
-            <div class="r"><span class="k">Wing:</span> {esc((r.get('wing') or '').replace('_',' ').title())}</div>
-            <div class="r"><span class="k">Action:</span> {esc((r.get('action_type') or '').replace('_',' ').title())}</div>
-            <div class="r"><span class="k">Amount:</span> {float(r.get('amount') or 0):.2f} {esc(r.get('currency') or 'KWD')}</div>
-            <div class="r"><span class="k">Handed Over By:</span> {esc(r.get('handed_over_by') or '-')}</div>
-            <div class="r"><span class="k">Received By:</span> {esc(r.get('received_by') or '-')}</div>
-            <div class="r"><span class="k">Entered By:</span> {esc(r.get('entered_by') or '-')}</div>
-            <div class="r"><span class="k">Remarks:</span> {esc(r.get('notes') or '-')}</div>
-            </div></body></html>""")
+                db.close(); self.send_html('<p>Record not found.</p>', 404); return
+            rec = dict(row)
+            name = esc(rec.get(meta['name_col']) or '-')
+            # Build tracking/reference
+            ref_row = db.execute(f"SELECT {meta['ref_expr']} ref FROM {meta['table']} WHERE {meta['id_col']} = ?", [rid]).fetchone()
+            tracking = esc(ref_row['ref'] if ref_row else f'{source}-{rid}')
+            fee_status = _fee_state(rec)
+            paid_at = rec.get('fee_paid_at') or ''
+            paid_by = rec.get('fee_paid_by') or ''
+            amount = float(rec.get('fee_amount') or 2.0)
+            currency = rec.get('fee_currency') or 'KWD'
+            # Also check fee_collections for the most recent entry
+            fc = db.execute("""SELECT * FROM fee_collections
+                WHERE source_table=? AND source_id=? AND fee_status='paid'
+                ORDER BY id DESC LIMIT 1""", [source, rid]).fetchone()
+            if fc:
+                paid_at = fc['paid_at'] or paid_at
+                paid_by = fc['paid_by'] or paid_by
+            db.close()
+            if fee_status != 'paid':
+                self.send_html('<p>Fee has not been collected yet for this record.</p>', 400); return
+            ts = esc(paid_at or datetime.now().strftime('%Y-%m-%d %H:%M'))
+            # Build a QR code payload string for the receipt
+            qr_data = f'{tracking}|{name}|{currency} {amount:.2f}|{ts}'
+            qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={quote(qr_data)}"
+            qr_html = f'<img src="{qr_url}" alt="Receipt QR" style="width:170px;height:170px;display:block;margin:0 auto;">'
+            receipt_html = (
+                '<!DOCTYPE html>\n<html><head><meta charset="UTF-8"><title>Fee Receipt — __TRACK__</title>\n'
+                '<style>\n'
+                '@page { size: A5; margin: 10mm; }\n'
+                '* { margin:0; padding:0; box-sizing:border-box; }\n'
+                'body { font-family: "Segoe UI", Arial, sans-serif; background: #eee; display:flex; justify-content:center; align-items:flex-start; padding:24px; }\n'
+                '.wrap { max-width:420px; width:100%; }\n'
+                '.no-print { text-align:center; margin-bottom:18px; }\n'
+                '.no-print button { padding:10px 30px; font-size:12pt; cursor:pointer; border:none; border-radius:8px; font-weight:700; margin:0 6px; }\n'
+                '.no-print .bp { background:#006600; color:#fff; }\n'
+                '.no-print .bc { background:#555; color:#fff; }\n'
+                '.receipt { background:#fff; border-radius:14px; overflow:hidden; box-shadow: 0 6px 28px rgba(0,0,0,.10); }\n'
+                '.r-top { background: linear-gradient(135deg, #006600 0%, #004d00 100%); color:#fff; text-align:center; padding:22px 24px 18px; }\n'
+                '.r-top h1 { font-size:13.5pt; letter-spacing:.4px; margin-bottom:2px; font-weight:700; }\n'
+                '.r-divider { height:3px; background:linear-gradient(90deg,#006600,#43a047,#006600); }\n'
+                '.r-body { padding:20px 28px 16px; }\n'
+                '.r-row { display:flex; justify-content:space-between; align-items:baseline; padding:9px 0; border-bottom:1px solid #f0f0f0; font-size:10.5pt; }\n'
+                '.r-row:last-child { border-bottom:none; }\n'
+                '.r-lbl { color:#888; font-weight:600; font-size:9.5pt; text-transform:uppercase; letter-spacing:.3px; }\n'
+                '.r-val { color:#222; font-weight:500; text-align:right; max-width:62%; word-break:break-word; }\n'
+                '.r-amount { text-align:center; margin:14px 0 8px; padding:14px 10px; background:#e8f5e9; border-radius:10px; border:1.5px solid #a5d6a7; }\n'
+                '.r-amount .cur { font-size:10pt; color:#388e3c; font-weight:600; text-transform:uppercase; letter-spacing:.5px; }\n'
+                '.r-amount .amt { font-size:20pt; font-weight:800; color:#006600; margin-top:2px; }\n'
+                '.r-qr { text-align:center; padding:14px 0 6px; }\n'
+                '.r-qr .qr-label { font-size:7.5pt; color:#aaa; margin-top:6px; }\n'
+                '.r-foot { text-align:center; padding:10px 24px 16px; font-size:7.8pt; color:#999; line-height:1.5; border-top:1px dashed #e0e0e0; margin:0 20px; }\n'
+                '@media print { body { background:#fff; padding:0; } .no-print { display:none !important; } .receipt { box-shadow:none; border:1px solid #ccc; } }\n'
+                '</style></head><body>\n'
+                '<div class="wrap">\n'
+                '<div class="no-print"><button class="bp" onclick="window.print()">Print Receipt</button>'
+                '<button class="bc" onclick="window.close()">Close</button></div>\n'
+                '<div class="receipt">\n'
+                '  <div class="r-top"><h1>Processing / Service Fee Receipt</h1></div>\n'
+                '  <div class="r-divider"></div>\n'
+                '  <div class="r-body">\n'
+                '    <div class="r-row"><span class="r-lbl">Tracking ID</span><span class="r-val">__TRACK__</span></div>\n'
+                '    <div class="r-row"><span class="r-lbl">Name</span><span class="r-val">__NAME__</span></div>\n'
+                '    <div class="r-amount"><div class="cur">Amount Received</div><div class="amt">__AMT__</div></div>\n'
+                '    <div class="r-row"><span class="r-lbl">Purpose</span><span class="r-val">Processing / Service Fee</span></div>\n'
+                '    <div class="r-row"><span class="r-lbl">Date / Time</span><span class="r-val">__TS__</span></div>\n'
+                '    <div class="r-qr">__QR__<div class="qr-label">Scan to verify</div></div>\n'
+                '  </div>\n'
+                '  <div class="r-foot">Computer-generated receipt — no signature required</div>\n'
+                '</div></div></body></html>'
+            )
+            receipt_html = receipt_html.replace('__TRACK__', tracking).replace('__NAME__', name)
+            receipt_html = receipt_html.replace('__AMT__', f'{currency} {amount:.2f}').replace('__TS__', ts)
+            receipt_html = receipt_html.replace('__QR__', qr_html)
+            self.send_html(receipt_html)
 
         # MS Forms webhook endpoint (public, uses API key)
         elif path == '/api/webhook/forms':
@@ -9213,27 +9457,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] not in ('admin', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            ct = self.headers.get('Content-Type', '')
-            orig, raw = extract_multipart_upload(body, ct, field_names=('file', 'pdf', 'note_verbal_pdf'))
-            if not raw:
-                self.send_json({'success': False, 'error': 'PDF file required'}, 400); return
-            if not (orig.lower().endswith('.pdf') or raw[:4] == b'%PDF'):
-                self.send_json({'success': False, 'error': 'Only PDF uploads are allowed'}, 400); return
-            m = {}
-            if 'multipart/form-data' in ct and 'boundary=' in ct:
-                boundary = ct.split('boundary=')[1].strip()
-                parts = body.split(f'--{boundary}'.encode())
-                for part in parts:
-                    ps = part.decode('latin-1', errors='ignore')
-                    m0 = re.search(r'name="([^"]+)"', ps)
-                    if not m0:
-                        continue
-                    key = m0.group(1)
-                    if key in ('note_verbal_number', 'note_verbal_date', 'source', 'remarks'):
-                        val = ps.split('\r\n\r\n', 1)[1].rsplit('\r\n', 1)[0].strip() if '\r\n\r\n' in ps else ''
-                        m[key] = val
-            res = api_nv_upload(raw, orig, m, user['user'])
-            self.send_json(res, 200 if res.get('success') else 400)
+            try:
+                ct = self.headers.get('Content-Type', '')
+                orig, raw = extract_multipart_upload(body, ct, field_names=('file', 'pdf', 'note_verbal_pdf'))
+                if not raw:
+                    self.send_json({'success': False, 'error': 'PDF file required. Ensure you selected a file before clicking Upload.'}, 400); return
+                if not (orig.lower().endswith('.pdf') or raw[:4] == b'%PDF'):
+                    self.send_json({'success': False, 'error': 'Only PDF uploads are allowed'}, 400); return
+                m = {}
+                if 'multipart/form-data' in ct and 'boundary=' in ct:
+                    boundary = ct.split('boundary=')[1].strip()
+                    if boundary.startswith('"') and boundary.endswith('"'):
+                        boundary = boundary[1:-1]
+                    parts = body.split(f'--{boundary}'.encode())
+                    for part in parts:
+                        ps = part.decode('latin-1', errors='ignore')
+                        m0 = re.search(r'name="([^"]+)"', ps)
+                        if not m0:
+                            continue
+                        key = m0.group(1)
+                        if key in ('note_verbal_number', 'note_verbal_date', 'source', 'remarks'):
+                            val = ps.split('\r\n\r\n', 1)[1].rsplit('\r\n', 1)[0].strip() if '\r\n\r\n' in ps else ''
+                            m[key] = val
+                res = api_nv_upload(raw, orig, m, user['user'])
+                self.send_json(res, 200 if res.get('success') else 400)
+            except Exception as e:
+                print(f'[NV Upload Error] {e}', flush=True)
+                self.send_json({'success': False, 'error': f'Upload failed: {str(e)}'}, 500)
         elif path == '/api/note-verbal-link-update':
             user = self.require_auth()
             if not user: return
@@ -10038,23 +10288,31 @@ async function runSearch(){
   const list=document.getElementById('list');
   list.innerHTML=(d.results||[]).map(r=>{
     const clr=r.fee_status==='paid'||r.fee_status==='waived';
+    const isPaid=r.fee_status==='paid';
     const st=esc((r.fee_status||'pending').toUpperCase());
     return `<div class="card">
-      <div class="row" style="justify-content:space-between"><strong>${esc(r.name||'')}</strong><span class="badge">${st}</span></div>
+      <div class="row" style="justify-content:space-between"><strong>${esc(r.name||'')}</strong><span class="badge" style="${isPaid?'background:#c8e6c9;color:#1b5e20':r.fee_status==='waived'?'background:#fff9c4;color:#f57f17':''}">${st}</span></div>
       <div class="muted">Passport: ${esc(r.passport||'-')} | Ref: ${esc(r.tracking_or_reference||'-')} | Source: ${esc(r.source||'')}</div>
       <div class="muted">Status: ${esc(r.status||'-')} | Ticket details: ${r.ticket_details_filled?'Yes':'No'} | Print unlocked: ${r.print_unlocked?'Yes':'No'}</div>
       <div class="row" style="margin-top:8px">
-        <button class="btn" ${clr?'disabled':''} onclick="collectFee('${r.source}',${r.id})">Collect KWD 2</button>
+        <button class="btn" ${clr?'disabled':''} onclick="collectFee('${r.source}',${r.id},'${esc(r.name||'')}','${esc(r.tracking_or_reference||'')}')">Collect KWD 2</button>
         ${USER_ROLE==='admin'?`<button class="warn" ${clr?'disabled':''} onclick="waiveFee('${r.source}',${r.id})">Waive (Gratis)</button>`:''}
-        ${clr?'<span class="muted">Already processed.</span>':''}
+        ${isPaid?`<button style="background:#1565c0;color:#fff;font-weight:bold" onclick="window.open('/print/fee-receipt?source='+encodeURIComponent('${r.source}')+'&id=${r.id}','_blank')">Print Receipt</button>`:''}
+        ${clr&&!isPaid?'<span class="muted">Waived.</span>':''}
       </div>
     </div>`;
   }).join('') || '<div class="card">No matching records.</div>';
 }
-async function collectFee(source,id){
-  if(!confirm('Confirm KWD 2 fee received?')) return;
+async function collectFee(source,id,name,ref){
+  if(!confirm('Confirm KWD 2 fee received'+(name?' from '+name:'')+'?')) return;
   const d=await api('/api/fee-collect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,id,amount:2.0})});
-  if(d&&d.success){alert('Fee marked as paid. Record released for printing if all other conditions are met.'); runSearch();}
+  if(d&&d.success){
+    runSearch();
+    // Open Print Receipt in new tab
+    if(confirm('Fee marked as paid. Print receipt now?')){
+      window.open('/print/fee-receipt?source='+encodeURIComponent(source)+'&id='+id,'_blank');
+    }
+  }
   else alert((d&&d.error)||'Failed');
 }
 async function waiveFee(source,id){
@@ -14267,6 +14525,9 @@ loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount();loadApp
 async function uploadNoteVerbalPdf(){
 const f=document.getElementById('nvFile')?.files?.[0];
 if(!f){toast('Select PDF file');return;}
+const msg=document.getElementById('nvUploadMsg');
+if(msg)msg.innerHTML='<span style="color:#1565c0">Uploading... please wait</span>';
+try{
 const fd=new FormData();
 fd.append('file',f);
 fd.append('note_verbal_number',document.getElementById('nvNo')?.value||'');
@@ -14274,12 +14535,29 @@ fd.append('note_verbal_date',document.getElementById('nvDate')?.value||'');
 fd.append('source',document.getElementById('nvSource')?.value||'');
 fd.append('remarks',document.getElementById('nvRemarks')?.value||'');
 const r=await fetch('/api/note-verbal-upload',{method:'POST',body:fd});
+if(!r.ok){
+  let errText='Upload failed (server error '+r.status+')';
+  try{const ej=await r.json();errText=ej.error||errText;}catch(e){try{errText=await r.text();}catch(e2){}}
+  if(msg)msg.innerHTML='<span style="color:#c62828;font-weight:600">'+errText+'</span>';
+  toast(errText);return;
+}
 const d=await r.json();
 if(d&&d.success){
-const msg=document.getElementById('nvUploadMsg'); if(msg)msg.textContent=`Uploaded. OCR: ${d.ocr_status||'-'} | Confirmed links: ${d.linked||0} | Suggested: ${d.suggested||0}`;
+if(msg)msg.innerHTML='<span style="color:#2e7d32;font-weight:600">Uploaded successfully. OCR: '+(d.ocr_status||'-')+' | Confirmed links: '+(d.linked||0)+' | Suggested: '+(d.suggested||0)+'</span>';
 toast('Note Verbal uploaded and processed');
+document.getElementById('nvFile').value='';
 loadNvUploads();loadNvLinks();
-}else toast((d&&d.error)||'Upload failed');
+}else{
+const errMsg=(d&&d.error)||'Upload failed';
+if(msg)msg.innerHTML='<span style="color:#c62828;font-weight:600">'+errMsg+'</span>';
+toast(errMsg);
+}
+}catch(err){
+console.error('NV upload error:',err);
+const errMsg='Upload failed: '+err.message;
+if(msg)msg.innerHTML='<span style="color:#c62828;font-weight:600">'+errMsg+'</span>';
+toast(errMsg);
+}
 }
 async function loadNvUploads(){
 const d=await api('/api/note-verbal-uploads'); if(!d||!d.success)return;
@@ -15436,12 +15714,27 @@ if __name__ == '__main__':
     start_email_worker()
     _iraq_backfill = run_iraq_forwarded_email_backfill_once('startup_auto')
     print(f"[IraqEmailBackfill] {_iraq_backfill}", flush=True)
+    bind_port = PORT
+    server = None
+    max_tries = 20
+    for i in range(max_tries):
+        try:
+            candidate = PORT + i
+            server = http.server.HTTPServer(('0.0.0.0', candidate), Handler)
+            bind_port = candidate
+            break
+        except OSError as e:
+            if getattr(e, 'errno', None) == 48:
+                continue
+            raise
+    if server is None:
+        raise OSError(f"Could not bind server to ports {PORT}-{PORT + max_tries - 1}")
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║   CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM                          ║
 ║   Pakistan Embassy Kuwait                               ║
 ║                                                         ║
-║   Server running on: http://localhost:{PORT}              ║
+║   Server running on: http://localhost:{bind_port}              ║
 ║                                                         ║
 ║   Default login:                                        ║
 ║     Username: admin                                     ║
@@ -15459,7 +15752,8 @@ if __name__ == '__main__':
 ║   Press Ctrl+C to stop                                  ║
 ╚══════════════════════════════════════════════════════════╝
 """)
-    server = http.server.HTTPServer(('0.0.0.0', PORT), Handler)
+    if bind_port != PORT:
+        print(f"[Port] {PORT} was busy; server started on {bind_port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
