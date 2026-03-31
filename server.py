@@ -319,7 +319,13 @@ def init_db():
         uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         processing_status TEXT DEFAULT 'uploaded',
         ocr_status TEXT DEFAULT '',
-        remarks TEXT DEFAULT ''
+        remarks TEXT DEFAULT '',
+        total_pages INTEGER DEFAULT 0,
+        pages_processed INTEGER DEFAULT 0,
+        pages_ocrd INTEGER DEFAULT 0,
+        confirmed_count INTEGER DEFAULT 0,
+        suggested_count INTEGER DEFAULT 0,
+        parse_error TEXT DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS note_verbal_record_links (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -374,6 +380,19 @@ def init_db():
     ]:
         try:
             db.execute(f"ALTER TABLE iraq_public_submissions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    for col, coltype in [
+        ('total_pages', 'INTEGER DEFAULT 0'),
+        ('pages_processed', 'INTEGER DEFAULT 0'),
+        ('pages_ocrd', 'INTEGER DEFAULT 0'),
+        ('confirmed_count', 'INTEGER DEFAULT 0'),
+        ('suggested_count', 'INTEGER DEFAULT 0'),
+        ('parse_error', "TEXT DEFAULT ''")
+    ]:
+        try:
+            db.execute(f"ALTER TABLE note_verbal_uploads ADD COLUMN {col} {coltype}")
             db.commit()
         except sqlite3.OperationalError:
             pass
@@ -3104,14 +3123,18 @@ def _nv_auto_link_upload(db, upload_id):
     txt = (up['extracted_text'] or '')
     up_txt = txt.upper()
     compact_txt = _norm_name_compact(txt)
+    up_word_set = set(re.findall(r'[A-Z]{3,}', up_txt))
+    common_name_tokens = {'MUHAMMAD', 'MOHAMMAD', 'AHMED', 'AHMAD', 'ALI', 'ABDUL', 'BIN', 'BINT', 'KHAN'}
     candidates = _collect_nv_candidate_records(db)
     linked = 0
     suggested = 0
+    processed = 0
     for c in candidates:
         passport = (c.get('passport_number') or '').strip().upper()
         full_name = (c.get('full_name') or '').strip()
         name_comp = _norm_name_compact(full_name)
         p_comp = re.sub(r'[^A-Z0-9]+', '', passport)
+        p_digits = ''.join(ch for ch in p_comp if ch.isdigit())
         method = ''
         conf = 0.0
         if passport and passport in up_txt:
@@ -3122,6 +3145,14 @@ def _nv_auto_link_upload(db, upload_id):
             method = 'name_normalized'; conf = 0.80
         elif passport and name_comp and passport in up_txt and name_comp in compact_txt:
             method = 'passport_name_combo'; conf = 0.97
+        else:
+            # OCR-noisy fallback: token overlap from applicant name
+            name_tokens = [t for t in re.findall(r'[A-Z]{3,}', full_name.upper()) if t not in common_name_tokens]
+            token_hits = [t for t in name_tokens if t in up_word_set]
+            if len(token_hits) >= 2:
+                method = 'name_tokens'; conf = 0.72
+            elif len(token_hits) == 1 and p_digits and len(p_digits) >= 6 and p_digits[-6:] in compact_txt:
+                method = 'name_token_passport_digits'; conf = 0.90
         if not method:
             continue
         status = 'confirmed' if conf >= 0.95 else 'suggested'
@@ -3138,8 +3169,49 @@ def _nv_auto_link_upload(db, upload_id):
         """, [upload_id, c['source_table'], c['id'], method, passport, full_name, conf, status])
         if status == 'confirmed': linked += 1
         else: suggested += 1
-    db.execute("UPDATE note_verbal_uploads SET processing_status='processed' WHERE id=?", [upload_id])
+        processed += 1
+        if processed % 250 == 0:
+            db.execute("UPDATE note_verbal_uploads SET confirmed_count=?, suggested_count=? WHERE id=?",
+                       [linked, suggested, upload_id])
+            db.commit()
     return {'linked': linked, 'suggested': suggested}
+
+def _nv_auto_reprocess_upload_if_needed(db, upload_row):
+    """
+    Backfill matcher for older uploads that extracted text successfully
+    but were processed with older/stricter matching logic.
+    """
+    try:
+        rid = int(upload_row.get('id') or 0)
+    except Exception:
+        rid = 0
+    if rid <= 0:
+        return None
+    txt = upload_row.get('extracted_text') or ''
+    if not txt:
+        return None
+    # Only retry rows that look like "processed but no links".
+    if int(upload_row.get('confirmed_links') or 0) > 0 or int(upload_row.get('suggested_links') or 0) > 0:
+        return None
+    pstatus = (upload_row.get('processing_status') or '').strip().lower()
+    if pstatus not in ('processed', 'processed_with_warnings', 'partial_success'):
+        return None
+    res = _nv_auto_link_upload(db, rid)
+    linked = int(res.get('linked') or 0)
+    suggested = int(res.get('suggested') or 0)
+    new_status = pstatus
+    parse_error = (upload_row.get('parse_error') or '').strip()
+    if linked > 0 or suggested > 0:
+        new_status = 'processed'
+        parse_error = ''
+    elif not parse_error:
+        parse_error = 'Text extracted but no applicant matches found'
+    db.execute("""UPDATE note_verbal_uploads
+                  SET confirmed_count=?, suggested_count=?, processing_status=?, parse_error=?
+                  WHERE id=?""",
+               [linked, suggested, new_status, parse_error[:300], rid])
+    db.commit()
+    return {'linked': linked, 'suggested': suggested, 'status': new_status}
 
 def _nv_best_link_for_record(db, source_table, source_id):
     row = db.execute("""
@@ -3159,35 +3231,98 @@ def api_nv_upload(file_data, original_filename, data, user):
     p = NOTE_VERBAL_UPLOADS_DIR / stored
     with open(p, 'wb') as f:
         f.write(file_data)
-    try:
-        text, ocr_status = _extract_full_pdf_text_with_fallback(str(p))
-    except Exception as e:
-        print(f'[NV Upload] OCR/text extraction failed: {e}', flush=True)
-        text, ocr_status = '', f'extraction_error: {str(e)[:120]}'
+    text = ''
+    ocr_status = 'uploaded'
+    ex_meta = {'total_pages': 0, 'pages_processed': 0, 'pages_ocrd': 0, 'error': ''}
     db = get_db()
     try:
         cur = db.execute("""
             INSERT INTO note_verbal_uploads
-            (filename, file_path, extracted_text, note_verbal_number, note_verbal_date, source, uploaded_by, processing_status, ocr_status, remarks)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (filename, file_path, extracted_text, note_verbal_number, note_verbal_date, source, uploaded_by, processing_status, ocr_status, remarks,
+             total_pages, pages_processed, pages_ocrd, confirmed_count, suggested_count, parse_error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '')
         """, [
             original_filename or stored,
             stored,
-            text or '',
+            '',
             (data.get('note_verbal_number') or '').strip(),
             (data.get('note_verbal_date') or '').strip(),
             (data.get('source') or '').strip(),
             user,
-            'processing',
-            ocr_status,
-            (data.get('remarks') or '').strip()
+            'uploaded',
+            'uploaded',
+            (data.get('remarks') or '').strip(),
+            0, 0, 0
         ])
         uid = cur.lastrowid
-        res = _nv_auto_link_upload(db, uid)
-        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_uploaded', ?, ?, ?)",
-                   [uid, user, json.dumps({'filename': original_filename, 'ocr_status': ocr_status, **res})])
         db.commit()
-        return {'success': True, 'upload_id': uid, 'ocr_status': ocr_status, **res}
+        db.execute("UPDATE note_verbal_uploads SET processing_status='processing', ocr_status='processing' WHERE id=?", [uid])
+        db.commit()
+        try:
+            text, ocr_status, ex_meta = _extract_full_pdf_text_with_fallback(str(p))
+        except Exception as e:
+            err = f'api_nv_upload extraction: {type(e).__name__}: {str(e)[:120]}'
+            print(f'[NV Upload] {err}', flush=True)
+            text, ocr_status, ex_meta = '', 'failed', {'total_pages': 0, 'pages_processed': 0, 'pages_ocrd': 0, 'error': err}
+
+        res = {'linked': 0, 'suggested': 0}
+        parse_error = ex_meta.get('error', '') or ''
+        if text:
+            res = _nv_auto_link_upload(db, uid)
+        final_status = 'processed'
+        if ocr_status in ('failed', 'ocr_unavailable'):
+            final_status = 'failed' if not text else 'processed_with_warnings'
+        elif ocr_status == 'partial_success':
+            final_status = 'partial_success'
+        elif parse_error:
+            final_status = 'processed_with_warnings'
+        if text and res.get('linked', 0) == 0 and res.get('suggested', 0) == 0:
+            final_status = 'processed_with_warnings'
+            if not parse_error:
+                parse_error = 'Text extracted but no applicant matches found'
+        if not text and not parse_error:
+            parse_error = 'No extractable text found'
+        db.execute("""
+            UPDATE note_verbal_uploads
+            SET extracted_text=?,
+                ocr_status=?,
+                processing_status=?,
+                total_pages=?,
+                pages_processed=?,
+                pages_ocrd=?,
+                confirmed_count=?,
+                suggested_count=?,
+                parse_error=?
+            WHERE id=?
+        """, [
+            text or '',
+            ocr_status,
+            final_status,
+            int(ex_meta.get('total_pages') or 0),
+            int(ex_meta.get('pages_processed') or 0),
+            int(ex_meta.get('pages_ocrd') or 0),
+            int(res.get('linked') or 0),
+            int(res.get('suggested') or 0),
+            parse_error[:300],
+            uid
+        ])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_uploaded', ?, ?, ?)",
+                   [uid, user, json.dumps({
+                       'filename': original_filename,
+                       'ocr_status': ocr_status,
+                       'processing_status': final_status,
+                       'total_pages': ex_meta.get('total_pages', 0),
+                       'pages_processed': ex_meta.get('pages_processed', 0),
+                       'pages_ocrd': ex_meta.get('pages_ocrd', 0),
+                       'parse_error': parse_error,
+                       **res
+                   })])
+        db.commit()
+        return {'success': True, 'upload_id': uid, 'ocr_status': ocr_status, 'processing_status': final_status,
+                'total_pages': int(ex_meta.get('total_pages') or 0),
+                'pages_processed': int(ex_meta.get('pages_processed') or 0),
+                'pages_ocrd': int(ex_meta.get('pages_ocrd') or 0),
+                'parse_error': parse_error[:300], **res}
     finally:
         db.close()
 
@@ -3201,6 +3336,20 @@ def api_nv_uploads(params):
             FROM note_verbal_uploads u
             ORDER BY u.id DESC LIMIT 300
         """).fetchall()]
+        # Self-heal previously processed rows with 0 links using improved matcher.
+        changed = False
+        for r in rows[:30]:
+            rr = _nv_auto_reprocess_upload_if_needed(db, r)
+            if rr is not None:
+                changed = True
+        if changed:
+            rows = [dict(r) for r in db.execute("""
+                SELECT u.*,
+                  (SELECT COUNT(*) FROM note_verbal_record_links l WHERE l.upload_id=u.id AND l.link_status='confirmed') confirmed_links,
+                  (SELECT COUNT(*) FROM note_verbal_record_links l WHERE l.upload_id=u.id AND l.link_status='suggested') suggested_links
+                FROM note_verbal_uploads u
+                ORDER BY u.id DESC LIMIT 300
+            """).fetchall()]
         return {'success': True, 'rows': rows}
     finally:
         db.close()
@@ -6062,42 +6211,75 @@ def _extract_pdf_text_via_pdftotext(pdf_path):
 
 def _extract_full_pdf_text_with_fallback(pdf_path):
     """
-    Return (full_text, status) as plain string status markers.
-    Guard against tuple/list page payloads so downstream .strip() never crashes.
+    Render-friendly extraction for Note Verbal uploads:
+    - Keep text-layer extraction page-by-page
+    - OCR only page-level fallbacks when dependencies are available
+    - Return partial text if OCR is unavailable (do not fail all pages)
+    Returns: (full_text, status, meta)
     """
+    meta = {'total_pages': 0, 'pages_processed': 0, 'pages_ocrd': 0, 'error': ''}
     try:
-        pages = _embedded_pdf_pages_for_parse(pdf_path)
-        if _pdf_text_layer_usable(pages):
-            text_pages = []
-            for item in pages:
-                # Expected shape: (page_no, text). Be defensive for malformed values.
-                if isinstance(item, tuple):
-                    page_text = item[1] if len(item) > 1 else ''
-                else:
-                    page_text = item
-                if page_text is None:
-                    page_text = ''
-                if not isinstance(page_text, str):
-                    page_text = str(page_text)
-                page_text = page_text.strip()
-                if page_text:
-                    text_pages.append(page_text)
-            return '\n\n'.join(text_pages), 'pdf_text'
-        ok, _msg = _check_ocr_deps()
-        if not ok:
-            return '', 'ocr_unavailable'
-        imgs = _pdf_to_images(pdf_path)
-        if not imgs:
-            return '', 'ocr_failed'
-        ocr_pages = []
-        for im in imgs:
-            txt = _ocr_image(_prepare_image_for_ocr(im))
-            if txt and txt.strip():
-                ocr_pages.append(txt)
-        return '\n\n'.join(ocr_pages), 'ocr'
+        per_page = {}
+        pypdf_pages = _extract_pdf_text_per_page(pdf_path) or []
+        for item in pypdf_pages:
+            if isinstance(item, tuple) and len(item) >= 2:
+                try:
+                    pno = int(item[0])
+                except Exception:
+                    continue
+                per_page[pno] = str(item[1] or '').strip()
+        # pdftotext fallback for pages where pypdf gave nothing useful
+        if not per_page:
+            for pno, ptxt in (_extract_pdf_text_via_pdftotext(pdf_path) or []):
+                per_page[int(pno)] = str(ptxt or '').strip()
+
+        total_pages = max(_pdf_page_count(pdf_path), max(per_page.keys()) if per_page else 0)
+        meta['total_pages'] = int(total_pages or 0)
+        if total_pages <= 0:
+            return '', 'failed', {**meta, 'error': 'No pages detected in uploaded PDF'}
+
+        ocr_ok, _ocr_msg = _check_ocr_deps()
+        max_ocr_pages = 60  # cap to keep requests bounded on Render
+        text_pages = []
+        for pno in range(1, total_pages + 1):
+            ptxt = str(per_page.get(pno) or '').strip()
+            if ptxt:
+                text_pages.append(ptxt)
+                meta['pages_processed'] += 1
+                continue
+            if not ocr_ok:
+                meta['pages_processed'] += 1
+                continue
+            if meta['pages_ocrd'] >= max_ocr_pages:
+                meta['pages_processed'] += 1
+                continue
+            im = _pdf_page_to_image(pdf_path, pno)
+            if im is not None:
+                otxt = str(_ocr_image(_prepare_image_for_ocr(im)) or '').strip()
+                if otxt:
+                    text_pages.append(otxt)
+                meta['pages_ocrd'] += 1
+            meta['pages_processed'] += 1
+
+        full_text = '\n\n'.join(x for x in text_pages if x).strip()
+        if full_text:
+            if len(full_text) > 2000000:
+                full_text = full_text[:2000000]
+            if meta['pages_ocrd'] > 0:
+                status = 'ocr'
+            else:
+                status = 'pdf_text'
+            if not ocr_ok and any(not str(per_page.get(p) or '').strip() for p in range(1, total_pages + 1)):
+                status = 'partial_success'
+            return full_text, status, meta
+
+        if not ocr_ok:
+            return '', 'ocr_unavailable', {**meta, 'error': 'OCR unavailable and no usable text-layer content found'}
+        return '', 'failed', {**meta, 'error': 'No text extracted from document'}
     except Exception as e:
-        print(f"[NV Extract] _extract_full_pdf_text_with_fallback failed for {pdf_path}: {type(e).__name__}: {e}", flush=True)
-        return '', f'extraction_error: _extract_full_pdf_text_with_fallback: {type(e).__name__}: {str(e)[:90]}'
+        err = f'_extract_full_pdf_text_with_fallback: {type(e).__name__}: {str(e)[:120]}'
+        print(f"[NV Extract] {err}", flush=True)
+        return '', 'failed', {**meta, 'error': err}
 
 def _embedded_pdf_pages_for_parse(pdf_path):
     """Combine pypdf per-page text with optional pdftotext fallback."""
@@ -6200,6 +6382,27 @@ def _pdf_to_images(pdf_path):
     except Exception as e:
         print(f'[ApprovalOCR] pdf2image error: {e}', flush=True)
         return []
+
+def _pdf_page_to_image(pdf_path, page_no):
+    """Convert a single page to image to avoid loading whole PDF into memory."""
+    if not _PDF2IMG_AVAILABLE:
+        return None
+    try:
+        images = convert_from_path(str(pdf_path), dpi=240, first_page=page_no, last_page=page_no)
+        return images[0] if images else None
+    except Exception as e:
+        print(f'[NV OCR] page image error p{page_no}: {e}', flush=True)
+        return None
+
+def _pdf_page_count(pdf_path):
+    """Best-effort page count, lightweight and safe."""
+    try:
+        if _PYPDF_AVAILABLE and PdfReader:
+            with open(pdf_path, 'rb') as f:
+                return len(PdfReader(f).pages)
+    except Exception as e:
+        print(f'[NV Extract] page-count error: {e}', flush=True)
+    return 0
 
 def _preprocess_image(img):
     """Grayscale, sharpen, enhance contrast for better OCR."""
