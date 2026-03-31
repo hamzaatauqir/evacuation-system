@@ -6061,21 +6061,43 @@ def _extract_pdf_text_via_pdftotext(pdf_path):
         return []
 
 def _extract_full_pdf_text_with_fallback(pdf_path):
-    pages = _embedded_pdf_pages_for_parse(pdf_path)
-    if _pdf_text_layer_usable(pages):
-        return '\n\n'.join((p or '').strip() for p in pages if (p or '').strip()), 'pdf_text'
-    ok, _msg = _check_ocr_deps()
-    if not ok:
-        return '', 'ocr_unavailable'
-    imgs = _pdf_to_images(pdf_path)
-    if not imgs:
-        return '', 'ocr_failed'
-    ocr_pages = []
-    for im in imgs:
-        txt = _ocr_image(_prepare_image_for_ocr(im))
-        if txt and txt.strip():
-            ocr_pages.append(txt)
-    return '\n\n'.join(ocr_pages), 'ocr'
+    """
+    Return (full_text, status) as plain string status markers.
+    Guard against tuple/list page payloads so downstream .strip() never crashes.
+    """
+    try:
+        pages = _embedded_pdf_pages_for_parse(pdf_path)
+        if _pdf_text_layer_usable(pages):
+            text_pages = []
+            for item in pages:
+                # Expected shape: (page_no, text). Be defensive for malformed values.
+                if isinstance(item, tuple):
+                    page_text = item[1] if len(item) > 1 else ''
+                else:
+                    page_text = item
+                if page_text is None:
+                    page_text = ''
+                if not isinstance(page_text, str):
+                    page_text = str(page_text)
+                page_text = page_text.strip()
+                if page_text:
+                    text_pages.append(page_text)
+            return '\n\n'.join(text_pages), 'pdf_text'
+        ok, _msg = _check_ocr_deps()
+        if not ok:
+            return '', 'ocr_unavailable'
+        imgs = _pdf_to_images(pdf_path)
+        if not imgs:
+            return '', 'ocr_failed'
+        ocr_pages = []
+        for im in imgs:
+            txt = _ocr_image(_prepare_image_for_ocr(im))
+            if txt and txt.strip():
+                ocr_pages.append(txt)
+        return '\n\n'.join(ocr_pages), 'ocr'
+    except Exception as e:
+        print(f"[NV Extract] _extract_full_pdf_text_with_fallback failed for {pdf_path}: {type(e).__name__}: {e}", flush=True)
+        return '', f'extraction_error: _extract_full_pdf_text_with_fallback: {type(e).__name__}: {str(e)[:90]}'
 
 def _embedded_pdf_pages_for_parse(pdf_path):
     """Combine pypdf per-page text with optional pdftotext fallback."""
@@ -8665,26 +8687,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_nv_links(params))
         elif path == '/note-verbal-file':
-            user = self.require_auth()
-            if not user: return
-            upload_id = int(params.get('upload_id', 0) or 0)
-            if upload_id <= 0:
-                self.send_html('<p>Invalid upload id.</p>', 400); return
-            db = get_db()
-            row = db.execute("SELECT filename, file_path FROM note_verbal_uploads WHERE id=?", [upload_id]).fetchone()
-            db.close()
-            if not row:
-                self.send_html('<p>File not found.</p>', 404); return
-            fp = NOTE_VERBAL_UPLOADS_DIR / row['file_path']
-            if not fp.exists():
-                self.send_html('<p>Stored file missing.</p>', 404); return
-            body = fp.read_bytes()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/pdf')
-            self.send_header('Content-Disposition', f'inline; filename="{row["filename"]}"')
-            self.send_header('Content-Length', len(body))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                user = self.require_auth()
+                if not user: return
+                try:
+                    upload_id = int(str(params.get('upload_id', 0) or 0).strip())
+                except Exception:
+                    upload_id = 0
+                db = get_db()
+                try:
+                    # Fallback resolver for callers that only provide record source/id.
+                    if upload_id <= 0:
+                        source = (params.get('source') or '').strip()
+                        try:
+                            rid = int(str(params.get('id', 0) or 0).strip())
+                        except Exception:
+                            rid = 0
+                        if source and rid > 0:
+                            ln = _nv_best_link_for_record(db, source, rid)
+                            if ln:
+                                upload_id = int(ln.get('upload_id') or 0)
+                    if upload_id <= 0:
+                        self.send_html('<p>No linked Note Verbal PDF was found for this record.</p>', 404); return
+                    row = db.execute("SELECT filename, file_path FROM note_verbal_uploads WHERE id=?", [upload_id]).fetchone()
+                finally:
+                    db.close()
+                if not row:
+                    self.send_html('<p>Linked Note Verbal file was not found.</p>', 404); return
+                fp = NOTE_VERBAL_UPLOADS_DIR / row['file_path']
+                if not fp.exists():
+                    self.send_html('<p>Stored Note Verbal PDF file is missing on server.</p>', 404); return
+                body = fp.read_bytes()
+                safe_filename = re.sub(r'[\r\n"]+', '_', str(row['filename'] or 'note_verbal.pdf'))
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/pdf')
+                self.send_header('Content-Disposition', f'inline; filename="{safe_filename}"')
+                self.send_header('Content-Length', len(body))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_html(f"<p>Unable to open linked Note Verbal PDF.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
         elif path == '/api/backups':
             user = self.require_auth()
             if not user: return
@@ -8828,7 +8870,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            rid = int(params.get('id', 0) or 0)
+            try:
+                rid = int(str(params.get('id', 0) or 0).strip())
+            except Exception:
+                rid = 0
             if rid <= 0:
                 self.send_html('<p>Invalid record.</p>', 400); return
             db = get_db()
@@ -8902,8 +8947,7 @@ function printBoth(){{
 </body></html>'''
                 self.send_html(combined)
             else:
-                # No linked Note Verbal — just show the letter
-                self.send_html(letter)
+                self.send_html('<p>No confirmed linked Note Verbal was found for this record. Please confirm the link in Note Verbal Review first.</p>', 404)
 
         # Iraq Transit Visa — Embassy Letter Print
         elif path == '/print/iraq-embassy-letter':
@@ -8947,7 +8991,10 @@ function printBoth(){{
             if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             source = (params.get('source', 'public') or 'public').strip()
-            rid = int(params.get('id', 0) or 0)
+            try:
+                rid = int(str(params.get('id', 0) or 0).strip())
+            except Exception:
+                rid = 0
             if rid <= 0:
                 self.send_html('<p>Invalid record.</p>', 400); return
             db = get_db()
@@ -9020,8 +9067,7 @@ function printBoth(){{
 </body></html>'''
                 self.send_html(combined)
             else:
-                letter = generate_iraq_embassy_letter_html(rec, source)
-                self.send_html(letter)
+                self.send_html('<p>No confirmed linked Note Verbal was found for this Iraq record. Please confirm the link in Note Verbal Review first.</p>', 404)
         elif path == '/print/fee-distribution-receipt':
             try:
                 user = self.require_auth()
@@ -13881,11 +13927,13 @@ html+=sec('Embassy Letter Approval',[
 ['Print count',printCnt]
 ]);
 }
-html+=`<div style="margin:12px 0;padding:12px;background:#f1f8e9;border-radius:8px;border:1px solid #c5e1a5">
-<button type="button" class="btn btn-p" style="padding:8px 18px" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter?id='+viewRec.id,'_blank')">\ud83d\udcc4 Print Embassy Letter</button>
-${r.linked_nv_upload_id?`<button type="button" class="btn btn-i" style="padding:8px 14px;margin-left:8px" onclick="window.open('/note-verbal-file?upload_id=${r.linked_nv_upload_id}','_blank')">\ud83d\udcce Print Linked Note Verbal</button>`:''}
-${r.linked_nv_upload_id?`<button type="button" class="btn" style="padding:8px 14px;margin-left:8px;background:#455a64;color:#fff" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter-with-note-verbal?id='+viewRec.id,'_blank')">\ud83e\uddfe Print Embassy Letter + Full Note Verbal PDF</button>`:''}
-<span style="font-size:.8em;color:#558b2f;margin-left:10px">${lr?'Ready to print.':tip}</span></div>`;
+html+=`<div style="margin:12px 0;padding:14px;background:#f8fbf4;border-radius:10px;border:1px solid #cfe3ba">
+<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+<button type="button" class="btn btn-p" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter?id='+viewRec.id,'_blank')">\ud83d\udcc4 Print Embassy Letter</button>
+${r.linked_nv_upload_id?`<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open('/note-verbal-file?upload_id=${r.linked_nv_upload_id}','_blank')">\ud83d\udcce Print Linked Note Verbal</button>`:''}
+${r.linked_nv_upload_id?`<button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)openCombinedLetterWithNV('/print/embassy-letter?id='+viewRec.id, ${Number(r.linked_nv_upload_id||0)})">\ud83e\uddfe Print Letter + Full Note Verbal PDF</button>`:''}
+</div>
+<div style="font-size:.8em;color:#558b2f;margin-top:8px">${lr?'Ready to print.':tip}</div></div>`;
 })();
 html+=sec('Status & Processing',[
 ['KSA Visa Status',r.visa_status],['Travel Status',r.travel_status],
@@ -14032,6 +14080,13 @@ loadRecords();loadDash();
 await openView(viewRec.id);
 }else{toast('Error: '+(res?.error||'Save failed'))}
 }catch(err){toast('Error: '+err.message)}
+}
+function openCombinedLetterWithNV(letterUrl, uploadId){
+const uid=Number(uploadId||0);
+if(!uid){toast('No linked Note Verbal PDF found for this record');return;}
+const w1=window.open(letterUrl,'_blank');
+const w2=window.open('/note-verbal-file?upload_id='+uid,'_blank');
+if(!w1||!w2)toast('Popup blocked. Please allow popups for this site.');
 }
 async function collectFeeFromView(){
 if(!viewRec)return;
@@ -15211,9 +15266,10 @@ h+='</div>';
 h+='<button type="button" class="btn btn-p" style="padding:8px 18px;margin-bottom:10px" onclick="ippSaveNvFields()">Save NV fields</button>';
 h+=x.linked_nv_upload_id?('<div style="font-size:.8em;color:#1565c0;margin-bottom:6px"><strong>Linked full Note Verbal:</strong> '+ippVq(x.linked_nv_filename||'PDF')+'</div>'):'';
 h+='<div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Letter issued:</strong> '+ippLtrIssued+' &nbsp;|&nbsp; <strong>Print count:</strong> '+ippPrintCnt+'</div>';
-h+='<button type="button" class="btn btn-p" style="padding:8px 18px" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)window.open(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,\'_blank\')">&#128196; Print Iraq Embassy Letter</button>';
-h+=x.linked_nv_upload_id?(' <button type="button" class="btn btn-i" style="padding:8px 14px;margin-left:8px" onclick="window.open(\'/note-verbal-file?upload_id='+x.linked_nv_upload_id+'\',\'_blank\')">&#128206; Print Linked Note Verbal</button> <button type="button" class="btn" style="padding:8px 14px;margin-left:8px;background:#455a64;color:#fff" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)window.open(\'/print/iraq-embassy-letter-with-note-verbal?source=public&id=\'+_ippCur.id,\'_blank\')">&#129534; Print Letter + Full Note Verbal PDF</button>'):'';
-h+=' <span style="font-size:.8em;color:#558b2f;margin-left:10px">'+(ippNvReady?'Ready to print.':ippLtrTip)+'</span>';
+h+='<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">';
+h+='<button type="button" class="btn btn-p" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)window.open(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,\'_blank\')">&#128196; Print Iraq Embassy Letter</button>';
+h+=x.linked_nv_upload_id?('<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open(\'/note-verbal-file?upload_id='+x.linked_nv_upload_id+'\',\'_blank\')">&#128206; Print Linked Note Verbal</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)openCombinedLetterWithNV(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,'+Number(x.linked_nv_upload_id||0)+')">&#129534; Print Letter + Full Note Verbal PDF</button>'):'';
+h+='</div><div style="font-size:.8em;color:#558b2f;margin-top:8px">'+(ippNvReady?'Ready to print.':ippLtrTip)+'</div>';
 h+='</div>';
 document.getElementById('ippBody').innerHTML=h;
 document.getElementById('ippEditBtn').style.display='';
@@ -15401,7 +15457,7 @@ const appNvOk=String(a.full_name||'').trim()!==''&&String(a.passport_number||'')
 const appFeeClear=(String(a.fee_status||'pending').toLowerCase()==='paid'||String(a.fee_status||'pending').toLowerCase()==='waived');
 ah+=`<td><button type="button" class="btn btn-p" style="padding:3px 10px;font-size:.75em" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)window.open('/print/iraq-embassy-letter?source=applicant&id=${a.id}','_blank')">&#128196; Print</button>`;
 if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn btn-i" style="padding:2px 8px;font-size:.68em;margin-top:3px" onclick="window.open('/note-verbal-file?upload_id=${a.linked_nv_upload_id}','_blank')">&#128206; Note Verbal</button>`;
-if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#455a64;color:#fff" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)window.open('/print/iraq-embassy-letter-with-note-verbal?source=applicant&id=${a.id}','_blank')">&#129534; Print + NV</button>`;
+if(a.linked_nv_upload_id) ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#455a64;color:#fff" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)openCombinedLetterWithNV('/print/iraq-embassy-letter?source=applicant&id=${a.id}', ${Number(a.linked_nv_upload_id||0)})">&#129534; Print + NV</button>`;
 if(a.embassy_letter_print_count>0) ah+=`<br><span style="font-size:.68em;color:#999">Printed: ${a.embassy_letter_print_count}x</span>`;
 ah+=`</td></tr>`;
 });
