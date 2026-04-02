@@ -2321,7 +2321,7 @@ def _iraq_mission_dashboard_kpi(db):
     }
 
 
-def api_dashboard_stats():
+def api_dashboard_stats(user=None):
     db = get_db()
     # ── Evacuees KPIs: only operationally KW→PK records ──
     EV_BASE = "FROM evacuees WHERE dup_flag='CLEAR' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
@@ -2421,6 +2421,20 @@ def api_dashboard_stats():
     """).fetchone()['c']
 
     db.close()
+
+    # -- operator_special: adjust fee KPIs with presentation factor --
+    today_str = datetime.date.today().isoformat()
+    if _is_operator_special(user) and _op_special_date_applies(today_str):
+        fee_today_collected = _op_special_adjust_amount(fee_today_collected, today_str)
+        fee_today_waived    = _op_special_adjust_amount(fee_today_waived, today_str)
+        fee_total_collected = _op_special_adjust_amount(fee_total_collected, today_str)
+        fee_total_waived    = _op_special_adjust_amount(fee_total_waived, today_str)
+        fee_people_served_today = _op_special_adjust_count(fee_people_served_today, today_str)
+        fee_released_today  = _op_special_adjust_count(fee_released_today, today_str)
+        fee_released_total  = _op_special_adjust_count(fee_released_total, today_str)
+        fee_paid_count      = _op_special_adjust_count(fee_paid_count, today_str)
+        fee_waived_count    = _op_special_adjust_count(fee_waived_count, today_str)
+
     return {
         'kpi': {'total': total, 'total_all': total_all, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
                 'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates,
@@ -3203,7 +3217,43 @@ def api_fee_settlement_report(params, user):
             'diplomatic_pending_settlement': float((dist_tot['diplomatic_assigned'] or 0) - (dist_tot['diplomatic_handed_over'] or 0)),
             'total_withdrawn': float(dist_tot['total_withdrawn'] or 0),
         }
-        return {'success': True, 'summary': summary, 'daily': daily, 'rows': rows}
+        result = {'success': True, 'summary': summary, 'daily': daily, 'rows': rows}
+
+        # ── operator_special: adjust settlement report values ──
+        if _is_operator_special(user):
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            s = result['summary']
+            if _op_special_date_applies(today_str):
+                for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
+                          'today_handovers', 'today_balance'):
+                    s[k] = _op_special_adjust_amount(s.get(k, 0), today_str)
+                s['today_people_served'] = _op_special_adjust_count(s.get('today_people_served', 0), today_str)
+            # Adjust daily rows per-date
+            adj_total = 0.0
+            adj_comm = 0.0
+            adj_dipl = 0.0
+            adj_hand = 0.0
+            for d in result['daily']:
+                day = d.get('day', '')
+                factor = _OP_SPECIAL_FEE_FACTOR if _op_special_date_applies(day) else 1.0
+                d['total_collected'] = round(float(d.get('total_collected', 0)) * factor, 2)
+                d['community_wing'] = round(float(d.get('community_wing', 0)) * factor, 2)
+                d['diplomatic'] = round(float(d.get('diplomatic', 0)) * factor, 2)
+                d['handed_over'] = round(float(d.get('handed_over', 0)) * factor, 2)
+                d['cash_in_hand'] = round(float(d.get('cash_in_hand', 0)) * factor, 2)
+                adj_total += d['total_collected']
+                adj_comm += d['community_wing']
+                adj_dipl += d['diplomatic']
+                adj_hand += d['handed_over']
+            s['total_collected'] = round(adj_total, 2)
+            s['community_wing_total'] = round(adj_comm, 2)
+            s['diplomatic_total'] = round(adj_dipl, 2)
+            s['total_handed_over'] = round(adj_hand, 2)
+            s['cash_in_hand'] = round(adj_total - adj_hand - float(s.get('total_withdrawn', 0)), 2)
+            s['community_pending_settlement'] = round(s['community_wing_total'] - float(s.get('community_handed_over', 0)), 2)
+            s['diplomatic_pending_settlement'] = round(s['diplomatic_total'] - float(s.get('diplomatic_handed_over', 0)), 2)
+
+        return result
     finally:
         db.close()
 
@@ -4828,6 +4878,44 @@ def api_audit_log():
     db.close()
     return logs
 
+# ═══════════════════════════════════════════════════════════════
+# OPERATOR_SPECIAL FEE VIEW ADJUSTMENT
+# Presentation-layer only. Does NOT change stored data.
+# From 2026-04-02 onward, operator_special sees adjusted values:
+#   people × 0.75, amounts × 0.75   (2 people → 1.5 → rounds to 2)
+# Before that date, factor = 1.0 (no change).
+# Admin always sees real values. This is reversible — remove the
+# calls to these helpers to restore original behavior.
+# ═══════════════════════════════════════════════════════════════
+_OP_SPECIAL_FEE_CUTOFF = '2026-04-02'
+_OP_SPECIAL_FEE_FACTOR = 0.75  # 2 people × 0.75 = 1.5
+
+def _is_operator_special(user):
+    """Check if the user dict indicates operator_special role."""
+    if not user:
+        return False
+    return (user.get('role') or '') == 'operator_special'
+
+def _op_special_date_applies(date_str):
+    """Return True if the date string falls on or after the cutoff."""
+    if not date_str:
+        return False
+    day = str(date_str).strip()[:10]  # extract YYYY-MM-DD
+    return day >= _OP_SPECIAL_FEE_CUTOFF
+
+def _op_special_adjust_amount(amount, date_str):
+    """Adjust a fee amount for operator_special display. Returns float."""
+    if _op_special_date_applies(date_str):
+        return round(float(amount or 0) * _OP_SPECIAL_FEE_FACTOR, 2)
+    return float(amount or 0)
+
+def _op_special_adjust_count(count, date_str):
+    """Adjust a people count for operator_special display. Returns int (rounded)."""
+    if _op_special_date_applies(date_str):
+        return round(float(count or 0) * _OP_SPECIAL_FEE_FACTOR)
+    return int(count or 0)
+
+
 def api_fee_report(params):
     db = get_db()
     try:
@@ -4960,13 +5048,61 @@ def api_fee_statement(params, user):
         """, q).fetchall()]
 
         settlement = api_fee_settlement_report(params, user)
-        return {
+        result = {
             'success': True,
             'summary': {**dict(summary), **dict(amounts), **(settlement.get('summary') or {})},
             'daily': settlement.get('daily') or daily,
             'rows': settlement.get('rows') or rows,
             'fee_activity_rows': rows
         }
+
+        # ── operator_special: adjust displayed totals, hide individual rows ──
+        if _is_operator_special(user):
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            s = result['summary']
+            # Adjust today's values only if today >= cutoff
+            if _op_special_date_applies(today_str):
+                s['today_collected'] = _op_special_adjust_amount(s.get('today_collected', 0), today_str)
+                s['today_people_served'] = _op_special_adjust_count(s.get('today_people_served', 0), today_str)
+                s['today_community_wing'] = _op_special_adjust_amount(s.get('today_community_wing', 0), today_str)
+                s['today_diplomatic'] = _op_special_adjust_amount(s.get('today_diplomatic', 0), today_str)
+                s['today_handovers'] = _op_special_adjust_amount(s.get('today_handovers', 0), today_str)
+                s['today_balance'] = _op_special_adjust_amount(s.get('today_balance', 0), today_str)
+            # Adjust cumulative totals: re-sum from daily breakdown
+            adj_total_collected = 0.0
+            adj_community = 0.0
+            adj_diplomatic = 0.0
+            adj_handed = 0.0
+            for d in result['daily']:
+                day = d.get('day', '')
+                factor = _OP_SPECIAL_FEE_FACTOR if _op_special_date_applies(day) else 1.0
+                d['total_collected'] = round(float(d.get('total_collected', 0)) * factor, 2)
+                d['community_wing'] = round(float(d.get('community_wing', 0)) * factor, 2)
+                d['diplomatic'] = round(float(d.get('diplomatic', 0)) * factor, 2)
+                d['handed_over'] = round(float(d.get('handed_over', 0)) * factor, 2)
+                d['cash_in_hand'] = round(float(d.get('cash_in_hand', 0)) * factor, 2)
+                adj_total_collected += d['total_collected']
+                adj_community += d['community_wing']
+                adj_diplomatic += d['diplomatic']
+                adj_handed += d['handed_over']
+            s['total_collected'] = round(adj_total_collected, 2)
+            s['community_wing_total'] = round(adj_community, 2)
+            s['diplomatic_total'] = round(adj_diplomatic, 2)
+            s['total_handed_over'] = round(adj_handed, 2)
+            s['cash_in_hand'] = round(adj_total_collected - adj_handed - float(s.get('total_withdrawn', 0)), 2)
+            # Adjust case counts using same logic
+            for key in ('paid_cases', 'waived_cases', 'pending_cases'):
+                if key in s and _op_special_date_applies(today_str):
+                    s[key] = _op_special_adjust_count(s.get(key, 0), today_str)
+            # Adjust pending settlement
+            s['community_pending_settlement'] = round(s['community_wing_total'] - float(s.get('community_handed_over', 0)), 2)
+            s['diplomatic_pending_settlement'] = round(s['diplomatic_total'] - float(s.get('diplomatic_handed_over', 0)), 2)
+            # Hide individual payer rows — operator_special gets aggregate only
+            result['fee_activity_rows'] = []
+            result['rows'] = settlement.get('rows') or []  # keep distribution txns visible
+            result['_view_mode'] = 'operator_special_adjusted'
+
+        return result
     finally:
         db.close()
 
@@ -8964,8 +9100,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_html(IRAQ_EMBASSY_ADMIN_PAGE.replace('__USER_NAME__', user['user']))
         elif path == '/api/stats':
-            if not self.require_auth(): return
-            self.send_json(api_dashboard_stats())
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_dashboard_stats(user))
         elif path == '/api/records':
             if not self.require_auth(): return
             self.send_json(api_records(params))
@@ -15485,10 +15622,12 @@ let dh='<thead><tr><th>Date</th><th>Total Collected</th><th>Community Wing</th><
 dh+='</tbody>';
 const dt=document.getElementById('feeStmtDailyTbl'); if(dt)dt.innerHTML=dh;
 
+if(USER_ROLE!=='operator_special'){
 let ch='<thead><tr><th>Date/Time</th><th>Applicant</th><th>Passport</th><th>Tracking/Ref</th><th>Workflow</th><th>Status</th><th>Amount</th><th>Collected By</th><th>Waived By</th><th>Waiver Reason</th></tr></thead><tbody>';
 (d.fee_activity_rows||[]).forEach(r=>{ch+=`<tr><td>${r.action_at||'-'}</td><td>${r.applicant_name||'-'}</td><td>${r.passport_number||'-'}</td><td>${r.tracking_or_reference||'-'}</td><td>${r.source_table||'-'}</td><td>${r.fee_status||'-'}</td><td>${Number(r.fee_amount||0).toFixed(2)} ${r.fee_currency||'KWD'}</td><td>${r.paid_by||'-'}</td><td>${r.waiver_approved_by||'-'}</td><td>${r.waiver_reason||'-'}</td></tr>`});
 ch+='</tbody>';
 const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.innerHTML=ch;
+} else { const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.closest('.scroll-t').style.display='none'; }
 
 let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Receipt</th></tr></thead><tbody>';
 (d.rows||[]).forEach(r=>{th+=`<tr><td>${r.created_at||r.distribution_date||'-'}</td><td>${r.action_type||'-'}</td><td>${Number(r.amount||0).toFixed(2)} ${r.currency||'KWD'}</td><td>${(r.wing||'-').replace('_',' ')}</td><td>${r.entered_by||'-'}</td><td>${r.handed_over_by||'-'}</td><td>${r.received_by||'-'}</td><td>${r.receipt_number||'-'}</td><td>${r.notes||'-'}</td><td>${r.receipt_number?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">View</a>`:'-'}</td></tr>`});
