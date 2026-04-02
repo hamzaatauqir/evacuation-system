@@ -392,6 +392,16 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass
+    # ── Iraq public final approval email tracking columns ──
+    for col, coltype in [
+        ('final_email_sent_flag', 'INTEGER DEFAULT 0'),
+        ('final_email_sent_at', 'TIMESTAMP')
+    ]:
+        try:
+            db.execute(f"ALTER TABLE iraq_public_submissions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
     for col, coltype in [
         ('total_pages', 'INTEGER DEFAULT 0'),
         ('pages_processed', 'INTEGER DEFAULT 0'),
@@ -1293,6 +1303,80 @@ def _queue_iraq_final_approval_if_ready(db, rec_id, changed_by='system'):
     if _has_both_approvals(rec) and int(rec.get('iraq_final_email_sent_flag') or 0) == 0:
         _queue_iraq_final_approval_email(rec, changed_by)
 
+
+def _iraq_public_get_kw_decision(db, submission_id):
+    """Return the latest Kuwait decision for an Iraq public submission."""
+    row = db.execute(
+        "SELECT decision FROM iraq_applicant_decisions WHERE public_submission_id = ? ORDER BY id DESC LIMIT 1",
+        [submission_id]).fetchone()
+    return (row['decision'] if row else '') or ''
+
+
+def _queue_iraq_public_final_approval_email(record, changed_by='system'):
+    """Queue a final-approval email for an Iraq public submission."""
+    email = (record.get('email') or '').strip()
+    if not _is_valid_email_loose(email):
+        return
+    ref = record.get('reference_number') or f"IRQ-{record.get('id', 0)}"
+    EMAIL_QUEUE.put({
+        'type': 'iraq_public_final_approval',
+        'to': email,
+        'name': (record.get('full_name') or 'Applicant').strip(),
+        'passport': (record.get('passport_number') or '').strip(),
+        'tracking_number': ref,
+        'submission_id': record.get('id'),
+        'changed_by': changed_by
+    })
+
+
+def _queue_iraq_public_final_approval_if_ready(db, submission_id, changed_by='system'):
+    """Check if an Iraq public submission has both KW + KSA approval; if so, queue final email."""
+    row = db.execute("""SELECT id, full_name, passport_number, email, reference_number,
+        COALESCE(ksa_mofa_status,'') AS ksa_mofa_status,
+        COALESCE(final_email_sent_flag,0) AS final_email_sent_flag
+        FROM iraq_public_submissions WHERE id = ?""", [submission_id]).fetchone()
+    if not row:
+        return
+    rec = dict(row)
+    # Check KSA side
+    ksa_ok = (rec.get('ksa_mofa_status') or '').strip().lower() == 'approved'
+    # Check KW side (latest decision in iraq_applicant_decisions)
+    kw_decision = _iraq_public_get_kw_decision(db, submission_id)
+    kw_ok = kw_decision.strip().lower() == 'approved'
+    if ksa_ok and kw_ok and int(rec.get('final_email_sent_flag') or 0) == 0:
+        _queue_iraq_public_final_approval_email(rec, changed_by)
+
+
+def _queue_iraq_public_final_approval_resend(changed_by='system'):
+    """Admin resend: queue final-approval emails for all Iraq public submissions that are fully approved."""
+    db = get_db()
+    rows = db.execute("""SELECT p.id, p.full_name, p.passport_number, p.email, p.reference_number,
+        COALESCE(p.ksa_mofa_status,'') AS ksa_mofa_status
+        FROM iraq_public_submissions p
+        WHERE LOWER(COALESCE(p.ksa_mofa_status,'')) = 'approved'
+          AND TRIM(COALESCE(p.email,'')) != ''
+          AND p.id IN (
+            SELECT d.public_submission_id FROM iraq_applicant_decisions d
+            WHERE d.id = (SELECT MAX(d2.id) FROM iraq_applicant_decisions d2 WHERE d2.public_submission_id = d.public_submission_id)
+              AND LOWER(d.decision) = 'approved'
+          )
+        ORDER BY p.id""").fetchall()
+    queued = 0
+    invalid_email = 0
+    for r in rows:
+        rec = dict(r)
+        if not _is_valid_email_loose((rec.get('email') or '').strip()):
+            invalid_email += 1
+            continue
+        _queue_iraq_public_final_approval_email(rec, changed_by)
+        queued += 1
+    db.execute("INSERT INTO audit_log (action, user, details) VALUES ('iraq_public_final_email_resend', ?, ?)",
+               [changed_by, json.dumps({'total_matched': len(rows), 'queued': queued, 'invalid_email': invalid_email})])
+    db.commit()
+    db.close()
+    return {'total_matched': len(rows), 'queued': queued, 'invalid_email': invalid_email}
+
+
 def _queue_iraq_forwarded_backfill_emails(changed_by='system', limit=3000):
     db = get_db()
     rows = db.execute("""SELECT e.id, e.name, e.passport, e.email
@@ -1859,6 +1943,39 @@ def _email_worker_loop():
                         iraq_final_email_sent_flag = 1,
                         iraq_final_email_sent_at = COALESCE(iraq_final_email_sent_at, CURRENT_TIMESTAMP)
                         WHERE id = ?""", [job.get('record_id')])
+                db.commit()
+                db.close()
+            elif job.get('type') == 'iraq_public_final_approval':
+                subject = "Final Approval Complete - Kuwait Transit Visa"
+                salutation = _recipient_salutation(job.get('name', ''))
+                templates = _load_email_templates()
+                body = _render_email_template(templates.get('iraq_final_approval_complete', ''), {
+                    'salutation': salutation,
+                    'tracking_number': job.get('tracking_number', ''),
+                    'name': job.get('name', ''),
+                    'passport': job.get('passport', '')
+                })
+                if not body.strip():
+                    body = (f"{salutation}\n\n"
+                            "Your approvals are complete. Both MOFA Kuwait and MOFA KSA have approved your Kuwait transit visa request.\n\n"
+                            f"Reference: {job.get('tracking_number', '')}\n"
+                            f"Name: {job.get('name', '')}\n"
+                            f"Passport: {job.get('passport', '')}\n\n"
+                            "Please approach Pakistan Embassy Iraq for travel to Kuwait.\n\n"
+                            "Pakistan Embassy Kuwait")
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                sub_id = job.get('submission_id')
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES ('email_iraq_public_final_approval', ?, ?, ?)",
+                    [sub_id, job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                if ok and sub_id:
+                    db.execute("""UPDATE iraq_public_submissions SET
+                        final_email_sent_flag = 1,
+                        final_email_sent_at = COALESCE(final_email_sent_at, CURRENT_TIMESTAMP)
+                        WHERE id = ?""", [sub_id])
                 db.commit()
                 db.close()
             elif job.get('type') == 'admin_advisory':
@@ -5304,6 +5421,9 @@ def api_iraq_bulk_visa_approval(csv_text, new_status, user):
                 [pub['id'], target_decision, now, 'Bulk visa CSV upload', user])
             db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('iraq_public_visa_decision_csv', ?, ?, ?)",
                        (pub['id'], user, json.dumps({'passport': passport, 'decision': target_decision})))
+            # Check if Iraq public submission now has both KW + KSA approval
+            if target_decision == 'Approved':
+                _queue_iraq_public_final_approval_if_ready(db, pub['id'], changed_by=user)
             stats['approved'] += 1
             stats['iraq_public_matched'] += 1
             stats['details'].append(f"Row {row_num}: {pub['full_name']} ({passport}) — {target_decision} ✓ (Iraq public / MOFA KW)")
@@ -5514,7 +5634,8 @@ def api_iraq_public_track(params):
         row = db.execute(
             """SELECT id, reference_number, full_name, passport_number, status, created_at,
                       COALESCE(mofa_kw_portal_visible,0) AS mofa_kw_portal_visible,
-                      COALESCE(mofa_kw_portal_sent_at,'') AS mofa_kw_portal_sent_at
+                      COALESCE(mofa_kw_portal_sent_at,'') AS mofa_kw_portal_sent_at,
+                      COALESCE(ksa_mofa_status,'') AS ksa_mofa_status
                FROM iraq_public_submissions
                WHERE UPPER(REPLACE(REPLACE(COALESCE(reference_number,''), '-', ''), ' ', '')) = ?""",
             [ref_norm]
@@ -5524,23 +5645,42 @@ def api_iraq_public_track(params):
         row = db.execute(
             """SELECT id, reference_number, full_name, passport_number, status, created_at,
                       COALESCE(mofa_kw_portal_visible,0) AS mofa_kw_portal_visible,
-                      COALESCE(mofa_kw_portal_sent_at,'') AS mofa_kw_portal_sent_at
+                      COALESCE(mofa_kw_portal_sent_at,'') AS mofa_kw_portal_sent_at,
+                      COALESCE(ksa_mofa_status,'') AS ksa_mofa_status
                FROM iraq_public_submissions
                WHERE UPPER(REPLACE(REPLACE(COALESCE(passport_number,''), ' ', ''), '-', '')) = ?""",
             [pp_norm]
         ).fetchone()
-    db.close()
 
     if not row:
+        db.close()
         return {'success': False, 'error': 'No application found with this information. Please check your passport number or reference number and try again.'}
 
     r = dict(row)
+    submission_id = r['id']
     status = (r.get('status') or '').strip()
     sent_to_main = int(r.get('mofa_kw_portal_visible') or 0) == 1 or bool((r.get('mofa_kw_portal_sent_at') or '').strip())
 
-    if sent_to_main or status == 'Forwarded to Embassy Kuwait':
+    # ── Fetch latest Kuwait decision from iraq_applicant_decisions ──
+    kw_decision = _iraq_public_get_kw_decision(db, submission_id)
+    approved_kw = kw_decision.strip().lower() == 'approved'
+
+    # ── KSA approval from iraq_public_submissions.ksa_mofa_status ──
+    approved_ksa = (r.get('ksa_mofa_status') or '').strip().lower() == 'approved'
+
+    db.close()
+
+    # ── Determine public-facing status ──
+    if approved_kw and approved_ksa:
+        public_status = 'APPROVED'
+        detail = 'Final approval complete. Please approach Pakistan Embassy Iraq for travel to Kuwait.'
+    elif sent_to_main or status == 'Forwarded to Embassy Kuwait':
         public_status = 'PENDING_MOFA'
         detail = 'Requests sent to MOFA Kuwait and MOFA KSA.'
+        if approved_kw and not approved_ksa:
+            detail = 'Kuwait approval received. Awaiting MOFA KSA approval.'
+        elif approved_ksa and not approved_kw:
+            detail = 'KSA approval received. Awaiting Kuwait approval.'
     else:
         public_status = 'PROCESSING'
         detail = 'Application Submitted. Under Review. Requests will be sent to concerned authorities.'
@@ -5558,8 +5698,8 @@ def api_iraq_public_track(params):
             'registered_date': registered_date,
             'mofa_sent_date': (r.get('mofa_kw_portal_sent_at') or '').strip(),
             'mofa_letter_number': '',
-            'approved_kw': False,
-            'approved_ksa': False
+            'approved_kw': approved_kw,
+            'approved_ksa': approved_ksa
         }
     }
 
@@ -5967,6 +6107,8 @@ def api_bulk_ksa_approval(passports_text, user='system'):
                 if (pr['ksa_mofa_status'] or '').strip().lower() != 'approved':
                     db.execute("""UPDATE iraq_public_submissions SET ksa_mofa_status='Approved' WHERE id=?""", [pr['id']])
                     iraq_public_updated += 1
+                # Check if both KW + KSA are now approved for this Iraq public submission
+                _queue_iraq_public_final_approval_if_ready(db, pr['id'], user)
 
         if not found_any:
             not_found.append(pp)
@@ -6095,6 +6237,9 @@ def api_iraq_update_decision(data, user):
         [sid, decision, (data.get('decision_date') or datetime.now().strftime('%Y-%m-%d')).strip(),
          (data.get('remarks') or '').strip(), user])
     db.commit()
+    # Check if Iraq public submission now has both KW + KSA approval
+    if decision == 'Approved':
+        _queue_iraq_public_final_approval_if_ready(db, sid, changed_by=user)
     db.close()
     return {'success': True}
 
@@ -10777,6 +10922,14 @@ function printBoth(){{
             result = _queue_iraq_forwarded_resend_emails(changed_by=user['user'])
             self.send_json({'success': True, **result})
 
+        elif path == '/api/admin-iraq-email-resend-approved':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            result = _queue_iraq_public_final_approval_resend(changed_by=user['user'])
+            self.send_json({'success': True, **result})
+
         elif path == '/api/upload-visa-approvals':
             user = self.require_auth()
             if not user: return
@@ -14060,6 +14213,7 @@ No deterioration in ground security situation so far.</textarea>
 <div style="margin-top:10px">
 <button class="btn btn-w" onclick="runIraqEmailBackfill()">Run Iraq Sent-Email Catch-up (one-time safe)</button>
 <button class="btn btn-i" onclick="resendIraqForwardedEmails()">Re-send Iraq Updated Status Emails</button>
+<button class="btn btn-i" onclick="resendIraqFinalApprovalEmails()" style="margin-left:6px;background:#2e7d32;color:#fff">Resend Final Approval Emails (Iraq Public)</button>
 <div id="iraqBackfillStatus" style="font-size:.82em;color:#555;margin-top:6px"></div>
 </div>
 </div>
@@ -15448,6 +15602,14 @@ if(!r||r.error){toast(r?.error||'Could not re-send Iraq updated status emails');
 const msg=`Re-send queued: ${r.queued||0} | Candidates: ${r.candidate_rows||0} | Invalid email skipped: ${r.skipped_invalid_email||0}`;
 const el=document.getElementById('iraqBackfillStatus'); if(el)el.textContent=msg;
 toast('Iraq updated status re-send queued');
+}
+async function resendIraqFinalApprovalEmails(){
+if(!confirm('Resend final approval emails to ALL Iraq public applicants who have both KW + KSA approval?'))return;
+const r=await api('/api/admin-iraq-email-resend-approved',{method:'POST'});
+if(!r||r.error){toast(r?.error||'Could not resend final approval emails');return}
+const msg=`Final approval resend — Matched: ${r.total_matched||0} | Queued: ${r.queued||0} | Invalid email: ${r.invalid_email||0}`;
+const el=document.getElementById('iraqBackfillStatus'); if(el)el.textContent=msg;
+toast('Iraq final approval emails queued for resend');
 }
 
 async function uploadVisaCSV(){
