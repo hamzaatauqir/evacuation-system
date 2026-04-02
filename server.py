@@ -3320,6 +3320,20 @@ def api_fee_settlement_report(params, user):
             s['community_pending_settlement'] = _op_special_round(s['community_wing_total'] - float(s.get('community_handed_over', 0)))
             s['diplomatic_pending_settlement'] = _op_special_round(s['diplomatic_total'] - float(s.get('diplomatic_handed_over', 0)))
             s['total_withdrawn'] = _op_special_round(s.get('total_withdrawn', 0))
+            # Additional operator_special display transformation (people-adjusted view).
+            s['display_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('total_collected', 0))
+            s['display_today_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('today_collected', 0))
+            s['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('total_collected', 0)))
+            s['display_today_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('today_collected', 0)))
+            s['display_cash_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('cash_in_hand', 0)))
+            # Make primary card values use adjusted display for operator_special.
+            s['total_collected'] = s['display_total_adjusted']
+            s['today_collected'] = s['display_today_adjusted']
+            s['cash_in_hand'] = s['display_cash_adjusted']
+            for d in result['daily']:
+                d['display_people_adjusted'] = _op_special_adjust_people_from_amount(d.get('total_collected', 0))
+                d['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(d.get('total_collected', 0)))
+                d['total_collected'] = d['display_total_adjusted']
 
         return result
     finally:
@@ -4956,6 +4970,7 @@ def api_audit_log():
 # calls to these helpers to restore original behavior.
 # ═══════════════════════════════════════════════════════════════
 _OP_SPECIAL_FEE_CUTOFF = '2026-04-02'
+_OP_SPECIAL_ADJUST_FACTOR = 0.75  # business rule: actual 2 people -> 1.5 displayed
 
 def _is_operator_special(user):
     """Check if the user dict indicates operator_special role."""
@@ -4976,6 +4991,18 @@ def _op_special_round(value):
         return int(Decimal(str(value or 0)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
     except Exception:
         return int(Decimal('0').quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+def _op_special_adjust_people_from_amount(amount):
+    """Convert amount->people (KWD 2 each), then apply operator_special display factor."""
+    try:
+        actual_people = float(amount or 0) / 2.0
+        return round(actual_people * _OP_SPECIAL_ADJUST_FACTOR, 1)
+    except Exception:
+        return 0.0
+
+def _op_special_adjust_amount_from_amount(amount):
+    """Apply operator_special people-adjustment and convert back to KWD-equivalent display amount."""
+    return _op_special_adjust_people_from_amount(amount) * 2.0
 
 
 def api_fee_report(params):
@@ -5173,6 +5200,20 @@ def api_fee_statement(params, user):
                     s[k] = _op_special_round(s.get(k, 0))
             s['community_pending_settlement'] = _op_special_round(s.get('community_wing_total', 0) - float(s.get('community_handed_over', 0)))
             s['diplomatic_pending_settlement'] = _op_special_round(s.get('diplomatic_total', 0) - float(s.get('diplomatic_handed_over', 0)))
+            # Additional operator_special display transformation (people-adjusted view).
+            s['display_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('total_collected', 0))
+            s['display_today_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('today_collected', 0))
+            s['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('total_collected', 0)))
+            s['display_today_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('today_collected', 0)))
+            s['display_cash_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('cash_in_hand', 0)))
+            # Ensure operator_special cards/tables do not show raw admin totals.
+            s['total_collected'] = s['display_total_adjusted']
+            s['today_collected'] = s['display_today_adjusted']
+            s['cash_in_hand'] = s['display_cash_adjusted']
+            for d in daily:
+                d['display_people_adjusted'] = _op_special_adjust_people_from_amount(d.get('total_collected', 0))
+                d['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(d.get('total_collected', 0)))
+                d['total_collected'] = d['display_total_adjusted']
             # Recompute paid/waived/pending case counts from cutoff-visible fee activity only.
             paid_cases = db.execute("""
                 SELECT COUNT(DISTINCT source_table||':'||source_id) c
@@ -15691,18 +15732,29 @@ const by=document.getElementById('feeStmtBy')?.value?.trim()||''; if(by)p.set('c
 const d=await api('/api/fee-statement?'+p.toString()); if(!d||d.error)return;
 const s0=d.summary||{};
 const money=v=>USER_ROLE==='operator_special'?String(Math.round(Number(v||0))):Number(v||0).toFixed(2);
+const isOpSpecial=USER_ROLE==='operator_special';
+const totalCollectedLabel=isOpSpecial?'Adjusted Total (Op Special)':'Total Fee Collected (KWD)';
+const todayCollectedLabel=isOpSpecial?"Adjusted Today (Op Special)":"Today's Collection";
+const cashLabel=isOpSpecial?'Adjusted Cash in Hand (Op Special)':'Cash in Hand / Balance';
+const totalCollectedValue=isOpSpecial?(s0.display_total_adjusted ?? s0.total_collected ?? 0):(s0.total_collected||0);
+const todayCollectedValue=isOpSpecial?(s0.display_today_adjusted ?? s0.today_collected ?? 0):(s0.today_collected||0);
+const cashValue=isOpSpecial?(s0.display_cash_adjusted ?? s0.cash_in_hand ?? 0):(s0.cash_in_hand||0);
+const adjustedPeopleBadge=isOpSpecial?`<div class="kc d"><div class="lb">Adjusted People (Op Special)</div><div class="vl">${(s0.display_people_adjusted??0)}</div></div>`:'';
+const adjustedTodayPeopleBadge=isOpSpecial?`<div class="kc d"><div class="lb">Adjusted People Today (Op Special)</div><div class="vl">${(s0.display_today_people_adjusted??0)}</div></div>`:'';
 const cards=document.getElementById('feeStmtCards');
 if(cards) cards.innerHTML=`
-<div class="kc s"><div class="lb">Total Fee Collected (KWD)</div><div class="vl">${money(s0.total_collected||0)}</div></div>
+<div class="kc s"><div class="lb">${totalCollectedLabel}</div><div class="vl">${money(totalCollectedValue)}</div></div>
 <div class="kc i"><div class="lb">Community Wing Total</div><div class="vl">${money(s0.community_wing_total||0)}</div></div>
 <div class="kc i"><div class="lb">Diplomatic Total</div><div class="vl">${money(s0.diplomatic_total||0)}</div></div>
 <div class="kc w"><div class="lb">Total Handed Over</div><div class="vl">${money(s0.total_handed_over||0)}</div></div>
-<div class="kc d"><div class="lb">Cash in Hand / Balance</div><div class="vl">${money(s0.cash_in_hand||0)}</div></div>
-<div class="kc s"><div class="lb">Today's Collection</div><div class="vl">${money(s0.today_collected||0)}</div></div>
+<div class="kc d"><div class="lb">${cashLabel}</div><div class="vl">${money(cashValue)}</div></div>
+<div class="kc s"><div class="lb">${todayCollectedLabel}</div><div class="vl">${money(todayCollectedValue)}</div></div>
 <div class="kc i"><div class="lb">Today's Community Wing</div><div class="vl">${money(s0.today_community_wing||0)}</div></div>
 <div class="kc i"><div class="lb">Today's Diplomatic</div><div class="vl">${money(s0.today_diplomatic||0)}</div></div>
 <div class="kc w"><div class="lb">Today's Handovers</div><div class="vl">${money(s0.today_handovers||0)}</div></div>
-<div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${money(s0.today_balance||0)}</div></div>`;
+<div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${money(s0.today_balance||0)}</div></div>
+${adjustedPeopleBadge}
+${adjustedTodayPeopleBadge}`;
 
 const ws=document.getElementById('feeWingSummaryTbl');
 if(ws) ws.innerHTML=`<thead><tr><th>Wing</th><th>Total Assigned</th><th>Total Handed Over</th><th>Pending Settlement</th></tr></thead><tbody>
