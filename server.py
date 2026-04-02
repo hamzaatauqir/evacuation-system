@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
 from email.message import EmailMessage
+from decimal import Decimal, ROUND_HALF_UP
 
 PORT = int(os.environ.get('PORT', 8080))
 
@@ -2323,140 +2324,192 @@ def _iraq_mission_dashboard_kpi(db):
 
 def api_dashboard_stats(user=None):
     db = get_db()
-    # ── Evacuees KPIs: only operationally KW→PK records ──
-    EV_BASE = "FROM evacuees WHERE dup_flag='CLEAR' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
-    EV_ALL  = "FROM evacuees WHERE (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
+    role = (user or {}).get('role', 'unknown')
+    print(f"[Dash] /api/stats hit by role={role}", flush=True)
+    try:
+        EV_BASE = "FROM evacuees WHERE dup_flag='CLEAR' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
+        EV_ALL = "FROM evacuees WHERE (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
 
-    total_all = db.execute(f"SELECT COUNT(*) c {EV_ALL}").fetchone()['c']
-    total = db.execute(f"SELECT COUNT(*) c {EV_BASE}").fetchone()['c']
-    departed = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed'").fetchone()['c']
-    visa_obtained = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Visa Obtained'").fetchone()['c']
-    pending = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Pending'").fetchone()['c']
-    visa_approved = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND visa_status='Approved'").fetchone()['c']
-    iraq_entries = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND country='Iraq'").fetchone()['c']
-    returned = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned'").fetchone()['c']
+        total_all = db.execute(f"SELECT COUNT(*) c {EV_ALL}").fetchone()['c']
+        total = db.execute(f"SELECT COUNT(*) c {EV_BASE}").fetchone()['c']
+        departed = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed'").fetchone()['c']
+        visa_obtained = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Visa Obtained'").fetchone()['c']
+        pending = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Pending'").fetchone()['c']
+        visa_approved = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND visa_status='Approved'").fetchone()['c']
+        iraq_entries = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND country='Iraq'").fetchone()['c']
+        returned = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned'").fetchone()['c']
 
-    # Today's live counts
-    departed_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed' AND departure_date=date('now')").fetchone()['c']
-    entered_today = departed_today
-    returned_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned' AND departure_date=date('now')").fetchone()['c']
+        departed_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed' AND departure_date=date('now')").fetchone()['c']
+        entered_today = departed_today
+        returned_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned' AND departure_date=date('now')").fetchone()['c']
+        jazeera_departed = 120
 
-    # Pre-database Jazeera Airways passengers
-    jazeera_departed = 120
+        by_country = [dict(r) for r in db.execute(f"""
+            SELECT country, COUNT(*) total,
+            SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
+            SUM(CASE WHEN travel_status='Visa Obtained' THEN 1 ELSE 0 END) visa_obtained,
+            SUM(CASE WHEN travel_status='Pending' THEN 1 ELSE 0 END) pending,
+            SUM(CASE WHEN gender='Male' THEN 1 ELSE 0 END) males,
+            SUM(CASE WHEN gender='Female' THEN 1 ELSE 0 END) females,
+            SUM(CASE WHEN gender='Child' THEN 1 ELSE 0 END) children
+            {EV_ALL} GROUP BY country ORDER BY COUNT(*) DESC
+        """).fetchall()]
 
-    by_country = [dict(r) for r in db.execute(f"""
-        SELECT country, COUNT(*) total,
-        SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
-        SUM(CASE WHEN travel_status='Visa Obtained' THEN 1 ELSE 0 END) visa_obtained,
-        SUM(CASE WHEN travel_status='Pending' THEN 1 ELSE 0 END) pending,
-        SUM(CASE WHEN gender='Male' THEN 1 ELSE 0 END) males,
-        SUM(CASE WHEN gender='Female' THEN 1 ELSE 0 END) females,
-        SUM(CASE WHEN gender='Child' THEN 1 ELSE 0 END) children
-        {EV_ALL} GROUP BY country ORDER BY COUNT(*) DESC
-    """).fetchall()]
+        by_gender = [dict(r) for r in db.execute(f"""
+            SELECT gender, COUNT(*) count,
+            SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed
+            {EV_ALL} GROUP BY gender
+        """).fetchall()]
 
-    by_gender = [dict(r) for r in db.execute(f"""
-        SELECT gender, COUNT(*) count,
-        SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed
-        {EV_ALL} GROUP BY gender
-    """).fetchall()]
+        by_date = [dict(r) for r in db.execute(f"""
+            SELECT date_of_request date, COUNT(*) new_requests,
+            SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
+            SUM(CASE WHEN travel_status='Visa Obtained' THEN 1 ELSE 0 END) visa_obtained,
+            SUM(CASE WHEN travel_status='Pending' THEN 1 ELSE 0 END) pending
+            {EV_ALL} AND date_of_request IS NOT NULL AND date_of_request != ''
+            GROUP BY date_of_request ORDER BY date_of_request
+        """).fetchall()]
 
-    by_date = [dict(r) for r in db.execute(f"""
-        SELECT date_of_request date, COUNT(*) new_requests,
-        SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
-        SUM(CASE WHEN travel_status='Visa Obtained' THEN 1 ELSE 0 END) visa_obtained,
-        SUM(CASE WHEN travel_status='Pending' THEN 1 ELSE 0 END) pending
-        {EV_ALL} AND date_of_request IS NOT NULL AND date_of_request != ''
-        GROUP BY date_of_request ORDER BY date_of_request
-    """).fetchall()]
+        by_visa = [dict(r) for r in db.execute(f"SELECT COALESCE(visa_status,'Not Set') status, COUNT(*) count {EV_ALL} GROUP BY visa_status").fetchall()]
+        by_border = [dict(r) for r in db.execute(f"SELECT border_crossing, COUNT(*) count {EV_ALL} AND border_crossing != '' GROUP BY border_crossing").fetchall()]
+        duplicates = db.execute("SELECT COUNT(*) c FROM evacuees WHERE dup_flag='DUPLICATE' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)").fetchone()['c']
 
-    by_visa = [dict(r) for r in db.execute(f"SELECT COALESCE(visa_status,'Not Set') status, COUNT(*) count {EV_ALL} GROUP BY visa_status").fetchall()]
-    by_border = [dict(r) for r in db.execute(f"SELECT border_crossing, COUNT(*) count {EV_ALL} AND border_crossing != '' GROUP BY border_crossing").fetchall()]
+        try:
+            mismatch_total = db.execute("SELECT COUNT(*) c FROM evacuees WHERE route_mismatch = 1").fetchone()['c']
+            mismatch_pending_review = db.execute("SELECT COUNT(*) c FROM evacuees WHERE review_status IN ('pending','under_review','needs_followup')").fetchone()['c']
+            corrected_to_pk = db.execute("SELECT COUNT(*) c FROM evacuees WHERE effective_route = 'pk_to_kw' AND route_mismatch = 1").fetchone()['c']
+        except sqlite3.OperationalError as e:
+            print(f"[Dash] route-review query fallback: {e}", flush=True)
+            mismatch_total = 0
+            mismatch_pending_review = 0
+            corrected_to_pk = 0
 
-    duplicates = db.execute("SELECT COUNT(*) c FROM evacuees WHERE dup_flag='DUPLICATE' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)").fetchone()['c']
+        iraq_mission = _iraq_mission_dashboard_kpi(db)
+        fee_today_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at))=date('now')").fetchone()['s']
+        fee_today_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at))=date('now')").fetchone()['s']
+        fee_total_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid'").fetchone()['s']
+        fee_total_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived'").fetchone()['s']
+        fee_paid_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='paid'").fetchone()['c']
+        fee_waived_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='waived'").fetchone()['c']
+        fee_people_served_today = db.execute("""
+            SELECT COUNT(*) c FROM (
+                SELECT source_table, source_id
+                FROM fee_collections
+                WHERE fee_status IN ('paid','waived')
+                  AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
+                GROUP BY source_table, source_id
+            ) t
+        """).fetchone()['c']
+        fee_released_today = db.execute("""
+            SELECT COUNT(*) c FROM (
+                SELECT source_table, source_id, MAX(COALESCE(paid_at,waived_at,created_at)) rel_at
+                FROM fee_collections
+                WHERE fee_status IN ('paid','waived')
+                GROUP BY source_table, source_id
+                HAVING date(rel_at)=date('now')
+            ) x
+        """).fetchone()['c']
+        fee_released_total = db.execute("""
+            SELECT COUNT(*) c FROM (
+                SELECT source_table, source_id
+                FROM fee_collections
+                WHERE fee_status IN ('paid','waived')
+                GROUP BY source_table, source_id
+            ) x
+        """).fetchone()['c']
+        fee_pending_count = db.execute("""
+            SELECT
+              (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='pending')
+              + (SELECT COUNT(*) FROM iraq_applicants WHERE COALESCE(fee_status,'pending')='pending')
+              + (SELECT COUNT(*) FROM iraq_public_submissions WHERE COALESCE(fee_status,'pending')='pending') AS c
+        """).fetchone()['c']
 
-    # ── Route mismatch summary for dashboard ──
-    mismatch_total = db.execute("SELECT COUNT(*) c FROM evacuees WHERE route_mismatch = 1").fetchone()['c']
-    mismatch_pending_review = db.execute("SELECT COUNT(*) c FROM evacuees WHERE review_status IN ('pending','under_review','needs_followup')").fetchone()['c']
-    corrected_to_pk = db.execute("SELECT COUNT(*) c FROM evacuees WHERE effective_route = 'pk_to_kw' AND route_mismatch = 1").fetchone()['c']
+        if _is_operator_special(user):
+            _cdt = _OP_SPECIAL_FEE_CUTOFF
+            fee_today_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at))=date('now') AND date(COALESCE(paid_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
+            fee_today_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at))=date('now') AND date(COALESCE(waived_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
+            fee_total_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
+            fee_total_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
+            fee_paid_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at)) >= date(?)", [_cdt]).fetchone()['c']
+            fee_waived_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at)) >= date(?)", [_cdt]).fetchone()['c']
+            fee_people_served_today = db.execute("""
+                SELECT COUNT(*) c FROM (
+                    SELECT source_table, source_id FROM fee_collections
+                    WHERE fee_status IN ('paid','waived')
+                      AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
+                      AND date(COALESCE(paid_at,waived_at,created_at)) >= date(?)
+                    GROUP BY source_table, source_id
+                ) t
+            """, [_cdt]).fetchone()['c']
+            fee_released_today = db.execute("""
+                SELECT COUNT(*) c FROM (
+                    SELECT source_table, source_id, MAX(COALESCE(paid_at,waived_at,created_at)) rel_at
+                    FROM fee_collections
+                    WHERE fee_status IN ('paid','waived')
+                      AND date(COALESCE(paid_at,waived_at,created_at)) >= date(?)
+                    GROUP BY source_table, source_id
+                    HAVING date(rel_at)=date('now')
+                ) x
+            """, [_cdt]).fetchone()['c']
+            fee_released_total = db.execute("""
+                SELECT COUNT(*) c FROM (
+                    SELECT source_table, source_id FROM fee_collections
+                    WHERE fee_status IN ('paid','waived')
+                      AND date(COALESCE(paid_at,waived_at,created_at)) >= date(?)
+                    GROUP BY source_table, source_id
+                ) x
+            """, [_cdt]).fetchone()['c']
+            fee_today_collected = _op_special_round(fee_today_collected)
+            fee_today_waived = _op_special_round(fee_today_waived)
+            fee_total_collected = _op_special_round(fee_total_collected)
+            fee_total_waived = _op_special_round(fee_total_waived)
+            total_fee_scope = db.execute("""
+                SELECT (SELECT COUNT(*) FROM evacuees)
+                     + (SELECT COUNT(*) FROM iraq_applicants)
+                     + (SELECT COUNT(*) FROM iraq_public_submissions) AS c
+            """).fetchone()['c']
+            fee_pending_count = max(int(total_fee_scope or 0) - int(fee_paid_count or 0) - int(fee_waived_count or 0), 0)
 
-    iraq_mission = _iraq_mission_dashboard_kpi(db)
-    fee_today_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at))=date('now')").fetchone()['s']
-    fee_today_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at))=date('now')").fetchone()['s']
-    fee_total_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid'").fetchone()['s']
-    fee_total_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived'").fetchone()['s']
-    fee_paid_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='paid'").fetchone()['c']
-    fee_waived_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='waived'").fetchone()['c']
-    fee_people_served_today = db.execute("""
-        SELECT COUNT(*) c FROM (
-            SELECT source_table, source_id
-            FROM fee_collections
-            WHERE fee_status IN ('paid','waived')
-              AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
-            GROUP BY source_table, source_id
-        ) t
-    """).fetchone()['c']
-    fee_released_today = db.execute("""
-        SELECT COUNT(*) c FROM (
-            SELECT source_table, source_id, MAX(COALESCE(paid_at,waived_at,created_at)) rel_at
-            FROM fee_collections
-            WHERE fee_status IN ('paid','waived')
-            GROUP BY source_table, source_id
-            HAVING date(rel_at)=date('now')
-        ) x
-    """).fetchone()['c']
-    fee_released_total = db.execute("""
-        SELECT COUNT(*) c FROM (
-            SELECT source_table, source_id
-            FROM fee_collections
-            WHERE fee_status IN ('paid','waived')
-            GROUP BY source_table, source_id
-        ) x
-    """).fetchone()['c']
-    fee_pending_count = db.execute("""
-        SELECT
-          (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='pending')
-          + (SELECT COUNT(*) FROM iraq_applicants WHERE COALESCE(fee_status,'pending')='pending')
-          + (SELECT COUNT(*) FROM iraq_public_submissions WHERE COALESCE(fee_status,'pending')='pending') AS c
-    """).fetchone()['c']
-
-    db.close()
-
-    # -- operator_special: adjust fee KPIs with presentation factor --
-    today_str = datetime.date.today().isoformat()
-    if _is_operator_special(user) and _op_special_date_applies(today_str):
-        fee_today_collected = _op_special_adjust_amount(fee_today_collected, today_str)
-        fee_today_waived    = _op_special_adjust_amount(fee_today_waived, today_str)
-        fee_total_collected = _op_special_adjust_amount(fee_total_collected, today_str)
-        fee_total_waived    = _op_special_adjust_amount(fee_total_waived, today_str)
-        fee_people_served_today = _op_special_adjust_count(fee_people_served_today, today_str)
-        fee_released_today  = _op_special_adjust_count(fee_released_today, today_str)
-        fee_released_total  = _op_special_adjust_count(fee_released_total, today_str)
-        fee_paid_count      = _op_special_adjust_count(fee_paid_count, today_str)
-        fee_waived_count    = _op_special_adjust_count(fee_waived_count, today_str)
-
-    return {
-        'kpi': {'total': total, 'total_all': total_all, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
-                'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates,
-                'departed_today': departed_today, 'entered_today': entered_today,
-                'returned': returned, 'returned_today': returned_today,
-                'jazeera_departed': jazeera_departed,
-                'mismatch_total': mismatch_total, 'mismatch_pending_review': mismatch_pending_review,
-                'corrected_to_pk': corrected_to_pk,
-                'fee_today_collected': float(fee_today_collected or 0),
-                'fee_today_waived': float(fee_today_waived or 0),
-                'fee_total_collected': float(fee_total_collected or 0),
-                'fee_total_waived': float(fee_total_waived or 0),
-                'fee_people_served_today': int(fee_people_served_today or 0),
-                'fee_released_today': int(fee_released_today or 0),
-                'fee_released_total': int(fee_released_total or 0),
-                'fee_pending_count': int(fee_pending_count or 0),
-                'fee_paid_count': int(fee_paid_count or 0),
-                'fee_waived_count': int(fee_waived_count or 0)},
-        'iraq_mission': iraq_mission,
-        'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
-        'by_visa': by_visa, 'by_border': by_border
-    }
+        payload = {
+            'kpi': {'total': total, 'total_all': total_all, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
+                    'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates,
+                    'departed_today': departed_today, 'entered_today': entered_today,
+                    'returned': returned, 'returned_today': returned_today,
+                    'jazeera_departed': jazeera_departed,
+                    'mismatch_total': mismatch_total, 'mismatch_pending_review': mismatch_pending_review,
+                    'corrected_to_pk': corrected_to_pk,
+                    'fee_today_collected': float(fee_today_collected or 0),
+                    'fee_today_waived': float(fee_today_waived or 0),
+                    'fee_total_collected': float(fee_total_collected or 0),
+                    'fee_total_waived': float(fee_total_waived or 0),
+                    'fee_people_served_today': int(fee_people_served_today or 0),
+                    'fee_released_today': int(fee_released_today or 0),
+                    'fee_released_total': int(fee_released_total or 0),
+                    'fee_pending_count': int(fee_pending_count or 0),
+                    'fee_paid_count': int(fee_paid_count or 0),
+                    'fee_waived_count': int(fee_waived_count or 0)},
+            'iraq_mission': iraq_mission,
+            'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
+            'by_visa': by_visa, 'by_border': by_border
+        }
+        print(f"[Dash] response keys={list(payload.keys())} total={payload['kpi'].get('total',0)} by_country={len(payload.get('by_country') or [])} by_date={len(payload.get('by_date') or [])}", flush=True)
+        return payload
+    except Exception as e:
+        print(f"[Dash] ERROR in api_dashboard_stats: {type(e).__name__}: {e}", flush=True)
+        return {
+            'kpi': {'total': 0, 'total_all': 0, 'departed': 0, 'visa_obtained': 0, 'pending': 0,
+                    'visa_approved': 0, 'iraq_entries': 0, 'duplicates': 0,
+                    'departed_today': 0, 'entered_today': 0, 'returned': 0, 'returned_today': 0,
+                    'jazeera_departed': 120, 'mismatch_total': 0, 'mismatch_pending_review': 0, 'corrected_to_pk': 0,
+                    'fee_today_collected': 0.0, 'fee_today_waived': 0.0, 'fee_total_collected': 0.0, 'fee_total_waived': 0.0,
+                    'fee_people_served_today': 0, 'fee_released_today': 0, 'fee_released_total': 0,
+                    'fee_pending_count': 0, 'fee_paid_count': 0, 'fee_waived_count': 0},
+            'iraq_mission': {'total_batches': 0, 'pending': 0, 'sent': 0, 'processed': 0, 'total_applicants': 0,
+                             'batches_sent_mofa': 0, 'batches_processed': 0, 'visa_kw_approved': 0, 'visa_kw_pending': 0, 'visa_kw_rejected': 0},
+            'by_country': [], 'by_gender': [], 'by_date': [], 'by_visa': [], 'by_border': []
+        }
+    finally:
+        db.close()
 
 def api_records(params):
     db = get_db()
@@ -3219,39 +3272,54 @@ def api_fee_settlement_report(params, user):
         }
         result = {'success': True, 'summary': summary, 'daily': daily, 'rows': rows}
 
-        # ── operator_special: adjust settlement report values ──
+        # ── operator_special: zero pre-cutoff rows, round to whole numbers ──
         if _is_operator_special(user):
-            today_str = datetime.now().strftime('%Y-%m-%d')
             s = result['summary']
-            if _op_special_date_applies(today_str):
-                for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
-                          'today_handovers', 'today_balance'):
-                    s[k] = _op_special_adjust_amount(s.get(k, 0), today_str)
-                s['today_people_served'] = _op_special_adjust_count(s.get('today_people_served', 0), today_str)
-            # Adjust daily rows per-date
             adj_total = 0.0
             adj_comm = 0.0
             adj_dipl = 0.0
             adj_hand = 0.0
             for d in result['daily']:
                 day = d.get('day', '')
-                factor = _OP_SPECIAL_FEE_FACTOR if _op_special_date_applies(day) else 1.0
-                d['total_collected'] = round(float(d.get('total_collected', 0)) * factor, 2)
-                d['community_wing'] = round(float(d.get('community_wing', 0)) * factor, 2)
-                d['diplomatic'] = round(float(d.get('diplomatic', 0)) * factor, 2)
-                d['handed_over'] = round(float(d.get('handed_over', 0)) * factor, 2)
-                d['cash_in_hand'] = round(float(d.get('cash_in_hand', 0)) * factor, 2)
-                adj_total += d['total_collected']
-                adj_comm += d['community_wing']
-                adj_dipl += d['diplomatic']
-                adj_hand += d['handed_over']
-            s['total_collected'] = round(adj_total, 2)
-            s['community_wing_total'] = round(adj_comm, 2)
-            s['diplomatic_total'] = round(adj_dipl, 2)
-            s['total_handed_over'] = round(adj_hand, 2)
-            s['cash_in_hand'] = round(adj_total - adj_hand - float(s.get('total_withdrawn', 0)), 2)
-            s['community_pending_settlement'] = round(s['community_wing_total'] - float(s.get('community_handed_over', 0)), 2)
-            s['diplomatic_pending_settlement'] = round(s['diplomatic_total'] - float(s.get('diplomatic_handed_over', 0)), 2)
+                if _op_special_before_cutoff(day):
+                    # Zero out all amounts for dates before cutoff
+                    d['total_collected'] = 0
+                    d['community_wing'] = 0
+                    d['diplomatic'] = 0
+                    d['handed_over'] = 0
+                    d['cash_in_hand'] = 0
+                else:
+                    # Round post-cutoff to whole numbers
+                    d['total_collected'] = _op_special_round(d.get('total_collected', 0))
+                    d['community_wing'] = _op_special_round(d.get('community_wing', 0))
+                    d['diplomatic'] = _op_special_round(d.get('diplomatic', 0))
+                    d['handed_over'] = _op_special_round(d.get('handed_over', 0))
+                    d['cash_in_hand'] = _op_special_round(d.get('cash_in_hand', 0))
+                adj_total += float(d['total_collected'])
+                adj_comm += float(d['community_wing'])
+                adj_dipl += float(d['diplomatic'])
+                adj_hand += float(d['handed_over'])
+            # Recalculate summaries from adjusted daily rows
+            s['total_collected'] = _op_special_round(adj_total)
+            s['community_wing_total'] = _op_special_round(adj_comm)
+            s['diplomatic_total'] = _op_special_round(adj_dipl)
+            s['total_handed_over'] = _op_special_round(adj_hand)
+            s['cash_in_hand'] = _op_special_round(adj_total - adj_hand - float(s.get('total_withdrawn', 0)))
+            # Today's values: zero if today is before cutoff, else round
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            if _op_special_before_cutoff(today_str):
+                for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
+                          'today_handovers', 'today_balance'):
+                    s[k] = 0
+                s['today_people_served'] = 0
+            else:
+                for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
+                          'today_handovers', 'today_balance'):
+                    s[k] = _op_special_round(s.get(k, 0))
+            # Round remaining summary fields
+            s['community_pending_settlement'] = _op_special_round(s['community_wing_total'] - float(s.get('community_handed_over', 0)))
+            s['diplomatic_pending_settlement'] = _op_special_round(s['diplomatic_total'] - float(s.get('diplomatic_handed_over', 0)))
+            s['total_withdrawn'] = _op_special_round(s.get('total_withdrawn', 0))
 
         return result
     finally:
@@ -4881,14 +4949,13 @@ def api_audit_log():
 # ═══════════════════════════════════════════════════════════════
 # OPERATOR_SPECIAL FEE VIEW ADJUSTMENT
 # Presentation-layer only. Does NOT change stored data.
-# From 2026-04-02 onward, operator_special sees adjusted values:
-#   people × 0.75, amounts × 0.75   (2 people → 1.5 → rounds to 2)
-# Before that date, factor = 1.0 (no change).
+# operator_special sees ONLY collections from cutoff date onward.
+# Any collection before that date is treated as zero.
+# All amounts are displayed as rounded whole numbers (no decimals).
 # Admin always sees real values. This is reversible — remove the
 # calls to these helpers to restore original behavior.
 # ═══════════════════════════════════════════════════════════════
 _OP_SPECIAL_FEE_CUTOFF = '2026-04-02'
-_OP_SPECIAL_FEE_FACTOR = 0.75  # 2 people × 0.75 = 1.5
 
 def _is_operator_special(user):
     """Check if the user dict indicates operator_special role."""
@@ -4896,24 +4963,19 @@ def _is_operator_special(user):
         return False
     return (user.get('role') or '') == 'operator_special'
 
-def _op_special_date_applies(date_str):
-    """Return True if the date string falls on or after the cutoff."""
+def _op_special_before_cutoff(date_str):
+    """Return True if date is before the operator_special visibility cutoff."""
     if not date_str:
-        return False
-    day = str(date_str).strip()[:10]  # extract YYYY-MM-DD
-    return day >= _OP_SPECIAL_FEE_CUTOFF
+        return True  # no date = treat as before cutoff
+    day = str(date_str).strip()[:10]
+    return day < _OP_SPECIAL_FEE_CUTOFF
 
-def _op_special_adjust_amount(amount, date_str):
-    """Adjust a fee amount for operator_special display. Returns float."""
-    if _op_special_date_applies(date_str):
-        return round(float(amount or 0) * _OP_SPECIAL_FEE_FACTOR, 2)
-    return float(amount or 0)
-
-def _op_special_adjust_count(count, date_str):
-    """Adjust a people count for operator_special display. Returns int (rounded)."""
-    if _op_special_date_applies(date_str):
-        return round(float(count or 0) * _OP_SPECIAL_FEE_FACTOR)
-    return int(count or 0)
+def _op_special_round(value):
+    """Round a monetary value to whole number for operator_special display."""
+    try:
+        return int(Decimal(str(value or 0)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+    except Exception:
+        return int(Decimal('0').quantize(Decimal('1'), rounding=ROUND_HALF_UP))
 
 
 def api_fee_report(params):
@@ -5056,50 +5118,80 @@ def api_fee_statement(params, user):
             'fee_activity_rows': rows
         }
 
-        # ── operator_special: adjust displayed totals, hide individual rows ──
+        # ── operator_special: zero pre-cutoff, round to whole numbers, hide payers ──
         if _is_operator_special(user):
-            today_str = datetime.now().strftime('%Y-%m-%d')
             s = result['summary']
-            # Adjust today's values only if today >= cutoff
-            if _op_special_date_applies(today_str):
-                s['today_collected'] = _op_special_adjust_amount(s.get('today_collected', 0), today_str)
-                s['today_people_served'] = _op_special_adjust_count(s.get('today_people_served', 0), today_str)
-                s['today_community_wing'] = _op_special_adjust_amount(s.get('today_community_wing', 0), today_str)
-                s['today_diplomatic'] = _op_special_adjust_amount(s.get('today_diplomatic', 0), today_str)
-                s['today_handovers'] = _op_special_adjust_amount(s.get('today_handovers', 0), today_str)
-                s['today_balance'] = _op_special_adjust_amount(s.get('today_balance', 0), today_str)
-            # Adjust cumulative totals: re-sum from daily breakdown
+            cdt = _OP_SPECIAL_FEE_CUTOFF
+            # Zero out daily rows before cutoff, round post-cutoff to whole numbers
             adj_total_collected = 0.0
             adj_community = 0.0
             adj_diplomatic = 0.0
             adj_handed = 0.0
             for d in result['daily']:
                 day = d.get('day', '')
-                factor = _OP_SPECIAL_FEE_FACTOR if _op_special_date_applies(day) else 1.0
-                d['total_collected'] = round(float(d.get('total_collected', 0)) * factor, 2)
-                d['community_wing'] = round(float(d.get('community_wing', 0)) * factor, 2)
-                d['diplomatic'] = round(float(d.get('diplomatic', 0)) * factor, 2)
-                d['handed_over'] = round(float(d.get('handed_over', 0)) * factor, 2)
-                d['cash_in_hand'] = round(float(d.get('cash_in_hand', 0)) * factor, 2)
-                adj_total_collected += d['total_collected']
-                adj_community += d['community_wing']
-                adj_diplomatic += d['diplomatic']
-                adj_handed += d['handed_over']
-            s['total_collected'] = round(adj_total_collected, 2)
-            s['community_wing_total'] = round(adj_community, 2)
-            s['diplomatic_total'] = round(adj_diplomatic, 2)
-            s['total_handed_over'] = round(adj_handed, 2)
-            s['cash_in_hand'] = round(adj_total_collected - adj_handed - float(s.get('total_withdrawn', 0)), 2)
-            # Adjust case counts using same logic
-            for key in ('paid_cases', 'waived_cases', 'pending_cases'):
-                if key in s and _op_special_date_applies(today_str):
-                    s[key] = _op_special_adjust_count(s.get(key, 0), today_str)
-            # Adjust pending settlement
-            s['community_pending_settlement'] = round(s['community_wing_total'] - float(s.get('community_handed_over', 0)), 2)
-            s['diplomatic_pending_settlement'] = round(s['diplomatic_total'] - float(s.get('diplomatic_handed_over', 0)), 2)
+                if _op_special_before_cutoff(day):
+                    d['total_collected'] = 0
+                    d['community_wing'] = 0
+                    d['diplomatic'] = 0
+                    d['handed_over'] = 0
+                    d['cash_in_hand'] = 0
+                    d['collected_amount'] = 0
+                    d['waived_amount'] = 0
+                else:
+                    d['total_collected'] = _op_special_round(d.get('total_collected', 0))
+                    d['community_wing'] = _op_special_round(d.get('community_wing', 0))
+                    d['diplomatic'] = _op_special_round(d.get('diplomatic', 0))
+                    d['handed_over'] = _op_special_round(d.get('handed_over', 0))
+                    d['cash_in_hand'] = _op_special_round(d.get('cash_in_hand', 0))
+                    if 'collected_amount' in d:
+                        d['collected_amount'] = _op_special_round(d.get('collected_amount', 0))
+                    if 'waived_amount' in d:
+                        d['waived_amount'] = _op_special_round(d.get('waived_amount', 0))
+                adj_total_collected += float(d.get('total_collected', 0) or d.get('collected_amount', 0))
+                adj_community += float(d.get('community_wing', 0))
+                adj_diplomatic += float(d.get('diplomatic', 0))
+                adj_handed += float(d.get('handed_over', 0))
+            # Recalculate cumulative summaries from adjusted daily
+            s['total_collected'] = _op_special_round(adj_total_collected)
+            s['community_wing_total'] = _op_special_round(adj_community)
+            s['diplomatic_total'] = _op_special_round(adj_diplomatic)
+            s['total_handed_over'] = _op_special_round(adj_handed)
+            s['cash_in_hand'] = _op_special_round(adj_total_collected - adj_handed - float(s.get('total_withdrawn', 0)))
+            # Today's values: zero if before cutoff, else round
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            if _op_special_before_cutoff(today_str):
+                for k in ('today_collected', 'today_people_served', 'today_community_wing',
+                          'today_diplomatic', 'today_handovers', 'today_balance'):
+                    s[k] = 0
+            else:
+                for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
+                          'today_handovers', 'today_balance'):
+                    s[k] = _op_special_round(s.get(k, 0))
+            # Round remaining summary fields
+            for k in ('total_waived', 'total_withdrawn'):
+                if k in s:
+                    s[k] = _op_special_round(s.get(k, 0))
+            s['community_pending_settlement'] = _op_special_round(s.get('community_wing_total', 0) - float(s.get('community_handed_over', 0)))
+            s['diplomatic_pending_settlement'] = _op_special_round(s.get('diplomatic_total', 0) - float(s.get('diplomatic_handed_over', 0)))
+            # Recompute paid/waived/pending case counts from cutoff-visible fee activity only.
+            paid_cases = db.execute("""
+                SELECT COUNT(DISTINCT source_table||':'||source_id) c
+                FROM fee_collections
+                WHERE fee_status='paid'
+                  AND date(COALESCE(paid_at,created_at)) >= date(?)
+            """, [cdt]).fetchone()['c']
+            waived_cases = db.execute("""
+                SELECT COUNT(DISTINCT source_table||':'||source_id) c
+                FROM fee_collections
+                WHERE fee_status='waived'
+                  AND date(COALESCE(waived_at,created_at)) >= date(?)
+            """, [cdt]).fetchone()['c']
+            s['paid_cases'] = int(paid_cases or 0)
+            s['waived_cases'] = int(waived_cases or 0)
+            s['pending_cases'] = max(int(s.get('total_applicants') or 0) - s['paid_cases'] - s['waived_cases'], 0)
             # Hide individual payer rows — operator_special gets aggregate only
             result['fee_activity_rows'] = []
-            result['rows'] = settlement.get('rows') or []  # keep distribution txns visible
+            result['rows'] = settlement.get('rows') or []
             result['_view_mode'] = 'operator_special_adjusted'
 
         return result
@@ -15598,39 +15690,40 @@ const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('to',t);
 const by=document.getElementById('feeStmtBy')?.value?.trim()||''; if(by)p.set('collected_by',by);
 const d=await api('/api/fee-statement?'+p.toString()); if(!d||d.error)return;
 const s0=d.summary||{};
+const money=v=>USER_ROLE==='operator_special'?String(Math.round(Number(v||0))):Number(v||0).toFixed(2);
 const cards=document.getElementById('feeStmtCards');
 if(cards) cards.innerHTML=`
-<div class="kc s"><div class="lb">Total Fee Collected (KWD)</div><div class="vl">${Number(s0.total_collected||0).toFixed(2)}</div></div>
-<div class="kc i"><div class="lb">Community Wing Total</div><div class="vl">${Number(s0.community_wing_total||0).toFixed(2)}</div></div>
-<div class="kc i"><div class="lb">Diplomatic Total</div><div class="vl">${Number(s0.diplomatic_total||0).toFixed(2)}</div></div>
-<div class="kc w"><div class="lb">Total Handed Over</div><div class="vl">${Number(s0.total_handed_over||0).toFixed(2)}</div></div>
-<div class="kc d"><div class="lb">Cash in Hand / Balance</div><div class="vl">${Number(s0.cash_in_hand||0).toFixed(2)}</div></div>
-<div class="kc s"><div class="lb">Today's Collection</div><div class="vl">${Number(s0.today_collected||0).toFixed(2)}</div></div>
-<div class="kc i"><div class="lb">Today's Community Wing</div><div class="vl">${Number(s0.today_community_wing||0).toFixed(2)}</div></div>
-<div class="kc i"><div class="lb">Today's Diplomatic</div><div class="vl">${Number(s0.today_diplomatic||0).toFixed(2)}</div></div>
-<div class="kc w"><div class="lb">Today's Handovers</div><div class="vl">${Number(s0.today_handovers||0).toFixed(2)}</div></div>
-<div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${Number(s0.today_balance||0).toFixed(2)}</div></div>`;
+<div class="kc s"><div class="lb">Total Fee Collected (KWD)</div><div class="vl">${money(s0.total_collected||0)}</div></div>
+<div class="kc i"><div class="lb">Community Wing Total</div><div class="vl">${money(s0.community_wing_total||0)}</div></div>
+<div class="kc i"><div class="lb">Diplomatic Total</div><div class="vl">${money(s0.diplomatic_total||0)}</div></div>
+<div class="kc w"><div class="lb">Total Handed Over</div><div class="vl">${money(s0.total_handed_over||0)}</div></div>
+<div class="kc d"><div class="lb">Cash in Hand / Balance</div><div class="vl">${money(s0.cash_in_hand||0)}</div></div>
+<div class="kc s"><div class="lb">Today's Collection</div><div class="vl">${money(s0.today_collected||0)}</div></div>
+<div class="kc i"><div class="lb">Today's Community Wing</div><div class="vl">${money(s0.today_community_wing||0)}</div></div>
+<div class="kc i"><div class="lb">Today's Diplomatic</div><div class="vl">${money(s0.today_diplomatic||0)}</div></div>
+<div class="kc w"><div class="lb">Today's Handovers</div><div class="vl">${money(s0.today_handovers||0)}</div></div>
+<div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${money(s0.today_balance||0)}</div></div>`;
 
 const ws=document.getElementById('feeWingSummaryTbl');
 if(ws) ws.innerHTML=`<thead><tr><th>Wing</th><th>Total Assigned</th><th>Total Handed Over</th><th>Pending Settlement</th></tr></thead><tbody>
-<tr><td>Community Wing</td><td>${Number(s0.community_wing_total||0).toFixed(2)} KWD</td><td>${Number(s0.community_handed_over||0).toFixed(2)} KWD</td><td>${Number(s0.community_pending_settlement||0).toFixed(2)} KWD</td></tr>
-<tr><td>Diplomatic</td><td>${Number(s0.diplomatic_total||0).toFixed(2)} KWD</td><td>${Number(s0.diplomatic_handed_over||0).toFixed(2)} KWD</td><td>${Number(s0.diplomatic_pending_settlement||0).toFixed(2)} KWD</td></tr>
+<tr><td>Community Wing</td><td>${money(s0.community_wing_total||0)} KWD</td><td>${money(s0.community_handed_over||0)} KWD</td><td>${money(s0.community_pending_settlement||0)} KWD</td></tr>
+<tr><td>Diplomatic</td><td>${money(s0.diplomatic_total||0)} KWD</td><td>${money(s0.diplomatic_handed_over||0)} KWD</td><td>${money(s0.diplomatic_pending_settlement||0)} KWD</td></tr>
 </tbody>`;
 
 let dh='<thead><tr><th>Date</th><th>Total Collected</th><th>Community Wing</th><th>Diplomatic</th><th>Handed Over</th><th>Cash in Hand</th><th>Remarks/Count</th></tr></thead><tbody>';
-(d.daily||[]).forEach(r=>{dh+=`<tr><td>${r.day||'-'}</td><td>${Number(r.total_collected||0).toFixed(2)}</td><td>${Number(r.community_wing||0).toFixed(2)}</td><td>${Number(r.diplomatic||0).toFixed(2)}</td><td>${Number(r.handed_over||0).toFixed(2)}</td><td>${Number(r.cash_in_hand||0).toFixed(2)}</td><td>${r.remarks_count||0}</td></tr>`});
+(d.daily||[]).forEach(r=>{dh+=`<tr><td>${r.day||'-'}</td><td>${money(r.total_collected||0)}</td><td>${money(r.community_wing||0)}</td><td>${money(r.diplomatic||0)}</td><td>${money(r.handed_over||0)}</td><td>${money(r.cash_in_hand||0)}</td><td>${r.remarks_count||0}</td></tr>`});
 dh+='</tbody>';
 const dt=document.getElementById('feeStmtDailyTbl'); if(dt)dt.innerHTML=dh;
 
 if(USER_ROLE!=='operator_special'){
 let ch='<thead><tr><th>Date/Time</th><th>Applicant</th><th>Passport</th><th>Tracking/Ref</th><th>Workflow</th><th>Status</th><th>Amount</th><th>Collected By</th><th>Waived By</th><th>Waiver Reason</th></tr></thead><tbody>';
-(d.fee_activity_rows||[]).forEach(r=>{ch+=`<tr><td>${r.action_at||'-'}</td><td>${r.applicant_name||'-'}</td><td>${r.passport_number||'-'}</td><td>${r.tracking_or_reference||'-'}</td><td>${r.source_table||'-'}</td><td>${r.fee_status||'-'}</td><td>${Number(r.fee_amount||0).toFixed(2)} ${r.fee_currency||'KWD'}</td><td>${r.paid_by||'-'}</td><td>${r.waiver_approved_by||'-'}</td><td>${r.waiver_reason||'-'}</td></tr>`});
+(d.fee_activity_rows||[]).forEach(r=>{ch+=`<tr><td>${r.action_at||'-'}</td><td>${r.applicant_name||'-'}</td><td>${r.passport_number||'-'}</td><td>${r.tracking_or_reference||'-'}</td><td>${r.source_table||'-'}</td><td>${r.fee_status||'-'}</td><td>${money(r.fee_amount||0)} ${r.fee_currency||'KWD'}</td><td>${r.paid_by||'-'}</td><td>${r.waiver_approved_by||'-'}</td><td>${r.waiver_reason||'-'}</td></tr>`});
 ch+='</tbody>';
 const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.innerHTML=ch;
 } else { const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.closest('.scroll-t').style.display='none'; }
 
 let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Receipt</th></tr></thead><tbody>';
-(d.rows||[]).forEach(r=>{th+=`<tr><td>${r.created_at||r.distribution_date||'-'}</td><td>${r.action_type||'-'}</td><td>${Number(r.amount||0).toFixed(2)} ${r.currency||'KWD'}</td><td>${(r.wing||'-').replace('_',' ')}</td><td>${r.entered_by||'-'}</td><td>${r.handed_over_by||'-'}</td><td>${r.received_by||'-'}</td><td>${r.receipt_number||'-'}</td><td>${r.notes||'-'}</td><td>${r.receipt_number?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">View</a>`:'-'}</td></tr>`});
+(d.rows||[]).forEach(r=>{th+=`<tr><td>${r.created_at||r.distribution_date||'-'}</td><td>${r.action_type||'-'}</td><td>${money(r.amount||0)} ${r.currency||'KWD'}</td><td>${(r.wing||'-').replace('_',' ')}</td><td>${r.entered_by||'-'}</td><td>${r.handed_over_by||'-'}</td><td>${r.received_by||'-'}</td><td>${r.receipt_number||'-'}</td><td>${r.notes||'-'}</td><td>${r.receipt_number?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">View</a>`:'-'}</td></tr>`});
 th+='</tbody>';
 const tt=document.getElementById('feeStmtTxnTbl'); if(tt)tt.innerHTML=th;
 }
