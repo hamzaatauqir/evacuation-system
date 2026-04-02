@@ -21,6 +21,15 @@ from email.message import EmailMessage
 
 PORT = int(os.environ.get('PORT', 8080))
 
+# ═══════════════════════════════════════════════════════════════
+# FEATURE FLAG: Route Review
+# Set to False to temporarily disable route-review holds.
+# Records will flow straight to MOFA Export without being held.
+# All existing review data (review_status, flag_reason, etc.) is
+# preserved — set back to True to re-enable the full workflow.
+# ═══════════════════════════════════════════════════════════════
+ROUTE_REVIEW_ENABLED = False
+
 # Use /data/ for persistent Render Disk, fallback to local directory for development
 RENDER_DISK = Path('/data')
 if RENDER_DISK.exists() and RENDER_DISK.is_dir():
@@ -812,25 +821,28 @@ def init_db():
     # Only strong Pakistan signals trigger auto-flag (country or mobile).
     # Missing civil_id alone does NOT flag — many legitimate Kuwait residents
     # lack a civil_id but have a Kuwait mobile and Kuwait country.
-    db.execute("""UPDATE evacuees SET review_status = 'pending',
-        flag_reason = COALESCE(NULLIF(flag_reason,''), 'Auto-flagged: matches route suspect heuristics')
-        WHERE (review_status IS NULL OR review_status = '')
-        AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
-        AND (route_mismatch = 0 OR route_mismatch IS NULL)
-        AND dup_flag = 'CLEAR'
-        AND (
-            LOWER(COALESCE(country,'')) LIKE '%pakistan%'
-            OR mobile LIKE '+92%' OR mobile LIKE '03%' OR mobile LIKE '92%'
-        )""")
+    # Skipped when ROUTE_REVIEW_ENABLED is False — no mass-flagging.
+    if ROUTE_REVIEW_ENABLED:
+        db.execute("""UPDATE evacuees SET review_status = 'pending',
+            flag_reason = COALESCE(NULLIF(flag_reason,''), 'Auto-flagged: matches route suspect heuristics')
+            WHERE (review_status IS NULL OR review_status = '')
+            AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+            AND (route_mismatch = 0 OR route_mismatch IS NULL)
+            AND dup_flag = 'CLEAR'
+            AND (
+                LOWER(COALESCE(country,'')) LIKE '%pakistan%'
+                OR mobile LIKE '+92%' OR mobile LIKE '03%' OR mobile LIKE '92%'
+            )""")
 
     # ── Cleanup: un-flag records that were auto-flagged ONLY because of missing civil_id ──
     # These records have non-Pakistan country + non-Pakistan mobile, so the only trigger
     # was civil_id IS NULL — which is no longer a standalone flag reason.
-    db.execute("""UPDATE evacuees SET review_status = NULL, flag_reason = NULL
-        WHERE review_status = 'pending'
-        AND flag_reason = 'Auto-flagged: matches route suspect heuristics'
-        AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-        AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+    if ROUTE_REVIEW_ENABLED:
+        db.execute("""UPDATE evacuees SET review_status = NULL, flag_reason = NULL
+            WHERE review_status = 'pending'
+            AND flag_reason = 'Auto-flagged: matches route suspect heuristics'
+            AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+            AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
         AND (route_mismatch = 0 OR route_mismatch IS NULL)""")
 
@@ -2652,6 +2664,29 @@ def api_save_record(data, user):
         _queue_registration_email(new_rec, user)
         db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('create', ?, ?, ?)",
                    (new_id, user, json.dumps(data)))
+
+        # ── Pakistan nationality/mobile heuristic at insert time ──
+        # Mirrors the startup backfill (init_db) so that records matching
+        # the MOFA-Export Pakistan exclusion immediately get review_status='pending',
+        # ensuring they appear in Route Review instead of falling into a gap
+        # where they're hidden from both MOFA Export and Route Review.
+        # Skipped when ROUTE_REVIEW_ENABLED is False (records flow straight to MOFA).
+        if ROUTE_REVIEW_ENABLED:
+            rec_country = (data.get('country') or '').strip().lower()
+            rec_mobile = (data.get('mobile') or '').strip()
+            is_pk_heuristic = (
+                'pakistan' in rec_country
+                or rec_mobile.startswith('+92')
+                or rec_mobile.startswith('03')
+                or rec_mobile.startswith('92')
+            )
+            if is_pk_heuristic and dup_flag == 'CLEAR':
+                db.execute("""UPDATE evacuees SET
+                    review_status = COALESCE(NULLIF(review_status,''), 'pending'),
+                    flag_reason = COALESCE(NULLIF(flag_reason,''), 'Auto-flagged: Pakistan nationality/mobile at registration')
+                WHERE id = ? AND (review_status IS NULL OR review_status = '')""",
+                [new_id])
+
         db.commit(); db.close()
         return {'success': True, 'id': new_id, 'dup_flag': dup_flag, 'dup_details': dup_flags}
 
@@ -4413,6 +4448,8 @@ def api_route_review_queue(params):
     """Return candidates for route mismatch review.
     Includes: heuristic suspects, manually flagged, under review, needs followup.
     Supports search by passport, tracking number (PKE-XXXX), or mobile."""
+    if not ROUTE_REVIEW_ENABLED:
+        return []
     db = get_db()
     filter_type = params.get('filter', 'all')  # all, suspects, flagged, pending, finalized
     search_val = (params.get('search', '') or '').strip()
@@ -4487,6 +4524,8 @@ def api_route_review_queue(params):
 
 def api_route_review_action(data, user):
     """Process a staff review decision on a route mismatch case."""
+    if not ROUTE_REVIEW_ENABLED:
+        return {'success': False, 'error': 'Route review is currently disabled'}
     db = get_db()
     rec_id = data.get('id')
     if not rec_id:
@@ -4618,6 +4657,8 @@ def api_route_review_action(data, user):
 
 def api_route_flag_record(data, user):
     """Manually flag a record for route review (from All Records tab)."""
+    if not ROUTE_REVIEW_ENABLED:
+        return {'success': False, 'error': 'Route review is currently disabled'}
     db = get_db()
     rec_id = data.get('id')
     flag_reason = data.get('flag_reason', 'Manually flagged by staff')
@@ -8688,7 +8729,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     or r.get('ip_location_status', '') == 'needs_review'
                 )
 
-                if review_held and inconsistency_found and r['visa_status'] != 'Approved' and r['mofa_status'] != 'Sent to MOFA':
+                if ROUTE_REVIEW_ENABLED and review_held and inconsistency_found and r['visa_status'] != 'Approved' and r['mofa_status'] != 'Sent to MOFA':
                     status_info['status'] = 'ROUTE_HOLD'
                     status_info['status_detail'] = 'Your application has been flagged due to a travel route clarity issue. Please contact Mr. Awais immediately at +965 55977292 to confirm your correct travel route. Your application cannot be processed further until this is resolved.'
                     status_info['action_required'] = True
@@ -8870,30 +8911,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
             has_mofa = 'mofa_status' in cols
             has_letter = 'mofa_letter_number' in cols
             if has_mofa:
-                rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status,
-                    visa_status, mobile,
-                    COALESCE(mofa_letter_number,'') as mofa_letter_number,
-                    COALESCE(mofa_letter_date,'') as mofa_letter_date,
-                    COALESCE(mofa_sent_date,'') as mofa_sent_date,
-                    COALESCE(mofa_batch_id,'') as mofa_batch_id
-                    FROM evacuees
-                    WHERE dup_flag='CLEAR' AND (
-                        (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
-                         AND (
-                             (route_mismatch = 0 OR route_mismatch IS NULL)
-                             OR review_status = 'finalized'
-                         )
-                         AND (
-                             review_status = 'finalized'
-                             OR (
-                                 (review_status IS NULL OR review_status = '')
-                                 AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-                                 AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                if ROUTE_REVIEW_ENABLED:
+                    rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status,
+                        visa_status, mobile,
+                        COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                        COALESCE(mofa_letter_date,'') as mofa_letter_date,
+                        COALESCE(mofa_sent_date,'') as mofa_sent_date,
+                        COALESCE(mofa_batch_id,'') as mofa_batch_id
+                        FROM evacuees
+                        WHERE dup_flag='CLEAR' AND (
+                            (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+                             AND (
+                                 (route_mismatch = 0 OR route_mismatch IS NULL)
+                                 OR review_status = 'finalized'
                              )
-                         ))
-                        OR mofa_status='Sent to MOFA'
-                    )
-                    ORDER BY id""").fetchall()
+                             AND (
+                                 review_status = 'finalized'
+                                 OR (
+                                     (review_status IS NULL OR review_status = '')
+                                     AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+                                     AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                                 )
+                             ))
+                            OR mofa_status='Sent to MOFA'
+                        )
+                        ORDER BY id""").fetchall()
+                else:
+                    # Route review disabled: skip route_mismatch / Pakistan heuristic exclusions
+                    rows = db.execute("""SELECT id, name, passport, border_crossing, mofa_status,
+                        visa_status, mobile,
+                        COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                        COALESCE(mofa_letter_date,'') as mofa_letter_date,
+                        COALESCE(mofa_sent_date,'') as mofa_sent_date,
+                        COALESCE(mofa_batch_id,'') as mofa_batch_id
+                        FROM evacuees
+                        WHERE dup_flag='CLEAR' AND (
+                            (travel_status='Pending' AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New'))
+                            OR mofa_status='Sent to MOFA'
+                        )
+                        ORDER BY id""").fetchall()
             else:
                 rows = db.execute("""SELECT id, name, passport, border_crossing, visa_status, mobile FROM evacuees
                     WHERE travel_status='Pending' AND dup_flag='CLEAR'
@@ -8977,22 +9033,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 q += " ORDER BY id"
                 rows = db.execute(q, qparams).fetchall()
             else:
-                rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
-                    WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
-                    AND (
-                        (route_mismatch = 0 OR route_mismatch IS NULL)
-                        OR review_status = 'finalized'
-                    )
-                    AND (
-                        review_status = 'finalized'
-                        OR (
-                            (review_status IS NULL OR review_status = '')
-                            AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-                            AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                if ROUTE_REVIEW_ENABLED:
+                    rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
+                        WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                        AND (
+                            (route_mismatch = 0 OR route_mismatch IS NULL)
+                            OR review_status = 'finalized'
                         )
-                    )
-                    AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
-                    ORDER BY id""", [from_id, to_id]).fetchall()
+                        AND (
+                            review_status = 'finalized'
+                            OR (
+                                (review_status IS NULL OR review_status = '')
+                                AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
+                                AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
+                            )
+                        )
+                        AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+                        ORDER BY id""", [from_id, to_id]).fetchall()
+                else:
+                    rows = db.execute("""SELECT id, name, passport, border_crossing FROM evacuees
+                        WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                        AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')
+                        ORDER BY id""", [from_id, to_id]).fetchall()
             rows = [dict(r) for r in rows]
             db.close()
             output = io.StringIO()
@@ -9961,33 +10023,36 @@ function printBoth(){{
             if result.get('success') and result.get('id'):
                 new_id = result['id']
                 db2 = get_db()
-                declared_country = (data.get('current_country') or '').strip().lower()
-                ip_review_flag = 0
-                ip_review_reason = ''
-                ip_location_status = 'unknown'
-                # Basic declared-vs-route consistency check
-                if declared_country == 'pakistan' and data.get('effective_route', 'kw_to_pk') == 'kw_to_pk':
-                    ip_review_flag = 1
-                    ip_review_reason = 'Declared Pakistan but registered in KW→PK form'
-                    ip_location_status = 'needs_review'
-                elif declared_country:
-                    ip_location_status = 'matches_declared_country'
-                db2.execute("""UPDATE evacuees SET
-                    applicant_ip = ?,
-                    ip_location_status = ?,
-                    location_review_flag = ?,
-                    location_review_reason = ?
-                WHERE id = ?""", [client_ip, ip_location_status, ip_review_flag, ip_review_reason or None, new_id])
-                # If flagged, also set review_status for the route review queue
-                if ip_review_flag == 1:
+                # Always store the applicant IP (informational, used for rate-limiting)
+                db2.execute("UPDATE evacuees SET applicant_ip = ? WHERE id = ?", [client_ip, new_id])
+                ip_review_flag = 0  # default; overwritten below when route review is enabled
+                if ROUTE_REVIEW_ENABLED:
+                    declared_country = (data.get('current_country') or '').strip().lower()
+                    ip_review_flag = 0
+                    ip_review_reason = ''
+                    ip_location_status = 'unknown'
+                    # Basic declared-vs-route consistency check
+                    if declared_country == 'pakistan' and data.get('effective_route', 'kw_to_pk') == 'kw_to_pk':
+                        ip_review_flag = 1
+                        ip_review_reason = 'Declared Pakistan but registered in KW→PK form'
+                        ip_location_status = 'needs_review'
+                    elif declared_country:
+                        ip_location_status = 'matches_declared_country'
                     db2.execute("""UPDATE evacuees SET
-                        review_status = COALESCE(NULLIF(review_status,''), 'pending'),
-                        flag_reason = COALESCE(NULLIF(flag_reason,''), ?)
-                    WHERE id = ? AND (review_status IS NULL OR review_status = '')""",
-                    [ip_review_reason, new_id])
+                        ip_location_status = ?,
+                        location_review_flag = ?,
+                        location_review_reason = ?
+                    WHERE id = ?""", [ip_location_status, ip_review_flag, ip_review_reason or None, new_id])
+                    # If flagged, also set review_status for the route review queue
+                    if ip_review_flag == 1:
+                        db2.execute("""UPDATE evacuees SET
+                            review_status = COALESCE(NULLIF(review_status,''), 'pending'),
+                            flag_reason = COALESCE(NULLIF(flag_reason,''), ?)
+                        WHERE id = ? AND (review_status IS NULL OR review_status = '')""",
+                        [ip_review_reason, new_id])
                 db2.commit()
                 # Auto-send clarification email if flagged at registration
-                if ip_review_flag == 1:
+                if ROUTE_REVIEW_ENABLED and ip_review_flag == 1:
                     fresh = db2.execute("SELECT id, name, email, passport FROM evacuees WHERE id = ?", [new_id]).fetchone()
                     db2.close()
                     if fresh:
@@ -10575,16 +10640,8 @@ function printBoth(){{
                     except sqlite3.OperationalError:
                         pass
                 sent_date = datetime.now().strftime('%Y-%m-%d %H:%M')
-                if from_id is not None and to_id is not None:
-                    from_id = int(from_id)
-                    to_id = int(to_id)
-                    cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA',
-                        mofa_letter_number=?, mofa_letter_date=?, mofa_sent_date=?,
-                        mofa_kw_status='Sent', mofa_ksa_status='Sent',
-                        mofa_kw_sent_at=COALESCE(mofa_kw_sent_at, ?), mofa_ksa_sent_at=COALESCE(mofa_ksa_sent_at, ?),
-                        mofa_submitted=1, record_locked=1,
-                        updated_at=CURRENT_TIMESTAMP, updated_by=?
-                        WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'
+                # ── Route review guard clauses for MOFA mark-sent ──
+                _rr_guard = """
                         AND (
                             (route_mismatch = 0 OR route_mismatch IS NULL)
                             OR review_status = 'finalized'
@@ -10596,7 +10653,19 @@ function printBoth(){{
                                 AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
                                 AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
                             )
-                        )
+                        )""" if ROUTE_REVIEW_ENABLED else ""
+                if from_id is not None and to_id is not None:
+                    from_id = int(from_id)
+                    to_id = int(to_id)
+                    cur = db.execute("""UPDATE evacuees SET mofa_status='Sent to MOFA',
+                        mofa_letter_number=?, mofa_letter_date=?, mofa_sent_date=?,
+                        mofa_kw_status='Sent', mofa_ksa_status='Sent',
+                        mofa_kw_sent_at=COALESCE(mofa_kw_sent_at, ?), mofa_ksa_sent_at=COALESCE(mofa_ksa_sent_at, ?),
+                        mofa_submitted=1, record_locked=1,
+                        updated_at=CURRENT_TIMESTAMP, updated_by=?
+                        WHERE id >= ? AND id <= ? AND travel_status='Pending' AND dup_flag='CLEAR'"""
+                        + _rr_guard +
+                        """
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
                         [letter_number, letter_date, sent_date, sent_date, sent_date, user['user'], from_id, to_id])
                     count = cur.rowcount
@@ -10609,19 +10678,9 @@ function printBoth(){{
                         mofa_kw_sent_at=COALESCE(mofa_kw_sent_at, ?), mofa_ksa_sent_at=COALESCE(mofa_ksa_sent_at, ?),
                         mofa_submitted=1, record_locked=1,
                         updated_at=CURRENT_TIMESTAMP, updated_by=?
-                        WHERE id IN ({placeholders})
-                        AND (
-                            (route_mismatch = 0 OR route_mismatch IS NULL)
-                            OR review_status = 'finalized'
-                        )
-                        AND (
-                            review_status = 'finalized'
-                            OR (
-                                (review_status IS NULL OR review_status = '')
-                                AND LOWER(COALESCE(country,'')) NOT LIKE '%pakistan%'
-                                AND mobile NOT LIKE '+92%' AND mobile NOT LIKE '03%' AND mobile NOT LIKE '92%'
-                            )
-                        )
+                        WHERE id IN ({placeholders})"""
+                        + _rr_guard +
+                        """
                         AND (mofa_status IS NULL OR mofa_status = '' OR mofa_status = 'New')""",
                         [letter_number, letter_date, sent_date, sent_date, sent_date, user['user']] + [int(i) for i in ids])
                     count = cur.rowcount
