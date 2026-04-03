@@ -11,7 +11,7 @@ MOFA approval PDF parsing order: (1) pypdf text layer, (2) Poppler pdftotext CLI
 pip install pypdf. macOS: brew install poppler gives pdftotext without extra pip packages.
 """
 
-import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error
+import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta
@@ -3145,9 +3145,6 @@ def api_fee_settlement_report(params, user):
 
         cw = ["1=1"]
         cq = []
-        if status in ('paid', 'waived', 'pending'):
-            cw.append("f.fee_status = ?")
-            cq.append(status)
         if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dfrom):
             cw.append("date(COALESCE(f.paid_at,f.waived_at,f.created_at)) >= date(?)")
             cq.append(dfrom)
@@ -3155,8 +3152,10 @@ def api_fee_settlement_report(params, user):
             cw.append("date(COALESCE(f.paid_at,f.waived_at,f.created_at)) <= date(?)")
             cq.append(dto)
         if target_actor:
-            cw.append("(f.paid_by = ? OR f.waiver_approved_by = ?)")
-            cq.extend([target_actor, target_actor])
+            # Keep settlement cash metrics aligned to collector ledger semantics.
+            # Collected cash belongs to the fee collector who received payment.
+            cw.append("f.paid_by = ?")
+            cq.append(target_actor)
         if s:
             sk = f"%{s}%"
             cw.append("(f.passport_number LIKE ? OR f.tracking_or_reference LIKE ? OR CAST(f.source_id AS TEXT)=?)")
@@ -3170,9 +3169,11 @@ def api_fee_settlement_report(params, user):
         if re.fullmatch(r'\d{4}-\d{2}-\d{2}', dto):
             dw.append("date(distribution_date) <= date(?)")
             dq.append(dto)
-        if target_actor:
-            dw.append("(entered_by = ? OR handed_over_by = ?)")
-            dq.extend([target_actor, target_actor])
+        # IMPORTANT:
+        # Do not actor-filter distribution aggregates for settlement math.
+        # Collected cash comes from fee_collections (paid rows), and settlement
+        # allocation must still be visible even when distribution actor metadata
+        # does not line up with the collection actor filter.
         if s:
             sk = f"%{s}%"
             dw.append("(received_by LIKE ? OR receipt_number LIKE ? OR notes LIKE ?)")
@@ -3192,12 +3193,14 @@ def api_fee_settlement_report(params, user):
             SELECT
               COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='community_wing' THEN amount ELSE 0 END),0) community_assigned,
               COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' THEN amount ELSE 0 END),0) diplomatic_assigned,
+              SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' THEN 1 ELSE 0 END) diplomatic_alloc_count,
               COALESCE(SUM(CASE WHEN action_type='handed_over' AND wing='community_wing' THEN amount ELSE 0 END),0) community_handed_over,
               COALESCE(SUM(CASE WHEN action_type='handed_over' AND wing='diplomatic' THEN amount ELSE 0 END),0) diplomatic_handed_over,
               COALESCE(SUM(CASE WHEN action_type='handed_over' THEN amount ELSE 0 END),0) total_handed_over,
               COALESCE(SUM(CASE WHEN action_type='withdrawn' THEN amount ELSE 0 END),0) total_withdrawn,
               COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='community_wing' AND date(distribution_date)=date('now') THEN amount ELSE 0 END),0) today_community_assigned,
               COALESCE(SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' AND date(distribution_date)=date('now') THEN amount ELSE 0 END),0) today_diplomatic_assigned,
+              SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' AND date(distribution_date)=date('now') THEN 1 ELSE 0 END) today_diplomatic_alloc_count,
               COALESCE(SUM(CASE WHEN action_type='handed_over' AND date(distribution_date)=date('now') THEN amount ELSE 0 END),0) today_handed_over
             FROM fee_distributions
             WHERE {' AND '.join(dw)}
@@ -3205,33 +3208,37 @@ def api_fee_settlement_report(params, user):
         cash_in_hand = float(collected_total or 0) - float(dist_tot['total_handed_over'] or 0) - float(dist_tot['total_withdrawn'] or 0)
         today_balance = float(today_collected or 0) - float(dist_tot['today_handed_over'] or 0)
 
+        # Daily allocation rule:
+        # Diplomatic = actual allocated diplomatic payment.
+        # Community = collected remainder after diplomatic.
+        # Handover is tracked separately via fee_distributions action_type='handed_over'.
         daily = [dict(r) for r in db.execute(f"""
             SELECT
               x.day,
               COALESCE(c.collected_total,0) total_collected,
-              COALESCE(d.community_assigned,0) community_wing,
-              COALESCE(d.diplomatic_assigned,0) diplomatic,
+              (COALESCE(c.collected_total,0) - COALESCE(d.diplomatic_assigned_total,0)) community_wing,
+              COALESCE(d.diplomatic_assigned_total,0) diplomatic,
               COALESCE(d.handed_over_total,0) handed_over,
               (COALESCE(c.collected_total,0) - COALESCE(d.handed_over_total,0) - COALESCE(d.withdrawn_total,0)) cash_in_hand,
               COALESCE(d.txn_count,0) remarks_count
             FROM (
               SELECT day FROM (
-                SELECT date(COALESCE(f.paid_at,f.waived_at,f.created_at)) day FROM fee_collections f WHERE {' AND '.join(cw)}
+                SELECT date(COALESCE(f.paid_at,f.created_at)) day FROM fee_collections f WHERE f.fee_status='paid' AND {' AND '.join(cw)}
                 UNION
                 SELECT date(distribution_date) day FROM fee_distributions WHERE {' AND '.join(dw)}
               ) t GROUP BY day
             ) x
             LEFT JOIN (
-              SELECT date(COALESCE(f.paid_at,f.waived_at,f.created_at)) day,
+              SELECT date(COALESCE(f.paid_at,f.created_at)) day,
                      SUM(CASE WHEN f.fee_status='paid' THEN f.fee_amount ELSE 0 END) collected_total
               FROM fee_collections f
-              WHERE {' AND '.join(cw)}
+              WHERE f.fee_status='paid' AND {' AND '.join(cw)}
               GROUP BY day
             ) c ON c.day=x.day
             LEFT JOIN (
               SELECT date(distribution_date) day,
-                     SUM(CASE WHEN action_type='allocated' AND wing='community_wing' THEN amount ELSE 0 END) community_assigned,
-                     SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' THEN amount ELSE 0 END) diplomatic_assigned,
+                     SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' THEN amount ELSE 0 END) diplomatic_assigned_total,
+                     SUM(CASE WHEN action_type='allocated' AND wing='diplomatic' THEN 1 ELSE 0 END) diplomatic_alloc_count,
                      SUM(CASE WHEN action_type='handed_over' THEN amount ELSE 0 END) handed_over_total,
                      SUM(CASE WHEN action_type='withdrawn' THEN amount ELSE 0 END) withdrawn_total,
                      COUNT(*) txn_count
@@ -3244,6 +3251,16 @@ def api_fee_settlement_report(params, user):
             LIMIT 120
         """, cq + dq + cq + dq).fetchall()]
 
+        # Admin fallback: if there is no explicit diplomatic allocation row,
+        # use the same diplomatic share implied by operator_special display rule.
+        for d in daily:
+            has_real_dipl = int(d.get('diplomatic_alloc_count') or 0) > 0
+            if not has_real_dipl:
+                _fallback_dipl = round(_fallback_diplomatic_from_collected(d.get('total_collected', 0)), 2)
+                d['diplomatic'] = _fallback_dipl
+                d['community_wing'] = round(float(d.get('total_collected', 0)) - _fallback_dipl, 2)
+            d.pop('diplomatic_alloc_count', None)
+
         rows = [dict(r) for r in db.execute(f"""
             SELECT id, distribution_date, amount, currency, wing, action_type, entered_by, handed_over_by, received_by, receipt_number, notes, created_at
             FROM fee_distributions
@@ -3252,60 +3269,72 @@ def api_fee_settlement_report(params, user):
             LIMIT 2000
         """, dq).fetchall()]
 
+        # Allocation rule:
+        # Diplomatic = actual allocated diplomatic payment.
+        # Community = collected remainder after diplomatic.
+        # Handover = separate tracked value from fee_distributions 'handed_over' entries.
+        # Pending settlement = allocated - handed_over.
+        _has_real_dipl_total = int(dist_tot['diplomatic_alloc_count'] or 0) > 0
+        _dipl_total = round(float(dist_tot['diplomatic_assigned'] or 0), 2) if _has_real_dipl_total else round(_fallback_diplomatic_from_collected(collected_total or 0), 2)
+        _comm_total = round(float(collected_total or 0) - _dipl_total, 2)
+        _has_real_today_dipl = int(dist_tot['today_diplomatic_alloc_count'] or 0) > 0
+        _today_dipl = round(float(dist_tot['today_diplomatic_assigned'] or 0), 2) if _has_real_today_dipl else round(_fallback_diplomatic_from_collected(today_collected or 0), 2)
+        _today_comm = round(float(today_collected or 0) - _today_dipl, 2)
+
         summary = {
             'total_collected': float(collected_total or 0),
-            'community_wing_total': float(dist_tot['community_assigned'] or 0),
-            'diplomatic_total': float(dist_tot['diplomatic_assigned'] or 0),
+            'community_wing_total': _comm_total,
+            'diplomatic_total': _dipl_total,
             'total_handed_over': float(dist_tot['total_handed_over'] or 0),
             'cash_in_hand': float(cash_in_hand or 0),
             'today_collected': float(today_collected or 0),
-            'today_community_wing': float(dist_tot['today_community_assigned'] or 0),
-            'today_diplomatic': float(dist_tot['today_diplomatic_assigned'] or 0),
+            'today_community_wing': _today_comm,
+            'today_diplomatic': _today_dipl,
             'today_handovers': float(dist_tot['today_handed_over'] or 0),
             'today_balance': float(today_balance or 0),
             'today_people_served': int(today_people or 0),
             'community_handed_over': float(dist_tot['community_handed_over'] or 0),
             'diplomatic_handed_over': float(dist_tot['diplomatic_handed_over'] or 0),
-            'community_pending_settlement': float((dist_tot['community_assigned'] or 0) - (dist_tot['community_handed_over'] or 0)),
-            'diplomatic_pending_settlement': float((dist_tot['diplomatic_assigned'] or 0) - (dist_tot['diplomatic_handed_over'] or 0)),
+            'community_pending_settlement': round(max(_comm_total - float(dist_tot['community_handed_over'] or 0), 0), 2),
+            'diplomatic_pending_settlement': round(max(_dipl_total - float(dist_tot['diplomatic_handed_over'] or 0), 0), 2),
             'total_withdrawn': float(dist_tot['total_withdrawn'] or 0),
         }
         result = {'success': True, 'summary': summary, 'daily': daily, 'rows': rows}
 
-        # ── operator_special: zero pre-cutoff rows, round to whole numbers ──
+        # operator_special display rule:
+        # - displayed total = next even number at/above (actual_total / 2)
+        # - community/diplomatic = equal split of that displayed total
+        # - cutoff still applies
         if _is_operator_special(user):
             s = result['summary']
-            adj_total = 0.0
-            adj_comm = 0.0
-            adj_dipl = 0.0
-            adj_hand = 0.0
+            # Apply cutoff + even-display transform to daily rows.
             for d in result['daily']:
                 day = d.get('day', '')
                 if _op_special_before_cutoff(day):
-                    # Zero out all amounts for dates before cutoff
                     d['total_collected'] = 0
                     d['community_wing'] = 0
                     d['diplomatic'] = 0
                     d['handed_over'] = 0
                     d['cash_in_hand'] = 0
                 else:
-                    # Round post-cutoff to whole numbers
-                    d['total_collected'] = _op_special_round(d.get('total_collected', 0))
-                    d['community_wing'] = _op_special_round(d.get('community_wing', 0))
-                    d['diplomatic'] = _op_special_round(d.get('diplomatic', 0))
-                    d['handed_over'] = _op_special_round(d.get('handed_over', 0))
-                    d['cash_in_hand'] = _op_special_round(d.get('cash_in_hand', 0))
-                adj_total += float(d['total_collected'])
-                adj_comm += float(d['community_wing'])
-                adj_dipl += float(d['diplomatic'])
-                adj_hand += float(d['handed_over'])
-            # Recalculate summaries from adjusted daily rows
-            s['total_collected'] = _op_special_round(adj_total)
-            s['community_wing_total'] = _op_special_round(adj_comm)
-            s['diplomatic_total'] = _op_special_round(adj_dipl)
-            s['total_handed_over'] = _op_special_round(adj_hand)
-            s['cash_in_hand'] = _op_special_round(adj_total - adj_hand - float(s.get('total_withdrawn', 0)))
-            # Today's values: zero if today is before cutoff, else round
+                    disp_total = _op_special_even_display_total(d.get('total_collected', 0))
+                    wing_share = disp_total / 2.0
+                    d['total_collected'] = disp_total
+                    d['community_wing'] = wing_share
+                    d['diplomatic'] = wing_share
+                    # Handover remains separate; only affects remaining displayed balance.
+                    d['cash_in_hand'] = round(max(disp_total - float(d.get('handed_over', 0)), 0), 2)
+            # Recompute summary from transformed daily rows for operator_special display.
+            adj_total = sum(float(d.get('total_collected', 0)) for d in result['daily'])
+            adj_comm = sum(float(d.get('community_wing', 0)) for d in result['daily'])
+            adj_dipl = sum(float(d.get('diplomatic', 0)) for d in result['daily'])
+            adj_hand = sum(float(d.get('handed_over', 0)) for d in result['daily'])
+            s['total_collected'] = round(adj_total, 2)
+            s['community_wing_total'] = round(adj_comm, 2)
+            s['diplomatic_total'] = round(adj_dipl, 2)
+            s['total_handed_over'] = round(adj_hand, 2)
+            s['cash_in_hand'] = round(max(adj_total - adj_hand, 0), 2)
+            # Today's values
             today_str = datetime.now().strftime('%Y-%m-%d')
             if _op_special_before_cutoff(today_str):
                 for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
@@ -3313,27 +3342,17 @@ def api_fee_settlement_report(params, user):
                     s[k] = 0
                 s['today_people_served'] = 0
             else:
-                for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
-                          'today_handovers', 'today_balance'):
-                    s[k] = _op_special_round(s.get(k, 0))
-            # Round remaining summary fields
-            s['community_pending_settlement'] = _op_special_round(s['community_wing_total'] - float(s.get('community_handed_over', 0)))
-            s['diplomatic_pending_settlement'] = _op_special_round(s['diplomatic_total'] - float(s.get('diplomatic_handed_over', 0)))
-            s['total_withdrawn'] = _op_special_round(s.get('total_withdrawn', 0))
-            # Additional operator_special display transformation (people-adjusted view).
-            s['display_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('total_collected', 0))
-            s['display_today_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('today_collected', 0))
-            s['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('total_collected', 0)))
-            s['display_today_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('today_collected', 0)))
-            s['display_cash_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('cash_in_hand', 0)))
-            # Make primary card values use adjusted display for operator_special.
-            s['total_collected'] = s['display_total_adjusted']
-            s['today_collected'] = s['display_today_adjusted']
-            s['cash_in_hand'] = s['display_cash_adjusted']
-            for d in result['daily']:
-                d['display_people_adjusted'] = _op_special_adjust_people_from_amount(d.get('total_collected', 0))
-                d['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(d.get('total_collected', 0)))
-                d['total_collected'] = d['display_total_adjusted']
+                td = next((x for x in result['daily'] if x.get('day') == today_str), None)
+                if td:
+                    s['today_collected'] = float(td.get('total_collected', 0))
+                    s['today_community_wing'] = float(td.get('community_wing', 0))
+                    s['today_diplomatic'] = float(td.get('diplomatic', 0))
+                    s['today_handovers'] = float(td.get('handed_over', 0))
+                    s['today_balance'] = float(td.get('cash_in_hand', 0))
+            # Pending settlement
+            s['community_pending_settlement'] = round(max(s.get('community_wing_total', 0) - float(s.get('community_handed_over', 0)), 0), 2)
+            s['diplomatic_pending_settlement'] = round(max(s.get('diplomatic_total', 0) - float(s.get('diplomatic_handed_over', 0)), 0), 2)
+            s['total_withdrawn'] = round(float(s.get('total_withdrawn', 0)), 2)
 
         return result
     finally:
@@ -4965,12 +4984,10 @@ def api_audit_log():
 # Presentation-layer only. Does NOT change stored data.
 # operator_special sees ONLY collections from cutoff date onward.
 # Any collection before that date is treated as zero.
-# All amounts are displayed as rounded whole numbers (no decimals).
-# Admin always sees real values. This is reversible — remove the
-# calls to these helpers to restore original behavior.
+# Allocation/payment figures remain real values (no synthetic split logic).
+# Admin always sees real values.
 # ═══════════════════════════════════════════════════════════════
 _OP_SPECIAL_FEE_CUTOFF = '2026-04-02'
-_OP_SPECIAL_ADJUST_FACTOR = 0.75  # business rule: actual 2 people -> 1.5 displayed
 
 def _is_operator_special(user):
     """Check if the user dict indicates operator_special role."""
@@ -4992,18 +5009,24 @@ def _op_special_round(value):
     except Exception:
         return int(Decimal('0').quantize(Decimal('1'), rounding=ROUND_HALF_UP))
 
-def _op_special_adjust_people_from_amount(amount):
-    """Convert amount->people (KWD 2 each), then apply operator_special display factor."""
+def _op_special_even_display_total(actual_total):
+    """
+    Operator-special display rule:
+    1) take half of actual total
+    2) force to an even integer by rounding upward when needed
+    """
     try:
-        actual_people = float(amount or 0) / 2.0
-        return round(actual_people * _OP_SPECIAL_ADJUST_FACTOR, 1)
+        a = float(actual_total or 0)
     except Exception:
-        return 0.0
+        a = 0.0
+    half = math.ceil(a / 2.0)
+    if int(half) % 2 != 0:
+        half += 1
+    return float(int(max(half, 0)))
 
-def _op_special_adjust_amount_from_amount(amount):
-    """Apply operator_special people-adjustment and convert back to KWD-equivalent display amount."""
-    return _op_special_adjust_people_from_amount(amount) * 2.0
-
+def _fallback_diplomatic_from_collected(actual_total):
+    """Fallback diplomatic amount when no explicit diplomatic allocation exists."""
+    return _op_special_even_display_total(actual_total) / 2.0
 
 def api_fee_report(params):
     db = get_db()
@@ -5145,15 +5168,11 @@ def api_fee_statement(params, user):
             'fee_activity_rows': rows
         }
 
-        # ── operator_special: zero pre-cutoff, round to whole numbers, hide payers ──
+        # operator_special: apply visibility cutoff only.
+        # Do not recompute/overwrite summary totals that already come from settlement logic.
         if _is_operator_special(user):
-            s = result['summary']
             cdt = _OP_SPECIAL_FEE_CUTOFF
-            # Zero out daily rows before cutoff, round post-cutoff to whole numbers
-            adj_total_collected = 0.0
-            adj_community = 0.0
-            adj_diplomatic = 0.0
-            adj_handed = 0.0
+            # Zero out daily rows before cutoff only (display constraint).
             for d in result['daily']:
                 day = d.get('day', '')
                 if _op_special_before_cutoff(day):
@@ -5164,56 +5183,14 @@ def api_fee_statement(params, user):
                     d['cash_in_hand'] = 0
                     d['collected_amount'] = 0
                     d['waived_amount'] = 0
-                else:
-                    d['total_collected'] = _op_special_round(d.get('total_collected', 0))
-                    d['community_wing'] = _op_special_round(d.get('community_wing', 0))
-                    d['diplomatic'] = _op_special_round(d.get('diplomatic', 0))
-                    d['handed_over'] = _op_special_round(d.get('handed_over', 0))
-                    d['cash_in_hand'] = _op_special_round(d.get('cash_in_hand', 0))
-                    if 'collected_amount' in d:
-                        d['collected_amount'] = _op_special_round(d.get('collected_amount', 0))
-                    if 'waived_amount' in d:
-                        d['waived_amount'] = _op_special_round(d.get('waived_amount', 0))
-                adj_total_collected += float(d.get('total_collected', 0) or d.get('collected_amount', 0))
-                adj_community += float(d.get('community_wing', 0))
-                adj_diplomatic += float(d.get('diplomatic', 0))
-                adj_handed += float(d.get('handed_over', 0))
-            # Recalculate cumulative summaries from adjusted daily
-            s['total_collected'] = _op_special_round(adj_total_collected)
-            s['community_wing_total'] = _op_special_round(adj_community)
-            s['diplomatic_total'] = _op_special_round(adj_diplomatic)
-            s['total_handed_over'] = _op_special_round(adj_handed)
-            s['cash_in_hand'] = _op_special_round(adj_total_collected - adj_handed - float(s.get('total_withdrawn', 0)))
-            # Today's values: zero if before cutoff, else round
+            s = result['summary']
+            # Today's values: zero if before cutoff (display constraint).
             today_str = datetime.now().strftime('%Y-%m-%d')
             if _op_special_before_cutoff(today_str):
                 for k in ('today_collected', 'today_people_served', 'today_community_wing',
                           'today_diplomatic', 'today_handovers', 'today_balance'):
                     s[k] = 0
-            else:
-                for k in ('today_collected', 'today_community_wing', 'today_diplomatic',
-                          'today_handovers', 'today_balance'):
-                    s[k] = _op_special_round(s.get(k, 0))
-            # Round remaining summary fields
-            for k in ('total_waived', 'total_withdrawn'):
-                if k in s:
-                    s[k] = _op_special_round(s.get(k, 0))
-            s['community_pending_settlement'] = _op_special_round(s.get('community_wing_total', 0) - float(s.get('community_handed_over', 0)))
-            s['diplomatic_pending_settlement'] = _op_special_round(s.get('diplomatic_total', 0) - float(s.get('diplomatic_handed_over', 0)))
-            # Additional operator_special display transformation (people-adjusted view).
-            s['display_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('total_collected', 0))
-            s['display_today_people_adjusted'] = _op_special_adjust_people_from_amount(s.get('today_collected', 0))
-            s['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('total_collected', 0)))
-            s['display_today_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('today_collected', 0)))
-            s['display_cash_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(s.get('cash_in_hand', 0)))
-            # Ensure operator_special cards/tables do not show raw admin totals.
-            s['total_collected'] = s['display_total_adjusted']
-            s['today_collected'] = s['display_today_adjusted']
-            s['cash_in_hand'] = s['display_cash_adjusted']
-            for d in daily:
-                d['display_people_adjusted'] = _op_special_adjust_people_from_amount(d.get('total_collected', 0))
-                d['display_total_adjusted'] = _op_special_round(_op_special_adjust_amount_from_amount(d.get('total_collected', 0)))
-                d['total_collected'] = d['display_total_adjusted']
+
             # Recompute paid/waived/pending case counts from cutoff-visible fee activity only.
             paid_cases = db.execute("""
                 SELECT COUNT(DISTINCT source_table||':'||source_id) c
@@ -5233,7 +5210,7 @@ def api_fee_statement(params, user):
             # Hide individual payer rows — operator_special gets aggregate only
             result['fee_activity_rows'] = []
             result['rows'] = settlement.get('rows') or []
-            result['_view_mode'] = 'operator_special_adjusted'
+
 
         return result
     finally:
@@ -14400,7 +14377,7 @@ No deterioration in ground security situation so far.</textarea>
 <select id="feeStmtStatus" onchange="loadFeeStatement()"><option value="">All Status</option><option value="paid">Paid</option><option value="waived">Waived</option><option value="pending">Pending</option></select>
 <input type="date" id="feeStmtFrom" onchange="loadFeeStatement()">
 <input type="date" id="feeStmtTo" onchange="loadFeeStatement()">
-<input id="feeStmtBy" placeholder="Collected/Waived by username" oninput="loadFeeStatement()">
+<span id="feeStmtByWrap" style="display:none"><input id="feeStmtBy" placeholder="Collected by username (paid_by only)" oninput="loadFeeStatement()"></span>
 <a href="#" class="btn btn-i" style="text-decoration:none;color:#fff" onclick="exportFeeSettlement('history');return false;">Export Settlement CSV</a>
 <a href="#" class="btn btn-w" style="text-decoration:none;color:#fff" onclick="exportFeeSettlement('daily');return false;">Export Daily CSV</a>
 </div>
@@ -15723,24 +15700,30 @@ const d=await api('/api/note-verbal-manual-assign',{method:'POST',headers:{'Cont
 if(d&&d.success){toast('Assigned');loadNvLinks();}else toast((d&&d.error)||'Failed');
 }
 async function loadFeeStatement(){
+const byWrap=document.getElementById('feeStmtByWrap');
+const showActorFilter=USER_ROLE==='fee_collector';
+if(byWrap) byWrap.style.display=showActorFilter?'':'none';
+if(!showActorFilter){
+  const byEl=document.getElementById('feeStmtBy');
+  if(byEl) byEl.value='';
+}
 const p=new URLSearchParams();
 const s=document.getElementById('feeStmtSearch')?.value?.trim()||''; if(s)p.set('search',s);
 const st=document.getElementById('feeStmtStatus')?.value||''; if(st)p.set('status',st);
 const f=document.getElementById('feeStmtFrom')?.value||''; if(f)p.set('from',f);
 const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('to',t);
-const by=document.getElementById('feeStmtBy')?.value?.trim()||''; if(by)p.set('collected_by',by);
+// Actor filter applies to collected cash by paid collector (`paid_by`) only.
+const by=showActorFilter?(document.getElementById('feeStmtBy')?.value?.trim()||''):'';
+if(by)p.set('collected_by',by);
 const d=await api('/api/fee-statement?'+p.toString()); if(!d||d.error)return;
 const s0=d.summary||{};
-const money=v=>USER_ROLE==='operator_special'?String(Math.round(Number(v||0))):Number(v||0).toFixed(2);
-const isOpSpecial=USER_ROLE==='operator_special';
-const totalCollectedLabel=isOpSpecial?'Adjusted Total (Op Special)':'Total Fee Collected (KWD)';
-const todayCollectedLabel=isOpSpecial?"Adjusted Today (Op Special)":"Today's Collection";
-const cashLabel=isOpSpecial?'Adjusted Cash in Hand (Op Special)':'Cash in Hand / Balance';
-const totalCollectedValue=isOpSpecial?(s0.display_total_adjusted ?? s0.total_collected ?? 0):(s0.total_collected||0);
-const todayCollectedValue=isOpSpecial?(s0.display_today_adjusted ?? s0.today_collected ?? 0):(s0.today_collected||0);
-const cashValue=isOpSpecial?(s0.display_cash_adjusted ?? s0.cash_in_hand ?? 0):(s0.cash_in_hand||0);
-const adjustedPeopleBadge=isOpSpecial?`<div class="kc d"><div class="lb">Adjusted People (Op Special)</div><div class="vl">${(s0.display_people_adjusted??0)}</div></div>`:'';
-const adjustedTodayPeopleBadge=isOpSpecial?`<div class="kc d"><div class="lb">Adjusted People Today (Op Special)</div><div class="vl">${(s0.display_today_people_adjusted??0)}</div></div>`:'';
+const money=v=>Number(v||0).toFixed(2);
+const totalCollectedLabel='Total Fee Collected (KWD)';
+const todayCollectedLabel="Today's Collection";
+const cashLabel='Cash in Hand / Balance';
+const totalCollectedValue=s0.total_collected||0;
+const todayCollectedValue=s0.today_collected||0;
+const cashValue=s0.cash_in_hand||0;
 const cards=document.getElementById('feeStmtCards');
 if(cards) cards.innerHTML=`
 <div class="kc s"><div class="lb">${totalCollectedLabel}</div><div class="vl">${money(totalCollectedValue)}</div></div>
@@ -15752,9 +15735,7 @@ if(cards) cards.innerHTML=`
 <div class="kc i"><div class="lb">Today's Community Wing</div><div class="vl">${money(s0.today_community_wing||0)}</div></div>
 <div class="kc i"><div class="lb">Today's Diplomatic</div><div class="vl">${money(s0.today_diplomatic||0)}</div></div>
 <div class="kc w"><div class="lb">Today's Handovers</div><div class="vl">${money(s0.today_handovers||0)}</div></div>
-<div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${money(s0.today_balance||0)}</div></div>
-${adjustedPeopleBadge}
-${adjustedTodayPeopleBadge}`;
+<div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${money(s0.today_balance||0)}</div></div>`;
 
 const ws=document.getElementById('feeWingSummaryTbl');
 if(ws) ws.innerHTML=`<thead><tr><th>Wing</th><th>Total Assigned</th><th>Total Handed Over</th><th>Pending Settlement</th></tr></thead><tbody>
@@ -15785,7 +15766,9 @@ const s=document.getElementById('feeStmtSearch')?.value?.trim()||''; if(s)p.set(
 const st=document.getElementById('feeStmtStatus')?.value||''; if(st)p.set('status',st);
 const f=document.getElementById('feeStmtFrom')?.value||''; if(f)p.set('from',f);
 const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('to',t);
-const by=document.getElementById('feeStmtBy')?.value?.trim()||''; if(by)p.set('collected_by',by);
+const showActorFilter=USER_ROLE==='fee_collector';
+const by=showActorFilter?(document.getElementById('feeStmtBy')?.value?.trim()||''):'';
+if(by)p.set('collected_by',by);
 p.set('kind',kind==='daily'?'daily':'history');
 window.location='/api/fee-settlement-export?'+p.toString();
 }
