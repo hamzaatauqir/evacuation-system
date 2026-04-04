@@ -14370,7 +14370,7 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 <div class="dash-top-shell">
 <div class="dash-summary-panel">
 <div class="dash-summary-section">
-<div class="dash-summary-section-head"><h3>Evacuees (Kuwait &rarr; Pakistan)</h3><span>Main movement summary</span></div>
+<div class="dash-summary-section-head"><h3>Assisted Travellers (Kuwait &rarr; Pakistan)</h3><span>Main movement summary</span></div>
 <div id="kpiGrid"></div>
 </div>
 <div class="dash-summary-section">
