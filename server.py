@@ -356,6 +356,16 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_nv_link_upload ON note_verbal_record_links(upload_id);
     CREATE INDEX IF NOT EXISTS idx_nv_link_record ON note_verbal_record_links(source_table, source_id);
     """)
+    for col, coltype in [
+        ('edited_by', "TEXT DEFAULT ''"),
+        ('edited_at', 'TIMESTAMP'),
+        ('edit_reason', "TEXT DEFAULT ''")
+    ]:
+        try:
+            db.execute(f"ALTER TABLE fee_distributions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
     # Migration: add CNIC to iraq_public_submissions if missing
     try:
         db.execute("ALTER TABLE iraq_public_submissions ADD COLUMN cnic TEXT DEFAULT ''")
@@ -3557,14 +3567,30 @@ def _next_fee_receipt_no(db):
     v = db.execute("SELECT COUNT(*) c FROM fee_distributions WHERE receipt_number != ''").fetchone()['c']
     return f"FDR-{datetime.now().strftime('%Y%m%d')}-{int(v)+1:04d}"
 
-def api_fee_settlement_entry(data, user):
+def _fee_distribution_effective_actor(row):
+    if not row:
+        return ''
+    return ((row.get('handed_over_by') or '').strip() or (row.get('entered_by') or '').strip())
+
+def _fee_distribution_outflow_amount(row):
+    if not row:
+        return 0.0
+    try:
+        amount = float(row.get('amount') or 0)
+    except Exception:
+        amount = 0.0
+    return amount if (row.get('action_type') or '').strip().lower() in ('handed_over', 'withdrawn') else 0.0
+
+def _validate_fee_distribution_fields(data, default_date=''):
     wing = (data.get('wing') or '').strip().lower()
     action = (data.get('action_type') or '').strip().lower()
-    amount = float(data.get('amount') or 0)
     notes = (data.get('notes') or '').strip()
     received_by = (data.get('received_by') or '').strip()
-    handed_over_by = (data.get('handed_over_by') or '').strip() or user
     d = (data.get('distribution_date') or '').strip()
+    try:
+        amount = float(data.get('amount') or 0)
+    except Exception:
+        return {'success': False, 'error': 'amount must be greater than 0'}
     if wing not in ('community_wing', 'diplomatic'):
         return {'success': False, 'error': 'wing must be community_wing or diplomatic'}
     if action not in ('allocated', 'handed_over', 'withdrawn', 'adjusted'):
@@ -3575,6 +3601,30 @@ def api_fee_settlement_entry(data, user):
         return {'success': False, 'error': 'distribution_date must be YYYY-MM-DD'}
     if action == 'handed_over' and not received_by:
         return {'success': False, 'error': 'received_by is required for handover'}
+    dist_date = d or (default_date or datetime.now().strftime('%Y-%m-%d'))
+    return {
+        'success': True,
+        'values': {
+            'wing': wing,
+            'action_type': action,
+            'amount': amount,
+            'distribution_date': dist_date,
+            'received_by': received_by,
+            'notes': notes,
+        }
+    }
+
+def api_fee_settlement_entry(data, user):
+    validated = _validate_fee_distribution_fields(data)
+    if not validated.get('success'):
+        return validated
+    vals = validated['values']
+    wing = vals['wing']
+    action = vals['action_type']
+    amount = vals['amount']
+    notes = vals['notes']
+    received_by = vals['received_by']
+    handed_over_by = (data.get('handed_over_by') or '').strip() or user
 
     db = get_db()
     try:
@@ -3583,7 +3633,7 @@ def api_fee_settlement_entry(data, user):
             if amount > cash + 1e-9:
                 return {'success': False, 'error': f'Insufficient cash in hand. Available: {cash:.2f} KWD'}
         receipt_no = _next_fee_receipt_no(db) if action == 'handed_over' else ''
-        dist_date = d or datetime.now().strftime('%Y-%m-%d')
+        dist_date = vals['distribution_date']
         cur = db.execute("""
             INSERT INTO fee_distributions (
                 distribution_date, amount, currency, wing, action_type,
@@ -3596,6 +3646,71 @@ def api_fee_settlement_entry(data, user):
                    [dist_id, user, json.dumps({'wing': wing, 'action_type': action, 'amount': amount, 'received_by': received_by, 'receipt_number': receipt_no, 'distribution_date': dist_date, 'handed_over_by': handed_over_by, 'notes': notes})])
         db.commit()
         return {'success': True, 'id': dist_id, 'receipt_number': receipt_no}
+    finally:
+        db.close()
+
+def api_fee_settlement_update(data, user):
+    reason = (data.get('correction_reason') or data.get('edit_reason') or '').strip()
+    if not reason:
+        return {'success': False, 'error': 'correction reason is required'}
+    try:
+        dist_id = int(str(data.get('id', 0) or 0).strip())
+    except Exception:
+        dist_id = 0
+    if dist_id <= 0:
+        return {'success': False, 'error': 'Valid settlement row id is required'}
+
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM fee_distributions WHERE id = ?", [dist_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Settlement row not found'}
+        old_row = dict(row)
+        validated = _validate_fee_distribution_fields(data, default_date=(old_row.get('distribution_date') or '').strip())
+        if not validated.get('success'):
+            return validated
+        vals = validated['values']
+        actor = _fee_distribution_effective_actor(old_row)
+        available_cash = _fee_cash_in_hand(db, actor) + _fee_distribution_outflow_amount(old_row)
+        if vals['action_type'] in ('handed_over', 'withdrawn') and vals['amount'] > available_cash + 1e-9:
+            return {'success': False, 'error': f'Insufficient cash in hand for this correction. Available: {available_cash:.2f} KWD'}
+
+        db.execute("""
+            UPDATE fee_distributions
+            SET wing = ?,
+                action_type = ?,
+                amount = ?,
+                distribution_date = ?,
+                received_by = ?,
+                notes = ?,
+                edited_by = ?,
+                edited_at = CURRENT_TIMESTAMP,
+                edit_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, [
+            vals['wing'],
+            vals['action_type'],
+            vals['amount'],
+            vals['distribution_date'],
+            vals['received_by'],
+            vals['notes'],
+            user,
+            reason,
+            dist_id
+        ])
+        new_row = dict(db.execute("SELECT * FROM fee_distributions WHERE id = ?", [dist_id]).fetchone())
+        audit_details = {
+            'correction_reason': reason,
+            'old_values': old_row,
+            'new_values': new_row
+        }
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES ('fee_distribution_edit', ?, ?, ?)",
+            [dist_id, user, json.dumps(audit_details, default=str)]
+        )
+        db.commit()
+        return {'success': True, 'id': dist_id, 'receipt_number': old_row.get('receipt_number') or '', 'row': new_row}
     finally:
         db.close()
 
@@ -3729,7 +3844,7 @@ def api_fee_settlement_report(params, user):
             d.pop('diplomatic_alloc_count', None)
 
         rows = [dict(r) for r in db.execute(f"""
-            SELECT id, distribution_date, amount, currency, wing, action_type, entered_by, handed_over_by, received_by, receipt_number, notes, created_at
+            SELECT id, distribution_date, amount, currency, wing, action_type, entered_by, handed_over_by, received_by, receipt_number, notes, created_at, updated_at, edited_by, edited_at, edit_reason
             FROM fee_distributions
             WHERE {' AND '.join(dw)}
             ORDER BY id DESC
@@ -3844,7 +3959,7 @@ def api_fee_settlement_export_csv(params, user, kind='history'):
                 int(r.get('remarks_count') or 0)
             ])
     else:
-        w.writerow(['Date/Time', 'Action Type', 'Amount', 'Currency', 'Wing', 'Entered By', 'Handed Over By', 'Received By', 'Receipt Number', 'Notes'])
+        w.writerow(['Date/Time', 'Action Type', 'Amount', 'Currency', 'Wing', 'Entered By', 'Handed Over By', 'Received By', 'Receipt Number', 'Notes', 'Edited By', 'Edited At', 'Edit Reason'])
         for r in data.get('rows') or []:
             w.writerow([
                 r.get('created_at') or r.get('distribution_date') or '',
@@ -3856,7 +3971,10 @@ def api_fee_settlement_export_csv(params, user, kind='history'):
                 r.get('handed_over_by') or '',
                 r.get('received_by') or '',
                 r.get('receipt_number') or '',
-                r.get('notes') or ''
+                r.get('notes') or '',
+                r.get('edited_by') or '',
+                r.get('edited_at') or '',
+                r.get('edit_reason') or ''
             ])
     return out.getvalue()
 
@@ -11930,6 +12048,26 @@ function printBoth(){{
             self.send_response(404)
             self.end_headers()
 
+    def do_PUT(self):
+        path = urlparse(self.path).path
+        body = self.read_body()
+
+        if path == '/api/fee-settlement-update':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            result = api_fee_settlement_update(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
 # ═══════════════════════════════════════════════════════════════
 # LOGIN PAGE
 # ═══════════════════════════════════════════════════════════════
@@ -11976,12 +12114,124 @@ button{padding:8px 12px;border:none;border-radius:6px;cursor:pointer}
 <h3 style="margin:0 0 10px">Recent Settlement History</h3>
 <div style="overflow:auto"><table id="settTbl" style="width:100%;border-collapse:collapse"></table></div>
 </div>
+<div id="settEditModal" onclick="if(event.target===this)closeSettlementEdit()" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;align-items:center;justify-content:center;padding:16px">
+  <div style="width:min(780px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:14px;border:1px solid #d7dee6;box-shadow:0 18px 48px rgba(15,23,42,.25);padding:18px">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+      <div>
+        <h3 style="margin:0;color:#0f172a">Correct Settlement Row</h3>
+        <div class="muted">Admin-only correction on the existing row. Receipt number stays unchanged.</div>
+      </div>
+      <button type="button" onclick="closeSettlementEdit()" style="background:#e5e7eb;color:#111827">Close</button>
+    </div>
+    <div id="settEditMeta" style="margin-bottom:12px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;font-size:13px;line-height:1.55"></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
+      <label style="display:flex;flex-direction:column;gap:6px">Action Type
+        <select id="settEditAction" onchange="toggleSettlementEditReceived()">
+          <option value="allocated">Allocated</option>
+          <option value="handed_over">Handed Over</option>
+          <option value="withdrawn">Withdrawn</option>
+          <option value="adjusted">Adjusted</option>
+        </select>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px">Wing
+        <select id="settEditWing">
+          <option value="community_wing">Community Wing</option>
+          <option value="diplomatic">Diplomatic Wing</option>
+        </select>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px">Amount (KWD)
+        <input id="settEditAmount" type="number" step="0.01" min="0.01">
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px">Distribution Date
+        <input id="settEditDate" type="date">
+      </label>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-top:10px">
+      <label style="display:flex;flex-direction:column;gap:6px">Received By
+        <input id="settEditReceivedBy" placeholder="Required when action is handed over" oninput="toggleSettlementEditReceived()">
+        <span id="settEditReceivedHint" class="muted">Required for handed over corrections.</span>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px">Notes / Remarks
+        <textarea id="settEditNotes" rows="3" style="width:100%"></textarea>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px">Correction Reason *
+        <textarea id="settEditReason" rows="3" style="width:100%" placeholder="Explain why this settlement row is being corrected"></textarea>
+      </label>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:14px">
+      <button type="button" onclick="closeSettlementEdit()" style="background:#e5e7eb;color:#111827">Cancel</button>
+      <button type="button" class="btn" onclick="saveSettlementEdit()">Save Correction</button>
+    </div>
+  </div>
+</div>
 </div>
 <script>
 async function api(u,o){const r=await fetch(u,o); if(r.redirected){location='/login';return null;} return r.json();}
 const USER_ROLE='__USER_ROLE__';
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
 function fmt(n){return Number(n||0).toFixed(2)}
+let settlementRows=[];
+let editingSettlementId=0;
+function settlementWingLabel(v){return v==='community_wing'?'Community Wing':(v==='diplomatic'?'Diplomatic Wing':String(v||'-').replace('_',' '));}
+function settlementEditedHtml(r){
+  if(!r||!r.edited_at) return '-';
+  return `<div style="font-weight:700;color:#6a1b9a">Edited</div><div class="muted">by ${esc(r.edited_by||'-')}<br>${esc(r.edited_at||'-')}</div>${r.edit_reason?`<div class="muted">Reason: ${esc(r.edit_reason)}</div>`:''}`;
+}
+function closeSettlementEdit(){
+  editingSettlementId=0;
+  const modal=document.getElementById('settEditModal');
+  if(modal) modal.style.display='none';
+}
+function toggleSettlementEditReceived(){
+  const action=document.getElementById('settEditAction')?.value||'';
+  const input=document.getElementById('settEditReceivedBy');
+  const hint=document.getElementById('settEditReceivedHint');
+  const required=action==='handed_over';
+  if(input){
+    input.dataset.required=required?'1':'0';
+    input.style.borderColor=required && !input.value.trim() ? '#c62828' : '#bbb';
+  }
+  if(hint) hint.textContent=required?'Required for handed over corrections.':'Optional for non-handover corrections.';
+}
+function openSettlementEdit(id){
+  if(USER_ROLE!=='admin') return;
+  const row=(settlementRows||[]).find(x=>Number(x.id)===Number(id));
+  if(!row){alert('Settlement row not found');return;}
+  editingSettlementId=Number(row.id||0);
+  document.getElementById('settEditAction').value=row.action_type||'allocated';
+  document.getElementById('settEditWing').value=row.wing||'community_wing';
+  document.getElementById('settEditAmount').value=fmt(row.amount||0);
+  document.getElementById('settEditDate').value=row.distribution_date||'';
+  document.getElementById('settEditReceivedBy').value=row.received_by||'';
+  document.getElementById('settEditNotes').value=row.notes||'';
+  document.getElementById('settEditReason').value='';
+  document.getElementById('settEditMeta').innerHTML=`<strong>Receipt #:</strong> ${esc(row.receipt_number||'-')}<br><strong>Entered By:</strong> ${esc(row.entered_by||'-')}<br><strong>Handed Over By:</strong> ${esc(row.handed_over_by||row.entered_by||'-')}<br><strong>Created:</strong> ${esc(row.created_at||row.distribution_date||'-')}${row.edited_at?`<br><strong>Last Edited:</strong> ${esc(row.edited_at||'-')} by ${esc(row.edited_by||'-')}`:''}`;
+  toggleSettlementEditReceived();
+  const modal=document.getElementById('settEditModal');
+  if(modal) modal.style.display='flex';
+}
+async function saveSettlementEdit(){
+  if(USER_ROLE!=='admin' || !(editingSettlementId>0)) return;
+  const data={
+    id:editingSettlementId,
+    action_type:document.getElementById('settEditAction').value,
+    wing:document.getElementById('settEditWing').value,
+    amount:Number(document.getElementById('settEditAmount').value||0),
+    distribution_date:document.getElementById('settEditDate').value||'',
+    received_by:document.getElementById('settEditReceivedBy').value.trim(),
+    notes:document.getElementById('settEditNotes').value.trim(),
+    correction_reason:document.getElementById('settEditReason').value.trim()
+  };
+  if(!(data.amount>0)){alert('Enter a valid amount');return;}
+  if(!data.correction_reason){alert('Correction reason is required');return;}
+  if(data.action_type==='handed_over'&&!data.received_by){alert('Received By is required for handed over entries');return;}
+  const d=await api('/api/fee-settlement-update',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(d&&d.success){
+    alert('Settlement corrected successfully.');
+    closeSettlementEdit();
+    loadSettlement();
+  }else alert((d&&d.error)||'Failed');
+}
 async function runSearch(){
   const q=document.getElementById('q').value.trim();
   if(!q){return;}
@@ -12024,6 +12274,7 @@ async function waiveFee(source,id){
 }
 async function loadSettlement(){
   const d=await api('/api/fee-settlement-report?scope=mine'); if(!d||!d.success)return;
+  settlementRows=d.rows||[];
   const s=d.summary||{};
   const cards=document.getElementById('settCards');
   if(cards) cards.innerHTML=`
@@ -12032,8 +12283,8 @@ async function loadSettlement(){
     <span class="badge">Diplomatic: ${fmt(s.diplomatic_total)} KWD</span>
     <span class="badge">Handed over: ${fmt(s.total_handed_over)} KWD</span>
     <span class="badge">Cash in hand: ${fmt(s.cash_in_hand)} KWD</span>`;
-  let h='<thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Date</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Action</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Wing</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Amount</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Received By</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Receipt / Voucher</th></tr></thead><tbody>';
-  (d.rows||[]).slice(0,40).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=(r.wing==='community_wing'?'Community Wing':(r.wing==='diplomatic'?'Diplomatic Wing':(r.wing||'-').replace('_',' ')));h+=`<tr><td style="padding:6px">${esc(r.distribution_date||'')}</td><td style="padding:6px">${esc((r.action_type||'').replace('_',' '))}</td><td style="padding:6px">${esc(wing)}</td><td style="padding:6px">${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td style="padding:6px">${esc(r.received_by||'-')}</td><td style="padding:6px">${isVoucher?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>${esc(r.receipt_number)}</span><a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank" style="display:inline-block;padding:4px 9px;border-radius:999px;background:#0f4c81;color:#fff;text-decoration:none;font-size:12px;font-weight:700">Print Voucher</a></div>`:(r.receipt_number?esc(r.receipt_number):'-')}</td></tr>`});
+  let h='<thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Date</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Action</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Wing</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Amount</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Received By</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Receipt / Voucher</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Edited</th>'+(USER_ROLE==='admin'?'<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Actions</th>':'')+'</tr></thead><tbody>';
+  (d.rows||[]).slice(0,40).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=settlementWingLabel(r.wing);const voucherHtml=isVoucher?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>${esc(r.receipt_number)}</span><a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank" style="display:inline-block;padding:4px 9px;border-radius:999px;background:#0f4c81;color:#fff;text-decoration:none;font-size:12px;font-weight:700">Print Voucher</a></div>`:(r.receipt_number?esc(r.receipt_number):'-');const actionBtn=USER_ROLE==='admin'?`<button class="btn" style="padding:4px 10px;font-size:12px;background:#1f2937;color:#fff" onclick="openSettlementEdit(${Number(r.id)||0})">Edit</button>`:'';h+=`<tr><td style="padding:6px">${esc(r.distribution_date||'')}</td><td style="padding:6px">${esc((r.action_type||'').replace('_',' '))}</td><td style="padding:6px">${esc(wing)}</td><td style="padding:6px">${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td style="padding:6px">${esc(r.received_by||'-')}</td><td style="padding:6px">${voucherHtml}</td><td style="padding:6px">${settlementEditedHtml(r)}</td>${USER_ROLE==='admin'?`<td style="padding:6px">${actionBtn||'-'}</td>`:''}</tr>`});
   h+='</tbody>';
   const t=document.getElementById('settTbl'); if(t)t.innerHTML=h;
 }
@@ -15108,6 +15359,31 @@ No deterioration in ground security situation so far.</textarea>
 <h3>Detailed Distribution &amp; Hand-over History</h3>
 <div class="scroll-t"><table id="feeStmtTxnTbl"></table></div>
 </div>
+<div id="feeStmtEditModal" onclick="if(event.target===this)closeFeeSettlementEdit()" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.6);align-items:center;justify-content:center;padding:18px">
+<div style="width:min(820px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:16px;border:1px solid #d6dee8;box-shadow:0 20px 48px rgba(15,23,42,.28);padding:20px">
+<div class="sb" style="align-items:flex-start;margin-bottom:12px">
+<div><h3 style="margin:0">Correct Settlement Row</h3><div class="muted">Admin-only correction on the existing fee distribution row. Receipt number and creator metadata remain unchanged.</div></div>
+<button class="btn btn-w" type="button" onclick="closeFeeSettlementEdit()">Close</button>
+</div>
+<div id="feeStmtEditMeta" style="margin-bottom:12px;padding:10px 12px;background:#f8fafc;border:1px solid #dbe4ee;border-radius:10px;font-size:.9em;line-height:1.6"></div>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Action Type</label><select id="feeStmtEditAction" onchange="toggleFeeSettlementReceived()"><option value="allocated">Allocated</option><option value="handed_over">Handed Over</option><option value="withdrawn">Withdrawn</option><option value="adjusted">Adjusted</option></select></div>
+<div class="fgp"><label>Wing</label><select id="feeStmtEditWing"><option value="community_wing">Community Wing</option><option value="diplomatic">Diplomatic Wing</option></select></div>
+<div class="fgp"><label>Amount (KWD)</label><input id="feeStmtEditAmount" type="number" step="0.01" min="0.01"></div>
+<div class="fgp"><label>Distribution Date</label><input id="feeStmtEditDate" type="date"></div>
+</div>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp" style="grid-column:1/-1"><label>Received By</label><input id="feeStmtEditReceivedBy" placeholder="Required when action is handed over" oninput="toggleFeeSettlementReceived()"><div id="feeStmtEditReceivedHint" class="muted" style="margin-top:6px">Required for handed over corrections.</div></div>
+</div>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp" style="grid-column:1/-1"><label>Notes / Remarks</label><textarea id="feeStmtEditNotes" rows="3"></textarea></div>
+</div>
+<div class="fg">
+<div class="fgp" style="grid-column:1/-1"><label>Correction Reason *</label><textarea id="feeStmtEditReason" rows="3" placeholder="Explain why this settlement row is being corrected"></textarea></div>
+</div>
+<div class="sb" style="margin-top:14px"><div class="muted">This correction updates the same row and writes a full audit trail.</div><div style="display:flex;gap:8px"><button class="btn btn-i" type="button" onclick="closeFeeSettlementEdit()">Cancel</button><button class="btn btn-p" type="button" onclick="saveFeeSettlementEdit()">Save Correction</button></div></div>
+</div>
+</div>
 </div></div>
 
 <!-- ADMIN -->
@@ -16502,6 +16778,66 @@ if(!source_table||!source_id){toast('Source and record id required');return;}
 const d=await api('/api/note-verbal-manual-assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:uploadId,source_table,source_id})});
 if(d&&d.success){toast('Assigned');loadNvLinks();}else toast((d&&d.error)||'Failed');
 }
+let feeStatementRows=[];
+let feeStatementEditId=0;
+function feeStmtWingLabel(v){return v==='community_wing'?'Community Wing':(v==='diplomatic'?'Diplomatic Wing':String(v||'-').replace('_',' '));}
+function feeStmtEditedHtml(r){
+if(!r||!r.edited_at)return '-';
+return `<div style="font-weight:700;color:#7c3aed">Edited</div><div class="sub">by ${escHtml(r.edited_by||'-')}<br>${escHtml(r.edited_at||'-')}</div>${r.edit_reason?`<div class="sub">Reason: ${escHtml(r.edit_reason)}</div>`:''}`;
+}
+function closeFeeSettlementEdit(){
+feeStatementEditId=0;
+const modal=document.getElementById('feeStmtEditModal'); if(modal)modal.style.display='none';
+}
+function toggleFeeSettlementReceived(){
+const action=document.getElementById('feeStmtEditAction')?.value||'';
+const input=document.getElementById('feeStmtEditReceivedBy');
+const hint=document.getElementById('feeStmtEditReceivedHint');
+const required=action==='handed_over';
+if(input){
+input.dataset.required=required?'1':'0';
+input.style.borderColor=required&&!input.value.trim()?'#c62828':'';
+}
+if(hint)hint.textContent=required?'Required for handed over corrections.':'Optional for non-handover corrections.';
+}
+function openFeeSettlementEdit(id){
+if(USER_ROLE!=='admin'){toast('Only admin can edit settlement rows');return;}
+const row=(feeStatementRows||[]).find(x=>Number(x.id)===Number(id));
+if(!row){toast('Settlement row not found');return;}
+feeStatementEditId=Number(row.id||0);
+document.getElementById('feeStmtEditAction').value=row.action_type||'allocated';
+document.getElementById('feeStmtEditWing').value=row.wing||'community_wing';
+document.getElementById('feeStmtEditAmount').value=Number(row.amount||0).toFixed(2);
+document.getElementById('feeStmtEditDate').value=row.distribution_date||'';
+document.getElementById('feeStmtEditReceivedBy').value=row.received_by||'';
+document.getElementById('feeStmtEditNotes').value=row.notes||'';
+document.getElementById('feeStmtEditReason').value='';
+document.getElementById('feeStmtEditMeta').innerHTML=`<strong>Receipt #:</strong> ${escHtml(row.receipt_number||'-')}<br><strong>Entered By:</strong> ${escHtml(row.entered_by||'-')}<br><strong>Handed Over By:</strong> ${escHtml(row.handed_over_by||row.entered_by||'-')}<br><strong>Created:</strong> ${escHtml(row.created_at||row.distribution_date||'-')}${row.edited_at?`<br><strong>Last Edited:</strong> ${escHtml(row.edited_at||'-')} by ${escHtml(row.edited_by||'-')}`:''}`;
+toggleFeeSettlementReceived();
+const modal=document.getElementById('feeStmtEditModal'); if(modal)modal.style.display='flex';
+}
+async function saveFeeSettlementEdit(){
+if(USER_ROLE!=='admin'||!(feeStatementEditId>0))return;
+const payload={
+id:feeStatementEditId,
+action_type:document.getElementById('feeStmtEditAction').value,
+wing:document.getElementById('feeStmtEditWing').value,
+amount:Number(document.getElementById('feeStmtEditAmount').value||0),
+distribution_date:document.getElementById('feeStmtEditDate').value||'',
+received_by:document.getElementById('feeStmtEditReceivedBy').value.trim(),
+notes:document.getElementById('feeStmtEditNotes').value.trim(),
+correction_reason:document.getElementById('feeStmtEditReason').value.trim()
+};
+if(!(payload.amount>0)){toast('Enter a valid amount');return;}
+if(!payload.correction_reason){toast('Correction reason is required');return;}
+if(payload.action_type==='handed_over'&&!payload.received_by){toast('Received By is required for handed over entries');return;}
+const d=await api('/api/fee-settlement-update',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+if(d&&d.success){
+toast('Settlement row corrected');
+closeFeeSettlementEdit();
+loadFeeStatement();
+}else toast((d&&d.error)||'Correction failed');
+}
 async function loadFeeStatement(){
 const byWrap=document.getElementById('feeStmtByWrap');
 const showActorFilter=USER_ROLE==='fee_collector';
@@ -16519,6 +16855,7 @@ const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('to',t);
 const by=showActorFilter?(document.getElementById('feeStmtBy')?.value?.trim()||''):'';
 if(by)p.set('collected_by',by);
 const d=await api('/api/fee-statement?'+p.toString()); if(!d||d.error)return;
+feeStatementRows=d.rows||[];
 const s0=d.summary||{};
 const money=v=>Number(v||0).toFixed(2);
 const totalCollectedLabel='Total Fee Collected (KWD)';
@@ -16558,8 +16895,8 @@ ch+='</tbody>';
 const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.innerHTML=ch;
 } else { const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.closest('.scroll-t').style.display='none'; }
 
-let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Voucher</th></tr></thead><tbody>';
-(d.rows||[]).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=(r.wing==='community_wing'?'Community Wing':(r.wing==='diplomatic'?'Diplomatic Wing':(r.wing||'-').replace('_',' ')));th+=`<tr><td>${r.created_at||r.distribution_date||'-'}</td><td>${(r.action_type||'-').replace('_',' ')}</td><td>${money(r.amount||0)} ${r.currency||'KWD'}</td><td>${wing}</td><td>${r.entered_by||'-'}</td><td>${r.handed_over_by||'-'}</td><td>${r.received_by||'-'}</td><td>${r.receipt_number||'-'}</td><td>${r.notes||'-'}</td><td>${isVoucher?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">Print Voucher</a>`:'-'}</td></tr>`});
+let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Edited</th><th>Voucher / Actions</th></tr></thead><tbody>';
+(d.rows||[]).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=feeStmtWingLabel(r.wing);const actions=[];if(isVoucher)actions.push(`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">Print Voucher</a>`);if(USER_ROLE==='admin')actions.push(`<button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="openFeeSettlementEdit(${Number(r.id)||0})">Edit</button>`);th+=`<tr><td>${escHtml(r.created_at||r.distribution_date||'-')}</td><td>${escHtml((r.action_type||'-').replace('_',' '))}</td><td>${money(r.amount||0)} ${escHtml(r.currency||'KWD')}</td><td>${escHtml(wing)}</td><td>${escHtml(r.entered_by||'-')}</td><td>${escHtml(r.handed_over_by||'-')}</td><td>${escHtml(r.received_by||'-')}</td><td>${escHtml(r.receipt_number||'-')}</td><td>${escHtml(r.notes||'-')}</td><td>${feeStmtEditedHtml(r)}</td><td>${actions.length?actions.join(' '):'-'}</td></tr>`});
 th+='</tbody>';
 const tt=document.getElementById('feeStmtTxnTbl'); if(tt)tt.innerHTML=th;
 }
