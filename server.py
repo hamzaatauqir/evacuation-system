@@ -10607,46 +10607,178 @@ function printBoth(){{
                 receipt_no = (r.get('receipt_number') or '').strip()
                 if not receipt_no:
                     self.send_html('<p>No receipt generated for this entry.</p>', 400); return
-                qr_data = quote(receipt_no)
-                qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={qr_data}"
+                if (r.get('action_type') or '').strip().lower() != 'handed_over':
+                    self.send_html('<p>Payment voucher is only available for handed over entries.</p>', 400); return
                 try:
                     amount_value = float(str(r.get('amount') if r.get('amount') is not None else 0).replace(',', '').strip() or 0)
                 except Exception:
                     amount_value = 0.0
-                self.send_html(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Receipt {esc(receipt_no)}</title>
+                wing_key = (r.get('wing') or '').strip().lower()
+                wing_label = {
+                    'community_wing': 'Community Wing',
+                    'diplomatic': 'Diplomatic Wing'
+                }.get(wing_key, ((r.get('wing') or '').replace('_', ' ').title() or '-'))
+                currency = (r.get('currency') or 'KWD').strip().upper() or 'KWD'
+                distribution_date = (r.get('distribution_date') or '').strip()
+                created_at = (r.get('created_at') or '').strip()
+                distribution_date_display = distribution_date
+                if distribution_date:
+                    try:
+                        distribution_date_display = datetime.strptime(distribution_date, '%Y-%m-%d').strftime('%d %B %Y')
+                    except Exception:
+                        distribution_date_display = distribution_date
+                created_at_display = created_at
+                if created_at:
+                    for _fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                        try:
+                            created_at_display = datetime.strptime(created_at, _fmt).strftime('%d %B %Y, %I:%M %p')
+                            break
+                        except Exception:
+                            continue
+                if not created_at_display:
+                    created_at_display = distribution_date_display or '-'
+                letterhead_src = _embassy_letterhead_data_url()
+                letterhead_html = f'<div class="letterhead"><img src="{letterhead_src}" alt="Embassy of Pakistan, Kuwait Letterhead"></div>' if letterhead_src else ''
+                notes_text = esc(r.get('notes') or 'No additional remarks recorded.')
+                received_by = esc(r.get('received_by') or '-')
+                handed_over_by = esc(r.get('handed_over_by') or r.get('entered_by') or '-')
+                entered_by = esc(r.get('entered_by') or '-')
+                qr_payload = (
+                    f"Embassy of Pakistan, Kuwait | Internal Payment Voucher | Receipt:{receipt_no} | "
+                    f"Date:{distribution_date or created_at} | Wing:{wing_label} | "
+                    f"Amount:{amount_value:.2f} {currency} | Handed Over By:{r.get('handed_over_by') or r.get('entered_by') or '-'} | "
+                    f"Received By:{r.get('received_by') or '-'}"
+                )
+                qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=220x220&data={quote(qr_payload)}&format=svg&margin=6"
+                self.send_html(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Payment Voucher / Receipt Confirmation - {esc(receipt_no)}</title>
             <style>
-            body{{font-family:'Segoe UI',Arial,sans-serif;background:#f5f7fb;margin:0;padding:24px}}
-            .box{{max-width:760px;margin:0 auto;background:#fff;border:1px solid #dfe3eb;border-radius:14px;padding:22px;box-shadow:0 6px 20px rgba(10,26,47,.08)}}
-            h2{{margin:0 0 14px;color:#0d47a1;font-size:1.35rem}}
-            .meta{{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}}
-            .rows{{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}}
-            .r{{padding:10px 12px;background:#f8fafc;border:1px solid #e6ebf2;border-radius:8px}}
-            .k{{display:block;font-size:.78rem;color:#5b6b7f;margin-bottom:4px;font-weight:600}}
-            .v{{font-size:.98rem;color:#0f172a;font-weight:700}}
-            .qr{{text-align:center;padding:8px 10px;border:1px dashed #b8c4d4;border-radius:10px;background:#fbfdff}}
-            .qr img{{width:170px;height:170px;display:block;margin:0 auto}}
-            .foot{{margin-top:14px;font-size:.78rem;color:#64748b;text-align:center}}
+            @page{{size:A4;margin:0}}
+            *{{box-sizing:border-box}}
+            body{{margin:0;background:#eef2f7;color:#142033;font-family:Arial,'Helvetica Neue',sans-serif}}
+            .screen-tools{{max-width:210mm;margin:18px auto 0;padding:0 10px;text-align:right}}
+            .screen-tools button{{border:none;border-radius:999px;padding:10px 18px;margin-left:8px;font-size:12px;font-weight:700;cursor:pointer}}
+            .screen-tools .print-btn{{background:#0f4c81;color:#fff}}
+            .screen-tools .close-btn{{background:#d7dee8;color:#203040}}
+            .page{{width:210mm;min-height:297mm;margin:12px auto 24px;padding:12mm;background:#fff;box-shadow:0 10px 34px rgba(15,23,42,.14)}}
+            .voucher{{border:1.4px solid #cfd8e3;min-height:273mm;padding:0 0 12mm;background:#fff}}
+            .letterhead{{padding:10mm 10mm 0}}
+            .letterhead img{{width:100%;max-height:38mm;object-fit:contain;display:block}}
+            .header{{padding:10mm 10mm 6mm;border-bottom:1px solid #dde4ec;display:flex;justify-content:space-between;gap:10mm;align-items:flex-start}}
+            .eyebrow{{font-size:11px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:#4c6481;margin-bottom:8px}}
+            h1{{margin:0;font-family:Georgia,'Times New Roman',serif;font-size:26px;line-height:1.18;color:#0b2848}}
+            .subtitle{{margin:8px 0 0;font-size:12px;line-height:1.6;color:#455468;max-width:112mm}}
+            .meta-stack{{width:58mm;display:grid;gap:8px}}
+            .meta-card{{border:1px solid #d8e0e8;border-radius:10px;padding:10px 12px;background:#f8fafc}}
+            .meta-card .label{{font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:#6b7b90;font-weight:700}}
+            .meta-card .value{{display:block;margin-top:4px;font-size:13px;font-weight:700;color:#12243a;word-break:break-word}}
+            .notice{{margin:8mm 10mm 0;padding:10px 12px;border-left:4px solid #0f4c81;background:#f7fafd;color:#28415f;font-size:11.5px;line-height:1.55}}
+            .hero{{display:grid;grid-template-columns:minmax(0,1fr) 48mm;gap:8mm;padding:8mm 10mm 0;align-items:stretch}}
+            .amount-panel{{border:1.6px solid #d6dfe8;border-radius:14px;background:linear-gradient(180deg,#fbfdff 0%,#f4f8fc 100%);padding:16px 18px}}
+            .amount-label{{font-size:11px;letter-spacing:1.1px;color:#617387;text-transform:uppercase;font-weight:700}}
+            .amount-value{{margin-top:6px;font-size:31px;font-weight:800;color:#0c4a6e;line-height:1.1}}
+            .purpose{{margin-top:14px;padding-top:12px;border-top:1px solid #dbe4ee}}
+            .purpose .k{{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:1px;color:#6b7b90;font-weight:700;margin-bottom:6px}}
+            .purpose .v{{font-size:14px;font-weight:700;color:#10263f}}
+            .ack{{margin:14px 0 0;font-size:13px;line-height:1.6;color:#21354d}}
+            .qr-panel{{border:1px solid #d8e0e8;border-radius:14px;padding:12px;background:#fff;text-align:center;display:flex;flex-direction:column;justify-content:center}}
+            .qr-panel img{{width:100%;max-width:190px;aspect-ratio:1/1;object-fit:contain;margin:0 auto}}
+            .qr-caption{{margin-top:8px;font-size:10px;color:#68788b;line-height:1.5}}
+            .section{{padding:8mm 10mm 0}}
+            .section-title{{font-family:Georgia,'Times New Roman',serif;font-size:17px;color:#0b2848;margin:0 0 8px}}
+            .details{{width:100%;border-collapse:collapse;border:1px solid #d6dee8;border-radius:12px;overflow:hidden}}
+            .details th,.details td{{padding:10px 12px;border-bottom:1px solid #e4ebf2;font-size:12px;text-align:left;vertical-align:top}}
+            .details tr:last-child th,.details tr:last-child td{{border-bottom:none}}
+            .details th{{width:18%;background:#f8fafc;color:#5d6f83;font-weight:700;text-transform:uppercase;letter-spacing:.5px;font-size:10px}}
+            .details td{{width:32%;color:#162538;font-weight:600}}
+            .remarks-box{{border:1px solid #d6dee8;border-radius:12px;padding:12px 14px;min-height:32mm;background:#fcfdff;font-size:12.5px;line-height:1.7;color:#22354d;white-space:pre-wrap}}
+            .signatures{{display:grid;grid-template-columns:1fr 1fr;gap:12mm;padding:12mm 10mm 0}}
+            .sig-box{{padding-top:20mm;border-bottom:1.4px solid #607086}}
+            .sig-label{{margin-top:10px;font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:#55667a;font-weight:700}}
+            .footer{{padding:10mm 10mm 0;text-align:center;font-size:10.5px;color:#68788b}}
+            @media print{{
+              body{{background:#fff}}
+              .screen-tools{{display:none !important}}
+              .page{{margin:0 auto;padding:0;box-shadow:none}}
+              .voucher{{border:none;min-height:auto}}
+            }}
             </style></head><body>
-            <div class="box">
-              <div class="meta">
-                <div>
-                  <h2>Fee Hand-over Receipt</h2>
-                  <div class="v">{esc(receipt_no)}</div>
+            <div class="screen-tools">
+              <button class="print-btn" onclick="window.print()">Print Voucher</button>
+              <button class="close-btn" onclick="window.close()">Close</button>
+            </div>
+            <div class="page">
+              <div class="voucher">
+                {letterhead_html}
+                <div class="header">
+                  <div>
+                    <div class="eyebrow">Embassy of Pakistan, Kuwait</div>
+                    <h1>Payment Voucher / Receipt Confirmation</h1>
+                    <p class="subtitle">Internal payment handover between portal/accounts staff and wing staff. This voucher is strictly for internal record and is not for public applicant fee collection.</p>
+                  </div>
+                  <div class="meta-stack">
+                    <div class="meta-card">
+                      <span class="label">Voucher / Receipt No.</span>
+                      <span class="value">{esc(receipt_no)}</span>
+                    </div>
+                    <div class="meta-card">
+                      <span class="label">Date / Time</span>
+                      <span class="value">{esc(created_at_display)}</span>
+                    </div>
+                  </div>
                 </div>
-                <div class="qr">
-                  <img src="{qr_url}" alt="Receipt QR">
-                  <div style="font-size:.72rem;color:#475569;margin-top:4px">Scan to verify receipt number</div>
+                <div class="notice">This document records an internal cash handover to {esc(wing_label)} staff for embassy fee settlement purposes only. It does not serve as a public-facing applicant receipt.</div>
+                <div class="hero">
+                  <div class="amount-panel">
+                    <div class="amount-label">Amount Handed Over</div>
+                    <div class="amount-value">{amount_value:.2f} {esc(currency)}</div>
+                    <div class="purpose">
+                      <span class="k">Purpose</span>
+                      <span class="v">Share of processing / service fee collection</span>
+                    </div>
+                    <p class="ack">This is to confirm that the above amount has been received.</p>
+                  </div>
+                  <div class="qr-panel">
+                    <img src="{qr_url}" alt="Voucher QR Code">
+                    <div class="qr-caption">Scan for internal voucher reference and receipt details.</div>
+                  </div>
                 </div>
+                <div class="section">
+                  <h2 class="section-title">Voucher Details</h2>
+                  <table class="details">
+                    <tr>
+                      <th>Wing</th><td>{esc(wing_label)}</td>
+                      <th>Action Type</th><td>Handed Over</td>
+                    </tr>
+                    <tr>
+                      <th>Settlement Date</th><td>{esc(distribution_date_display or '-')}</td>
+                      <th>Currency</th><td>{esc(currency)}</td>
+                    </tr>
+                    <tr>
+                      <th>Received By</th><td>{received_by}</td>
+                      <th>Handed Over By</th><td>{handed_over_by}</td>
+                    </tr>
+                    <tr>
+                      <th>Entered By</th><td>{entered_by}</td>
+                      <th>Receipt Number</th><td>{esc(receipt_no)}</td>
+                    </tr>
+                  </table>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Notes / Remarks</h2>
+                  <div class="remarks-box">{notes_text}</div>
+                </div>
+                <div class="signatures">
+                  <div>
+                    <div class="sig-box"></div>
+                    <div class="sig-label">Received By Signature</div>
+                  </div>
+                  <div>
+                    <div class="sig-box"></div>
+                    <div class="sig-label">Handed Over By Signature</div>
+                  </div>
+                </div>
+                <div class="footer">Computer-generated voucher for record purposes.</div>
               </div>
-              <div class="rows">
-                <div class="r"><span class="k">Date</span><span class="v">{esc(r.get('distribution_date') or '')}</span></div>
-                <div class="r"><span class="k">Wing</span><span class="v">{esc((r.get('wing') or '').replace('_',' ').title())}</span></div>
-                <div class="r"><span class="k">Action</span><span class="v">{esc((r.get('action_type') or '').replace('_',' ').title())}</span></div>
-                <div class="r"><span class="k">Amount</span><span class="v">{amount_value:.2f} {esc(r.get('currency') or 'KWD')}</span></div>
-                <div class="r"><span class="k">Received By</span><span class="v">{esc(r.get('received_by') or '-')}</span></div>
-                <div class="r"><span class="k">Remarks</span><span class="v">{esc(r.get('notes') or '-')}</span></div>
-              </div>
-              <div class="foot">Generated electronically</div>
             </div></body></html>""")
             except Exception as e:
                 self.send_html(f"<p>Unable to render receipt right now.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
@@ -11900,8 +12032,8 @@ async function loadSettlement(){
     <span class="badge">Diplomatic: ${fmt(s.diplomatic_total)} KWD</span>
     <span class="badge">Handed over: ${fmt(s.total_handed_over)} KWD</span>
     <span class="badge">Cash in hand: ${fmt(s.cash_in_hand)} KWD</span>`;
-  let h='<thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Date</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Action</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Wing</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Amount</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Received By</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Receipt</th></tr></thead><tbody>';
-  (d.rows||[]).slice(0,40).forEach(r=>{h+=`<tr><td style="padding:6px">${esc(r.distribution_date||'')}</td><td style="padding:6px">${esc(r.action_type||'')}</td><td style="padding:6px">${esc((r.wing||'').replace('_',' '))}</td><td style="padding:6px">${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td style="padding:6px">${esc(r.received_by||'-')}</td><td style="padding:6px">${r.receipt_number?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">${esc(r.receipt_number)}</a>`:'-'}</td></tr>`});
+  let h='<thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Date</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Action</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Wing</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Amount</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Received By</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Receipt / Voucher</th></tr></thead><tbody>';
+  (d.rows||[]).slice(0,40).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=(r.wing==='community_wing'?'Community Wing':(r.wing==='diplomatic'?'Diplomatic Wing':(r.wing||'-').replace('_',' ')));h+=`<tr><td style="padding:6px">${esc(r.distribution_date||'')}</td><td style="padding:6px">${esc((r.action_type||'').replace('_',' '))}</td><td style="padding:6px">${esc(wing)}</td><td style="padding:6px">${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td style="padding:6px">${esc(r.received_by||'-')}</td><td style="padding:6px">${isVoucher?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>${esc(r.receipt_number)}</span><a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank" style="display:inline-block;padding:4px 9px;border-radius:999px;background:#0f4c81;color:#fff;text-decoration:none;font-size:12px;font-weight:700">Print Voucher</a></div>`:(r.receipt_number?esc(r.receipt_number):'-')}</td></tr>`});
   h+='</tbody>';
   const t=document.getElementById('settTbl'); if(t)t.innerHTML=h;
 }
@@ -16426,8 +16558,8 @@ ch+='</tbody>';
 const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.innerHTML=ch;
 } else { const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.closest('.scroll-t').style.display='none'; }
 
-let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Receipt</th></tr></thead><tbody>';
-(d.rows||[]).forEach(r=>{th+=`<tr><td>${r.created_at||r.distribution_date||'-'}</td><td>${r.action_type||'-'}</td><td>${money(r.amount||0)} ${r.currency||'KWD'}</td><td>${(r.wing||'-').replace('_',' ')}</td><td>${r.entered_by||'-'}</td><td>${r.handed_over_by||'-'}</td><td>${r.received_by||'-'}</td><td>${r.receipt_number||'-'}</td><td>${r.notes||'-'}</td><td>${r.receipt_number?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">View</a>`:'-'}</td></tr>`});
+let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Voucher</th></tr></thead><tbody>';
+(d.rows||[]).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=(r.wing==='community_wing'?'Community Wing':(r.wing==='diplomatic'?'Diplomatic Wing':(r.wing||'-').replace('_',' ')));th+=`<tr><td>${r.created_at||r.distribution_date||'-'}</td><td>${(r.action_type||'-').replace('_',' ')}</td><td>${money(r.amount||0)} ${r.currency||'KWD'}</td><td>${wing}</td><td>${r.entered_by||'-'}</td><td>${r.handed_over_by||'-'}</td><td>${r.received_by||'-'}</td><td>${r.receipt_number||'-'}</td><td>${r.notes||'-'}</td><td>${isVoucher?`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">Print Voucher</a>`:'-'}</td></tr>`});
 th+='</tbody>';
 const tt=document.getElementById('feeStmtTxnTbl'); if(tt)tt.innerHTML=th;
 }
