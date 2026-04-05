@@ -1158,6 +1158,39 @@ def decrypt_pw(enc):
 
 def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
 
+def _password_strength_error(password):
+    pw = str(password or '')
+    if not pw:
+        return 'New password is required'
+    if len(pw) < 8:
+        return 'New password must be at least 8 characters long'
+    return ''
+
+def _verify_user_password(db, username, password):
+    username = (username or '').strip()
+    if not username or password is None:
+        return False
+    row = db.execute("SELECT password_hash FROM users WHERE username = ?", [username]).fetchone()
+    if not row:
+        return False
+    return (row['password_hash'] or '') == hash_pw(str(password))
+
+def _office_expense_access_granted(session_user):
+    if not session_user:
+        return False
+    if session_user.get('role') != 'fee_collector':
+        return True
+    try:
+        unlocked_until = float(session_user.get('office_expense_unlock_until') or 0)
+    except Exception:
+        unlocked_until = 0
+    return unlocked_until > time.time()
+
+def _grant_office_expense_access(session_user, minutes=15):
+    if not session_user:
+        return
+    session_user['office_expense_unlock_until'] = time.time() + max(1, int(minutes)) * 60
+
 # ═══════════════════════════════════════════════════════════════
 # EMAIL NOTIFICATIONS (SAFE BACKGROUND WORKER)
 # ═══════════════════════════════════════════════════════════════
@@ -3919,6 +3952,8 @@ def api_office_expense_decision(data, user):
         return {'success': False, 'error': 'Valid expense id is required'}
     if decision not in ('approved', 'rejected'):
         return {'success': False, 'error': 'decision must be approved or rejected'}
+    if not approval_notes:
+        return {'success': False, 'error': 'approval notes are required'}
 
     db = get_db()
     try:
@@ -10524,6 +10559,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] not in ('admin', 'fee_collector'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
+            if not _office_expense_access_granted(user):
+                self.send_json({'error': 'Re-authentication required for Office Expense Ledger'}, 403); return
             self.send_json(api_office_expense_report(params, user))
         elif path == '/api/fee-settlement-export':
             user = self.require_auth()
@@ -11216,6 +11253,8 @@ function printBoth(){{
                 if not user: return
                 if user['role'] not in ('admin', 'fee_collector'):
                     self.send_json({'error': 'Unauthorized'}, 403); return
+                if not _office_expense_access_granted(user):
+                    self.send_json({'error': 'Re-authentication required for Office Expense Ledger'}, 403); return
                 try:
                     rid = int(str(params.get('id', 0) or 0).strip())
                 except Exception:
@@ -11760,12 +11799,36 @@ function printBoth(){{
             if not user: return
             if user['role'] not in ('admin', 'fee_collector'):
                 self.send_json({'error': 'Only fee collector/admin can create office expenses'}, 403); return
+            if not _office_expense_access_granted(user):
+                self.send_json({'error': 'Re-authentication required for Office Expense Ledger'}, 403); return
             try:
                 data = json.loads(body) if body else {}
             except json.JSONDecodeError:
                 self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
             result = api_office_expense_create(data, user['user'])
             self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/office-expense-access':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            if user['role'] == 'admin':
+                _grant_office_expense_access(user)
+                self.send_json({'success': True})
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            current_password = data.get('current_password')
+            db = get_db()
+            try:
+                if not _verify_user_password(db, user['user'], current_password):
+                    self.send_json({'success': False, 'error': 'Current password is incorrect'}, 403); return
+            finally:
+                db.close()
+            _grant_office_expense_access(user)
+            self.send_json({'success': True})
         elif path == '/api/office-expense-decision':
             user = self.require_auth()
             if not user: return
@@ -12101,14 +12164,34 @@ function printBoth(){{
             if not user: return
             data = json.loads(body)
             db = get_db()
-            target_user = data.get('username', user['user'])
-            # Only admin can change other users' passwords
-            if target_user != user['user'] and user['role'] != 'admin':
+            try:
+                target_user = (data.get('username') or user['user']).strip() or user['user']
+                new_password = data.get('new_password') or ''
+                current_password = data.get('current_password')
+                confirm_password = data.get('confirm_password')
+                if target_user != user['user'] and user['role'] != 'admin':
+                    self.send_json({'error': 'Unauthorized'}, 403); return
+                if not new_password:
+                    self.send_json({'error': 'New password is required'}, 400); return
+                if target_user == user['user'] and user['role'] == 'fee_collector':
+                    strength_error = _password_strength_error(new_password)
+                    if strength_error:
+                        self.send_json({'error': strength_error}, 400); return
+                if confirm_password is not None and str(confirm_password) != str(new_password):
+                    self.send_json({'error': 'New password and confirmation do not match'}, 400); return
+                if target_user == user['user'] and user['role'] == 'fee_collector':
+                    if not current_password:
+                        self.send_json({'error': 'Current password is required'}, 400); return
+                    if not _verify_user_password(db, user['user'], current_password):
+                        self.send_json({'error': 'Current password is incorrect'}, 403); return
+                elif target_user == user['user'] and current_password:
+                    if not _verify_user_password(db, user['user'], current_password):
+                        self.send_json({'error': 'Current password is incorrect'}, 403); return
+                db.execute("UPDATE users SET password_hash = ?, password_plain = ? WHERE username = ?",
+                           (hash_pw(new_password), encrypt_pw(new_password), target_user))
+                db.commit()
+            finally:
                 db.close()
-                self.send_json({'error': 'Unauthorized'}, 403); return
-            db.execute("UPDATE users SET password_hash = ?, password_plain = ? WHERE username = ?",
-                       (hash_pw(data['new_password']), encrypt_pw(data['new_password']), target_user))
-            db.commit(); db.close()
             self.send_json({'success': True})
 
         elif path == '/api/email-config':
@@ -12651,7 +12734,7 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
 </style></head><body>
 <div class="hdr">
   <div><strong>Visa Fee Collection</strong> <span class="muted" style="color:#d7f0d7">KWD 2 Saudi Govt Processing Fee | Internal staff ledger tools</span></div>
-  <div>__USER_NAME__ (__USER_ROLE__) | <a href="/logout" style="color:#fff">Logout</a></div>
+  <div>__USER_NAME__ (__USER_ROLE__) | <a href="#" onclick="openFeeCollectorPwModal();return false;" style="color:#fff">Change Password</a> | <a href="/logout" style="color:#fff">Logout</a></div>
 </div>
 <div class="ctr">
   <div class="tabs">
@@ -12681,7 +12764,6 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
           <p class="muted">Existing settlement workflow remains unchanged. Handover entries still generate printable internal vouchers.</p>
         </div>
       </div>
-      <div id="settCards" class="summary-grid"></div>
       <div class="grid" style="margin-top:12px">
         <label class="field">Action Type
           <select id="stAction">
@@ -12735,6 +12817,36 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
           <p class="muted">Separate internal module for office expenses such as tea, stationery, photocopy, printer supplies, and other small operational bills.</p>
         </div>
       </div>
+      <div id="officeAccessNotice" class="notice">Re-enter your current password to open this internal ledger section.</div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Settlement Balance Snapshot</h3>
+          <p class="muted">Sensitive balance figures are shown only inside the Office Expense Ledger tab.</p>
+        </div>
+      </div>
+      <div id="officeBalanceCards" class="summary-grid"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Office Expense Summary</h3>
+          <p class="muted">Adjusted balance shown here is for internal office reference only and does not alter the existing settlement calculations elsewhere in the system.</p>
+        </div>
+      </div>
+      <div id="officeSummaryCards" class="summary-grid"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Add Office Expense</h3>
+          <p class="muted">Original paper bill to be retained in office record for verification.</p>
+        </div>
+      </div>
       <div class="notice">Original paper bill to be retained in office record for verification. Pending and rejected entries do not reduce the adjusted balance. Only approved office expenses affect the office expense total used for balance display here.</div>
       <div class="grid" style="margin-top:12px">
         <label class="field">Expense Date
@@ -12780,16 +12892,6 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
         <button class="btn alt" onclick="saveOfficeExpense()">Submit Office Expense</button>
       </div>
       <div class="muted" style="margin-top:8px">Submitted entries go to <strong>pending approval</strong>. Only admin can approve, reject, or correct an entry. No bill image or file upload is required in this portal.</div>
-    </div>
-
-    <div class="card">
-      <div class="section-title">
-        <div>
-          <h3 style="margin:0">Office Expense Summary</h3>
-          <p class="muted">Adjusted balance shown here is for internal office reference only and does not alter the existing settlement calculations elsewhere in the system.</p>
-        </div>
-      </div>
-      <div id="officeSummaryCards" class="summary-grid"></div>
     </div>
 
     <div class="card">
@@ -12914,6 +13016,53 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
       <div id="officeModalActions" class="row" style="justify-content:flex-end;margin-top:14px"></div>
     </div>
   </div>
+
+  <div id="officeAccessModal" class="modal" onclick="if(event.target===this)closeOfficeAccessModal()">
+    <div class="modal-card" style="width:min(460px,100%)">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div>
+          <h3 style="margin:0;color:#0f172a">Confirm Access</h3>
+          <div class="muted">Re-enter your current password to open the Office Expense Ledger.</div>
+        </div>
+        <button type="button" class="btn ghost" onclick="closeOfficeAccessModal()">Close</button>
+      </div>
+      <label class="field">Current Password
+        <input id="officeAccessPassword" type="password" placeholder="Enter your current password">
+      </label>
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button type="button" class="btn ghost" onclick="closeOfficeAccessModal()">Cancel</button>
+        <button type="button" class="btn alt" onclick="confirmOfficeAccess()">Open Ledger</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="collectorPwModal" class="modal" onclick="if(event.target===this)closeFeeCollectorPwModal()">
+    <div class="modal-card" style="width:min(520px,100%)">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div>
+          <h3 style="margin:0;color:#0f172a">Change Password</h3>
+          <div class="muted">Update your own login password. Current password verification is required for fee collectors.</div>
+        </div>
+        <button type="button" class="btn ghost" onclick="closeFeeCollectorPwModal()">Close</button>
+      </div>
+      <div class="grid">
+        <label class="field">Current Password
+          <input id="collectorCurrentPw" type="password">
+        </label>
+        <label class="field">New Password
+          <input id="collectorNewPw" type="password">
+        </label>
+        <label class="field">Confirm New Password
+          <input id="collectorConfirmPw" type="password">
+        </label>
+      </div>
+      <div class="muted" style="margin-top:10px">Use at least 8 characters.</div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button type="button" class="btn ghost" onclick="closeFeeCollectorPwModal()">Cancel</button>
+        <button type="button" class="btn" onclick="changeCollectorPassword()">Update Password</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -12921,13 +13070,26 @@ async function api(u,o){const r=await fetch(u,o); if(r.redirected){location='/lo
 const USER_ROLE='__USER_ROLE__';
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
 function fmt(n){return Number(n||0).toFixed(2)}
-function showPortalTab(tab){
+let settlementSummary={};
+let officeTabLoaded=false;
+let officeTabUnlocked=USER_ROLE==='admin';
+async function showPortalTab(tab){
+  if(tab==='office' && USER_ROLE==='fee_collector' && !officeTabUnlocked){
+    openOfficeAccessModal();
+    return;
+  }
   ['fees','office'].forEach(name=>{
     const section=document.getElementById('portal-'+name);
     const btn=document.getElementById('tab-'+name);
     if(section) section.classList.toggle('active', name===tab);
     if(btn) btn.classList.toggle('active', name===tab);
   });
+  if(tab==='office'){
+    officeTabLoaded=true;
+    renderOfficeAccessState();
+    renderOfficeBalanceCards(settlementSummary||{});
+    await loadOfficeExpenses();
+  }
 }
 
 let settlementRows=[];
@@ -12961,6 +13123,75 @@ function officeStatusHtml(v){
 function officeEditedHtml(r){
   if(!r||!r.edited_at) return '-';
   return `<div style="font-weight:700;color:#6a1b9a">Edited</div><div class="muted">by ${esc(r.edited_by||'-')}<br>${esc(r.edited_at||'-')}</div>${r.edit_reason?`<div class="muted">Reason: ${esc(r.edit_reason)}</div>`:''}`;
+}
+function renderOfficeAccessState(){
+  const notice=document.getElementById('officeAccessNotice');
+  if(notice) notice.classList.toggle('hidden', officeTabUnlocked || USER_ROLE==='admin');
+  if(!officeTabUnlocked && USER_ROLE==='fee_collector'){
+    const bal=document.getElementById('officeBalanceCards');
+    const sum=document.getElementById('officeSummaryCards');
+    const tbl=document.getElementById('officeTbl');
+    if(bal) bal.innerHTML='';
+    if(sum) sum.innerHTML='';
+    if(tbl) tbl.innerHTML='';
+  }
+}
+function renderOfficeBalanceCards(s){
+  const cards=document.getElementById('officeBalanceCards');
+  if(!cards) return;
+  if(!(officeTabUnlocked || USER_ROLE==='admin') || !officeTabLoaded){
+    cards.innerHTML='';
+    return;
+  }
+  cards.innerHTML=`
+    <div class="summary-card"><div class="k">Collected</div><div class="v">${fmt(s.total_collected||0)}</div><div class="s">KWD total received</div></div>
+    <div class="summary-card"><div class="k">Community</div><div class="v">${fmt(s.community_wing_total||0)}</div><div class="s">KWD assigned</div></div>
+    <div class="summary-card"><div class="k">Diplomatic</div><div class="v">${fmt(s.diplomatic_total||0)}</div><div class="s">KWD assigned</div></div>
+    <div class="summary-card"><div class="k">Handed Over</div><div class="v">${fmt(s.total_handed_over||0)}</div><div class="s">KWD handed over</div></div>
+    <div class="summary-card"><div class="k">Cash In Hand</div><div class="v">${fmt(s.cash_in_hand||0)}</div><div class="s">KWD available</div></div>`;
+}
+function openOfficeAccessModal(){
+  const modal=document.getElementById('officeAccessModal');
+  if(modal) modal.style.display='flex';
+}
+function closeOfficeAccessModal(){
+  const modal=document.getElementById('officeAccessModal');
+  if(modal) modal.style.display='none';
+  const input=document.getElementById('officeAccessPassword');
+  if(input) input.value='';
+}
+async function confirmOfficeAccess(){
+  const password=(document.getElementById('officeAccessPassword').value||'').trim();
+  if(!password){alert('Enter your current password to continue.');return;}
+  const d=await api('/api/office-expense-access',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:password})});
+  if(d&&d.success){
+    officeTabUnlocked=true;
+    closeOfficeAccessModal();
+    showPortalTab('office');
+  }else alert((d&&d.error)||'Access denied');
+}
+function openFeeCollectorPwModal(){
+  const modal=document.getElementById('collectorPwModal');
+  if(modal) modal.style.display='flex';
+}
+function closeFeeCollectorPwModal(){
+  const modal=document.getElementById('collectorPwModal');
+  if(modal) modal.style.display='none';
+  ['collectorCurrentPw','collectorNewPw','collectorConfirmPw'].forEach(id=>{const el=document.getElementById(id); if(el) el.value='';});
+}
+async function changeCollectorPassword(){
+  const current_password=document.getElementById('collectorCurrentPw').value||'';
+  const new_password=document.getElementById('collectorNewPw').value||'';
+  const confirm_password=document.getElementById('collectorConfirmPw').value||'';
+  if(!current_password){alert('Current password is required');return;}
+  if(!new_password){alert('Enter a new password');return;}
+  if(new_password.length<8){alert('New password must be at least 8 characters long');return;}
+  if(new_password!==confirm_password){alert('New password and confirmation do not match');return;}
+  const d=await api('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password,new_password,confirm_password})});
+  if(d&&d.success){
+    alert('Password changed successfully.');
+    closeFeeCollectorPwModal();
+  }else alert((d&&d.error)||'Failed');
 }
 
 function closeSettlementEdit(){
@@ -13051,7 +13282,6 @@ async function collectFee(source,id){
       window.open('/print/fee-receipt?source='+encodeURIComponent(source)+'&id='+id,'_blank');
     }
     loadSettlement();
-    loadOfficeExpenses();
   }else alert((d&&d.error)||'Failed');
 }
 async function waiveFee(source,id){
@@ -13065,14 +13295,8 @@ async function loadSettlement(){
   const d=await api('/api/fee-settlement-report?scope=mine');
   if(!d||!d.success)return;
   settlementRows=d.rows||[];
-  const s=d.summary||{};
-  const cards=document.getElementById('settCards');
-  if(cards) cards.innerHTML=`
-    <div class="summary-card"><div class="k">Collected</div><div class="v">${fmt(s.total_collected)}</div><div class="s">KWD total received</div></div>
-    <div class="summary-card"><div class="k">Community</div><div class="v">${fmt(s.community_wing_total)}</div><div class="s">KWD assigned</div></div>
-    <div class="summary-card"><div class="k">Diplomatic</div><div class="v">${fmt(s.diplomatic_total)}</div><div class="s">KWD assigned</div></div>
-    <div class="summary-card"><div class="k">Handed Over</div><div class="v">${fmt(s.total_handed_over)}</div><div class="s">KWD handed over</div></div>
-    <div class="summary-card"><div class="k">Cash In Hand</div><div class="v">${fmt(s.cash_in_hand)}</div><div class="s">KWD available</div></div>`;
+  settlementSummary=d.summary||{};
+  renderOfficeBalanceCards(settlementSummary);
   let h='<thead><tr><th>Date</th><th>Action</th><th>Wing</th><th>Amount</th><th>Received By</th><th>Receipt / Voucher</th><th>Edited</th>'+(USER_ROLE==='admin'?'<th>Actions</th>':'')+'</tr></thead><tbody>';
   (d.rows||[]).slice(0,40).forEach(r=>{
     const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);
@@ -13102,7 +13326,6 @@ async function saveSettlement(){
     document.getElementById('stReceivedBy').value='';
     document.getElementById('stNotes').value='';
     loadSettlement();
-    loadOfficeExpenses();
   }else alert((d&&d.error)||'Failed');
 }
 
@@ -13167,6 +13390,7 @@ async function submitOfficeExpenseDecision(decision){
   if(USER_ROLE!=='admin' || !(officeModalId>0)) return;
   const notes=(document.getElementById('officeApprovalNotes').value||'').trim();
   const actionLabel=decision==='approved'?'approve':'reject';
+  if(!notes){alert('Approval notes are required.');return;}
   if(!confirm('Confirm '+actionLabel+' for this office expense record?')) return;
   const d=await api('/api/office-expense-decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:officeModalId,decision,approval_notes:notes})});
   if(d&&d.success){
@@ -13180,8 +13404,9 @@ async function quickOfficeDecision(id,decision){
   const row=(officeExpenseRows||[]).find(x=>Number(x.id)===Number(id));
   if(!row){alert('Office expense record not found');return;}
   const actionLabel=decision==='approved'?'Approval':'Rejection';
-  const notes=prompt(actionLabel+' notes (optional):', row.approval_notes||'');
+  const notes=prompt(actionLabel+' notes (required):', row.approval_notes||'');
   if(notes===null) return;
+  if(!String(notes).trim()){alert('Approval notes are required.');return;}
   const d=await api('/api/office-expense-decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,decision,approval_notes:String(notes).trim()})});
   if(d&&d.success){
     alert('Office expense record updated successfully.');
@@ -13189,6 +13414,7 @@ async function quickOfficeDecision(id,decision){
   }else alert((d&&d.error)||'Failed');
 }
 async function saveOfficeExpense(){
+  if(USER_ROLE==='fee_collector' && !officeTabUnlocked){alert('Re-open the Office Expense Ledger and confirm your password first.');return;}
   const data={
     expense_date:document.getElementById('oeDate').value||'',
     category:document.getElementById('oeCategory').value,
@@ -13210,7 +13436,7 @@ async function saveOfficeExpense(){
     document.getElementById('oeAmount').value='';
     document.getElementById('oeBillNumber').value='';
     document.getElementById('oeRemarks').value='';
-    loadOfficeExpenses();
+    if(officeTabLoaded && (officeTabUnlocked || USER_ROLE==='admin')) loadOfficeExpenses();
   }else alert((d&&d.error)||'Failed');
 }
 async function saveOfficeExpenseEdit(){
@@ -13240,8 +13466,19 @@ async function saveOfficeExpenseEdit(){
 }
 
 async function loadOfficeExpenses(){
+  if(!(officeTabUnlocked || USER_ROLE==='admin') || !officeTabLoaded){
+    renderOfficeAccessState();
+    return;
+  }
   const d=await api('/api/office-expenses');
-  if(!d||!d.success)return;
+  if(!d||!d.success){
+    if(d&&String(d.error||'').toLowerCase().includes('re-authentication')){
+      officeTabUnlocked=false;
+      renderOfficeAccessState();
+      showPortalTab('fees');
+    }
+    return;
+  }
   officeExpenseRows=d.rows||[];
   const s=d.summary||{};
   const cards=document.getElementById('officeSummaryCards');
@@ -13266,8 +13503,8 @@ async function loadOfficeExpenses(){
 }
 
 document.getElementById('oeDate').value=new Date().toISOString().slice(0,10);
+renderOfficeAccessState();
 loadSettlement();
-loadOfficeExpenses();
 </script></body></html>"""
 
 LOGIN_PAGE = """<!DOCTYPE html>
@@ -16311,6 +16548,19 @@ No deterioration in ground security situation so far.</textarea>
 <h3>Daily Settlement Statement</h3>
 <div class="scroll-t"><table id="feeStmtDailyTbl"></table></div>
 </div>
+<div id="feeOfficeLedgerSection" class="fs" style="border-left:3px solid #8e24aa" data-admin-only>
+<h3>Office Expense Ledger (Approval Required)</h3>
+<p class="muted" style="margin-bottom:12px">Original paper bill to be retained in office record for verification. Only approved office expenses reduce the net balance shown in this section.</p>
+<div id="feeOfficeSummaryCards" class="kg" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px"></div>
+<div style="margin-top:10px">
+<h4 style="margin:0 0 8px;color:#4a148c">Pending Approval</h4>
+<div class="scroll-t"><table id="feeOfficePendingTbl"></table></div>
+</div>
+<div style="margin-top:14px">
+<h4 style="margin:0 0 8px;color:#4a148c">Office Expense History</h4>
+<div class="scroll-t"><table id="feeOfficeHistTbl"></table></div>
+</div>
+</div>
 <div class="fs" style="border-left:3px solid #455a64">
 <h3>Complete Fee Collection History</h3>
 <div class="scroll-t"><table id="feeCollectionHistTbl"></table></div>
@@ -16342,6 +16592,42 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp" style="grid-column:1/-1"><label>Correction Reason *</label><textarea id="feeStmtEditReason" rows="3" placeholder="Explain why this settlement row is being corrected"></textarea></div>
 </div>
 <div class="sb" style="margin-top:14px"><div class="muted">This correction updates the same row and writes a full audit trail.</div><div style="display:flex;gap:8px"><button class="btn btn-i" type="button" onclick="closeFeeSettlementEdit()">Cancel</button><button class="btn btn-p" type="button" onclick="saveFeeSettlementEdit()">Save Correction</button></div></div>
+</div>
+</div>
+<div id="feeOfficeDecisionModal" onclick="if(event.target===this)closeFeeOfficeDecisionModal()" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.6);align-items:center;justify-content:center;padding:18px">
+<div style="width:min(560px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:16px;border:1px solid #d6dee8;box-shadow:0 20px 48px rgba(15,23,42,.28);padding:20px">
+<div class="sb" style="align-items:flex-start;margin-bottom:12px">
+<div><h3 style="margin:0">Office Expense Decision</h3><div class="muted">Approval notes are required before saving.</div></div>
+<button class="btn btn-w" type="button" onclick="closeFeeOfficeDecisionModal()">Close</button>
+</div>
+<div id="feeOfficeDecisionMeta" style="margin-bottom:12px;padding:10px 12px;background:#f8fafc;border:1px solid #dbe4ee;border-radius:10px;font-size:.9em;line-height:1.6"></div>
+<div class="fg">
+<div class="fgp" style="grid-column:1/-1"><label>Approval Notes *</label><textarea id="feeOfficeDecisionNotes" rows="4" placeholder="Enter verification / approval notes"></textarea></div>
+</div>
+<div class="sb" style="margin-top:14px"><div class="muted">Status change is audit logged and balance adjusts only on approval.</div><div style="display:flex;gap:8px"><button class="btn btn-i" type="button" onclick="closeFeeOfficeDecisionModal()">Cancel</button><button class="btn btn-p" type="button" onclick="saveFeeOfficeDecision()">Save Decision</button></div></div>
+</div>
+</div>
+<div id="feeOfficeViewModal" onclick="if(event.target===this)closeFeeOfficeViewModal()" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.6);align-items:center;justify-content:center;padding:18px">
+<div style="width:min(860px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:16px;border:1px solid #d6dee8;box-shadow:0 20px 48px rgba(15,23,42,.28);padding:20px">
+<div class="sb" style="align-items:flex-start;margin-bottom:12px">
+<div><h3 id="feeOfficeViewTitle" style="margin:0">Office Expense Record</h3><div class="muted">Internal office ledger record for admin review.</div></div>
+<button class="btn btn-w" type="button" onclick="closeFeeOfficeViewModal()">Close</button>
+</div>
+<div id="feeOfficeViewMeta" style="margin-bottom:12px;padding:10px 12px;background:#f8fafc;border:1px solid #dbe4ee;border-radius:10px;font-size:.9em;line-height:1.6"></div>
+<div class="notice" style="margin-bottom:12px">Original paper bill to be retained in office record for verification.</div>
+<div class="fg">
+<div class="fgp"><label>Expense Date</label><input id="feeOfficeEditDate" type="date"></div>
+<div class="fgp"><label>Category</label><select id="feeOfficeEditCategory"><option value="tea_refreshments">Tea / Refreshments</option><option value="stationery">Stationery</option><option value="photocopy">Photocopy</option><option value="printer_supplies">Printer Supplies</option><option value="office_purchase">Office Purchase</option><option value="maintenance">Maintenance</option><option value="transport_misc">Transport / Miscellaneous</option><option value="other">Other</option></select></div>
+<div class="fgp"><label>Description</label><input id="feeOfficeEditDescription"></div>
+<div class="fgp"><label>Vendor / Shop</label><input id="feeOfficeEditVendor"></div>
+<div class="fgp"><label>Amount (KWD)</label><input id="feeOfficeEditAmount" type="number" step="0.01" min="0.01"></div>
+<div class="fgp"><label>Payment Mode</label><select id="feeOfficeEditPaymentMode"><option value="cash">Cash</option><option value="card">Card</option><option value="bank_transfer">Bank Transfer</option><option value="other">Other</option></select></div>
+<div class="fgp"><label>Bill Number</label><input id="feeOfficeEditBillNumber"></div>
+<div class="fgp" style="grid-column:1/-1"><label>Remarks</label><textarea id="feeOfficeEditRemarks" rows="3"></textarea></div>
+<div class="fgp" style="grid-column:1/-1"><label>Approval Notes</label><textarea id="feeOfficeEditApprovalNotes" rows="3"></textarea></div>
+<div id="feeOfficeEditReasonWrap" class="fgp" style="grid-column:1/-1;display:none"><label>Correction Reason *</label><textarea id="feeOfficeEditReason" rows="3" placeholder="Explain why this office expense row is being corrected"></textarea></div>
+</div>
+<div id="feeOfficeViewActions" class="sb" style="margin-top:14px;justify-content:flex-end"></div>
 </div>
 </div>
 </div></div>
@@ -17798,6 +18084,160 @@ closeFeeSettlementEdit();
 loadFeeStatement();
 }else toast((d&&d.error)||'Correction failed');
 }
+let feeOfficeRows=[];
+let feeOfficeDecisionId=0;
+let feeOfficeDecisionAction='';
+let feeOfficeViewId=0;
+let feeOfficeViewMode='view';
+function feeOfficeRecordNumber(r){return r&&r.record_number?r.record_number:`OFFEXP-${r&&r.id?r.id:'-'}`;}
+function feeOfficeCategoryLabel(v){
+const labels={tea_refreshments:'Tea / Refreshments',stationery:'Stationery',photocopy:'Photocopy',printer_supplies:'Printer Supplies',office_purchase:'Office Purchase',maintenance:'Maintenance',transport_misc:'Transport / Miscellaneous',other:'Other'};
+return labels[v]||String(v||'-').replace(/_/g,' ');
+}
+function feeOfficePaymentModeLabel(v){
+const labels={cash:'Cash',card:'Card',bank_transfer:'Bank Transfer',other:'Other'};
+return labels[v]||String(v||'-').replace(/_/g,' ');
+}
+function feeOfficeStatusLabel(v){
+const labels={pending_approval:'Pending Approval',approved:'Approved',rejected:'Rejected'};
+return labels[v]||String(v||'-').replace(/_/g,' ');
+}
+function feeOfficeStatusBadge(v){
+const cls=v==='approved'?'bdg-app':(v==='rejected'?'bdg-rej':'bdg-pen');
+return `<span class="bdg ${cls}">${escHtml(feeOfficeStatusLabel(v))}</span>`;
+}
+function closeFeeOfficeDecisionModal(){
+feeOfficeDecisionId=0; feeOfficeDecisionAction='';
+const modal=document.getElementById('feeOfficeDecisionModal'); if(modal)modal.style.display='none';
+}
+function openFeeOfficeDecisionModal(id,action){
+if(USER_ROLE!=='admin'){toast('Only admin can review office expense approvals');return;}
+const row=(feeOfficeRows||[]).find(x=>Number(x.id)===Number(id));
+if(!row){toast('Office expense record not found');return;}
+feeOfficeDecisionId=Number(row.id||0);
+feeOfficeDecisionAction=action==='rejected'?'rejected':'approved';
+document.getElementById('feeOfficeDecisionMeta').innerHTML=`<strong>Record #:</strong> ${escHtml(feeOfficeRecordNumber(row))}<br><strong>Status:</strong> ${escHtml(feeOfficeStatusLabel(row.status))}<br><strong>Entered By:</strong> ${escHtml(row.entered_by||'-')}<br><strong>Amount:</strong> ${Number(row.amount||0).toFixed(2)} KWD<br><strong>Description:</strong> ${escHtml(row.description||'-')}`;
+document.getElementById('feeOfficeDecisionNotes').value=row.approval_notes||'';
+const modal=document.getElementById('feeOfficeDecisionModal'); if(modal)modal.style.display='flex';
+}
+async function saveFeeOfficeDecision(){
+if(USER_ROLE!=='admin'||!(feeOfficeDecisionId>0)||!feeOfficeDecisionAction)return;
+const approval_notes=(document.getElementById('feeOfficeDecisionNotes').value||'').trim();
+if(!approval_notes){toast('Approval notes are required');return;}
+const d=await api('/api/office-expense-decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:feeOfficeDecisionId,decision:feeOfficeDecisionAction,approval_notes})});
+if(d&&d.success){
+toast('Office expense decision saved');
+closeFeeOfficeDecisionModal();
+loadFeeOfficeLedger();
+}else toast((d&&d.error)||'Decision failed');
+}
+function closeFeeOfficeViewModal(){
+feeOfficeViewId=0; feeOfficeViewMode='view';
+const modal=document.getElementById('feeOfficeViewModal'); if(modal)modal.style.display='none';
+}
+function feeOfficeFieldIds(){
+return ['feeOfficeEditDate','feeOfficeEditCategory','feeOfficeEditDescription','feeOfficeEditVendor','feeOfficeEditAmount','feeOfficeEditPaymentMode','feeOfficeEditBillNumber','feeOfficeEditRemarks'];
+}
+function setFeeOfficeFieldsDisabled(disabled){
+feeOfficeFieldIds().forEach(id=>{const el=document.getElementById(id); if(el)el.disabled=disabled;});
+}
+function renderFeeOfficeViewActions(){
+const wrap=document.getElementById('feeOfficeViewActions'); if(!wrap)return;
+const printBtn=`<a href="/print/office-expense-record?id=${feeOfficeViewId}" target="_blank" class="btn btn-i" style="text-decoration:none;color:#fff">Print Record</a>`;
+const closeBtn=`<button class="btn btn-w" type="button" onclick="closeFeeOfficeViewModal()">Close</button>`;
+if(feeOfficeViewMode==='edit'){
+wrap.innerHTML=`${printBtn}${closeBtn}<button class="btn btn-p" type="button" onclick="saveFeeOfficeEdit()">Save Correction</button>`;
+return;
+}
+wrap.innerHTML=`${printBtn}${closeBtn}<button class="btn btn-i" type="button" onclick="openFeeOfficeViewModal(${feeOfficeViewId},'edit')">Edit</button>`;
+}
+function openFeeOfficeViewModal(id,mode){
+const row=(feeOfficeRows||[]).find(x=>Number(x.id)===Number(id));
+if(!row){toast('Office expense record not found');return;}
+feeOfficeViewId=Number(row.id||0);
+feeOfficeViewMode=mode==='edit'?'edit':'view';
+document.getElementById('feeOfficeViewTitle').textContent=feeOfficeViewMode==='edit'?'Correct Office Expense Record':'Office Expense Record';
+document.getElementById('feeOfficeViewMeta').innerHTML=`<strong>Record #:</strong> ${escHtml(feeOfficeRecordNumber(row))}<br><strong>Status:</strong> ${escHtml(feeOfficeStatusLabel(row.status))}<br><strong>Entered By:</strong> ${escHtml(row.entered_by||'-')}<br><strong>Approved By:</strong> ${escHtml(row.approved_by||'-')}<br><strong>Approval Date:</strong> ${escHtml(row.approved_at||'-')}${row.edited_at?`<br><strong>Last Edited:</strong> ${escHtml(row.edited_at||'-')} by ${escHtml(row.edited_by||'-')}`:''}`;
+document.getElementById('feeOfficeEditDate').value=row.expense_date||'';
+document.getElementById('feeOfficeEditCategory').value=row.category||'other';
+document.getElementById('feeOfficeEditDescription').value=row.description||'';
+document.getElementById('feeOfficeEditVendor').value=row.vendor_name||'';
+document.getElementById('feeOfficeEditAmount').value=Number(row.amount||0).toFixed(2);
+document.getElementById('feeOfficeEditPaymentMode').value=row.payment_mode||'cash';
+document.getElementById('feeOfficeEditBillNumber').value=row.bill_number||'';
+document.getElementById('feeOfficeEditRemarks').value=row.remarks||'';
+document.getElementById('feeOfficeEditApprovalNotes').value=row.approval_notes||'';
+document.getElementById('feeOfficeEditReason').value='';
+const isEdit=feeOfficeViewMode==='edit';
+setFeeOfficeFieldsDisabled(!isEdit);
+const approvalNotes=document.getElementById('feeOfficeEditApprovalNotes');
+if(approvalNotes) approvalNotes.disabled=!isEdit;
+const reasonWrap=document.getElementById('feeOfficeEditReasonWrap');
+if(reasonWrap) reasonWrap.style.display=isEdit?'':'none';
+renderFeeOfficeViewActions();
+const modal=document.getElementById('feeOfficeViewModal'); if(modal)modal.style.display='flex';
+}
+async function saveFeeOfficeEdit(){
+if(USER_ROLE!=='admin'||!(feeOfficeViewId>0))return;
+const payload={
+id:feeOfficeViewId,
+expense_date:document.getElementById('feeOfficeEditDate').value||'',
+category:document.getElementById('feeOfficeEditCategory').value,
+description:document.getElementById('feeOfficeEditDescription').value.trim(),
+vendor_name:document.getElementById('feeOfficeEditVendor').value.trim(),
+amount:Number(document.getElementById('feeOfficeEditAmount').value||0),
+payment_mode:document.getElementById('feeOfficeEditPaymentMode').value,
+bill_number:document.getElementById('feeOfficeEditBillNumber').value.trim(),
+remarks:document.getElementById('feeOfficeEditRemarks').value.trim(),
+correction_reason:document.getElementById('feeOfficeEditReason').value.trim()
+};
+if(!payload.expense_date){toast('Expense date is required');return;}
+if(!payload.description){toast('Description is required');return;}
+if(!(payload.amount>0)){toast('Enter a valid amount');return;}
+if(!payload.correction_reason){toast('Correction reason is required');return;}
+const d=await api('/api/office-expense-update',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+if(d&&d.success){
+toast('Office expense corrected');
+closeFeeOfficeViewModal();
+loadFeeOfficeLedger();
+}else toast((d&&d.error)||'Correction failed');
+}
+async function loadFeeOfficeLedger(){
+if(USER_ROLE!=='admin'){
+const sec=document.getElementById('feeOfficeLedgerSection');
+if(sec) sec.style.display='none';
+return;
+}
+const sec=document.getElementById('feeOfficeLedgerSection');
+if(sec) sec.style.display='';
+const d=await api('/api/office-expenses');
+if(!d||!d.success)return;
+feeOfficeRows=d.rows||[];
+const s=d.summary||{};
+const money=v=>Number(v||0).toFixed(2);
+const cards=document.getElementById('feeOfficeSummaryCards');
+if(cards) cards.innerHTML=`
+<div class="kc s"><div class="lb">Total Approved Office Expenses</div><div class="vl">${money(s.approved_total||0)}</div></div>
+<div class="kc w"><div class="lb">Total Pending Office Expenses</div><div class="vl">${money(s.pending_total||0)}</div></div>
+<div class="kc d"><div class="lb">Total Rejected Office Expenses</div><div class="vl">${money(s.rejected_total||0)}</div></div>
+<div class="kc i"><div class="lb">Net Balance After Approved Office Expenses</div><div class="vl">${money(s.net_cash_available||0)}</div></div>`;
+const pending=(feeOfficeRows||[]).filter(r=>String(r.status||'')==='pending_approval');
+let ph='<thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Vendor</th><th>Amount</th><th>Bill Number</th><th>Entered By</th><th>Remarks</th><th>Actions</th></tr></thead><tbody>';
+pending.forEach(r=>{
+ph+=`<tr><td>${escHtml(r.expense_date||'-')}</td><td>${escHtml(r.category_label||feeOfficeCategoryLabel(r.category))}</td><td>${escHtml(r.description||'-')}</td><td>${escHtml(r.vendor_name||'-')}</td><td>${money(r.amount||0)} KWD</td><td>${escHtml(r.bill_number||'-')}</td><td>${escHtml(r.entered_by||'-')}</td><td>${escHtml(r.remarks||'-')}</td><td><button class="btn btn-p" style="padding:2px 8px;font-size:.75em" onclick="openFeeOfficeDecisionModal(${Number(r.id)||0},'approved')">Approve</button> <button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="openFeeOfficeDecisionModal(${Number(r.id)||0},'rejected')">Reject</button> <button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="openFeeOfficeViewModal(${Number(r.id)||0},'view')">View</button> <a href="/print/office-expense-record?id=${r.id}" target="_blank">Print Record</a></td></tr>`;
+});
+if(!pending.length) ph+='<tr><td colspan="9" style="text-align:center;color:#999;padding:18px">No pending office expenses right now.</td></tr>';
+ph+='</tbody>';
+const pt=document.getElementById('feeOfficePendingTbl'); if(pt)pt.innerHTML=ph;
+let hh='<thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Vendor</th><th>Amount</th><th>Status</th><th>Entered By</th><th>Approved By</th><th>Approval Date</th><th>Bill Number</th><th>Actions</th></tr></thead><tbody>';
+(feeOfficeRows||[]).forEach(r=>{
+const actions=[`<button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="openFeeOfficeViewModal(${Number(r.id)||0},'view')">View</button>`,`<a href="/print/office-expense-record?id=${r.id}" target="_blank">Print Record</a>`,`<button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="openFeeOfficeViewModal(${Number(r.id)||0},'edit')">Edit</button>`];
+hh+=`<tr><td>${escHtml(r.expense_date||'-')}</td><td>${escHtml(r.category_label||feeOfficeCategoryLabel(r.category))}</td><td>${escHtml(r.description||'-')}</td><td>${escHtml(r.vendor_name||'-')}</td><td>${money(r.amount||0)} KWD</td><td>${feeOfficeStatusBadge(r.status)}</td><td>${escHtml(r.entered_by||'-')}</td><td>${escHtml(r.approved_by||'-')}</td><td>${escHtml(r.approved_at||'-')}</td><td>${escHtml(r.bill_number||'-')}</td><td>${actions.join(' ')}</td></tr>`;
+});
+if(!(feeOfficeRows||[]).length) hh+='<tr><td colspan="11" style="text-align:center;color:#999;padding:18px">No office expense records found.</td></tr>';
+hh+='</tbody>';
+const ht=document.getElementById('feeOfficeHistTbl'); if(ht)ht.innerHTML=hh;
+}
 async function loadFeeStatement(){
 const byWrap=document.getElementById('feeStmtByWrap');
 const showActorFilter=USER_ROLE==='fee_collector';
@@ -17859,6 +18299,7 @@ let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing
 (d.rows||[]).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=feeStmtWingLabel(r.wing);const actions=[];if(isVoucher)actions.push(`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">Print Voucher</a>`);if(USER_ROLE==='admin')actions.push(`<button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="openFeeSettlementEdit(${Number(r.id)||0})">Edit</button>`);th+=`<tr><td>${escHtml(r.created_at||r.distribution_date||'-')}</td><td>${escHtml((r.action_type||'-').replace('_',' '))}</td><td>${money(r.amount||0)} ${escHtml(r.currency||'KWD')}</td><td>${escHtml(wing)}</td><td>${escHtml(r.entered_by||'-')}</td><td>${escHtml(r.handed_over_by||'-')}</td><td>${escHtml(r.received_by||'-')}</td><td>${escHtml(r.receipt_number||'-')}</td><td>${escHtml(r.notes||'-')}</td><td>${feeStmtEditedHtml(r)}</td><td>${actions.length?actions.join(' '):'-'}</td></tr>`});
 th+='</tbody>';
 const tt=document.getElementById('feeStmtTxnTbl'); if(tt)tt.innerHTML=th;
+if(USER_ROLE==='admin') loadFeeOfficeLedger();
 }
 function exportFeeSettlement(kind){
 const p=new URLSearchParams();
@@ -17917,8 +18358,9 @@ const r=await api('/api/change-password',{method:'POST',headers:{'Content-Type':
 if(r?.success){toast('Password changed successfully');document.getElementById('myNewPw').value='';document.getElementById('myConfPw').value='';document.getElementById('pwModal').classList.remove('show')}
 else toast('Error: '+(r?.error||'failed'))}
 async function changePw(){const pw=document.getElementById('newPw').value;if(!pw){toast('Enter password');return}
-await api('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pw})});
-document.getElementById('newPw').value='';toast('Password changed')}
+const r=await api('/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:pw})});
+if(r?.success){document.getElementById('newPw').value='';toast('Password changed')}
+else toast('Error: '+(r?.error||'failed'))}
 async function updateUserRole(uid,role){
 const r=await api('/api/user/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:uid,role})});
 if(r?.success){toast('Role updated to '+role)}else{toast('Error: '+(r?.error||'failed'));loadAdmin()}}
