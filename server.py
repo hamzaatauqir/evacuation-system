@@ -317,6 +317,32 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_fee_dist_wing ON fee_distributions(wing);
     CREATE INDEX IF NOT EXISTS idx_fee_dist_action ON fee_distributions(action_type);
     CREATE INDEX IF NOT EXISTS idx_fee_dist_receipt ON fee_distributions(receipt_number);
+    CREATE TABLE IF NOT EXISTS office_expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_number TEXT DEFAULT '',
+        expense_date TEXT DEFAULT '',
+        category TEXT DEFAULT '',
+        description TEXT DEFAULT '',
+        vendor_name TEXT DEFAULT '',
+        amount REAL NOT NULL DEFAULT 0,
+        payment_mode TEXT DEFAULT 'cash',
+        bill_number TEXT DEFAULT '',
+        remarks TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending_approval',
+        entered_by TEXT DEFAULT '',
+        approved_by TEXT DEFAULT '',
+        approved_at TIMESTAMP,
+        approval_notes TEXT DEFAULT '',
+        edited_by TEXT DEFAULT '',
+        edited_at TIMESTAMP,
+        edit_reason TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_office_expense_date ON office_expenses(expense_date);
+    CREATE INDEX IF NOT EXISTS idx_office_expense_status ON office_expenses(status);
+    CREATE INDEX IF NOT EXISTS idx_office_expense_record ON office_expenses(record_number);
+    CREATE INDEX IF NOT EXISTS idx_office_expense_entered_by ON office_expenses(entered_by);
     CREATE TABLE IF NOT EXISTS note_verbal_uploads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         filename TEXT NOT NULL,
@@ -363,6 +389,32 @@ def init_db():
     ]:
         try:
             db.execute(f"ALTER TABLE fee_distributions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    for col, coltype in [
+        ('record_number', "TEXT DEFAULT ''"),
+        ('expense_date', "TEXT DEFAULT ''"),
+        ('category', "TEXT DEFAULT ''"),
+        ('description', "TEXT DEFAULT ''"),
+        ('vendor_name', "TEXT DEFAULT ''"),
+        ('amount', 'REAL NOT NULL DEFAULT 0'),
+        ('payment_mode', "TEXT DEFAULT 'cash'"),
+        ('bill_number', "TEXT DEFAULT ''"),
+        ('remarks', "TEXT DEFAULT ''"),
+        ('status', "TEXT DEFAULT 'pending_approval'"),
+        ('entered_by', "TEXT DEFAULT ''"),
+        ('approved_by', "TEXT DEFAULT ''"),
+        ('approved_at', 'TIMESTAMP'),
+        ('approval_notes', "TEXT DEFAULT ''"),
+        ('edited_by', "TEXT DEFAULT ''"),
+        ('edited_at', 'TIMESTAMP'),
+        ('edit_reason', "TEXT DEFAULT ''"),
+        ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+    ]:
+        try:
+            db.execute(f"ALTER TABLE office_expenses ADD COLUMN {col} {coltype}")
             db.commit()
         except sqlite3.OperationalError:
             pass
@@ -3711,6 +3763,257 @@ def api_fee_settlement_update(data, user):
         )
         db.commit()
         return {'success': True, 'id': dist_id, 'receipt_number': old_row.get('receipt_number') or '', 'row': new_row}
+    finally:
+        db.close()
+
+def _office_expense_category_label(value):
+    key = (value or '').strip().lower()
+    labels = {
+        'tea_refreshments': 'Tea / Refreshments',
+        'stationery': 'Stationery',
+        'photocopy': 'Photocopy',
+        'printer_supplies': 'Printer Supplies',
+        'office_purchase': 'Office Purchase',
+        'maintenance': 'Maintenance',
+        'transport_misc': 'Transport / Miscellaneous',
+        'other': 'Other'
+    }
+    return labels.get(key, ((value or '').replace('_', ' ').title() or '-'))
+
+def _office_expense_payment_mode_label(value):
+    key = (value or '').strip().lower()
+    labels = {
+        'cash': 'Cash',
+        'card': 'Card',
+        'bank_transfer': 'Bank Transfer',
+        'other': 'Other'
+    }
+    return labels.get(key, ((value or '').replace('_', ' ').title() or '-'))
+
+def _next_office_expense_record_no(db):
+    v = db.execute("SELECT COUNT(*) c FROM office_expenses WHERE record_number != ''").fetchone()['c']
+    return f"OEL-{datetime.now().strftime('%Y%m%d')}-{int(v)+1:04d}"
+
+def _validate_office_expense_fields(data, default_date=''):
+    expense_date = (data.get('expense_date') or '').strip() or (default_date or datetime.now().strftime('%Y-%m-%d'))
+    category = (data.get('category') or '').strip().lower()
+    description = (data.get('description') or '').strip()
+    vendor_name = (data.get('vendor_name') or '').strip()
+    payment_mode = (data.get('payment_mode') or '').strip().lower() or 'cash'
+    bill_number = (data.get('bill_number') or '').strip()
+    remarks = (data.get('remarks') or '').strip()
+    try:
+        amount = float(data.get('amount') or 0)
+    except Exception:
+        amount = 0
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', expense_date):
+        return {'success': False, 'error': 'expense_date must be YYYY-MM-DD'}
+    if not category:
+        return {'success': False, 'error': 'category is required'}
+    if not description:
+        return {'success': False, 'error': 'description is required'}
+    if amount <= 0:
+        return {'success': False, 'error': 'amount must be greater than 0'}
+    if payment_mode not in ('cash', 'card', 'bank_transfer', 'other'):
+        return {'success': False, 'error': 'Invalid payment_mode'}
+    return {
+        'success': True,
+        'values': {
+            'expense_date': expense_date,
+            'category': category,
+            'description': description,
+            'vendor_name': vendor_name,
+            'amount': amount,
+            'payment_mode': payment_mode,
+            'bill_number': bill_number,
+            'remarks': remarks
+        }
+    }
+
+def _office_expense_approved_total(db, exclude_id=0):
+    if exclude_id:
+        row = db.execute(
+            "SELECT COALESCE(SUM(amount),0) s FROM office_expenses WHERE status='approved' AND id != ?",
+            [exclude_id]
+        ).fetchone()
+    else:
+        row = db.execute("SELECT COALESCE(SUM(amount),0) s FROM office_expenses WHERE status='approved'").fetchone()
+    return float((row['s'] if row else 0) or 0)
+
+def _office_expense_approval_available_cash(db, exclude_id=0):
+    return float(_fee_cash_in_hand(db, '')) - _office_expense_approved_total(db, exclude_id=exclude_id)
+
+def api_office_expense_create(data, user):
+    validated = _validate_office_expense_fields(data)
+    if not validated.get('success'):
+        return validated
+    vals = validated['values']
+    db = get_db()
+    try:
+        record_number = _next_office_expense_record_no(db)
+        cur = db.execute("""
+            INSERT INTO office_expenses (
+                record_number, expense_date, category, description, vendor_name, amount,
+                payment_mode, bill_number, remarks, status, entered_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """, [
+            record_number,
+            vals['expense_date'],
+            vals['category'],
+            vals['description'],
+            vals['vendor_name'],
+            vals['amount'],
+            vals['payment_mode'],
+            vals['bill_number'],
+            vals['remarks'],
+            user
+        ])
+        expense_id = cur.lastrowid
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES ('office_expense_created', ?, ?, ?)",
+            [expense_id, user, json.dumps({'record_number': record_number, **vals}, default=str)]
+        )
+        db.commit()
+        return {'success': True, 'id': expense_id, 'record_number': record_number}
+    finally:
+        db.close()
+
+def api_office_expense_report(params, user):
+    db = get_db()
+    try:
+        summary = dict(db.execute("""
+            SELECT
+                COALESCE(SUM(CASE WHEN status='approved' THEN amount ELSE 0 END),0) approved_total,
+                COALESCE(SUM(CASE WHEN status='pending_approval' THEN amount ELSE 0 END),0) pending_total,
+                COALESCE(SUM(CASE WHEN status='rejected' THEN amount ELSE 0 END),0) rejected_total,
+                SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) approved_count,
+                SUM(CASE WHEN status='pending_approval' THEN 1 ELSE 0 END) pending_count,
+                SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) rejected_count
+            FROM office_expenses
+        """).fetchone())
+        raw_cash_in_hand = float(_fee_cash_in_hand(db, ''))
+        approved_total = float(summary.get('approved_total') or 0)
+        summary['raw_cash_in_hand'] = raw_cash_in_hand
+        summary['net_cash_available'] = raw_cash_in_hand - approved_total
+        rows = [dict(r) for r in db.execute("""
+            SELECT *
+            FROM office_expenses
+            ORDER BY date(COALESCE(NULLIF(expense_date,''), created_at)) DESC, id DESC
+            LIMIT 200
+        """).fetchall()]
+        for row in rows:
+            row['category_label'] = _office_expense_category_label(row.get('category'))
+            row['payment_mode_label'] = _office_expense_payment_mode_label(row.get('payment_mode'))
+        return {'success': True, 'summary': summary, 'rows': rows}
+    finally:
+        db.close()
+
+def api_office_expense_decision(data, user):
+    try:
+        expense_id = int(str(data.get('id', 0) or 0).strip())
+    except Exception:
+        expense_id = 0
+    decision = (data.get('decision') or '').strip().lower()
+    approval_notes = (data.get('approval_notes') or '').strip()
+    if expense_id <= 0:
+        return {'success': False, 'error': 'Valid expense id is required'}
+    if decision not in ('approved', 'rejected'):
+        return {'success': False, 'error': 'decision must be approved or rejected'}
+
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM office_expenses WHERE id = ?", [expense_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Expense record not found'}
+        old_row = dict(row)
+        if decision == 'approved':
+            available_cash = _office_expense_approval_available_cash(db, exclude_id=expense_id)
+            try:
+                amount = float(old_row.get('amount') or 0)
+            except Exception:
+                amount = 0
+            if amount > available_cash + 1e-9:
+                return {'success': False, 'error': f'Insufficient available balance. Available for approved office expenses: {available_cash:.2f} KWD'}
+        db.execute("""
+            UPDATE office_expenses
+            SET status = ?,
+                approved_by = ?,
+                approved_at = CURRENT_TIMESTAMP,
+                approval_notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, [decision, user, approval_notes, expense_id])
+        new_row = dict(db.execute("SELECT * FROM office_expenses WHERE id = ?", [expense_id]).fetchone())
+        action = 'office_expense_approved' if decision == 'approved' else 'office_expense_rejected'
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+            [action, expense_id, user, json.dumps({'old_values': old_row, 'new_values': new_row, 'approval_notes': approval_notes}, default=str)]
+        )
+        db.commit()
+        return {'success': True, 'id': expense_id, 'row': new_row}
+    finally:
+        db.close()
+
+def api_office_expense_update(data, user):
+    reason = (data.get('correction_reason') or data.get('edit_reason') or '').strip()
+    if not reason:
+        return {'success': False, 'error': 'correction reason is required'}
+    try:
+        expense_id = int(str(data.get('id', 0) or 0).strip())
+    except Exception:
+        expense_id = 0
+    if expense_id <= 0:
+        return {'success': False, 'error': 'Valid expense id is required'}
+
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM office_expenses WHERE id = ?", [expense_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Expense record not found'}
+        old_row = dict(row)
+        validated = _validate_office_expense_fields(data, default_date=(old_row.get('expense_date') or '').strip())
+        if not validated.get('success'):
+            return validated
+        vals = validated['values']
+        if (old_row.get('status') or '').strip().lower() == 'approved':
+            available_cash = _office_expense_approval_available_cash(db, exclude_id=expense_id)
+            if vals['amount'] > available_cash + 1e-9:
+                return {'success': False, 'error': f'Insufficient available balance for this correction. Available: {available_cash:.2f} KWD'}
+        db.execute("""
+            UPDATE office_expenses
+            SET expense_date = ?,
+                category = ?,
+                description = ?,
+                vendor_name = ?,
+                amount = ?,
+                payment_mode = ?,
+                bill_number = ?,
+                remarks = ?,
+                edited_by = ?,
+                edited_at = CURRENT_TIMESTAMP,
+                edit_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, [
+            vals['expense_date'],
+            vals['category'],
+            vals['description'],
+            vals['vendor_name'],
+            vals['amount'],
+            vals['payment_mode'],
+            vals['bill_number'],
+            vals['remarks'],
+            user,
+            reason,
+            expense_id
+        ])
+        new_row = dict(db.execute("SELECT * FROM office_expenses WHERE id = ?", [expense_id]).fetchone())
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES ('office_expense_edit', ?, ?, ?)",
+            [expense_id, user, json.dumps({'correction_reason': reason, 'old_values': old_row, 'new_values': new_row}, default=str)]
+        )
+        db.commit()
+        return {'success': True, 'id': expense_id, 'row': new_row}
     finally:
         db.close()
 
@@ -10216,6 +10519,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_fee_settlement_report(params, user))
+        elif path == '/api/office-expenses':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_office_expense_report(params, user))
         elif path == '/api/fee-settlement-export':
             user = self.require_auth()
             if not user: return
@@ -10901,6 +11210,183 @@ function printBoth(){{
             except Exception as e:
                 self.send_html(f"<p>Unable to render receipt right now.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
 
+        elif path == '/print/office-expense-record':
+            try:
+                user = self.require_auth()
+                if not user: return
+                if user['role'] not in ('admin', 'fee_collector'):
+                    self.send_json({'error': 'Unauthorized'}, 403); return
+                try:
+                    rid = int(str(params.get('id', 0) or 0).strip())
+                except Exception:
+                    rid = 0
+                if rid <= 0:
+                    self.send_html('<p>Invalid office expense record id.</p>', 400); return
+                db = get_db()
+                row = db.execute("SELECT * FROM office_expenses WHERE id = ?", [rid]).fetchone()
+                db.close()
+                if not row:
+                    self.send_html('<p>Office expense record not found.</p>', 404); return
+                r = dict(row)
+                record_number = (r.get('record_number') or '').strip() or f"OFFEXP-{rid}"
+                expense_date = (r.get('expense_date') or '').strip()
+                expense_date_display = expense_date
+                if expense_date:
+                    try:
+                        expense_date_display = datetime.strptime(expense_date, '%Y-%m-%d').strftime('%d %B %Y')
+                    except Exception:
+                        expense_date_display = expense_date
+                approved_at = (r.get('approved_at') or '').strip()
+                approved_at_display = approved_at
+                if approved_at:
+                    for _fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                        try:
+                            approved_at_display = datetime.strptime(approved_at, _fmt).strftime('%d %B %Y, %I:%M %p')
+                            break
+                        except Exception:
+                            continue
+                try:
+                    amount_value = float(str(r.get('amount') if r.get('amount') is not None else 0).replace(',', '').strip() or 0)
+                except Exception:
+                    amount_value = 0.0
+                letterhead_src = _embassy_letterhead_data_url()
+                letterhead_html = f'<div class="letterhead"><img src="{letterhead_src}" alt="Embassy of Pakistan, Kuwait Letterhead"></div>' if letterhead_src else ''
+                status_label = ((r.get('status') or '').replace('_', ' ').title() or '-')
+                category_label = _office_expense_category_label(r.get('category'))
+                payment_mode_label = _office_expense_payment_mode_label(r.get('payment_mode'))
+                self.send_html(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Office Expense Approval Record - {esc(record_number)}</title>
+            <style>
+            @page{{size:A4;margin:0}}
+            *{{box-sizing:border-box}}
+            body{{margin:0;background:#eef2f7;color:#162235;font-family:Arial,'Helvetica Neue',sans-serif}}
+            .screen-tools{{max-width:210mm;margin:18px auto 0;padding:0 10px;text-align:right}}
+            .screen-tools button{{border:none;border-radius:999px;padding:10px 18px;margin-left:8px;font-size:12px;font-weight:700;cursor:pointer}}
+            .screen-tools .print-btn{{background:#0f4c81;color:#fff}}
+            .screen-tools .close-btn{{background:#d7dee8;color:#203040}}
+            .page{{width:210mm;min-height:297mm;margin:12px auto 24px;padding:12mm;background:#fff;box-shadow:0 10px 34px rgba(15,23,42,.14)}}
+            .record{{border:1.4px solid #cfd8e3;min-height:273mm;padding:0 0 12mm;background:#fff}}
+            .letterhead{{padding:10mm 10mm 0}}
+            .letterhead img{{width:100%;max-height:38mm;object-fit:contain;display:block}}
+            .header{{padding:10mm 10mm 8mm;border-bottom:1px solid #dde4ec;display:flex;justify-content:space-between;gap:10mm;align-items:flex-start}}
+            .eyebrow{{font-size:11px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:#4c6481;margin-bottom:8px}}
+            h1{{margin:0;font-family:Georgia,'Times New Roman',serif;font-size:26px;line-height:1.18;color:#0b2848}}
+            .subtitle{{margin:8px 0 0;font-size:12px;line-height:1.6;color:#455468;max-width:118mm}}
+            .meta-stack{{width:58mm;display:grid;gap:8px}}
+            .meta-card{{border:1px solid #d8e0e8;border-radius:10px;padding:10px 12px;background:#f8fafc}}
+            .meta-card .label{{font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:#6b7b90;font-weight:700}}
+            .meta-card .value{{display:block;margin-top:4px;font-size:13px;font-weight:700;color:#12243a;word-break:break-word}}
+            .notice{{margin:8mm 10mm 0;padding:10px 12px;border-left:4px solid #0f4c81;background:#f7fafd;color:#28415f;font-size:11.5px;line-height:1.55}}
+            .summary{{display:grid;grid-template-columns:minmax(0,1fr) 52mm;gap:8mm;padding:8mm 10mm 0;align-items:stretch}}
+            .amount-panel{{border:1.6px solid #d6dfe8;border-radius:14px;background:linear-gradient(180deg,#fbfdff 0%,#f4f8fc 100%);padding:16px 18px}}
+            .amount-label{{font-size:11px;letter-spacing:1.1px;color:#617387;text-transform:uppercase;font-weight:700}}
+            .amount-value{{margin-top:6px;font-size:30px;font-weight:800;color:#0c4a6e;line-height:1.1}}
+            .status-chip{{display:inline-block;margin-top:14px;padding:7px 12px;border-radius:999px;background:#e8f0fb;color:#0f4c81;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}}
+            .control-note{{margin-top:14px;font-size:12px;line-height:1.6;color:#22354d}}
+            .note-panel{{border:1px solid #d8e0e8;border-radius:14px;padding:14px;background:#fff;display:flex;flex-direction:column;justify-content:center}}
+            .note-panel h3{{margin:0 0 10px;font-size:14px;color:#0b2848}}
+            .note-panel p{{margin:0;font-size:11.5px;line-height:1.7;color:#59697d}}
+            .section{{padding:8mm 10mm 0}}
+            .section-title{{font-family:Georgia,'Times New Roman',serif;font-size:17px;color:#0b2848;margin:0 0 8px}}
+            .details{{width:100%;border-collapse:collapse;border:1px solid #d6dee8;border-radius:12px;overflow:hidden}}
+            .details th,.details td{{padding:10px 12px;border-bottom:1px solid #e4ebf2;font-size:12px;text-align:left;vertical-align:top}}
+            .details tr:last-child th,.details tr:last-child td{{border-bottom:none}}
+            .details th{{width:18%;background:#f8fafc;color:#5d6f83;font-weight:700;text-transform:uppercase;letter-spacing:.5px;font-size:10px}}
+            .details td{{width:32%;color:#162538;font-weight:600}}
+            .signatures{{display:grid;grid-template-columns:1fr 1fr;gap:12mm;padding:12mm 10mm 0}}
+            .sig-box{{padding-top:20mm;border-bottom:1.4px solid #607086}}
+            .sig-label{{margin-top:10px;font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:#55667a;font-weight:700}}
+            .footer{{padding:10mm 10mm 0;text-align:center;font-size:10.5px;color:#68788b;line-height:1.7}}
+            @media print{{
+              body{{background:#fff}}
+              .screen-tools{{display:none !important}}
+              .page{{margin:0 auto;padding:0;box-shadow:none}}
+              .record{{border:none;min-height:auto}}
+            }}
+            </style></head><body>
+            <div class="screen-tools">
+              <button class="print-btn" onclick="window.print()">Print Record</button>
+              <button class="close-btn" onclick="window.close()">Close</button>
+            </div>
+            <div class="page">
+              <div class="record">
+                {letterhead_html}
+                <div class="header">
+                  <div>
+                    <div class="eyebrow">Embassy of Pakistan, Kuwait</div>
+                    <h1>Office Expense Approval Record</h1>
+                    <p class="subtitle">Internal office ledger document for record keeping. This printout is for office use only and is not a public applicant receipt.</p>
+                  </div>
+                  <div class="meta-stack">
+                    <div class="meta-card">
+                      <span class="label">Record ID / Voucher No.</span>
+                      <span class="value">{esc(record_number)}</span>
+                    </div>
+                    <div class="meta-card">
+                      <span class="label">Expense Date</span>
+                      <span class="value">{esc(expense_date_display or '-')}</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="notice">Original paper bill to be retained in office record for verification.</div>
+                <div class="summary">
+                  <div class="amount-panel">
+                    <div class="amount-label">Expense Amount</div>
+                    <div class="amount-value">{amount_value:.2f} KWD</div>
+                    <div class="status-chip">{esc(status_label)}</div>
+                    <div class="control-note">Dual control record: entered by one staff member and reviewed by admin before being treated as approved in the office ledger balance.</div>
+                  </div>
+                  <div class="note-panel">
+                    <h3>Office Record Note</h3>
+                    <p>Vendor bill details and approval remarks shown below should be matched with the retained original paper bill during office verification.</p>
+                  </div>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Expense Details</h2>
+                  <table class="details">
+                    <tr>
+                      <th>Category</th><td>{esc(category_label)}</td>
+                      <th>Description</th><td>{esc(r.get('description') or '-')}</td>
+                    </tr>
+                    <tr>
+                      <th>Vendor / Shop</th><td>{esc(r.get('vendor_name') or '-')}</td>
+                      <th>Payment Mode</th><td>{esc(payment_mode_label)}</td>
+                    </tr>
+                    <tr>
+                      <th>Bill Number</th><td>{esc(r.get('bill_number') or '-')}</td>
+                      <th>Remarks</th><td>{esc(r.get('remarks') or '-')}</td>
+                    </tr>
+                    <tr>
+                      <th>Status</th><td>{esc(status_label)}</td>
+                      <th>Entered By</th><td>{esc(r.get('entered_by') or '-')}</td>
+                    </tr>
+                    <tr>
+                      <th>Approved By</th><td>{esc(r.get('approved_by') or '-')}</td>
+                      <th>Approval Date</th><td>{esc(approved_at_display or '-')}</td>
+                    </tr>
+                    <tr>
+                      <th>Approval Notes</th><td colspan="3">{esc(r.get('approval_notes') or '-')}</td>
+                    </tr>
+                  </table>
+                </div>
+                <div class="signatures">
+                  <div>
+                    <div class="sig-box"></div>
+                    <div class="sig-label">Entered By Signature</div>
+                  </div>
+                  <div>
+                    <div class="sig-box"></div>
+                    <div class="sig-label">Approved By Signature</div>
+                  </div>
+                </div>
+                <div class="footer">
+                  <div>Original paper bill retained in office record for verification.</div>
+                  <div>Computer-generated office ledger record.</div>
+                </div>
+              </div>
+            </div></body></html>""")
+            except Exception as e:
+                self.send_html(f"<p>Unable to render office expense record right now.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
+
         elif path == '/print/fee-receipt':
             user = self.require_auth()
             if not user: return
@@ -11268,6 +11754,28 @@ function printBoth(){{
                 self.send_json({'error': 'Only fee collector/admin can record settlements'}, 403); return
             data = json.loads(body)
             result = api_fee_settlement_entry(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/office-expenses':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'fee_collector'):
+                self.send_json({'error': 'Only fee collector/admin can create office expenses'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            result = api_office_expense_create(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/office-expense-decision':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'error': 'Only admin can approve or reject office expenses'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            result = api_office_expense_decision(data, user['user'])
             self.send_json(result, 200 if result.get('success') else 400)
         elif path == '/api/note-verbal-upload':
             user = self.require_auth()
@@ -12064,6 +12572,18 @@ function printBoth(){{
             result = api_fee_settlement_update(data, user['user'])
             self.send_json(result, 200 if result.get('success') else 400)
             return
+        if path == '/api/office-expense-update':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            result = api_office_expense_update(data, user['user'])
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
 
         self.send_response(404)
         self.end_headers()
@@ -12075,108 +12595,374 @@ FEE_COLLECTION_PAGE = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fee Collection - Embassy Portal</title>
 <style>
-body{font-family:'Segoe UI',Arial,sans-serif;background:#f5f5f5;margin:0}
-.hdr{background:#006600;color:#fff;padding:12px 18px;display:flex;justify-content:space-between;align-items:center}
-.ctr{max-width:980px;margin:0 auto;padding:16px}
-.card{background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:14px;margin-bottom:12px}
-input,textarea,button{font-size:14px} input,textarea{padding:8px;border:1px solid #bbb;border-radius:6px}
-button{padding:8px 12px;border:none;border-radius:6px;cursor:pointer}
-.btn{background:#006600;color:#fff}.warn{background:#ef6c00;color:#fff}
-.muted{color:#666;font-size:12px}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:12px;background:#e8f5e9;color:#1b5e20}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f3f5f8;margin:0;color:#172638}
+.hdr{background:#006600;color:#fff;padding:12px 18px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.ctr{max-width:1120px;margin:0 auto;padding:18px}
+.tabs{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.tab{padding:11px 16px;border-radius:999px;border:1px solid #c8d5e2;background:#fff;color:#234;font-weight:700;cursor:pointer}
+.tab.active{background:#0f4c81;border-color:#0f4c81;color:#fff}
+.portal-section{display:none}
+.portal-section.active{display:block}
+.card{background:#fff;border:1px solid #dde5ee;border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 4px 16px rgba(15,23,42,.04)}
+.card h3{margin:0 0 10px;color:#10263f}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+label.field{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600;color:#334155}
+input,select,textarea,button{font-size:14px}
+input,select,textarea{width:100%;padding:9px 10px;border:1px solid #b9c6d3;border-radius:8px;background:#fff}
+textarea{resize:vertical}
+button{padding:9px 13px;border:none;border-radius:8px;cursor:pointer}
+button:disabled{opacity:.55;cursor:not-allowed}
+.btn{background:#006600;color:#fff}
+.btn.alt{background:#0f4c81}
+.btn.gray{background:#475569;color:#fff}
+.btn.warn{background:#ef6c00;color:#fff}
+.btn.ghost{background:#e5e7eb;color:#111827}
+.muted{color:#64748b;font-size:12px;line-height:1.6}
+.notice{padding:10px 12px;border-left:4px solid #0f4c81;background:#f8fbfe;border-radius:8px;color:#2b4764;font-size:12px;line-height:1.6}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.summary-card{border:1px solid #dbe5ef;border-radius:12px;padding:12px 14px;background:linear-gradient(180deg,#fff 0%,#f8fbff 100%)}
+.summary-card .k{font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:#6b7b90}
+.summary-card .v{margin-top:6px;font-size:24px;font-weight:800;color:#0c4a6e}
+.summary-card .s{margin-top:4px;font-size:12px;color:#5c7085}
+.badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;background:#e8f5e9;color:#1b5e20;font-weight:700}
+.status-pill{display:inline-block;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
+.status-pill.ok{background:#dcfce7;color:#166534}
+.status-pill.wait{background:#fef3c7;color:#92400e}
+.status-pill.bad{background:#fee2e2;color:#991b1b}
+.section-title{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.section-title p{margin:0}
+table{width:100%;border-collapse:collapse}
+th,td{padding:9px 8px;border-bottom:1px solid #e7edf3;text-align:left;vertical-align:top;font-size:13px}
+th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
+.table-wrap{overflow:auto}
+.action-link{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:#0f4c81;color:#fff;text-decoration:none;font-size:12px;font-weight:700}
+.table-actions{display:flex;gap:6px;flex-wrap:wrap}
+.table-actions button,.table-actions a{font-size:12px;padding:5px 10px;border-radius:999px}
+.pill-link{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:#e2e8f0;color:#0f172a;text-decoration:none;font-size:12px;font-weight:700}
+.modal{display:none;position:fixed;inset:0;background:rgba(15,23,42,.58);z-index:9999;align-items:center;justify-content:center;padding:16px}
+.modal-card{width:min(860px,100%);max-height:92vh;overflow:auto;background:#fff;border-radius:16px;border:1px solid #d7dee6;box-shadow:0 18px 48px rgba(15,23,42,.25);padding:18px}
+.modal-meta{margin-bottom:12px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;font-size:13px;line-height:1.65}
+.hidden{display:none !important}
+@media(max-width:720px){
+  .ctr{padding:12px}
+  .summary-card .v{font-size:20px}
+}
 </style></head><body>
-<div class="hdr"><div><strong>Visa Fee Collection</strong> <span class="muted">KWD 2 Saudi Govt Processing Fee</span></div><div>__USER_NAME__ (__USER_ROLE__) | <a href="/logout" style="color:#fff">Logout</a></div></div>
+<div class="hdr">
+  <div><strong>Visa Fee Collection</strong> <span class="muted" style="color:#d7f0d7">KWD 2 Saudi Govt Processing Fee | Internal staff ledger tools</span></div>
+  <div>__USER_NAME__ (__USER_ROLE__) | <a href="/logout" style="color:#fff">Logout</a></div>
+</div>
 <div class="ctr">
-<div class="card">
-<div class="row">
-<input id="q" placeholder="Passport / PKE-Tracking / Reference number" style="flex:1;min-width:260px">
-<button class="btn" onclick="runSearch()">Search</button>
-</div>
-<div class="muted" style="margin-top:8px">Search by Passport, Tracking Number (`PKE-...`), or Iraq Reference Number.</div>
-</div>
-<div id="list"></div>
-<div class="card">
-<h3 style="margin:0 0 10px">Fee Settlement Ledger</h3>
-<div id="settCards" class="row"></div>
-<div class="row" style="margin-top:8px">
-<select id="stAction"><option value="allocated">Allocate</option><option value="handed_over">Handed Over</option><option value="withdrawn">Withdrawn</option><option value="adjusted">Adjusted</option></select>
-<select id="stWing"><option value="community_wing">Community Wing</option><option value="diplomatic">Diplomatic</option></select>
-<input id="stAmount" type="number" step="0.01" min="0.01" placeholder="Amount (KWD)">
-<input id="stDate" type="date">
-<input id="stReceivedBy" placeholder="Received by (handover)">
-<input id="stNotes" placeholder="Notes / remarks" style="flex:1;min-width:240px">
-<button class="btn" onclick="saveSettlement()">Save Entry</button>
-</div>
-<div class="muted" style="margin-top:8px">Diplomatic hand-over entries generate receipt numbers automatically.</div>
-</div>
-<div class="card">
-<h3 style="margin:0 0 10px">Recent Settlement History</h3>
-<div style="overflow:auto"><table id="settTbl" style="width:100%;border-collapse:collapse"></table></div>
-</div>
-<div id="settEditModal" onclick="if(event.target===this)closeSettlementEdit()" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;align-items:center;justify-content:center;padding:16px">
-  <div style="width:min(780px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:14px;border:1px solid #d7dee6;box-shadow:0 18px 48px rgba(15,23,42,.25);padding:18px">
-    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
-      <div>
-        <h3 style="margin:0;color:#0f172a">Correct Settlement Row</h3>
-        <div class="muted">Admin-only correction on the existing row. Receipt number stays unchanged.</div>
+  <div class="tabs">
+    <button id="tab-fees" class="tab active" onclick="showPortalTab('fees')">Fee Collection & Settlement</button>
+    <button id="tab-office" class="tab" onclick="showPortalTab('office')">Office Expense Ledger</button>
+  </div>
+
+  <div id="portal-fees" class="portal-section active">
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Applicant Fee Collection</h3>
+          <p class="muted">Search by Passport, Tracking Number (`PKE-...`), or Iraq Reference Number.</p>
+        </div>
       </div>
-      <button type="button" onclick="closeSettlementEdit()" style="background:#e5e7eb;color:#111827">Close</button>
+      <div class="row">
+        <input id="q" placeholder="Passport / PKE-Tracking / Reference number" style="flex:1;min-width:260px">
+        <button class="btn" onclick="runSearch()">Search</button>
+      </div>
     </div>
-    <div id="settEditMeta" style="margin-bottom:12px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;font-size:13px;line-height:1.55"></div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
-      <label style="display:flex;flex-direction:column;gap:6px">Action Type
-        <select id="settEditAction" onchange="toggleSettlementEditReceived()">
-          <option value="allocated">Allocated</option>
-          <option value="handed_over">Handed Over</option>
-          <option value="withdrawn">Withdrawn</option>
-          <option value="adjusted">Adjusted</option>
-        </select>
-      </label>
-      <label style="display:flex;flex-direction:column;gap:6px">Wing
-        <select id="settEditWing">
-          <option value="community_wing">Community Wing</option>
-          <option value="diplomatic">Diplomatic Wing</option>
-        </select>
-      </label>
-      <label style="display:flex;flex-direction:column;gap:6px">Amount (KWD)
-        <input id="settEditAmount" type="number" step="0.01" min="0.01">
-      </label>
-      <label style="display:flex;flex-direction:column;gap:6px">Distribution Date
-        <input id="settEditDate" type="date">
-      </label>
+    <div id="list"></div>
+
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Fee Settlement Ledger</h3>
+          <p class="muted">Existing settlement workflow remains unchanged. Handover entries still generate printable internal vouchers.</p>
+        </div>
+      </div>
+      <div id="settCards" class="summary-grid"></div>
+      <div class="grid" style="margin-top:12px">
+        <label class="field">Action Type
+          <select id="stAction">
+            <option value="allocated">Allocate</option>
+            <option value="handed_over">Handed Over</option>
+            <option value="withdrawn">Withdrawn</option>
+            <option value="adjusted">Adjusted</option>
+          </select>
+        </label>
+        <label class="field">Wing
+          <select id="stWing">
+            <option value="community_wing">Community Wing</option>
+            <option value="diplomatic">Diplomatic</option>
+          </select>
+        </label>
+        <label class="field">Amount (KWD)
+          <input id="stAmount" type="number" step="0.01" min="0.01" placeholder="Amount (KWD)">
+        </label>
+        <label class="field">Distribution Date
+          <input id="stDate" type="date">
+        </label>
+        <label class="field">Received By
+          <input id="stReceivedBy" placeholder="Required for handed over">
+        </label>
+        <label class="field" style="grid-column:span 2">Notes / Remarks
+          <input id="stNotes" placeholder="Notes / remarks">
+        </label>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:12px">
+        <button class="btn" onclick="saveSettlement()">Save Entry</button>
+      </div>
+      <div class="muted" style="margin-top:8px">Handed-over entries generate receipt numbers automatically. Settlement corrections are admin-only and preserve the original receipt number.</div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-top:10px">
-      <label style="display:flex;flex-direction:column;gap:6px">Received By
-        <input id="settEditReceivedBy" placeholder="Required when action is handed over" oninput="toggleSettlementEditReceived()">
-        <span id="settEditReceivedHint" class="muted">Required for handed over corrections.</span>
-      </label>
-      <label style="display:flex;flex-direction:column;gap:6px">Notes / Remarks
-        <textarea id="settEditNotes" rows="3" style="width:100%"></textarea>
-      </label>
-      <label style="display:flex;flex-direction:column;gap:6px">Correction Reason *
-        <textarea id="settEditReason" rows="3" style="width:100%" placeholder="Explain why this settlement row is being corrected"></textarea>
-      </label>
+
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Recent Settlement History</h3>
+          <p class="muted">Print Voucher appears only on handed-over entries with a generated receipt number.</p>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="settTbl"></table></div>
     </div>
-    <div class="row" style="justify-content:flex-end;margin-top:14px">
-      <button type="button" onclick="closeSettlementEdit()" style="background:#e5e7eb;color:#111827">Cancel</button>
-      <button type="button" class="btn" onclick="saveSettlementEdit()">Save Correction</button>
+  </div>
+
+  <div id="portal-office" class="portal-section">
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Office Expense Ledger</h3>
+          <p class="muted">Separate internal module for office expenses such as tea, stationery, photocopy, printer supplies, and other small operational bills.</p>
+        </div>
+      </div>
+      <div class="notice">Original paper bill to be retained in office record for verification. Pending and rejected entries do not reduce the adjusted balance. Only approved office expenses affect the office expense total used for balance display here.</div>
+      <div class="grid" style="margin-top:12px">
+        <label class="field">Expense Date
+          <input id="oeDate" type="date">
+        </label>
+        <label class="field">Category
+          <select id="oeCategory">
+            <option value="tea_refreshments">Tea / Refreshments</option>
+            <option value="stationery">Stationery</option>
+            <option value="photocopy">Photocopy</option>
+            <option value="printer_supplies">Printer Supplies</option>
+            <option value="office_purchase">Office Purchase</option>
+            <option value="maintenance">Maintenance</option>
+            <option value="transport_misc">Transport / Miscellaneous</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label class="field">Description
+          <input id="oeDescription" placeholder="Expense description">
+        </label>
+        <label class="field">Vendor / Shop Name
+          <input id="oeVendor" placeholder="Vendor or shop name">
+        </label>
+        <label class="field">Amount (KWD)
+          <input id="oeAmount" type="number" step="0.01" min="0.01" placeholder="Amount">
+        </label>
+        <label class="field">Payment Mode
+          <select id="oePaymentMode">
+            <option value="cash">Cash</option>
+            <option value="card">Card</option>
+            <option value="bank_transfer">Bank Transfer</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label class="field">Bill Number
+          <input id="oeBillNumber" placeholder="Bill / receipt number">
+        </label>
+        <label class="field" style="grid-column:span 2">Remarks
+          <textarea id="oeRemarks" rows="2" placeholder="Remarks or internal notes"></textarea>
+        </label>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:12px">
+        <button class="btn alt" onclick="saveOfficeExpense()">Submit Office Expense</button>
+      </div>
+      <div class="muted" style="margin-top:8px">Submitted entries go to <strong>pending approval</strong>. Only admin can approve, reject, or correct an entry. No bill image or file upload is required in this portal.</div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Office Expense Summary</h3>
+          <p class="muted">Adjusted balance shown here is for internal office reference only and does not alter the existing settlement calculations elsewhere in the system.</p>
+        </div>
+      </div>
+      <div id="officeSummaryCards" class="summary-grid"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">Expense History</h3>
+          <p class="muted">Fee collector can view and print. Admin can approve, reject, view, print, and correct records with audit trail.</p>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="officeTbl"></table></div>
+    </div>
+  </div>
+
+  <div id="settEditModal" class="modal" onclick="if(event.target===this)closeSettlementEdit()">
+    <div class="modal-card">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div>
+          <h3 style="margin:0;color:#0f172a">Correct Settlement Row</h3>
+          <div class="muted">Admin-only correction on the existing row. Receipt number stays unchanged.</div>
+        </div>
+        <button type="button" class="btn ghost" onclick="closeSettlementEdit()">Close</button>
+      </div>
+      <div id="settEditMeta" class="modal-meta"></div>
+      <div class="grid">
+        <label class="field">Action Type
+          <select id="settEditAction" onchange="toggleSettlementEditReceived()">
+            <option value="allocated">Allocated</option>
+            <option value="handed_over">Handed Over</option>
+            <option value="withdrawn">Withdrawn</option>
+            <option value="adjusted">Adjusted</option>
+          </select>
+        </label>
+        <label class="field">Wing
+          <select id="settEditWing">
+            <option value="community_wing">Community Wing</option>
+            <option value="diplomatic">Diplomatic Wing</option>
+          </select>
+        </label>
+        <label class="field">Amount (KWD)
+          <input id="settEditAmount" type="number" step="0.01" min="0.01">
+        </label>
+        <label class="field">Distribution Date
+          <input id="settEditDate" type="date">
+        </label>
+      </div>
+      <div class="grid" style="margin-top:10px">
+        <label class="field">Received By
+          <input id="settEditReceivedBy" placeholder="Required when action is handed over" oninput="toggleSettlementEditReceived()">
+          <span id="settEditReceivedHint" class="muted">Required for handed over corrections.</span>
+        </label>
+        <label class="field">Notes / Remarks
+          <textarea id="settEditNotes" rows="3"></textarea>
+        </label>
+        <label class="field" style="grid-column:span 2">Correction Reason *
+          <textarea id="settEditReason" rows="3" placeholder="Explain why this settlement row is being corrected"></textarea>
+        </label>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button type="button" class="btn ghost" onclick="closeSettlementEdit()">Cancel</button>
+        <button type="button" class="btn" onclick="saveSettlementEdit()">Save Correction</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="officeModal" class="modal" onclick="if(event.target===this)closeOfficeExpenseModal()">
+    <div class="modal-card">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div>
+          <h3 id="officeModalTitle" style="margin:0;color:#0f172a">Office Expense Record</h3>
+          <div class="muted">Internal office ledger record for staff use only.</div>
+        </div>
+        <button type="button" class="btn ghost" onclick="closeOfficeExpenseModal()">Close</button>
+      </div>
+      <div id="officeModalMeta" class="modal-meta"></div>
+      <div class="notice" style="margin-bottom:12px">Original paper bill to be retained in office record for verification.</div>
+      <div class="grid">
+        <label class="field">Expense Date
+          <input id="officeEditDate" type="date">
+        </label>
+        <label class="field">Category
+          <select id="officeEditCategory">
+            <option value="tea_refreshments">Tea / Refreshments</option>
+            <option value="stationery">Stationery</option>
+            <option value="photocopy">Photocopy</option>
+            <option value="printer_supplies">Printer Supplies</option>
+            <option value="office_purchase">Office Purchase</option>
+            <option value="maintenance">Maintenance</option>
+            <option value="transport_misc">Transport / Miscellaneous</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label class="field">Description
+          <input id="officeEditDescription">
+        </label>
+        <label class="field">Vendor / Shop Name
+          <input id="officeEditVendor">
+        </label>
+        <label class="field">Amount (KWD)
+          <input id="officeEditAmount" type="number" step="0.01" min="0.01">
+        </label>
+        <label class="field">Payment Mode
+          <select id="officeEditPaymentMode">
+            <option value="cash">Cash</option>
+            <option value="card">Card</option>
+            <option value="bank_transfer">Bank Transfer</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label class="field">Bill Number
+          <input id="officeEditBillNumber">
+        </label>
+        <label class="field" style="grid-column:span 2">Remarks
+          <textarea id="officeEditRemarks" rows="3"></textarea>
+        </label>
+        <label class="field" style="grid-column:span 2">Approval Notes
+          <textarea id="officeApprovalNotes" rows="3" placeholder="Admin may add approval or rejection notes here"></textarea>
+        </label>
+        <label id="officeCorrectionWrap" class="field hidden" style="grid-column:span 2">Correction Reason *
+          <textarea id="officeCorrectionReason" rows="3" placeholder="Explain why this office expense row is being corrected"></textarea>
+        </label>
+      </div>
+      <div id="officeModalActions" class="row" style="justify-content:flex-end;margin-top:14px"></div>
     </div>
   </div>
 </div>
-</div>
+
 <script>
 async function api(u,o){const r=await fetch(u,o); if(r.redirected){location='/login';return null;} return r.json();}
 const USER_ROLE='__USER_ROLE__';
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
 function fmt(n){return Number(n||0).toFixed(2)}
+function showPortalTab(tab){
+  ['fees','office'].forEach(name=>{
+    const section=document.getElementById('portal-'+name);
+    const btn=document.getElementById('tab-'+name);
+    if(section) section.classList.toggle('active', name===tab);
+    if(btn) btn.classList.toggle('active', name===tab);
+  });
+}
+
 let settlementRows=[];
 let editingSettlementId=0;
+let officeExpenseRows=[];
+let officeModalId=0;
+let officeModalMode='view';
+
 function settlementWingLabel(v){return v==='community_wing'?'Community Wing':(v==='diplomatic'?'Diplomatic Wing':String(v||'-').replace('_',' '));}
 function settlementEditedHtml(r){
   if(!r||!r.edited_at) return '-';
   return `<div style="font-weight:700;color:#6a1b9a">Edited</div><div class="muted">by ${esc(r.edited_by||'-')}<br>${esc(r.edited_at||'-')}</div>${r.edit_reason?`<div class="muted">Reason: ${esc(r.edit_reason)}</div>`:''}`;
 }
+function officeRecordNumber(r){return r&&r.record_number?r.record_number:`OFFEXP-${r&&r.id?r.id:'-'}`;}
+function officeCategoryLabel(v){
+  const labels={tea_refreshments:'Tea / Refreshments',stationery:'Stationery',photocopy:'Photocopy',printer_supplies:'Printer Supplies',office_purchase:'Office Purchase',maintenance:'Maintenance',transport_misc:'Transport / Miscellaneous',other:'Other'};
+  return labels[v]||String(v||'-').replace(/_/g,' ');
+}
+function officePaymentModeLabel(v){
+  const labels={cash:'Cash',card:'Card',bank_transfer:'Bank Transfer',other:'Other'};
+  return labels[v]||String(v||'-').replace(/_/g,' ');
+}
+function officeStatusLabel(v){
+  const labels={pending_approval:'Pending Approval',approved:'Approved',rejected:'Rejected'};
+  return labels[v]||String(v||'-').replace(/_/g,' ');
+}
+function officeStatusHtml(v){
+  const cls=v==='approved'?'ok':(v==='rejected'?'bad':'wait');
+  return `<span class="status-pill ${cls}">${esc(officeStatusLabel(v))}</span>`;
+}
+function officeEditedHtml(r){
+  if(!r||!r.edited_at) return '-';
+  return `<div style="font-weight:700;color:#6a1b9a">Edited</div><div class="muted">by ${esc(r.edited_by||'-')}<br>${esc(r.edited_at||'-')}</div>${r.edit_reason?`<div class="muted">Reason: ${esc(r.edit_reason)}</div>`:''}`;
+}
+
 function closeSettlementEdit(){
   editingSettlementId=0;
   const modal=document.getElementById('settEditModal');
@@ -12189,7 +12975,7 @@ function toggleSettlementEditReceived(){
   const required=action==='handed_over';
   if(input){
     input.dataset.required=required?'1':'0';
-    input.style.borderColor=required && !input.value.trim() ? '#c62828' : '#bbb';
+    input.style.borderColor=required && !input.value.trim() ? '#c62828' : '#b9c6d3';
   }
   if(hint) hint.textContent=required?'Required for handed over corrections.':'Optional for non-handover corrections.';
 }
@@ -12232,10 +13018,12 @@ async function saveSettlementEdit(){
     loadSettlement();
   }else alert((d&&d.error)||'Failed');
 }
+
 async function runSearch(){
   const q=document.getElementById('q').value.trim();
   if(!q){return;}
-  const d=await api('/api/fee-lookup?q='+encodeURIComponent(q)); if(!d||!d.success){return;}
+  const d=await api('/api/fee-lookup?q='+encodeURIComponent(q));
+  if(!d||!d.success){return;}
   const list=document.getElementById('list');
   list.innerHTML=(d.results||[]).map(r=>{
     const clr=r.fee_status==='paid'||r.fee_status==='waived';
@@ -12246,47 +13034,56 @@ async function runSearch(){
       <div class="muted">Passport: ${esc(r.passport||'-')} | Ref: ${esc(r.tracking_or_reference||'-')} | Source: ${esc(r.source||'')}</div>
       <div class="muted">Status: ${esc(r.status||'-')} | Ticket details: ${r.ticket_details_filled?'Yes':'No'} | Print unlocked: ${r.print_unlocked?'Yes':'No'}</div>
       <div class="row" style="margin-top:8px">
-        <button class="btn" ${clr?'disabled':''} onclick="collectFee('${r.source}',${r.id},'${esc(r.name||'')}','${esc(r.tracking_or_reference||'')}')">Collect KWD 2</button>
-        ${USER_ROLE==='admin'?`<button class="warn" ${clr?'disabled':''} onclick="waiveFee('${r.source}',${r.id})">Waive (Gratis)</button>`:''}
-        ${isPaid?`<button style="background:#1565c0;color:#fff;font-weight:bold" onclick="window.open('/print/fee-receipt?source='+encodeURIComponent('${r.source}')+'&id=${r.id}','_blank')">Print Receipt</button>`:''}
+        <button class="btn" ${clr?'disabled':''} onclick="collectFee('${r.source}',${r.id})">Collect KWD 2</button>
+        ${USER_ROLE==='admin'?`<button class="btn warn" ${clr?'disabled':''} onclick="waiveFee('${r.source}',${r.id})">Waive (Gratis)</button>`:''}
+        ${isPaid?`<button class="btn alt" onclick="window.open('/print/fee-receipt?source='+encodeURIComponent('${r.source}')+'&id=${r.id}','_blank')">Print Receipt</button>`:''}
         ${clr&&!isPaid?'<span class="muted">Waived.</span>':''}
       </div>
     </div>`;
   }).join('') || '<div class="card">No matching records.</div>';
 }
-async function collectFee(source,id,name,ref){
-  if(!confirm('Confirm KWD 2 fee received'+(name?' from '+name:'')+'?')) return;
+async function collectFee(source,id){
+  if(!confirm('Confirm KWD 2 fee received?')) return;
   const d=await api('/api/fee-collect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,id,amount:2.0})});
   if(d&&d.success){
     runSearch();
-    // Open Print Receipt in new tab
     if(confirm('Fee marked as paid. Print receipt now?')){
       window.open('/print/fee-receipt?source='+encodeURIComponent(source)+'&id='+id,'_blank');
     }
-  }
-  else alert((d&&d.error)||'Failed');
+    loadSettlement();
+    loadOfficeExpenses();
+  }else alert((d&&d.error)||'Failed');
 }
 async function waiveFee(source,id){
   const reason=prompt('Waiver reason (optional):','')||'';
   const d=await api('/api/fee-waive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,id,amount:2.0,waiver_reason:reason})});
-  if(d&&d.success){alert('Fee waived. Record released for printing if all other conditions are met.'); runSearch();}
+  if(d&&d.success){alert('Fee waived. Record released for printing if all other conditions are met.'); runSearch(); loadSettlement();}
   else alert((d&&d.error)||'Failed');
 }
+
 async function loadSettlement(){
-  const d=await api('/api/fee-settlement-report?scope=mine'); if(!d||!d.success)return;
+  const d=await api('/api/fee-settlement-report?scope=mine');
+  if(!d||!d.success)return;
   settlementRows=d.rows||[];
   const s=d.summary||{};
   const cards=document.getElementById('settCards');
   if(cards) cards.innerHTML=`
-    <span class="badge">Collected: ${fmt(s.total_collected)} KWD</span>
-    <span class="badge">Community: ${fmt(s.community_wing_total)} KWD</span>
-    <span class="badge">Diplomatic: ${fmt(s.diplomatic_total)} KWD</span>
-    <span class="badge">Handed over: ${fmt(s.total_handed_over)} KWD</span>
-    <span class="badge">Cash in hand: ${fmt(s.cash_in_hand)} KWD</span>`;
-  let h='<thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Date</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Action</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Wing</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Amount</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Received By</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Receipt / Voucher</th><th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Edited</th>'+(USER_ROLE==='admin'?'<th style="text-align:left;border-bottom:1px solid #ddd;padding:6px">Actions</th>':'')+'</tr></thead><tbody>';
-  (d.rows||[]).slice(0,40).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=settlementWingLabel(r.wing);const voucherHtml=isVoucher?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>${esc(r.receipt_number)}</span><a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank" style="display:inline-block;padding:4px 9px;border-radius:999px;background:#0f4c81;color:#fff;text-decoration:none;font-size:12px;font-weight:700">Print Voucher</a></div>`:(r.receipt_number?esc(r.receipt_number):'-');const actionBtn=USER_ROLE==='admin'?`<button class="btn" style="padding:4px 10px;font-size:12px;background:#1f2937;color:#fff" onclick="openSettlementEdit(${Number(r.id)||0})">Edit</button>`:'';h+=`<tr><td style="padding:6px">${esc(r.distribution_date||'')}</td><td style="padding:6px">${esc((r.action_type||'').replace('_',' '))}</td><td style="padding:6px">${esc(wing)}</td><td style="padding:6px">${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td style="padding:6px">${esc(r.received_by||'-')}</td><td style="padding:6px">${voucherHtml}</td><td style="padding:6px">${settlementEditedHtml(r)}</td>${USER_ROLE==='admin'?`<td style="padding:6px">${actionBtn||'-'}</td>`:''}</tr>`});
+    <div class="summary-card"><div class="k">Collected</div><div class="v">${fmt(s.total_collected)}</div><div class="s">KWD total received</div></div>
+    <div class="summary-card"><div class="k">Community</div><div class="v">${fmt(s.community_wing_total)}</div><div class="s">KWD assigned</div></div>
+    <div class="summary-card"><div class="k">Diplomatic</div><div class="v">${fmt(s.diplomatic_total)}</div><div class="s">KWD assigned</div></div>
+    <div class="summary-card"><div class="k">Handed Over</div><div class="v">${fmt(s.total_handed_over)}</div><div class="s">KWD handed over</div></div>
+    <div class="summary-card"><div class="k">Cash In Hand</div><div class="v">${fmt(s.cash_in_hand)}</div><div class="s">KWD available</div></div>`;
+  let h='<thead><tr><th>Date</th><th>Action</th><th>Wing</th><th>Amount</th><th>Received By</th><th>Receipt / Voucher</th><th>Edited</th>'+(USER_ROLE==='admin'?'<th>Actions</th>':'')+'</tr></thead><tbody>';
+  (d.rows||[]).slice(0,40).forEach(r=>{
+    const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);
+    const wing=settlementWingLabel(r.wing);
+    const voucherHtml=isVoucher?`<div class="table-actions"><span>${esc(r.receipt_number)}</span><a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank" class="action-link">Print Voucher</a></div>`:(r.receipt_number?esc(r.receipt_number):'-');
+    const actionBtn=USER_ROLE==='admin'?`<button class="btn gray" onclick="openSettlementEdit(${Number(r.id)||0})">Edit</button>`:'';
+    h+=`<tr><td>${esc(r.distribution_date||'')}</td><td>${esc((r.action_type||'').replace('_',' '))}</td><td>${esc(wing)}</td><td>${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td>${esc(r.received_by||'-')}</td><td>${voucherHtml}</td><td>${settlementEditedHtml(r)}</td>${USER_ROLE==='admin'?`<td>${actionBtn||'-'}</td>`:''}</tr>`;
+  });
   h+='</tbody>';
-  const t=document.getElementById('settTbl'); if(t)t.innerHTML=h;
+  const t=document.getElementById('settTbl');
+  if(t)t.innerHTML=h;
 }
 async function saveSettlement(){
   const data={
@@ -12305,9 +13102,172 @@ async function saveSettlement(){
     document.getElementById('stReceivedBy').value='';
     document.getElementById('stNotes').value='';
     loadSettlement();
+    loadOfficeExpenses();
   }else alert((d&&d.error)||'Failed');
 }
+
+function closeOfficeExpenseModal(){
+  officeModalId=0;
+  officeModalMode='view';
+  const modal=document.getElementById('officeModal');
+  if(modal) modal.style.display='none';
+}
+function officeFieldIds(){
+  return ['officeEditDate','officeEditCategory','officeEditDescription','officeEditVendor','officeEditAmount','officeEditPaymentMode','officeEditBillNumber','officeEditRemarks'];
+}
+function setOfficeFieldsDisabled(disabled){
+  officeFieldIds().forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.disabled=disabled;
+  });
+}
+function renderOfficeModalActions(){
+  const wrap=document.getElementById('officeModalActions');
+  if(!wrap) return;
+  const printBtn=`<button type="button" class="btn alt" onclick="window.open('/print/office-expense-record?id='+officeModalId,'_blank')">Print Record</button>`;
+  const closeBtn=`<button type="button" class="btn ghost" onclick="closeOfficeExpenseModal()">Close</button>`;
+  if(USER_ROLE!=='admin'){
+    wrap.innerHTML=printBtn+closeBtn;
+    return;
+  }
+  if(officeModalMode==='edit'){
+    wrap.innerHTML=`${printBtn}${closeBtn}<button type="button" class="btn" onclick="saveOfficeExpenseEdit()">Save Correction</button>`;
+    return;
+  }
+  wrap.innerHTML=`${printBtn}${closeBtn}<button type="button" class="btn gray" onclick="openOfficeExpenseModal(officeModalId,'edit')">Edit</button><button type="button" class="btn warn" onclick="submitOfficeExpenseDecision('rejected')">Reject</button><button type="button" class="btn" onclick="submitOfficeExpenseDecision('approved')">Approve</button>`;
+}
+function openOfficeExpenseModal(id, mode='view'){
+  const row=(officeExpenseRows||[]).find(x=>Number(x.id)===Number(id));
+  if(!row){alert('Office expense record not found');return;}
+  officeModalId=Number(row.id||0);
+  officeModalMode=mode||'view';
+  document.getElementById('officeModalTitle').textContent=officeModalMode==='edit'?'Correct Office Expense Record':'Office Expense Record';
+  document.getElementById('officeModalMeta').innerHTML=`<strong>Record #:</strong> ${esc(officeRecordNumber(row))}<br><strong>Status:</strong> ${esc(officeStatusLabel(row.status))}<br><strong>Entered By:</strong> ${esc(row.entered_by||'-')}<br><strong>Approved By:</strong> ${esc(row.approved_by||'-')}<br><strong>Approval Date:</strong> ${esc(row.approved_at||'-')}${row.edited_at?`<br><strong>Last Edited:</strong> ${esc(row.edited_at||'-')} by ${esc(row.edited_by||'-')}`:''}`;
+  document.getElementById('officeEditDate').value=row.expense_date||'';
+  document.getElementById('officeEditCategory').value=row.category||'other';
+  document.getElementById('officeEditDescription').value=row.description||'';
+  document.getElementById('officeEditVendor').value=row.vendor_name||'';
+  document.getElementById('officeEditAmount').value=fmt(row.amount||0);
+  document.getElementById('officeEditPaymentMode').value=row.payment_mode||'cash';
+  document.getElementById('officeEditBillNumber').value=row.bill_number||'';
+  document.getElementById('officeEditRemarks').value=row.remarks||'';
+  document.getElementById('officeApprovalNotes').value=row.approval_notes||'';
+  document.getElementById('officeCorrectionReason').value='';
+  const isEdit=USER_ROLE==='admin'&&officeModalMode==='edit';
+  setOfficeFieldsDisabled(!isEdit);
+  const approvalBox=document.getElementById('officeApprovalNotes');
+  if(approvalBox) approvalBox.disabled=!(USER_ROLE==='admin'&&officeModalMode==='view');
+  const correctionWrap=document.getElementById('officeCorrectionWrap');
+  if(correctionWrap) correctionWrap.classList.toggle('hidden', !isEdit);
+  renderOfficeModalActions();
+  const modal=document.getElementById('officeModal');
+  if(modal) modal.style.display='flex';
+}
+async function submitOfficeExpenseDecision(decision){
+  if(USER_ROLE!=='admin' || !(officeModalId>0)) return;
+  const notes=(document.getElementById('officeApprovalNotes').value||'').trim();
+  const actionLabel=decision==='approved'?'approve':'reject';
+  if(!confirm('Confirm '+actionLabel+' for this office expense record?')) return;
+  const d=await api('/api/office-expense-decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:officeModalId,decision,approval_notes:notes})});
+  if(d&&d.success){
+    alert('Office expense record updated successfully.');
+    closeOfficeExpenseModal();
+    loadOfficeExpenses();
+  }else alert((d&&d.error)||'Failed');
+}
+async function quickOfficeDecision(id,decision){
+  if(USER_ROLE!=='admin') return;
+  const row=(officeExpenseRows||[]).find(x=>Number(x.id)===Number(id));
+  if(!row){alert('Office expense record not found');return;}
+  const actionLabel=decision==='approved'?'Approval':'Rejection';
+  const notes=prompt(actionLabel+' notes (optional):', row.approval_notes||'');
+  if(notes===null) return;
+  const d=await api('/api/office-expense-decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,decision,approval_notes:String(notes).trim()})});
+  if(d&&d.success){
+    alert('Office expense record updated successfully.');
+    loadOfficeExpenses();
+  }else alert((d&&d.error)||'Failed');
+}
+async function saveOfficeExpense(){
+  const data={
+    expense_date:document.getElementById('oeDate').value||'',
+    category:document.getElementById('oeCategory').value,
+    description:document.getElementById('oeDescription').value.trim(),
+    vendor_name:document.getElementById('oeVendor').value.trim(),
+    amount:Number(document.getElementById('oeAmount').value||0),
+    payment_mode:document.getElementById('oePaymentMode').value,
+    bill_number:document.getElementById('oeBillNumber').value.trim(),
+    remarks:document.getElementById('oeRemarks').value.trim()
+  };
+  if(!data.expense_date){alert('Expense date is required');return;}
+  if(!data.description){alert('Description is required');return;}
+  if(!(data.amount>0)){alert('Enter a valid amount');return;}
+  const d=await api('/api/office-expenses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(d&&d.success){
+    alert('Office expense submitted successfully. Record number: '+(d.record_number||'Pending'));
+    document.getElementById('oeDescription').value='';
+    document.getElementById('oeVendor').value='';
+    document.getElementById('oeAmount').value='';
+    document.getElementById('oeBillNumber').value='';
+    document.getElementById('oeRemarks').value='';
+    loadOfficeExpenses();
+  }else alert((d&&d.error)||'Failed');
+}
+async function saveOfficeExpenseEdit(){
+  if(USER_ROLE!=='admin' || !(officeModalId>0)) return;
+  const data={
+    id:officeModalId,
+    expense_date:document.getElementById('officeEditDate').value||'',
+    category:document.getElementById('officeEditCategory').value,
+    description:document.getElementById('officeEditDescription').value.trim(),
+    vendor_name:document.getElementById('officeEditVendor').value.trim(),
+    amount:Number(document.getElementById('officeEditAmount').value||0),
+    payment_mode:document.getElementById('officeEditPaymentMode').value,
+    bill_number:document.getElementById('officeEditBillNumber').value.trim(),
+    remarks:document.getElementById('officeEditRemarks').value.trim(),
+    correction_reason:document.getElementById('officeCorrectionReason').value.trim()
+  };
+  if(!data.expense_date){alert('Expense date is required');return;}
+  if(!data.description){alert('Description is required');return;}
+  if(!(data.amount>0)){alert('Enter a valid amount');return;}
+  if(!data.correction_reason){alert('Correction reason is required');return;}
+  const d=await api('/api/office-expense-update',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(d&&d.success){
+    alert('Office expense corrected successfully.');
+    closeOfficeExpenseModal();
+    loadOfficeExpenses();
+  }else alert((d&&d.error)||'Failed');
+}
+
+async function loadOfficeExpenses(){
+  const d=await api('/api/office-expenses');
+  if(!d||!d.success)return;
+  officeExpenseRows=d.rows||[];
+  const s=d.summary||{};
+  const cards=document.getElementById('officeSummaryCards');
+  if(cards) cards.innerHTML=`
+    <div class="summary-card"><div class="k">Approved Office Expenses</div><div class="v">${fmt(s.approved_total)}</div><div class="s">${Number(s.approved_count||0)} approved record(s)</div></div>
+    <div class="summary-card"><div class="k">Pending Expenses</div><div class="v">${fmt(s.pending_total)}</div><div class="s">${Number(s.pending_count||0)} pending record(s)</div></div>
+    <div class="summary-card"><div class="k">Rejected Expenses</div><div class="v">${fmt(s.rejected_total)}</div><div class="s">${Number(s.rejected_count||0)} rejected record(s)</div></div>
+    <div class="summary-card"><div class="k">Net Cash Available</div><div class="v">${fmt(s.net_cash_available)}</div><div class="s">Raw cash in hand ${fmt(s.raw_cash_in_hand)} KWD less approved office expenses</div></div>`;
+  let h='<thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Vendor</th><th>Amount</th><th>Status</th><th>Entered By</th><th>Approved By</th><th>Approval Date</th><th>Bill Number</th><th>Edited</th><th>Actions</th></tr></thead><tbody>';
+  (officeExpenseRows||[]).forEach(r=>{
+    const actions=[`<button class="btn gray" onclick="openOfficeExpenseModal(${Number(r.id)||0},'view')">View</button>`,`<a href="/print/office-expense-record?id=${r.id}" target="_blank" class="action-link">Print Record</a>`];
+    if(USER_ROLE==='admin'){
+      actions.push(`<button class="btn" onclick="quickOfficeDecision(${Number(r.id)||0},'approved')">Approve</button>`);
+      actions.push(`<button class="btn warn" onclick="quickOfficeDecision(${Number(r.id)||0},'rejected')">Reject</button>`);
+      actions.push(`<button class="btn gray" onclick="openOfficeExpenseModal(${Number(r.id)||0},'edit')">Edit</button>`);
+    }
+    h+=`<tr><td>${esc(r.expense_date||'-')}</td><td>${esc(r.category_label||officeCategoryLabel(r.category))}</td><td>${esc(r.description||'-')}</td><td>${esc(r.vendor_name||'-')}</td><td>${fmt(r.amount)} KWD</td><td>${officeStatusHtml(r.status)}</td><td>${esc(r.entered_by||'-')}</td><td>${esc(r.approved_by||'-')}</td><td>${esc(r.approved_at||'-')}</td><td>${esc(r.bill_number||'-')}</td><td>${officeEditedHtml(r)}</td><td><div class="table-actions">${actions.join('')}</div></td></tr>`;
+  });
+  h+='</tbody>';
+  const t=document.getElementById('officeTbl');
+  if(t)t.innerHTML=h;
+}
+
+document.getElementById('oeDate').value=new Date().toISOString().slice(0,10);
 loadSettlement();
+loadOfficeExpenses();
 </script></body></html>"""
 
 LOGIN_PAGE = """<!DOCTYPE html>
