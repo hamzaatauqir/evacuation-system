@@ -5190,10 +5190,10 @@ def _nv_release_hint(user, record, has_linked_nv):
     if not has_linked_nv:
         return 'No linked Note Verbal available.'
     if role == 'admin':
-        return 'Admin may release a controlled NV copy or open the master file.'
+        return 'Admin may release a selective applicant NV copy or open the master file.'
     if role in ('operator', 'operator_special'):
         if _nv_release_fee_paid(record):
-            return 'Controlled copy will be generated through the secure release system.'
+            return 'Selective applicant copy will be generated through the secure release system.'
         return 'Available after fee payment or waiver.'
     return 'You do not have permission to access Note Verbals.'
 
@@ -5214,6 +5214,27 @@ def _controlled_nv_renderer_user_message(user=None):
     if _is_admin_user(user):
         return base + ' Admin action required: install PyMuPDF on Render and redeploy.'
     return base + ' Please contact admin.'
+
+
+def _log_admin_area_event(action, session_user, area, client_ip='', user_agent='', extra=None):
+    details = {
+        'area': str(area or '').strip(),
+        'role': (session_user or {}).get('role', ''),
+        'client_ip': client_ip or '',
+        'user_agent': user_agent or '',
+        'timestamp': _nv_now_iso(),
+    }
+    if extra:
+        details.update(extra)
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES (?, 0, ?, ?)",
+            [action, (session_user or {}).get('user', 'system'), json.dumps(details)]
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 def _nv_parse_dt(value):
@@ -5449,6 +5470,285 @@ def create_nv_release_token(db, source_table, source_record_id, record, master_n
     }
 
 
+def normalize_passport_for_nv_match(value):
+    return normalize_passport_number(value)
+
+
+def normalize_name_for_nv_match(value):
+    return _nv_normalize_name_for_match(value)
+
+
+def _nv_record_point_of_entry(source_table, record):
+    if not isinstance(record, dict):
+        return ''
+    if source_table == 'evacuees':
+        candidates = (
+            record.get('border_crossing'),
+            record.get('departure_airport'),
+            record.get('destination_country'),
+            record.get('saudi_city'),
+        )
+    else:
+        candidates = (
+            record.get('border_crossing'),
+            record.get('entry_point'),
+            record.get('current_location'),
+            record.get('current_city'),
+            record.get('travel_route'),
+        )
+    for raw in candidates:
+        s = str(raw or '').strip()
+        if s:
+            return s
+    return ''
+
+
+def _nv_collect_page_text_for_match(master_pdf_path):
+    pdf_path = str(master_pdf_path)
+    pages = {}
+    for item in (_embedded_pdf_pages_for_parse(pdf_path) or []):
+        if not isinstance(item, tuple) or len(item) < 2:
+            continue
+        try:
+            page_no = int(item[0])
+        except Exception:
+            continue
+        txt = str(item[1] or '').strip()
+        if txt:
+            pages[page_no] = txt
+    if pages:
+        return pages
+    if _controlled_nv_renderer_available():
+        src = None
+        try:
+            src = fitz.open(pdf_path)
+            for idx, page in enumerate(src, start=1):
+                txt = str(page.get_text("text") or '').strip()
+                if txt:
+                    pages[idx] = txt
+        except Exception:
+            pass
+        finally:
+            try:
+                if src is not None:
+                    src.close()
+            except Exception:
+                pass
+    return pages
+
+
+def _nv_page_match_info(page_text, applicant_name, passport_no):
+    text = str(page_text or '')
+    upper_text = normalize_name_for_nv_match(text)
+    compact_text = _nv_compact_text(text)
+    passport_norm = normalize_passport_for_nv_match(passport_no)
+    name_compact = _nv_compact_text(normalize_name_for_nv_match(applicant_name))
+    name_tokens = _nv_significant_name_tokens(applicant_name)
+    token_hits = [tok for tok in name_tokens if tok in upper_text]
+    exact_passport = bool(passport_norm and passport_norm in compact_text)
+    score = 0
+    strong_combo = False
+    if exact_passport:
+        score = 100
+        if name_compact and name_compact in compact_text:
+            score += 8
+            strong_combo = True
+        elif len(token_hits) >= 2:
+            score += 5
+            strong_combo = True
+        elif len(token_hits) >= 1:
+            score += 2
+    elif passport_norm and len(passport_norm) >= 6 and passport_norm[-6:] in compact_text and len(token_hits) >= 2:
+        score = 88
+    elif name_compact and len(name_compact) >= 10 and name_compact in compact_text:
+        score = 74
+    elif len(token_hits) >= 3:
+        score = 68
+    lines = [ln.strip() for ln in re.split(r'[\r\n]+', text) if str(ln or '').strip()]
+    line_index = -1
+    for idx, line in enumerate(lines):
+        line_compact = _nv_compact_text(line)
+        line_upper = normalize_name_for_nv_match(line)
+        if passport_norm and passport_norm in line_compact:
+            line_index = idx
+            break
+        if name_compact and name_compact in line_compact:
+            line_index = idx
+            break
+        if len([tok for tok in name_tokens if tok in line_upper]) >= 2:
+            line_index = idx
+            break
+    return {
+        'score': score,
+        'passport_exact': exact_passport,
+        'strong_combo': strong_combo,
+        'token_hits': token_hits[:6],
+        'line_index': line_index,
+        'line_count': len(lines),
+    }
+
+
+def _nv_should_include_following_page(current_info, next_info):
+    if not current_info:
+        return False
+    if next_info and next_info.get('passport_exact'):
+        return True
+    if next_info and int(next_info.get('score') or 0) >= 88:
+        return True
+    line_count = int(current_info.get('line_count') or 0)
+    line_index = int(current_info.get('line_index') or -1)
+    if line_count <= 0 or line_index < 0:
+        return False
+    return line_index >= max(line_count - 4, int(line_count * 0.78))
+
+
+def find_applicant_nv_pages(master_pdf_path, release_row):
+    source_table = str(release_row.get('source_table') or '').strip()
+    source_id = int(release_row.get('source_record_id') or 0)
+    db = get_db()
+    try:
+        record = _nv_fetch_record(db, source_table, source_id)
+        link_row = _nv_best_link_for_record(db, source_table, source_id)
+    finally:
+        db.close()
+    if not record:
+        raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because the applicant record is missing.')
+    applicant_name = str((record.get('name') or record.get('full_name') or release_row.get('applicant_name') or '')).strip()
+    passport_no = str((record.get('passport') or record.get('passport_number') or release_row.get('passport_no') or '')).strip()
+    if not applicant_name or not passport_no:
+        raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because applicant identity details are incomplete.')
+    page_texts = _nv_collect_page_text_for_match(master_pdf_path)
+    total_pages = max(int(_pdf_page_count(str(master_pdf_path)) or 0), max(page_texts.keys()) if page_texts else 0)
+    if total_pages <= 0:
+        raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because the linked Note Verbal pages could not be read.')
+    if not page_texts:
+        raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because the applicant page could not be searched confidently in the linked Note Verbal.')
+    candidates = []
+    for page_no in range(1, total_pages + 1):
+        txt = page_texts.get(page_no)
+        if not txt:
+            continue
+        info = _nv_page_match_info(txt, applicant_name, passport_no)
+        if int(info.get('score') or 0) > 0:
+            candidates.append((page_no, info))
+    candidates.sort(key=lambda item: (-int(item[1].get('score') or 0), item[0]))
+    if not candidates or int(candidates[0][1].get('score') or 0) < 90:
+        raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because the applicant could not be located confidently in the linked Note Verbal.')
+    best_page, best_info = candidates[0]
+    next_best = candidates[1] if len(candidates) > 1 else None
+    if next_best and next_best[0] != best_page + 1:
+        next_score = int(next_best[1].get('score') or 0)
+        if next_score >= int(best_info.get('score') or 0) - 1 and next_best[1].get('passport_exact'):
+            raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because multiple applicant-page matches were found and manual admin review is required.')
+    lead_pages = [p for p in (1, 2) if p <= total_pages]
+    tail_pages = []
+    if best_page not in lead_pages:
+        tail_pages.append(best_page)
+    next_page = best_page + 1
+    next_info = _nv_page_match_info(page_texts.get(next_page, ''), applicant_name, passport_no) if next_page <= total_pages else None
+    include_following = next_page <= total_pages and _nv_should_include_following_page(best_info, next_info)
+    if include_following and next_page not in lead_pages and next_page not in tail_pages:
+        tail_pages.append(next_page)
+    return {
+        'record': record,
+        'link_row': link_row or {},
+        'applicant_page': best_page,
+        'include_following_page': include_following,
+        'page_numbers': lead_pages + tail_pages,
+        'total_pages': total_pages,
+        'match_score': int(best_info.get('score') or 0),
+    }
+
+
+def _nv_selective_detail_html(release_row, record, link_row):
+    applicant_name = esc(record.get('name') or record.get('full_name') or release_row.get('applicant_name') or '')
+    passport_no = esc(record.get('passport') or record.get('passport_number') or release_row.get('passport_no') or '')
+    point_of_entry = esc(_nv_record_point_of_entry(release_row.get('source_table'), record) or '—')
+    nv_number = esc(record.get('note_verbal_number') or link_row.get('note_verbal_number') or '')
+    nv_date = esc(record.get('note_verbal_date') or link_row.get('note_verbal_date') or '')
+    nv_serial = esc(record.get('mofa_approval_serial') or '')
+    return f"""
+    <div style="font-family:Helvetica,Arial,sans-serif;font-size:12px;line-height:1.45;color:#1f2937">
+      <div style="border:2px solid #1b5e20;border-radius:14px;padding:22px 24px;background:#f9fff5">
+        <div style="font-size:18px;font-weight:700;color:#1b5e20;margin-bottom:6px">Selective Applicant Note Verbal Copy</div>
+        <div style="font-size:12px;margin-bottom:12px">Issued only for the applicant identified below. This selective copy is intended for border facilitation and does not replace the protected master Note Verbal.</div>
+        <div dir="rtl" style="font-size:14px;font-weight:700;color:#1b5e20;text-align:right;margin-bottom:8px">نسخة انتقائية تخص مقدم الطلب المذكور أدناه فقط</div>
+        <div dir="rtl" style="font-size:11px;text-align:right;color:#374151;margin-bottom:16px">هذه النسخة صادرة لتسهيل إجراءات الحدود للمذكور أدناه ولا تمثل النسخة الأصلية الكاملة من المذكرة.</div>
+        <table style="width:100%;border-collapse:collapse">
+          <tr>
+            <td style="width:50%;padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top"><strong>Applicant Name</strong><br>{applicant_name}</td>
+            <td style="width:50%;padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top;text-align:right" dir="rtl"><strong>اسم مقدم الطلب</strong><br>{applicant_name}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top"><strong>Passport Number</strong><br>{passport_no}</td>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top;text-align:right" dir="rtl"><strong>رقم الجواز</strong><br>{passport_no}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top"><strong>Point of Entry</strong><br>{point_of_entry}</td>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top;text-align:right" dir="rtl"><strong>منفذ الدخول</strong><br>{point_of_entry}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top"><strong>Note Verbal Number</strong><br>{nv_number or '—'}</td>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top;text-align:right" dir="rtl"><strong>رقم المذكرة</strong><br>{nv_number or '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top"><strong>Applicant List Serial</strong><br>{nv_serial or '—'}</td>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top;text-align:right" dir="rtl"><strong>مسلسل الاسم في المذكرة</strong><br>{nv_serial or '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top"><strong>Date</strong><br>{nv_date or '—'}</td>
+            <td style="padding:8px 10px;border:1px solid #d6e7ca;vertical-align:top;text-align:right" dir="rtl"><strong>التاريخ</strong><br>{nv_date or '—'}</td>
+          </tr>
+        </table>
+        <div style="margin-top:16px;font-size:11px;color:#4b5563">Border officers may compare this selective copy with the corresponding applicant details and the official master record retained by the Embassy.</div>
+      </div>
+    </div>
+    """
+
+
+def _nv_insert_selective_detail_page(out_doc, page_width, page_height, release_row, record, link_row):
+    page = out_doc.new_page(width=page_width, height=page_height)
+    html = _nv_selective_detail_html(release_row, record, link_row)
+    rect = fitz.Rect(34, 42, page_width - 34, page_height - 42)
+    try:
+        inserted = False
+        if hasattr(page, 'insert_htmlbox'):
+            rc = page.insert_htmlbox(rect, html)
+            inserted = rc is not None
+        if inserted:
+            return
+    except Exception:
+        pass
+    fallback_lines = [
+        "Selective Applicant Note Verbal Copy",
+        "Issued only for the applicant identified below.",
+        "",
+        f"Applicant Name / اسم مقدم الطلب: {record.get('name') or record.get('full_name') or release_row.get('applicant_name') or ''}",
+        f"Passport Number / رقم الجواز: {record.get('passport') or record.get('passport_number') or release_row.get('passport_no') or ''}",
+        f"Point of Entry / منفذ الدخول: {_nv_record_point_of_entry(release_row.get('source_table'), record) or '—'}",
+        f"Note Verbal Number / رقم المذكرة: {record.get('note_verbal_number') or link_row.get('note_verbal_number') or ''}",
+        f"Applicant List Serial / مسلسل الاسم في المذكرة: {record.get('mofa_approval_serial') or '—'}",
+        f"Date / التاريخ: {record.get('note_verbal_date') or link_row.get('note_verbal_date') or ''}",
+        "",
+        "This selective copy is issued for border facilitation of the named applicant.",
+    ]
+    page.insert_textbox(
+        rect,
+        "\n".join(fallback_lines),
+        fontsize=12,
+        fontname='helv',
+        color=(0.18, 0.22, 0.20),
+        align=0,
+        overlay=True,
+    )
+
+
+def _open_release_pdf_source(pdf_source):
+    if isinstance(pdf_source, (bytes, bytearray)):
+        return fitz.open(stream=bytes(pdf_source), filetype='pdf')
+    return fitz.open(str(pdf_source))
+
+
 def _nv_release_watermark_text(release_row):
     applicant_name = str(release_row.get('applicant_name') or '').strip()
     passport_no = str(release_row.get('passport_no') or '').strip()
@@ -5512,10 +5812,10 @@ def _apply_nv_release_watermark_to_page(page, release_row):
     )
 
 
-def render_hardened_nv_release_pdf(master_pdf_path, release_row, dpi=160):
+def render_hardened_nv_release_pdf(master_pdf_source, release_row, dpi=160):
     if not _controlled_nv_renderer_available():
         raise RuntimeError('Controlled NV rendering dependency is unavailable')
-    src = fitz.open(str(master_pdf_path))
+    src = _open_release_pdf_source(master_pdf_source)
     out = fitz.open()
     zoom = max(float(dpi or 160), 120.0) / 72.0
     try:
@@ -5535,8 +5835,8 @@ def render_hardened_nv_release_pdf(master_pdf_path, release_row, dpi=160):
         out.set_metadata({
             'title': str(release_row.get('released_copy_filename') or 'Embassy controlled NV copy'),
             'author': 'Pakistan Embassy Kuwait',
-            'subject': 'Controlled Note Verbal release copy',
-            'keywords': 'note verbal, embassy controlled copy, border facilitation',
+            'subject': 'Selective controlled Note Verbal release copy',
+            'keywords': 'note verbal, embassy controlled copy, selective applicant copy, border facilitation',
             'creator': 'Citizen Support for Transit KSA System',
             'producer': 'Citizen Support for Transit KSA System (hardened NV release)',
         })
@@ -5546,8 +5846,45 @@ def render_hardened_nv_release_pdf(master_pdf_path, release_row, dpi=160):
         out.close()
 
 
+def render_selective_applicant_nv_copy(master_pdf_path, release_row):
+    if not _controlled_nv_renderer_available():
+        raise RuntimeError('Controlled NV rendering dependency is unavailable')
+    plan = find_applicant_nv_pages(master_pdf_path, release_row)
+    src = fitz.open(str(master_pdf_path))
+    selective_doc = fitz.open()
+    try:
+        if len(src) <= 0:
+            raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because the linked Note Verbal has no readable pages.')
+        first_rect = src[0].rect
+        lead_pages = [p for p in (1, 2) if p <= len(src)]
+        tail_pages = [p for p in (plan.get('page_numbers') or []) if p not in lead_pages]
+        for pno in lead_pages:
+            selective_doc.insert_pdf(src, from_page=pno - 1, to_page=pno - 1)
+        _nv_insert_selective_detail_page(
+            selective_doc,
+            first_rect.width,
+            first_rect.height,
+            release_row,
+            plan.get('record') or {},
+            plan.get('link_row') or {},
+        )
+        for pno in tail_pages:
+            selective_doc.insert_pdf(src, from_page=pno - 1, to_page=pno - 1)
+        return selective_doc.tobytes(garbage=3, deflate=True), {
+            'page_numbers': plan.get('page_numbers') or [],
+            'applicant_page': plan.get('applicant_page') or 0,
+            'include_following_page': 1 if plan.get('include_following_page') else 0,
+            'detail_page_inserted': 1,
+            'match_score': plan.get('match_score') or 0,
+        }
+    finally:
+        src.close()
+        selective_doc.close()
+
+
 def render_controlled_nv_copy(master_pdf_path, release_row):
-    return render_hardened_nv_release_pdf(master_pdf_path, release_row, dpi=160)
+    selective_pdf, meta = render_selective_applicant_nv_copy(master_pdf_path, release_row)
+    return render_hardened_nv_release_pdf(selective_pdf, release_row, dpi=160), meta
 
 def api_nv_upload(file_data, original_filename, data, user):
     """Save uploaded NV PDF and queue for deterministic processing.
@@ -11746,12 +12083,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'note_verbal_uploads',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_nv_uploads(params))
         elif path == '/api/note-verbal-links':
             user = self.require_auth()
             if not user: return
             if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'note_verbal_links',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_nv_links(params))
         elif path == '/api/nv-link-review':
@@ -11816,7 +12163,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     master_path = NOTE_VERBAL_UPLOADS_DIR / str(master['file_path'] or '')
                     if not master_path.exists():
                         self.send_html('<p>The linked master Note Verbal file is missing on server.</p>', 404); return
-                    pdf_body = render_controlled_nv_copy(master_path, rel)
+                    pdf_body, render_meta = render_controlled_nv_copy(master_path, rel)
                     used_at = _nv_now_iso()
                     db.execute("UPDATE nv_release_log SET token_used_at = ? WHERE id = ?", [used_at, rel['id']])
                     log_nv_release_event(
@@ -11824,7 +12171,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         applicant_name=rel.get('applicant_name', ''), passport_no=rel.get('passport_no', ''),
                         tracking_id=rel.get('tracking_id', ''), release_mode=rel.get('release_mode', ''),
                         token_id=token_id, client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
-                        extra={'used_at': used_at},
+                        extra={'used_at': used_at, **(render_meta or {})},
                     )
                     db.commit()
                 finally:
@@ -11892,10 +12239,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         db2.close()
                 except Exception as log_exc:
                     print(f"[NV Release] failed to persist render failure log: {log_exc}", flush=True)
-                msg = _controlled_nv_renderer_user_message(user) if not _controlled_nv_renderer_available() else (
-                    'Controlled Note Verbal copy generation is temporarily unavailable. Please contact admin.'
-                )
-                status = 503 if not _controlled_nv_renderer_available() else 500
+                err_text = str(e or '').strip()
+                if not _controlled_nv_renderer_available():
+                    msg = _controlled_nv_renderer_user_message(user)
+                    status = 503
+                elif err_text.startswith('Selective applicant Note Verbal copy could not be prepared'):
+                    msg = err_text
+                    if _is_admin_user(user):
+                        msg += ' Admin can still open the full master Note Verbal separately.'
+                    else:
+                        msg += ' Please contact admin for review.'
+                    status = 422
+                else:
+                    msg = 'Controlled Note Verbal copy generation is temporarily unavailable. Please contact admin.'
+                    status = 500
                 self.send_html(f"<p>{esc(msg)}</p>", status)
         elif path == '/note-verbal-file':
             try:
@@ -12067,22 +12424,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/approval-review':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
-                self.send_json({'error': 'Unauthorized'}, 403); return
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_review',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
+                self.send_html('<p>Forbidden.</p>', 403); return
+            _log_admin_area_event(
+                'admin_area_accessed', user, 'approval_review',
+                client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                extra={'path': path}
+            )
             html = APPROVAL_REVIEW_PAGE.replace('__USER_NAME__', esc(user['user']))
             self.send_html(html)
 
         elif path == '/api/approval-batches':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_batches',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_approval_batches_list())
 
         elif path == '/api/approval-review':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_batch_review_api',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path, 'batch_id': (params.get('batch_id') or '').strip()}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             batch_id = (params.get('batch_id') or '').strip()
             if not batch_id:
@@ -12099,7 +12476,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-export':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_export',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path, 'batch_id': (params.get('batch_id') or '').strip()}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             batch_id = (params.get('batch_id') or '').strip()
             ex_type = (params.get('type') or 'pdf_not_found').strip()
@@ -12118,7 +12500,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/approval-search':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_search',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path, 'q': (params.get('q') or '').strip()}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             q = (params.get('q') or '').strip()
             self.send_json(api_approval_search_portal(q, params.get('batch_id')))
@@ -13845,7 +14232,12 @@ function printBoth(){{
         elif path == '/api/approval-upload':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_upload',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             ct = self.headers.get('Content-Type', '')
             orig, raw = extract_multipart_upload(body, ct)
@@ -13858,7 +14250,12 @@ function printBoth(){{
         elif path == '/api/approval-parse':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_parse',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -13872,7 +14269,12 @@ function printBoth(){{
         elif path == '/api/approval-apply':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_apply',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -13898,7 +14300,12 @@ function printBoth(){{
         elif path == '/api/approval-batch-nv':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_batch_nv',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -13916,7 +14323,12 @@ function printBoth(){{
         elif path == '/api/approval-row-update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_row_update',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -13931,7 +14343,12 @@ function printBoth(){{
         elif path == '/api/approval-rematch':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_rematch',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body)
@@ -13945,7 +14362,12 @@ function printBoth(){{
         elif path == '/api/approval-search':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if user['role'] != 'admin':
+                _log_admin_area_event(
+                    'admin_area_access_denied', user, 'approval_search_post',
+                    client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                    extra={'path': path}
+                )
                 self.send_json({'error': 'Unauthorized'}, 403); return
             # GET-style via POST body for consistency with other approval APIs
             try:
@@ -18035,7 +18457,7 @@ No deterioration in ground security situation so far.</textarea>
 <div id="visaCsvDetails" class="imp-result" style="max-height:300px;overflow-y:auto;font-size:.82em;background:#f9f9f9;padding:10px;border-radius:6px"></div>
 </div>
 </div>
-<div id="approvalPdfSection" class="fs" style="border-left:3px solid #1b5e20;background:linear-gradient(135deg,#f1f8e9,#fff);scroll-margin-top:88px">
+<div id="approvalPdfSection" class="fs" style="border-left:3px solid #1b5e20;background:linear-gradient(135deg,#f1f8e9,#fff);scroll-margin-top:88px" data-admin-only>
 <h3 style="color:#1b5e20">MOFA approval PDF (OCR workflow)</h3>
 <p style="margin-bottom:10px;font-size:.88em;color:var(--tl);line-height:1.45">Upload scanned approval lists from authorities. The system runs OCR, matches on <strong>passport number</strong>, and requires staff review before any record is marked <strong>Approved</strong>. After applying updates, use <strong>Print Embassy Letter</strong> on each record once travel details are complete.</p>
 <form id="approvalPdfForm" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px" onsubmit="return approvalPdfUpload(event)">
@@ -18231,8 +18653,8 @@ No deterioration in ground security situation so far.</textarea>
 
 <div class="mo" id="nvReleaseModal"><div class="ml" style="max-width:520px">
 <button class="cb" onclick="closeNvReleaseModal()">&times;</button>
-<h3 id="nvReleaseTitle">Release Border NV Copy</h3>
-<p id="nvReleaseMeta" style="font-size:.84em;color:#556;line-height:1.45;margin:8px 0 12px">Generate a one-time controlled copy of the linked full Note Verbal. The token stays valid for 15 minutes and can only be used once.</p>
+<h3 id="nvReleaseTitle">Release Applicant NV Copy</h3>
+<p id="nvReleaseMeta" style="font-size:.84em;color:#556;line-height:1.45;margin:8px 0 12px">Generate a one-time selective applicant Note Verbal copy. The token stays valid for 15 minutes and can only be used once.</p>
 <div class="fg">
 <div class="fgp"><label>Release mode</label><select id="nvReleaseMode"></select></div>
 <div class="fgp"><label>Reason code</label><select id="nvReleaseReasonCode">
@@ -18265,6 +18687,10 @@ if((status==='Departed'||status==='Returned')&&!document.getElementById('e_depar
 document.getElementById('e_departure_date').value=new Date().toISOString().slice(0,10);
 }}
 function go(tab,btn){
+if(tab==='admin'&&USER_ROLE!=='admin'){
+toast('Admin access only');
+return;
+}
 document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));
 document.getElementById('tab-'+tab).classList.add('active');
@@ -18272,6 +18698,7 @@ btn.classList.add('active');
 if(tab==='dash')loadDash();if(tab==='recs')loadRecords();if(tab==='mofa')loadMofaData();if(tab==='admin')loadAdmin();if(tab==='returnees'){loadReturneesStats();loadReturnees()}if(tab==='review')loadReviewQueue();if(tab==='iraq-public')loadIraqPublicPortal();if(tab==='fee-report')loadFeeStatement();
 }
 function goToApprovalPdfSection(){
+if(USER_ROLE!=='admin'){toast('Admin access only');return;}
 const admBtn=[...document.querySelectorAll('.nav button')].find(b=>(b.textContent||'').trim()==='Admin');
 if(admBtn) go('admin',admBtn);
 setTimeout(()=>{const el=document.getElementById('approvalPdfSection');if(el) el.scrollIntoView({behavior:'smooth',block:'start'})},500);
@@ -18643,7 +19070,7 @@ const nvLabelAdmin=vq(r.linked_nv_filename||'Master PDF');
 const nvLabelUser='Linked full Note Verbal available';
 const lastRelease=(r.last_nv_release_at&&USER_ROLE==='admin')?('Last release: '+vq(r.last_nv_release_at||'')+' by '+vq(r.last_nv_release_by||'')+' ('+vq(r.last_nv_release_mode||'')+')'):'';
 const showNvCopyActions=(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')&&nvLinked;
-const nvCopyHelp=!nvLinked?'No linked Note Verbal available.':(r.can_release_nv?'Controlled copy will be generated through the secure release system.':'Available after fee payment or waiver.');
+const nvCopyHelp=!nvLinked?'No linked Note Verbal available.':(r.can_release_nv?'Selective applicant copy will be generated through the secure release system.':'Available after fee payment or waiver.');
 if(USER_ROLE!=='viewer'){
 html+=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#1b5e20;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #c8e6c9;margin-bottom:8px">Embassy letter \u2014 Note verbal &amp; approval</div>
 <p style="font-size:.78em;color:#666;margin:0 0 10px;line-height:1.45">Enter or correct <strong>Note Verbal number</strong> and <strong>date</strong> manually, then click <strong>Save these fields</strong>. They are stored on this applicant and used for the printable embassy letter (with travel details and MOFA list serial).</p>
@@ -18662,9 +19089,9 @@ ${r.can_review_nv_link?`<div id="nvLinkReviewBox" style="margin:8px 0 10px;paddi
 <div style="margin:8px 0 10px;padding:12px;border:1px solid #c8e6c9;border-radius:9px;background:#f7fcf4">
 <div style="font-weight:700;font-size:.82em;color:#1b5e20;text-transform:uppercase;letter-spacing:.45px;margin-bottom:8px">Note Verbal Copy</div>
 ${showNvCopyActions?`<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-<button type="button" class="btn btn-p" style="padding:8px 14px;min-height:36px;border-radius:8px;font-size:.84em;font-weight:700" ${nvReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('evacuees', ${Number(r.id)||0}, '${escJsAttr(String(r.name||''))}', 'print')">🖨 Print Official NV Copy</button>
-<button type="button" class="btn btn-i" style="padding:8px 14px;min-height:36px;border-radius:8px;font-size:.84em;font-weight:700" ${nvReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('evacuees', ${Number(r.id)||0}, '${escJsAttr(String(r.name||''))}', 'whatsapp')">📲 WhatsApp NV Copy</button>
-<button type="button" class="btn" style="padding:8px 14px;min-height:36px;border-radius:8px;font-size:.84em;font-weight:700;background:#546e7a;color:#fff" ${nvReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('evacuees', ${Number(r.id)||0}, '${escJsAttr(String(r.name||''))}', 'resend')">🔁 Re-send NV Copy</button>
+<button type="button" class="btn btn-p" style="padding:8px 14px;min-height:36px;border-radius:8px;font-size:.84em;font-weight:700" ${nvReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('evacuees', ${Number(r.id)||0}, '${escJsAttr(String(r.name||''))}', 'print')">🖨 Print Applicant NV Copy</button>
+<button type="button" class="btn btn-i" style="padding:8px 14px;min-height:36px;border-radius:8px;font-size:.84em;font-weight:700" ${nvReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('evacuees', ${Number(r.id)||0}, '${escJsAttr(String(r.name||''))}', 'whatsapp')">📲 WhatsApp Applicant NV Copy</button>
+<button type="button" class="btn" style="padding:8px 14px;min-height:36px;border-radius:8px;font-size:.84em;font-weight:700;background:#546e7a;color:#fff" ${nvReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('evacuees', ${Number(r.id)||0}, '${escJsAttr(String(r.name||''))}', 'resend')">🔁 Re-send Applicant NV Copy</button>
 </div>`:''}
 <div style="font-size:.79em;color:${r.can_release_nv?'#558b2f':'#8d6e63'};margin-top:${showNvCopyActions?8:0}px">${nvCopyHelp}</div>
 </div>
@@ -18685,7 +19112,7 @@ html+=sec('Embassy Letter Approval',[
 html+=`<div style="margin:12px 0;padding:14px;background:#f8fbf4;border-radius:10px;border:1px solid #cfe3ba">
 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
 <button type="button" class="btn btn-p" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" ${lr?'':'disabled title="'+tip+'"'} onclick="if(!this.disabled)window.open('/print/embassy-letter?id='+viewRec.id,'_blank')">\ud83d\udcc4 Print Embassy Letter</button>
-${nvLinked&&USER_ROLE==='admin'?`<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open('/note-verbal-file?source=evacuees&id='+viewRec.id,'_blank')">\ud83d\uddd0 Open Master NV</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" onclick="window.open('/note-verbal-file?source=evacuees&id='+viewRec.id+'&download=1','_blank')">\u2b07 Download Master NV</button>`:''}
+${nvLinked&&USER_ROLE==='admin'?`<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open('/note-verbal-file?source=evacuees&id='+viewRec.id,'_blank')">\ud83d\uddd0 Open Master NV</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#1565c0;color:#fff" onclick="window.open('/note-verbal-file?source=evacuees&id='+viewRec.id,'_blank')">\ud83d\udda8 Print Full Master NV</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" onclick="window.open('/note-verbal-file?source=evacuees&id='+viewRec.id+'&download=1','_blank')">\u2b07 Download Master NV</button>`:''}
 ${nvLinked&&USER_ROLE==='admin'?`<button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#6d4c41;color:#fff" onclick="openNvReleaseModal('evacuees', ${Number(r.id)||0}, '${escJsAttr(String(r.name||''))}', 'emergency', '${escJsAttr(String(r.last_nv_release_at||''))}', '${escJsAttr(String(r.last_nv_release_by||''))}', '${escJsAttr(String(r.last_nv_release_mode||''))}')">Emergency Release Without Fee</button>`:''}
 </div>
 <div style="font-size:.8em;color:#558b2f;margin-top:8px">${lr?'Ready to print.':tip}</div></div>`;
@@ -18857,8 +19284,8 @@ modeEl.innerHTML=modes;
 const wanted=(defaultMode||'print');
 modeEl.value=((wanted==='print'||wanted==='whatsapp'||wanted==='resend')||(wanted==='emergency'&&USER_ROLE==='admin'))?wanted:'print';
 document.getElementById('nvReleaseReasonCode').value=wanted==='resend'?'resend_requested':(wanted==='emergency'?'active_travel_support':'paid_applicant_request');
-document.getElementById('nvReleaseTitle').textContent=(wanted==='emergency'?'Emergency NV Release':'Release Border NV Copy')+(applicantName?(' — '+applicantName):'');
-document.getElementById('nvReleaseMeta').textContent='Generate a one-time controlled full Note Verbal copy for this applicant. Every page will be marked with applicant, release, and fee-control details.';
+document.getElementById('nvReleaseTitle').textContent=(wanted==='emergency'?'Emergency Applicant NV Release':'Release Applicant NV Copy')+(applicantName?(' — '+applicantName):'');
+document.getElementById('nvReleaseMeta').textContent='Generate a one-time selective applicant Note Verbal copy for this record. The secure release flow will include the leading embassy pages, the applicant list page(s), and identifying applicant details.';
 const last=document.getElementById('nvReleaseLast');
 if(lastAt){
 last.textContent='Last release: '+String(lastAt||'')+(lastBy?(' by '+String(lastBy||'')):'')+(lastMode?(' ('+String(lastMode||'')+')'):'');
@@ -18900,7 +19327,7 @@ source:String(source||''),record_id:Number(recordId||0),release_mode:String(rele
 })});
 if(r&&r.success){
 if(popup) popup.location=r.url; else window.open(r.url,'_blank');
-toast('Controlled NV copy generated for '+String(applicantName||'applicant'));
+toast('Applicant NV copy generated for '+String(applicantName||'applicant'));
 if(viewRec&&Number(viewRec.id)===Number(recordId)&&String(source)==='evacuees') await openView(viewRec.id);
 if(_ippCur&&Number(_ippCur.id)===Number(recordId)&&String(source)==='iraq_public_submissions') await ippView(_ippCur.id);
 if(_iraqCurrentBatchId&&String(source)==='iraq_applicants') await openIraqDetail(_iraqCurrentBatchId);
@@ -19478,6 +19905,7 @@ document.getElementById('repContent').innerHTML=h}
 
 // ADMIN
 async function loadAdmin(){
+if(USER_ROLE!=='admin')return;
 const u=await api('/api/users');
 if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
 u.forEach(x=>{
@@ -20433,8 +20861,8 @@ h+=ippLastRelease?('<div style="font-size:.78em;color:#607d8b;margin:-4px 0 8px"
 h+='<div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Letter issued:</strong> '+ippLtrIssued+' &nbsp;|&nbsp; <strong>Print count:</strong> '+ippPrintCnt+'</div>';
 h+='<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">';
 h+='<button type="button" class="btn btn-p" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" '+(ippNvReady?'':'disabled title="'+ippLtrTip+'"')+' onclick="if(!this.disabled)window.open(\'/print/iraq-embassy-letter?source=public&id=\'+_ippCur.id,\'_blank\')">&#128196; Print Iraq Embassy Letter</button>';
-h+=ippNvLinked&&USER_ROLE==='admin'?('<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open(\'/note-verbal-file?source=iraq_public_submissions&id=\'+_ippCur.id,\'_blank\')">&#128194; Open Master NV</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" onclick="window.open(\'/note-verbal-file?source=iraq_public_submissions&id=\'+_ippCur.id+\'&download=1\',\'_blank\')">&#11015; Download Master NV</button>'):'';
-h+=ippNvLinked&&(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')?('<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" '+ippReleaseDisabled+' onclick="if(!this.disabled)openNvReleaseModal(\'iraq_public_submissions\','+Number(x.id||0)+',\''+escJsAttr(String(x.full_name||''))+'\',\'print\',\''+escJsAttr(String(x.last_nv_release_at||''))+'\',\''+escJsAttr(String(x.last_nv_release_by||''))+'\',\''+escJsAttr(String(x.last_nv_release_mode||''))+'\')">&#128206; Release Border NV Copy</button>'):'';
+h+=ippNvLinked&&USER_ROLE==='admin'?('<button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" onclick="window.open(\'/note-verbal-file?source=iraq_public_submissions&id=\'+_ippCur.id,\'_blank\')">&#128194; Open Master NV</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#1565c0;color:#fff" onclick="window.open(\'/note-verbal-file?source=iraq_public_submissions&id=\'+_ippCur.id,\'_blank\')">&#128424; Print Full Master NV</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#455a64;color:#fff" onclick="window.open(\'/note-verbal-file?source=iraq_public_submissions&id=\'+_ippCur.id+\'&download=1\',\'_blank\')">&#11015; Download Master NV</button>'):'';
+h+=ippNvLinked&&(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')?('<button type="button" class="btn btn-p" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" '+ippReleaseDisabled+' onclick="if(!this.disabled)quickNvRelease(\'iraq_public_submissions\','+Number(x.id||0)+',\''+escJsAttr(String(x.full_name||''))+'\',\'print\')">&#128424; Print Applicant NV Copy</button><button type="button" class="btn btn-i" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700" '+ippReleaseDisabled+' onclick="if(!this.disabled)quickNvRelease(\'iraq_public_submissions\','+Number(x.id||0)+',\''+escJsAttr(String(x.full_name||''))+'\',\'whatsapp\')">&#128241; WhatsApp Applicant NV Copy</button><button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#546e7a;color:#fff" '+ippReleaseDisabled+' onclick="if(!this.disabled)quickNvRelease(\'iraq_public_submissions\','+Number(x.id||0)+',\''+escJsAttr(String(x.full_name||''))+'\',\'resend\')">&#128260; Re-send Applicant NV Copy</button>'):'';
 h+=ippNvLinked&&USER_ROLE==='admin'?('<button type="button" class="btn" style="padding:9px 16px;min-height:38px;border-radius:9px;font-size:.86em;font-weight:700;background:#6d4c41;color:#fff" onclick="openNvReleaseModal(\'iraq_public_submissions\','+Number(x.id||0)+',\''+escJsAttr(String(x.full_name||''))+'\',\'emergency\',\''+escJsAttr(String(x.last_nv_release_at||''))+'\',\''+escJsAttr(String(x.last_nv_release_by||''))+'\',\''+escJsAttr(String(x.last_nv_release_mode||''))+'\')">Emergency Release Without Fee</button>'):'';
 h+='</div><div style="font-size:.8em;color:#558b2f;margin-top:8px">'+(ippNvReady?'Ready to print.':ippLtrTip)+'</div>';
 h+='</div>';
@@ -20516,16 +20944,19 @@ document.querySelectorAll('.nav button').forEach(b=>{
 const tab=b.textContent.trim();
 if(['New Registration','CSV Import','MOFA Export','Admin','MOFA Approval PDF','Iraq Public (MOFA KW)','Fee Reporting'].includes(tab)){b.style.display='none'}});
 document.querySelectorAll('.btn-d').forEach(b=>b.style.display='none');// hide delete buttons
+const adminTab=document.getElementById('tab-admin');if(adminTab)adminTab.style.display='none';
 }
 // Operator: same as admin for daily ops, but user management / SMTP / backups / audit are data-admin-only (hidden below)
 if(USER_ROLE==='operator'){
 document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
 document.querySelectorAll('[data-fee-report-nav]').forEach(el=>el.style.display='none');
+document.querySelectorAll('.nav button').forEach(b=>{const tab=(b.textContent||'').trim();if(tab==='Admin'||tab==='MOFA Approval PDF')b.style.display='none';});
+const adminTab=document.getElementById('tab-admin');if(adminTab)adminTab.style.display='none';
 }
 if(USER_ROLE==='operator_special'){
 document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
-const adm=[...document.querySelectorAll('.nav button')].find(b=>(b.textContent||'').trim()==='Admin');
-if(adm)adm.style.display='none';
+document.querySelectorAll('.nav button').forEach(b=>{const tab=(b.textContent||'').trim();if(tab==='Admin'||tab==='MOFA Approval PDF')b.style.display='none';});
+const adminTab=document.getElementById('tab-admin');if(adminTab)adminTab.style.display='none';
 }
 // Admin: full access (nothing hidden)
 }
@@ -20627,8 +21058,11 @@ const appReleaseHint=nvQ(a.nv_release_hint||'Release is not available.');
 const appReleaseDisabled=a.can_release_nv?'':'disabled title="'+appReleaseHint+'"';
 ah+=`<td><button type="button" class="btn btn-p" style="padding:3px 10px;font-size:.75em" ${(appNvOk&&appFeeClear)?'':'disabled title="'+(appFeeClear?'Fill NV fields first':'Fee must be paid or waived')+'"'} onclick="if(!this.disabled)window.open('/print/iraq-embassy-letter?source=applicant&id=${a.id}','_blank')">&#128196; Print</button>`;
 if(appNvLinked&&USER_ROLE==='admin') ah+=`<br><button type="button" class="btn btn-i" style="padding:2px 8px;font-size:.68em;margin-top:3px" onclick="window.open('/note-verbal-file?source=iraq_applicants&id=${a.id}','_blank')">&#128194; Open Master NV</button>`;
+if(appNvLinked&&USER_ROLE==='admin') ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#1565c0;color:#fff" onclick="window.open('/note-verbal-file?source=iraq_applicants&id=${a.id}','_blank')">&#128424; Print Full Master NV</button>`;
 if(appNvLinked&&USER_ROLE==='admin') ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#455a64;color:#fff" onclick="window.open('/note-verbal-file?source=iraq_applicants&id=${a.id}&download=1','_blank')">&#11015; Download Master NV</button>`;
-if(appNvLinked&&(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')) ah+=`<br><button type="button" class="btn btn-i" style="padding:2px 8px;font-size:.68em;margin-top:3px" ${appReleaseDisabled} onclick="if(!this.disabled)openNvReleaseModal('iraq_applicants', ${a.id}, '${escJsAttr(String(a.full_name||''))}', 'print', '${escJsAttr(String(a.last_nv_release_at||''))}', '${escJsAttr(String(a.last_nv_release_by||''))}', '${escJsAttr(String(a.last_nv_release_mode||''))}')">&#128206; Release NV Copy</button>`;
+if(appNvLinked&&(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')) ah+=`<br><button type="button" class="btn btn-p" style="padding:2px 8px;font-size:.68em;margin-top:3px" ${appReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('iraq_applicants', ${a.id}, '${escJsAttr(String(a.full_name||''))}', 'print')">&#128424; Print Applicant NV Copy</button>`;
+if(appNvLinked&&(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')) ah+=`<br><button type="button" class="btn btn-i" style="padding:2px 8px;font-size:.68em;margin-top:3px" ${appReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('iraq_applicants', ${a.id}, '${escJsAttr(String(a.full_name||''))}', 'whatsapp')">&#128241; WhatsApp Applicant NV Copy</button>`;
+if(appNvLinked&&(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')) ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#546e7a;color:#fff" ${appReleaseDisabled} onclick="if(!this.disabled)quickNvRelease('iraq_applicants', ${a.id}, '${escJsAttr(String(a.full_name||''))}', 'resend')">&#128260; Re-send Applicant NV Copy</button>`;
 if(appNvLinked&&USER_ROLE==='admin') ah+=`<br><button type="button" class="btn" style="padding:2px 8px;font-size:.68em;margin-top:3px;background:#6d4c41;color:#fff" onclick="openNvReleaseModal('iraq_applicants', ${a.id}, '${escJsAttr(String(a.full_name||''))}', 'emergency', '${escJsAttr(String(a.last_nv_release_at||''))}', '${escJsAttr(String(a.last_nv_release_by||''))}', '${escJsAttr(String(a.last_nv_release_mode||''))}')">Emergency NV</button>`;
 if(a.embassy_letter_print_count>0) ah+=`<br><span style="font-size:.68em;color:#999">Printed: ${a.embassy_letter_print_count}x</span>`;
 ah+=`</td></tr>`;
