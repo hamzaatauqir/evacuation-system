@@ -11,7 +11,7 @@ MOFA approval PDF parsing order: (1) pypdf text layer, (2) Poppler pdftotext CLI
 pip install pypdf. macOS: brew install poppler gives pdftotext without extra pip packages.
 """
 
-import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math
+import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta, date
@@ -20,14 +20,22 @@ from queue import Queue
 from email.message import EmailMessage
 from decimal import Decimal, ROUND_HALF_UP
 
-_FITZ_AVAILABLE = False
+HAVE_PYMUPDF = False
+PYMUPDF_IMPORT_ERROR = None
 fitz = None
 try:
     import fitz as _fitz  # PyMuPDF
     fitz = _fitz
-    _FITZ_AVAILABLE = True
-except ImportError:
-    pass
+    HAVE_PYMUPDF = True
+except Exception as exc:
+    fitz = None
+    HAVE_PYMUPDF = False
+    PYMUPDF_IMPORT_ERROR = str(exc)
+_FITZ_AVAILABLE = HAVE_PYMUPDF
+if HAVE_PYMUPDF:
+    print("INFO: PyMuPDF available for controlled NV rendering", flush=True)
+else:
+    print(f"WARNING: PyMuPDF unavailable; controlled NV rendering disabled ({PYMUPDF_IMPORT_ERROR or 'unknown import error'})", flush=True)
 
 PORT = int(os.environ.get('PORT', 8080))
 
@@ -4865,6 +4873,24 @@ def _nv_release_hint(user, record, has_linked_nv):
     return 'You do not have permission to access Note Verbals.'
 
 
+def _controlled_nv_renderer_available():
+    return HAVE_PYMUPDF and fitz is not None
+
+
+def _controlled_nv_renderer_debug_error():
+    return (PYMUPDF_IMPORT_ERROR or 'PyMuPDF import failed').strip()
+
+
+def _controlled_nv_renderer_user_message(user=None):
+    base = (
+        'Controlled Note Verbal copy generation is temporarily unavailable because '
+        'the PDF rendering dependency is not installed on the server.'
+    )
+    if _is_admin_user(user):
+        return base + ' Admin action required: install PyMuPDF on Render and redeploy.'
+    return base + ' Please contact admin.'
+
+
 def _nv_parse_dt(value):
     if not value:
         return None
@@ -5079,8 +5105,8 @@ def _apply_nv_release_watermark_to_page(page, release_row):
 
 
 def render_hardened_nv_release_pdf(master_pdf_path, release_row, dpi=160):
-    if not _FITZ_AVAILABLE or not fitz:
-        raise RuntimeError('PyMuPDF (fitz) is required to render controlled NV copies')
+    if not _controlled_nv_renderer_available():
+        raise RuntimeError('Controlled NV rendering dependency is unavailable')
     src = fitz.open(str(master_pdf_path))
     out = fitz.open()
     zoom = max(float(dpi or 160), 120.0) / 72.0
@@ -5328,6 +5354,16 @@ def api_nv_release(data, session_user, client_ip='', user_agent=''):
         if not master_nv:
             db.commit()
             return {'success': False, 'error': 'No linked master Note Verbal found for this applicant'}, 404
+        if not _controlled_nv_renderer_available():
+            log_nv_release_event(
+                db, 'nv_release_renderer_unavailable', session_user, source_table, record_id,
+                applicant_name=applicant_name, passport_no=passport_no, tracking_id=tracking_id,
+                release_mode=release_mode, reason_code=reason_code, reason_text=reason_text,
+                client_ip=client_ip, user_agent=user_agent,
+                extra={'renderer_error': _controlled_nv_renderer_debug_error()},
+            )
+            db.commit()
+            return {'success': False, 'error': _controlled_nv_renderer_user_message(session_user)}, 503
 
         fee_paid = is_record_fee_paid(record)
         is_admin_override = False
@@ -11154,6 +11190,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_nv_links(params))
         elif path.startswith('/nv/release/'):
+            user = None
+            rel = None
+            token_id = ''
             try:
                 user = self.require_auth()
                 if not user: return
@@ -11233,7 +11272,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(pdf_body)
             except Exception as e:
-                self.send_html(f"<p>Unable to render controlled NV copy.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
+                tb = traceback.format_exc()
+                rel_dict = rel if isinstance(rel, dict) else (dict(rel) if rel else {})
+                print(
+                    "[NV Release] controlled render failed "
+                    f"token={token_id or ''} "
+                    f"record_id={rel_dict.get('source_record_id') or 0} "
+                    f"passport={rel_dict.get('passport_no') or ''} "
+                    f"user={(user or {}).get('user', '')} "
+                    f"release_mode={rel_dict.get('release_mode') or ''} "
+                    f"error={e}\n{tb}",
+                    flush=True,
+                )
+                try:
+                    db2 = get_db()
+                    try:
+                        if rel_dict:
+                            log_nv_release_event(
+                                db2, 'nv_release_render_failed', user or {}, rel_dict.get('source_table', ''),
+                                rel_dict.get('source_record_id') or 0,
+                                applicant_name=rel_dict.get('applicant_name', ''),
+                                passport_no=rel_dict.get('passport_no', ''),
+                                tracking_id=rel_dict.get('tracking_id', ''),
+                                release_mode=rel_dict.get('release_mode', ''),
+                                token_id=token_id, client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                                extra={'error': str(e), 'traceback': tb},
+                            )
+                        else:
+                            db2.execute(
+                                "INSERT INTO audit_log (action, record_id, user, details) VALUES ('nv_release_render_failed', 0, ?, ?)",
+                                [
+                                    (user or {}).get('user', 'system'),
+                                    json.dumps({
+                                        'token_id': token_id or '',
+                                        'role': (user or {}).get('role', ''),
+                                        'record_id': 0,
+                                        'passport': '',
+                                        'release_mode': '',
+                                        'client_ip': self.get_client_ip(),
+                                        'user_agent': self.get_user_agent(),
+                                        'error': str(e),
+                                        'traceback': tb,
+                                        'timestamp': _nv_now_iso(),
+                                    }),
+                                ],
+                            )
+                        db2.commit()
+                    finally:
+                        db2.close()
+                except Exception as log_exc:
+                    print(f"[NV Release] failed to persist render failure log: {log_exc}", flush=True)
+                msg = _controlled_nv_renderer_user_message(user) if not _controlled_nv_renderer_available() else (
+                    'Controlled Note Verbal copy generation is temporarily unavailable. Please contact admin.'
+                )
+                status = 503 if not _controlled_nv_renderer_available() else 500
+                self.send_html(f"<p>{esc(msg)}</p>", status)
         elif path == '/note-verbal-file':
             try:
                 user = self.require_auth()
