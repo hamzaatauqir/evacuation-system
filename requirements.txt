@@ -2,6 +2,9 @@
 # MOFA approval PDF: text-layer PDFs need pypdf (searchable PDFs).
 pypdf>=4.0.0
 
+# Controlled NV rendering / watermarking / rasterized release copies
+PyMuPDF>=1.24.0
+
 # Optional — only if you enable full raster OCR on the server (heavy setup: Tesseract + Poppler on the image):
 Pillow>=10.0.0
 pytesseract>=0.3.10
