@@ -392,12 +392,17 @@ def init_db():
         link_status TEXT DEFAULT 'suggested',
         reviewed_by TEXT DEFAULT '',
         reviewed_at TIMESTAMP,
+        link_state TEXT DEFAULT '',
+        link_reason TEXT DEFAULT '',
+        linked_by_user TEXT DEFAULT '',
+        linked_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(upload_id, source_table, source_id)
     );
     CREATE INDEX IF NOT EXISTS idx_nv_upload_status ON note_verbal_uploads(processing_status);
     CREATE INDEX IF NOT EXISTS idx_nv_link_upload ON note_verbal_record_links(upload_id);
     CREATE INDEX IF NOT EXISTS idx_nv_link_record ON note_verbal_record_links(source_table, source_id);
+    CREATE INDEX IF NOT EXISTS idx_nv_link_record_status ON note_verbal_record_links(source_table, source_id, link_status);
     CREATE TABLE IF NOT EXISTS nv_release_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         source_table TEXT NOT NULL,
@@ -428,8 +433,20 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_nv_release_user ON nv_release_log(released_by_username);
     CREATE INDEX IF NOT EXISTS idx_nv_release_mode ON nv_release_log(release_mode);
     CREATE INDEX IF NOT EXISTS idx_nv_release_at ON nv_release_log(released_at);
+    CREATE INDEX IF NOT EXISTS idx_nv_release_record_latest ON nv_release_log(source_table, source_record_id, id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_nv_release_token ON nv_release_log(token_id) WHERE token_id IS NOT NULL AND token_id != '';
     """)
+    for col, coltype in [
+        ('link_state', "TEXT DEFAULT ''"),
+        ('link_reason', "TEXT DEFAULT ''"),
+        ('linked_by_user', "TEXT DEFAULT ''"),
+        ('linked_at', 'TIMESTAMP')
+    ]:
+        try:
+            db.execute(f"ALTER TABLE note_verbal_record_links ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
     for col, coltype in [
         ('edited_by', "TEXT DEFAULT ''"),
         ('edited_at', 'TIMESTAMP'),
@@ -3035,75 +3052,94 @@ def api_dashboard_stats(user=None):
 
 def api_records(params, session_user=None):
     db = get_db()
-    # Single-record fetch (fresh data for View modal after approval PDF / other updates)
-    if params.get('id'):
-        try:
-            rid = int(str(params['id']).strip())
-        except (TypeError, ValueError):
-            rid = 0
-        if rid > 0:
-            row = db.execute("SELECT * FROM evacuees WHERE id = ?", [rid]).fetchone()
-            if row:
-                rec = dict(row)
-                rec = _apply_nv_access_fields(db, rec, 'evacuees', session_user)
-                db.close()
-                return [rec]
-            db.close()
-            return []
-    where = ["1=1"]
-    qparams = []
-    if params.get('search'):
-        search_val = params['search'].strip()
-        tracking_match = re.match(r'^PKE-?(\d+)$', search_val, re.IGNORECASE)
-        if tracking_match:
-            rec_id = int(tracking_match.group(1))
-            where.append("id = ?")
-            qparams.append(rec_id)
-        else:
-            s = f"%{search_val}%"
-            where.append("(name LIKE ? OR passport LIKE ? OR cnic LIKE ? OR mobile LIKE ? OR civil_id LIKE ? OR IFNULL(note_verbal_number,'') LIKE ?)")
-            qparams.extend([s, s, s, s, s, s])
-    if params.get('status'):
-        where.append("travel_status = ?")
-        qparams.append(params['status'])
-    if params.get('country'):
-        where.append("country = ?")
-        qparams.append(params['country'])
-    if params.get('gender'):
-        where.append("gender = ?")
-        qparams.append(params['gender'])
-    if params.get('visa'):
-        where.append("visa_status = ?")
-        qparams.append(params['visa'])
-    if params.get('dup'):
-        where.append("dup_flag = ?")
-        qparams.append(params['dup'])
-    if params.get('fee_status'):
-        where.append("COALESCE(fee_status,'pending') = ?")
-        qparams.append(params['fee_status'])
-    # ── Route mismatch filters ──
-    if params.get('effective_route'):
-        where.append("effective_route = ?")
-        qparams.append(params['effective_route'])
-    if params.get('route_mismatch') == '1':
-        where.append("route_mismatch = 1")
-    elif params.get('route_mismatch') == '0':
-        where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
-    if params.get('hide_mismatch') == '1':
-        where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
-    if params.get('location_review_flag') == '1':
-        where.append("location_review_flag = 1")
-    if params.get('current_country'):
-        where.append("current_country = ?")
-        qparams.append(params['current_country'])
-    if params.get('ip_location_status'):
-        where.append("ip_location_status = ?")
-        qparams.append(params['ip_location_status'])
+    try:
+        # Single-record fetch (fresh data for View modal after approval PDF / other updates)
+        if params.get('id'):
+            try:
+                rid = int(str(params['id']).strip())
+            except (TypeError, ValueError):
+                rid = 0
+            if rid > 0:
+                row = db.execute("SELECT * FROM evacuees WHERE id = ?", [rid]).fetchone()
+                if row:
+                    rec = dict(row)
+                    return [_apply_nv_access_fields(db, rec, 'evacuees', session_user)]
+                return []
+        where = ["1=1"]
+        qparams = []
+        if params.get('search'):
+            search_val = params['search'].strip()
+            tracking_match = re.match(r'^PKE-?(\d+)$', search_val, re.IGNORECASE)
+            if tracking_match:
+                rec_id = int(tracking_match.group(1))
+                where.append("id = ?")
+                qparams.append(rec_id)
+            else:
+                s = f"%{search_val}%"
+                where.append("(name LIKE ? OR passport LIKE ? OR cnic LIKE ? OR mobile LIKE ? OR civil_id LIKE ? OR IFNULL(note_verbal_number,'') LIKE ?)")
+                qparams.extend([s, s, s, s, s, s])
+        if params.get('status'):
+            where.append("travel_status = ?")
+            qparams.append(params['status'])
+        if params.get('country'):
+            where.append("country = ?")
+            qparams.append(params['country'])
+        if params.get('gender'):
+            where.append("gender = ?")
+            qparams.append(params['gender'])
+        if params.get('visa'):
+            where.append("visa_status = ?")
+            qparams.append(params['visa'])
+        if params.get('dup'):
+            where.append("dup_flag = ?")
+            qparams.append(params['dup'])
+        if params.get('fee_status'):
+            where.append("COALESCE(fee_status,'pending') = ?")
+            qparams.append(params['fee_status'])
+        # ── Route mismatch filters ──
+        if params.get('effective_route'):
+            where.append("effective_route = ?")
+            qparams.append(params['effective_route'])
+        if params.get('route_mismatch') == '1':
+            where.append("route_mismatch = 1")
+        elif params.get('route_mismatch') == '0':
+            where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
+        if params.get('hide_mismatch') == '1':
+            where.append("(route_mismatch = 0 OR route_mismatch IS NULL)")
+        if params.get('location_review_flag') == '1':
+            where.append("location_review_flag = 1")
+        if params.get('current_country'):
+            where.append("current_country = ?")
+            qparams.append(params['current_country'])
+        if params.get('ip_location_status'):
+            where.append("ip_location_status = ?")
+            qparams.append(params['ip_location_status'])
 
-    rows = db.execute(f"SELECT * FROM evacuees WHERE {' AND '.join(where)} ORDER BY id DESC", qparams).fetchall()
-    result = [_apply_nv_access_fields(db, dict(r), 'evacuees', session_user) for r in rows]
-    db.close()
-    return result
+        sql = f"SELECT * FROM evacuees WHERE {' AND '.join(where)} ORDER BY id DESC"
+        page_params = list(qparams)
+        try:
+            limit = int(str(params.get('limit', '')).strip() or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        try:
+            offset = int(str(params.get('offset', '')).strip() or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        if limit > 0:
+            limit = min(limit, 200)
+            offset = max(offset, 0)
+            sql += " LIMIT ? OFFSET ?"
+            page_params.extend([limit, offset])
+
+        rows = [dict(r) for r in db.execute(sql, page_params).fetchall()]
+        if not rows:
+            return []
+        record_ids = [r.get('id') for r in rows]
+        nv_links_by_id = bulk_fetch_nv_links_for_records(db, 'evacuees', record_ids)
+        latest_releases_by_id = bulk_fetch_latest_nv_releases(db, 'evacuees', record_ids) if _is_admin_user(session_user) else {}
+        return apply_nv_access_fields_bulk(rows, nv_links_by_id, latest_releases_by_id, session_user, 'evacuees')
+    finally:
+        db.close()
 
 def api_returnees(params):
     db = get_db()
@@ -4385,6 +4421,290 @@ def _nv_get_record_label(db, source_table, source_id):
         return {'name': '', 'passport': ''}
     return {'name': r['n'] or '', 'passport': r['p'] or ''}
 
+
+NV_LINK_REASON_CODES = (
+    'manual_passport_match',
+    'manual_name_review',
+    'admin_override',
+    'unlink_correction',
+)
+
+_NV_COMMON_NAME_TOKENS = {
+    'MUHAMMAD', 'MOHAMMAD', 'MUHAMED', 'MOHAMED', 'AHMED', 'AHMAD',
+    'ALI', 'ABDUL', 'ABD', 'BIN', 'BINT', 'KHAN', 'HUSSAIN', 'HUSAIN',
+}
+
+
+def _can_review_nv_links(user):
+    return bool(user) and (user.get('role') or '') in ('admin', 'operator', 'operator_special')
+
+
+def _nv_normalize_name_for_match(value):
+    if not value:
+        return ''
+    v = _name_upper(value)
+    for src, dst in (
+        ('MOHAMMAD', 'MUHAMMAD'),
+        ('MOHAMED', 'MUHAMMAD'),
+        ('MUHAMED', 'MUHAMMAD'),
+        ('MD ', 'MUHAMMAD '),
+    ):
+        v = v.replace(src, dst)
+    v = re.sub(r'[^A-Z0-9]+', ' ', v)
+    return re.sub(r'\s+', ' ', v).strip()
+
+
+def _nv_compact_text(value):
+    return re.sub(r'[^A-Z0-9]+', '', str(value or '').upper())
+
+
+def _nv_name_compact(value):
+    return _nv_compact_text(_nv_normalize_name_for_match(value))
+
+
+def _nv_significant_name_tokens(value):
+    return [t for t in _nv_normalize_name_for_match(value).split() if len(t) >= 3 and t not in _NV_COMMON_NAME_TOKENS]
+
+
+def _nv_effective_link_state(link_row):
+    st = str((link_row or {}).get('link_state') or '').strip()
+    if st in ('auto_linked', 'needs_review', 'manually_confirmed'):
+        return st
+    status = str((link_row or {}).get('link_status') or '').strip().lower()
+    method = str((link_row or {}).get('match_method') or '').strip().lower()
+    if status == 'confirmed':
+        if method.startswith('manual') or str((link_row or {}).get('linked_by_user') or '').strip():
+            return 'manually_confirmed'
+        return 'auto_linked'
+    if status == 'suggested':
+        return 'needs_review'
+    return 'unlinked'
+
+
+def _nv_link_state_label(state):
+    return {
+        'auto_linked': 'Auto linked',
+        'needs_review': 'Needs review',
+        'manually_confirmed': 'Manually confirmed',
+        'unlinked': 'Unlinked',
+    }.get(str(state or '').strip(), 'Unlinked')
+
+
+def _nv_reason_label(reason):
+    return {
+        'passport_exact': 'Exact passport match',
+        'passport_normalized': 'Normalized passport match',
+        'passport_name_combo': 'Passport and name support',
+        'passport_name_support': 'Passport and name support',
+        'name_normalized': 'Full name review',
+        'name_tokens': 'Name token review',
+        'name_token_passport_digits': 'Passport digits and name support',
+        'manual_passport_match': 'Manual passport review',
+        'manual_name_review': 'Manual name review',
+        'admin_override': 'Admin override',
+        'unlink_correction': 'Unlink correction',
+        'search_match': 'Search result',
+    }.get(str(reason or '').strip(), str(reason or '').replace('_', ' ').strip().title())
+
+
+def _nv_refresh_upload_link_counts(db, upload_ids):
+    seen = []
+    for raw in upload_ids or []:
+        try:
+            uid = int(raw or 0)
+        except Exception:
+            uid = 0
+        if uid > 0 and uid not in seen:
+            seen.append(uid)
+    for uid in seen:
+        counts = db.execute("""
+            SELECT
+              SUM(CASE WHEN link_status='confirmed' THEN 1 ELSE 0 END) confirmed_count,
+              SUM(CASE WHEN link_status='suggested' THEN 1 ELSE 0 END) suggested_count
+            FROM note_verbal_record_links
+            WHERE upload_id = ?
+        """, [uid]).fetchone()
+        db.execute(
+            "UPDATE note_verbal_uploads SET confirmed_count=?, suggested_count=? WHERE id=?",
+            [int((counts['confirmed_count'] or 0) if counts else 0), int((counts['suggested_count'] or 0) if counts else 0), uid]
+        )
+
+
+def _nv_get_record_links(db, source_table, source_id):
+    rows = db.execute("""
+        SELECT l.*, u.filename, u.note_verbal_number, u.note_verbal_date, u.file_path, u.uploaded_at, u.source
+        FROM note_verbal_record_links l
+        JOIN note_verbal_uploads u ON u.id = l.upload_id
+        WHERE l.source_table = ? AND l.source_id = ?
+        ORDER BY
+          CASE WHEN l.link_status='confirmed' THEN 0 WHEN l.link_status='suggested' THEN 1 ELSE 2 END,
+          COALESCE(l.reviewed_at, l.linked_at, l.created_at) DESC,
+          l.id DESC
+    """, [source_table, int(source_id or 0)]).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _nv_choose_reason_code(match_method, session_user):
+    role = (session_user or {}).get('role') or ''
+    if role == 'admin':
+        return 'admin_override'
+    mm = str(match_method or '').strip().lower()
+    if 'passport' in mm:
+        return 'manual_passport_match'
+    return 'manual_name_review'
+
+
+def _nv_describe_upload_match(upload_row, record, source_table=''):
+    applicant_name = (record.get('name') or record.get('full_name') or '').strip()
+    passport_no = (record.get('passport') or record.get('passport_number') or '').strip()
+    note_verbal_number = str(record.get('note_verbal_number') or '').strip()
+    note_verbal_date = str(record.get('note_verbal_date') or '').strip()
+    txt = str(upload_row.get('extracted_text') or '')
+    txt_upper = txt.upper()
+    compact_txt = _nv_compact_text(txt)
+    passport_norm = normalize_passport_number(passport_no)
+    name_compact = _nv_name_compact(applicant_name)
+    token_hits = [t for t in _nv_significant_name_tokens(applicant_name) if t in txt_upper]
+    score = 0.0
+    method = ''
+    reason = ''
+    if passport_norm and passport_norm in compact_txt:
+        score = 0.985
+        method = 'passport_exact'
+        reason = 'Exact normalized passport match'
+        if name_compact and (name_compact in compact_txt or len(token_hits) >= 2):
+            score = 0.997
+            method = 'passport_name_support'
+            reason = 'Exact passport match with supporting name tokens'
+    elif passport_norm and len(passport_norm) >= 6 and passport_norm[-6:] in compact_txt and len(token_hits) >= 2:
+        score = 0.88
+        method = 'name_token_passport_digits'
+        reason = 'Passport digits and name support'
+    elif name_compact and len(name_compact) >= 8 and name_compact in compact_txt:
+        score = 0.74
+        method = 'name_normalized'
+        reason = 'Full normalized name match only'
+    elif len(token_hits) >= 2:
+        score = 0.58
+        method = 'name_tokens'
+        reason = 'Multiple significant name tokens matched'
+    if note_verbal_number and str(upload_row.get('note_verbal_number') or '').strip() and note_verbal_number == str(upload_row.get('note_verbal_number') or '').strip():
+        score = min(0.999, score + 0.03)
+        reason = (reason + ' + matching NV number').strip(' +')
+    if note_verbal_date and str(upload_row.get('note_verbal_date') or '').strip() and note_verbal_date == str(upload_row.get('note_verbal_date') or '').strip():
+        score = min(0.999, score + 0.02)
+        reason = (reason + ' + matching NV date').strip(' +')
+    if source_table and str(upload_row.get('source') or '').strip() and str(upload_row.get('source') or '').strip() == source_table:
+        score = min(0.999, score + 0.01)
+    if not method:
+        return None
+    return {
+        'confidence': round(score, 3),
+        'match_method': method,
+        'match_reason': reason or _nv_reason_label(method),
+        'review_only': score < 0.95 or method in ('name_normalized', 'name_tokens'),
+        'token_hits': token_hits[:4],
+    }
+
+
+def _nv_candidate_display(upload_row, link_row=None, match_info=None, session_user=None):
+    lr = dict(link_row or {})
+    mi = dict(match_info or {})
+    state = _nv_effective_link_state(lr) if lr else ('needs_review' if mi else 'unlinked')
+    reason_code = str(lr.get('link_reason') or '').strip() or _nv_choose_reason_code(mi.get('match_method', ''), session_user)
+    confidence = float(lr.get('match_confidence') if lr.get('match_confidence') is not None else mi.get('confidence') or 0.0)
+    return {
+        'upload_id': int(upload_row.get('id') or upload_row.get('upload_id') or 0),
+        'label': "NV# {num} | Date {dt}".format(
+            num=str(upload_row.get('note_verbal_number') or 'Unnumbered').strip(),
+            dt=str(upload_row.get('note_verbal_date') or 'Unknown').strip(),
+        ),
+        'filename': str(upload_row.get('filename') or '').strip() if _is_admin_user(session_user) else '',
+        'note_verbal_number': str(upload_row.get('note_verbal_number') or '').strip(),
+        'note_verbal_date': str(upload_row.get('note_verbal_date') or '').strip(),
+        'upload_source': str(upload_row.get('source') or '').strip(),
+        'link_status': str(lr.get('link_status') or ('suggested' if mi else '')).strip(),
+        'link_state': state,
+        'link_state_label': _nv_link_state_label(state),
+        'link_reason': reason_code,
+        'link_reason_label': _nv_reason_label(reason_code),
+        'match_method': str(lr.get('match_method') or mi.get('match_method') or '').strip(),
+        'match_reason': str(mi.get('match_reason') or _nv_reason_label(lr.get('match_method') or '')).strip(),
+        'confidence': round(confidence, 3),
+        'reviewed_at': str(lr.get('reviewed_at') or '').strip(),
+        'linked_at': str(lr.get('linked_at') or '').strip(),
+    }
+
+
+def _nv_candidate_shortlist(db, source_table, source_id, session_user=None, query=''):
+    record = _nv_fetch_record(db, source_table, source_id)
+    if not record:
+        return {'record': None, 'current': None, 'status': 'unlinked', 'status_label': 'Unlinked', 'suggestions': [], 'search_results': []}
+    existing_links = _nv_get_record_links(db, source_table, source_id)
+    current = None
+    candidates = {}
+    for row in existing_links:
+        upload_row = {
+            'id': row.get('upload_id'),
+            'filename': row.get('filename'),
+            'note_verbal_number': row.get('note_verbal_number'),
+            'note_verbal_date': row.get('note_verbal_date'),
+            'source': row.get('source', ''),
+        }
+        payload = _nv_candidate_display(upload_row, row, None, session_user=session_user)
+        if row.get('link_status') == 'confirmed' and not current:
+            current = payload
+            continue
+        if row.get('link_status') == 'rejected':
+            continue
+        candidates[payload['upload_id']] = payload
+
+    where = ["processing_status IN ('processed','processed_with_warnings','partial_success')"]
+    q = []
+    if query:
+        qtxt = (query or '').strip().upper()
+        like = f"%{qtxt}%"
+        where.append("(UPPER(IFNULL(note_verbal_number,'')) LIKE ? OR UPPER(IFNULL(filename,'')) LIKE ? OR UPPER(IFNULL(extracted_text,'')) LIKE ?)")
+        q.extend([like, like, like])
+    uploads = db.execute(f"""
+        SELECT id, filename, note_verbal_number, note_verbal_date, extracted_text, uploaded_at, source
+        FROM note_verbal_uploads
+        WHERE {' AND '.join(where)}
+        ORDER BY id DESC
+        LIMIT ?
+    """, q + [200 if query else 120]).fetchall()
+    for up in uploads:
+        upload_row = dict(up)
+        match_info = _nv_describe_upload_match(upload_row, record, source_table=source_table)
+        if not match_info:
+            continue
+        if not query and match_info['confidence'] < 0.52:
+            continue
+        payload = _nv_candidate_display(upload_row, None, match_info, session_user=session_user)
+        old = candidates.get(payload['upload_id'])
+        if not old or float(payload['confidence'] or 0) > float(old.get('confidence') or 0):
+            candidates[payload['upload_id']] = payload
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda x: (
+            0 if x.get('link_status') == 'suggested' else 1,
+            -(float(x.get('confidence') or 0)),
+            -(int(x.get('upload_id') or 0)),
+        )
+    )
+    suggestions = ordered[:6]
+    search_results = ordered[:10] if query else []
+    status = current['link_state'] if current else ('needs_review' if suggestions else 'unlinked')
+    return {
+        'record': record,
+        'current': current,
+        'status': status,
+        'status_label': _nv_link_state_label(status),
+        'suggestions': suggestions,
+        'search_results': search_results,
+    }
+
 def _nv_auto_link_upload(db, upload_id):
     up = db.execute("SELECT * FROM note_verbal_uploads WHERE id = ?", [upload_id]).fetchone()
     if not up:
@@ -4393,7 +4713,7 @@ def _nv_auto_link_upload(db, upload_id):
     up_txt = txt.upper()
     compact_txt = _norm_name_compact(txt)
     up_word_set = set(re.findall(r'[A-Z]{3,}', up_txt))
-    common_name_tokens = {'MUHAMMAD', 'MOHAMMAD', 'AHMED', 'AHMAD', 'ALI', 'ABDUL', 'BIN', 'BINT', 'KHAN'}
+    common_name_tokens = _NV_COMMON_NAME_TOKENS
     candidates = _collect_nv_candidate_records(db)
     linked = 0
     suggested = 0
@@ -4408,11 +4728,13 @@ def _nv_auto_link_upload(db, upload_id):
         method = ''
         conf = 0.0
         if passport and passport in up_txt:
-            method = 'passport_exact'; conf = 0.99
+            method = 'passport_exact'; conf = 0.985
+            if name_comp and (name_comp in compact_txt or len([t for t in re.findall(r'[A-Z]{3,}', full_name.upper()) if t not in common_name_tokens and t in up_word_set]) >= 2):
+                method = 'passport_name_combo'; conf = 0.997
         elif p_comp and p_comp in compact_txt:
-            method = 'passport_normalized'; conf = 0.95
-        elif passport and name_comp and passport in up_txt and name_comp in compact_txt:
-            method = 'passport_name_combo'; conf = 0.97
+            method = 'passport_normalized'; conf = 0.96
+            if name_comp and (name_comp in compact_txt or len([t for t in re.findall(r'[A-Z]{3,}', full_name.upper()) if t not in common_name_tokens and t in up_word_set]) >= 2):
+                method = 'passport_name_combo'; conf = 0.992
         elif name_comp and len(name_comp) >= 8 and name_comp in compact_txt:
             method = 'name_normalized'; conf = 0.80
         else:
@@ -4425,17 +4747,20 @@ def _nv_auto_link_upload(db, upload_id):
         if not method:
             continue
         status = 'confirmed' if conf >= 0.95 else 'suggested'
+        link_state = 'auto_linked' if status == 'confirmed' else 'needs_review'
         db.execute("""
             INSERT INTO note_verbal_record_links
-            (upload_id, source_table, source_id, match_method, matched_passport, matched_name, match_confidence, link_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (upload_id, source_table, source_id, match_method, matched_passport, matched_name, match_confidence, link_status, link_state, link_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(upload_id, source_table, source_id) DO UPDATE SET
               match_method=excluded.match_method,
               matched_passport=excluded.matched_passport,
               matched_name=excluded.matched_name,
               match_confidence=excluded.match_confidence,
-              link_status=excluded.link_status
-        """, [upload_id, c['source_table'], c['id'], method, passport, full_name, conf, status])
+              link_status=excluded.link_status,
+              link_state=excluded.link_state,
+              link_reason=excluded.link_reason
+        """, [upload_id, c['source_table'], c['id'], method, passport, full_name, conf, status, link_state, method])
         if status == 'confirmed': linked += 1
         else: suggested += 1
         processed += 1
@@ -4939,31 +5264,114 @@ def _latest_nv_release(db, source_table, source_id):
     return dict(row) if row else None
 
 
-def _apply_nv_access_fields(db, rec, source_table, session_user):
-    ln = _nv_best_link_for_record(db, source_table, rec.get('id'))
+def _nv_clean_record_ids(record_ids):
+    out = []
+    seen = set()
+    for raw in record_ids or []:
+        try:
+            rid = int(raw or 0)
+        except Exception:
+            rid = 0
+        if rid > 0 and rid not in seen:
+            seen.add(rid)
+            out.append(rid)
+    return out
+
+
+def _iter_nv_record_id_chunks(record_ids, chunk_size=400):
+    ids = _nv_clean_record_ids(record_ids)
+    for i in range(0, len(ids), max(int(chunk_size or 400), 1)):
+        yield ids[i:i + max(int(chunk_size or 400), 1)]
+
+
+def bulk_fetch_nv_links_for_records(db, source_table, record_ids):
+    by_id = {}
+    for chunk in _iter_nv_record_id_chunks(record_ids):
+        placeholders = ','.join('?' for _ in chunk)
+        rows = db.execute(f"""
+            SELECT l.*, u.filename, u.note_verbal_number, u.note_verbal_date, u.file_path
+            FROM note_verbal_record_links l
+            JOIN note_verbal_uploads u ON u.id = l.upload_id
+            WHERE l.source_table = ? AND l.link_status = 'confirmed' AND l.source_id IN ({placeholders})
+            ORDER BY l.source_id ASC, COALESCE(l.reviewed_at, l.linked_at, l.created_at) DESC, l.id DESC
+        """, [source_table, *chunk]).fetchall()
+        for row in rows:
+            d = dict(row)
+            rid = int(d.get('source_id') or 0)
+            if rid > 0 and rid not in by_id:
+                by_id[rid] = d
+    return by_id
+
+
+def bulk_fetch_latest_nv_releases(db, source_table, record_ids):
+    by_id = {}
+    for chunk in _iter_nv_record_id_chunks(record_ids):
+        placeholders = ','.join('?' for _ in chunk)
+        rows = db.execute(f"""
+            SELECT source_record_id, released_at, released_by_username, release_mode, id
+            FROM nv_release_log
+            WHERE source_table = ? AND source_record_id IN ({placeholders})
+            ORDER BY source_record_id ASC, id DESC
+        """, [source_table, *chunk]).fetchall()
+        for row in rows:
+            d = dict(row)
+            rid = int(d.get('source_record_id') or 0)
+            if rid > 0 and rid not in by_id:
+                by_id[rid] = d
+    return by_id
+
+
+def _apply_nv_access_fields_from_link(rec, ln, last_release, session_user):
     has_linked_nv = bool(ln)
     rec['has_linked_nv'] = has_linked_nv
     rec['nv_link_status'] = 'linked' if has_linked_nv else 'unlinked'
+    rec['can_review_nv_link'] = _can_review_nv_links(session_user)
     rec['can_release_nv'] = _nv_release_allowed(session_user, rec, has_linked_nv)
     rec['nv_release_hint'] = _nv_release_hint(session_user, rec, has_linked_nv)
     if ln:
         rec['linked_nv_number'] = ln.get('note_verbal_number', '')
         rec['linked_nv_date'] = ln.get('note_verbal_date', '')
+    else:
+        rec.pop('linked_nv_number', None)
+        rec.pop('linked_nv_date', None)
     if _is_admin_user(session_user) and ln:
         rec['linked_nv_upload_id'] = ln.get('upload_id')
         rec['linked_nv_filename'] = ln.get('filename', '')
-        last_release = _latest_nv_release(db, source_table, rec.get('id'))
         if last_release:
             rec['last_nv_release_at'] = last_release.get('released_at', '')
             rec['last_nv_release_by'] = last_release.get('released_by_username', '')
             rec['last_nv_release_mode'] = last_release.get('release_mode', '')
+        else:
+            rec.pop('last_nv_release_at', None)
+            rec.pop('last_nv_release_by', None)
+            rec.pop('last_nv_release_mode', None)
     else:
         rec.pop('linked_nv_upload_id', None)
         rec.pop('linked_nv_filename', None)
+        rec.pop('last_nv_release_at', None)
+        rec.pop('last_nv_release_by', None)
+        rec.pop('last_nv_release_mode', None)
     if not _is_admin_user(session_user):
         for raw_key in ('approval_batch_id', 'approval_pdf_filename', 'approval_source'):
             rec.pop(raw_key, None)
     return rec
+
+
+def apply_nv_access_fields_bulk(rows, nv_links_by_id, latest_releases_by_id, session_user, source_table):
+    out = []
+    for row in rows or []:
+        rec = dict(row)
+        rid = int(rec.get('id') or 0)
+        ln = (nv_links_by_id or {}).get(rid)
+        last_release = (latest_releases_by_id or {}).get(rid) if _is_admin_user(session_user) else None
+        out.append(_apply_nv_access_fields_from_link(rec, ln, last_release, session_user))
+    return out
+
+
+def _apply_nv_access_fields(db, rec, source_table, session_user):
+    ln = _nv_best_link_for_record(db, source_table, rec.get('id'))
+    last_release = _latest_nv_release(db, source_table, rec.get('id')) if (_is_admin_user(session_user) and ln) else None
+    return _apply_nv_access_fields_from_link(rec, ln, last_release, session_user)
 
 
 def log_nv_release_event(db, action, session_user, source_table, record_id, applicant_name='',
@@ -5257,6 +5665,7 @@ def api_nv_links(params):
             lbl = _nv_get_record_label(db, d['source_table'], d['source_id'])
             d['record_name'] = lbl['name']
             d['record_passport'] = lbl['passport']
+            d['link_state'] = _nv_effective_link_state(d)
             rows.append(d)
         return {'success': True, 'rows': rows}
     finally:
@@ -5269,37 +5678,193 @@ def api_nv_link_update(data, user):
         return {'success': False, 'error': 'id and valid link_status required'}
     db = get_db()
     try:
-        db.execute("UPDATE note_verbal_record_links SET link_status=?, reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
-                   [status, user, lid])
+        row = db.execute("SELECT * FROM note_verbal_record_links WHERE id = ?", [lid]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Link not found'}
+        row = dict(row)
+        link_state = 'manually_confirmed' if status == 'confirmed' else ('needs_review' if status == 'suggested' else row.get('link_state', ''))
+        link_reason = row.get('link_reason') or ('admin_override' if status == 'confirmed' else '')
+        db.execute("""UPDATE note_verbal_record_links
+                      SET link_status=?, link_state=?, link_reason=?, reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP,
+                          linked_by_user=CASE WHEN ?='confirmed' THEN ? ELSE linked_by_user END,
+                          linked_at=CASE WHEN ?='confirmed' THEN CURRENT_TIMESTAMP ELSE linked_at END
+                      WHERE id=?""",
+                   [status, link_state, link_reason, user, status, user, status, lid])
         db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_link_reviewed', ?, ?, ?)",
-                   [lid, user, json.dumps({'link_status': status})])
+                   [lid, user, json.dumps({'link_status': status, 'link_state': link_state, 'source_table': row.get('source_table', ''), 'source_id': row.get('source_id', 0)})])
+        _nv_refresh_upload_link_counts(db, [row.get('upload_id')])
         db.commit()
         return {'success': True}
     finally:
         db.close()
 
+def api_nv_link_review(params, session_user):
+    if not _can_review_nv_links(session_user):
+        return {'success': False, 'error': 'Unauthorized'}, 403
+    source_table = (params.get('source') or '').strip()
+    source_id = int(params.get('id') or params.get('record_id') or 0)
+    if source_table not in ('evacuees', 'iraq_applicants', 'iraq_public_submissions') or source_id <= 0:
+        return {'success': False, 'error': 'source and record id required'}, 400
+    query = (params.get('q') or '').strip()
+    db = get_db()
+    try:
+        result = _nv_candidate_shortlist(db, source_table, source_id, session_user=session_user, query=query)
+        if not result.get('record'):
+            return {'success': False, 'error': 'Record not found'}, 404
+        log_nv_release_event(
+            db, 'nv_link_candidates_viewed', session_user, source_table, source_id,
+            applicant_name=(result['record'].get('name') or result['record'].get('full_name') or '').strip(),
+            passport_no=(result['record'].get('passport') or result['record'].get('passport_number') or '').strip(),
+            reason_text=query, extra={'candidate_count': len(result.get('suggestions') or []), 'search_results': len(result.get('search_results') or [])}
+        )
+        db.commit()
+        return {
+            'success': True,
+            'status': result.get('status', 'unlinked'),
+            'status_label': result.get('status_label', 'Unlinked'),
+            'current': result.get('current'),
+            'suggestions': result.get('suggestions', []),
+            'search_results': result.get('search_results', []),
+            'reason_codes': list(NV_LINK_REASON_CODES),
+            'query': query,
+        }, 200
+    finally:
+        db.close()
+
+
+def api_nv_link_confirm(data, session_user):
+    if not _can_review_nv_links(session_user):
+        return {'success': False, 'error': 'Unauthorized'}, 403
+    upload_id = int(data.get('upload_id') or 0)
+    source_table = (data.get('source') or data.get('source_table') or '').strip()
+    source_id = int(data.get('record_id') or data.get('source_id') or 0)
+    reason_code = (data.get('reason_code') or '').strip() or 'manual_name_review'
+    reason_text = (data.get('reason_text') or '').strip()
+    replace_confirmed = int(data.get('replace_confirmed') or 0) == 1
+    if upload_id <= 0 or source_id <= 0 or source_table not in ('evacuees', 'iraq_applicants', 'iraq_public_submissions'):
+        return {'success': False, 'error': 'upload_id, source, and record_id are required'}, 400
+    if reason_code not in NV_LINK_REASON_CODES:
+        return {'success': False, 'error': 'Valid reason code is required'}, 400
+    if reason_code == 'admin_override' and not _is_admin_user(session_user):
+        return {'success': False, 'error': 'Only admin can use admin_override for manual NV links'}, 403
+    db = get_db()
+    try:
+        record = _nv_fetch_record(db, source_table, source_id)
+        upload = db.execute("SELECT * FROM note_verbal_uploads WHERE id = ?", [upload_id]).fetchone()
+        if not record:
+            return {'success': False, 'error': 'Record not found'}, 404
+        if not upload:
+            return {'success': False, 'error': 'Note Verbal upload not found'}, 404
+        upload = dict(upload)
+        existing = _nv_best_link_for_record(db, source_table, source_id)
+        applicant_name = (record.get('name') or record.get('full_name') or '').strip()
+        passport_no = (record.get('passport') or record.get('passport_number') or '').strip()
+        old_link = dict(existing) if existing else None
+        if old_link and int(old_link.get('upload_id') or 0) != upload_id and not replace_confirmed:
+            return {
+                'success': False,
+                'error': 'A confirmed Note Verbal link already exists for this record. Confirm replacement to continue.',
+                'requires_confirmation': True,
+                'current_link': {
+                    'upload_id': int(old_link.get('upload_id') or 0),
+                    'label': f"NV# {old_link.get('note_verbal_number') or 'Unnumbered'} | Date {old_link.get('note_verbal_date') or 'Unknown'}",
+                }
+            }, 409
+        if old_link and int(old_link.get('upload_id') or 0) != upload_id:
+            db.execute("""UPDATE note_verbal_record_links
+                          SET link_status='rejected', link_reason='unlink_correction', reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP
+                          WHERE source_table=? AND source_id=? AND link_status='confirmed' AND upload_id<>?""",
+                       [session_user.get('user', ''), source_table, source_id, upload_id])
+        lbl = _nv_get_record_label(db, source_table, source_id)
+        db.execute("""
+            INSERT INTO note_verbal_record_links
+            (upload_id, source_table, source_id, match_method, matched_passport, matched_name, match_confidence, link_status,
+             reviewed_by, reviewed_at, link_state, link_reason, linked_by_user, linked_at)
+            VALUES (?, ?, ?, 'manual_confirm', ?, ?, 1.0, 'confirmed', ?, CURRENT_TIMESTAMP, 'manually_confirmed', ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(upload_id, source_table, source_id) DO UPDATE SET
+              match_method='manual_confirm',
+              matched_passport=excluded.matched_passport,
+              matched_name=excluded.matched_name,
+              match_confidence=1.0,
+              link_status='confirmed',
+              reviewed_by=excluded.reviewed_by,
+              reviewed_at=CURRENT_TIMESTAMP,
+              link_state='manually_confirmed',
+              link_reason=excluded.link_reason,
+              linked_by_user=excluded.linked_by_user,
+              linked_at=CURRENT_TIMESTAMP
+        """, [upload_id, source_table, source_id, lbl.get('passport', ''), lbl.get('name', ''), session_user.get('user', ''), reason_code, session_user.get('user', '')])
+        action = 'note_verbal_manual_link_replaced' if old_link and int(old_link.get('upload_id') or 0) != upload_id else 'note_verbal_manual_link_confirmed'
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                   [action, source_id, session_user.get('user', ''), json.dumps({
+                       'source_table': source_table,
+                       'source_id': source_id,
+                       'old_upload_id': int(old_link.get('upload_id') or 0) if old_link else 0,
+                       'new_upload_id': upload_id,
+                       'passport': passport_no,
+                       'applicant_name': applicant_name,
+                       'reason_code': reason_code,
+                       'reason_text': reason_text,
+                       'timestamp': _nv_now_iso(),
+                   })])
+        _nv_refresh_upload_link_counts(db, [upload_id, int(old_link.get('upload_id') or 0) if old_link else 0])
+        db.commit()
+        return {'success': True, 'replaced': bool(old_link and int(old_link.get('upload_id') or 0) != upload_id)}, 200
+    finally:
+        db.close()
+
+
+def api_nv_unlink(data, session_user):
+    if not _can_review_nv_links(session_user):
+        return {'success': False, 'error': 'Unauthorized'}, 403
+    source_table = (data.get('source') or data.get('source_table') or '').strip()
+    source_id = int(data.get('record_id') or data.get('source_id') or 0)
+    reason_code = (data.get('reason_code') or 'unlink_correction').strip() or 'unlink_correction'
+    reason_text = (data.get('reason_text') or '').strip()
+    if source_table not in ('evacuees', 'iraq_applicants', 'iraq_public_submissions') or source_id <= 0:
+        return {'success': False, 'error': 'source and record_id are required'}, 400
+    db = get_db()
+    try:
+        current = _nv_best_link_for_record(db, source_table, source_id)
+        record = _nv_fetch_record(db, source_table, source_id)
+        if not current:
+            return {'success': False, 'error': 'No confirmed Note Verbal link exists for this record'}, 404
+        db.execute("""UPDATE note_verbal_record_links
+                      SET link_status='rejected', link_reason=?, reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP
+                      WHERE source_table=? AND source_id=? AND upload_id=? AND link_status='confirmed'""",
+                   [reason_code, session_user.get('user', ''), source_table, source_id, int(current.get('upload_id') or 0)])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_unlinked', ?, ?, ?)",
+                   [source_id, session_user.get('user', ''), json.dumps({
+                       'source_table': source_table,
+                       'source_id': source_id,
+                       'old_upload_id': int(current.get('upload_id') or 0),
+                       'passport': (record.get('passport') or record.get('passport_number') or '') if record else '',
+                       'applicant_name': (record.get('name') or record.get('full_name') or '') if record else '',
+                       'reason_code': reason_code,
+                       'reason_text': reason_text,
+                       'timestamp': _nv_now_iso(),
+                   })])
+        _nv_refresh_upload_link_counts(db, [int(current.get('upload_id') or 0)])
+        db.commit()
+        return {'success': True}, 200
+    finally:
+        db.close()
+
+
 def api_nv_manual_assign(data, user):
     upload_id = int(data.get('upload_id') or 0)
     source_table = (data.get('source_table') or '').strip()
     source_id = int(data.get('source_id') or 0)
-    if upload_id <= 0 or source_id <= 0 or source_table not in ('evacuees', 'iraq_applicants', 'iraq_public_submissions'):
-        return {'success': False, 'error': 'upload_id, source_table, source_id required'}
-    db = get_db()
-    try:
-        lbl = _nv_get_record_label(db, source_table, source_id)
-        db.execute("""
-            INSERT INTO note_verbal_record_links
-            (upload_id, source_table, source_id, match_method, matched_passport, matched_name, match_confidence, link_status, reviewed_by, reviewed_at)
-            VALUES (?, ?, ?, 'manual_assign', ?, ?, 1.0, 'confirmed', ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(upload_id, source_table, source_id) DO UPDATE SET
-              match_method='manual_assign', match_confidence=1.0, link_status='confirmed', reviewed_by=excluded.reviewed_by, reviewed_at=CURRENT_TIMESTAMP
-        """, [upload_id, source_table, source_id, lbl.get('passport',''), lbl.get('name',''), user])
-        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('note_verbal_manual_assign', ?, ?, ?)",
-                   [upload_id, user, json.dumps({'source_table': source_table, 'source_id': source_id})])
-        db.commit()
-        return {'success': True}
-    finally:
-        db.close()
+    result, _status = api_nv_link_confirm({
+        'upload_id': upload_id,
+        'source_table': source_table,
+        'source_id': source_id,
+        'reason_code': 'admin_override',
+        'replace_confirmed': 1,
+    }, {'user': user, 'role': 'admin'})
+    if result.get('success'):
+        result['legacy_action'] = 'manual_assign'
+    return result
 
 
 def get_linked_nv_for_record(db, source_table, source_id):
@@ -11189,6 +11754,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] != 'admin':
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_nv_links(params))
+        elif path == '/api/nv-link-review':
+            user = self.require_auth()
+            if not user: return
+            result, status = api_nv_link_review(params, user)
+            self.send_json(result, status)
         elif path.startswith('/nv/release/'):
             user = None
             rel = None
@@ -12634,6 +13204,18 @@ function printBoth(){{
             data = json.loads(body)
             res = api_nv_manual_assign(data, user['user'])
             self.send_json(res, 200 if res.get('success') else 400)
+        elif path == '/api/nv-link-confirm':
+            user = self.require_auth()
+            if not user: return
+            data = json.loads(body)
+            res, status = api_nv_link_confirm(data, user)
+            self.send_json(res, status)
+        elif path == '/api/nv-link-unlink':
+            user = self.require_auth()
+            if not user: return
+            data = json.loads(body)
+            res, status = api_nv_unlink(data, user)
+            self.send_json(res, status)
 
         elif path == '/api/returnee/save':
             user = self.require_auth()
@@ -18073,6 +18655,10 @@ html+=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85
 <button type="button" class="btn btn-p" style="padding:8px 18px;margin-bottom:10px" onclick="saveViewEmbassyFields()">Save note verbal &amp; serial</button>
 <div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Fee status:</strong> ${(r.fee_status||'pending').toUpperCase()} ${feeAt?(' | '+feeAt):''} ${feeActor?(' by '+feeActor):''}</div>
 ${nvLinked?`<div style="font-size:.8em;color:#1565c0;margin-bottom:8px"><strong>Linked full Note Verbal:</strong> ${USER_ROLE==='admin'?nvLabelAdmin:nvLabelUser} ${r.linked_nv_number?('| NV# '+vq(r.linked_nv_number)):''} ${r.linked_nv_date?('| '+vq(r.linked_nv_date)):''}</div>`:''}
+${r.can_review_nv_link?`<div id="nvLinkReviewBox" style="margin:8px 0 10px;padding:12px;border:1px solid #dcedc8;border-radius:9px;background:#fcfff8">
+<div style="font-weight:700;font-size:.82em;color:#1b5e20;text-transform:uppercase;letter-spacing:.45px;margin-bottom:8px">Note Verbal Link Review</div>
+<div style="font-size:.79em;color:#607d8b">Loading Note Verbal link review…</div>
+</div>`:''}
 <div style="margin:8px 0 10px;padding:12px;border:1px solid #c8e6c9;border-radius:9px;background:#f7fcf4">
 <div style="font-weight:700;font-size:.82em;color:#1b5e20;text-transform:uppercase;letter-spacing:.45px;margin-bottom:8px">Note Verbal Copy</div>
 ${showNvCopyActions?`<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
@@ -18152,6 +18738,7 @@ html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-
 <div>Created: ${r.created_at||'—'}</div><div>Updated: ${r.updated_at||'—'} ${r.updated_by?'by '+r.updated_by:''}</div></div>`;
 document.getElementById('viewBody').innerHTML=html;
 document.getElementById('viewModal').classList.add('show');
+if(r.can_review_nv_link) loadViewNvLinkReview('');
 }
 let viewEditMode=false;
 function closeView(){
@@ -18321,6 +18908,91 @@ if(_iraqCurrentBatchId&&String(source)==='iraq_applicants') await openIraqDetail
 if(popup&&!popup.closed) popup.close();
 toast('Error: '+(r?.error||'NV release failed'));
 }
+}
+function nvLinkBoxEl(){return document.getElementById('nvLinkReviewBox')}
+function nvLinkReasonFallback(candidate){
+if(candidate&&candidate.link_reason)return String(candidate.link_reason);
+const mm=String(candidate&&candidate.match_method||'').toLowerCase();
+return mm.includes('passport')?'manual_passport_match':'manual_name_review';
+}
+function renderViewNvLinkReview(data){
+const box=nvLinkBoxEl(); if(!box)return;
+const current=data&&data.current;
+const suggestions=Array.isArray(data&&data.suggestions)?data.suggestions:[];
+const searchResults=Array.isArray(data&&data.search_results)?data.search_results:[];
+const statusLabel=escHtml(data&&data.status_label||'Unlinked');
+const badgeColor=(data&&data.status)==='manually_confirmed'?'#2e7d32':((data&&data.status)==='auto_linked'?'#1565c0':((data&&data.status)==='needs_review'?'#ef6c00':'#78909c'));
+let html=`<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px"><span style="font-size:.79em;color:#555">Current link status:</span><span style="display:inline-block;padding:3px 8px;border-radius:999px;background:${badgeColor};color:#fff;font-size:.74em;font-weight:700">${statusLabel}</span></div>`;
+html+=`<div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;margin-bottom:10px">
+<div><label style="color:#555;font-size:.76em;display:block;margin-bottom:4px">Manual review reason</label><select id="nvLinkReasonCode" style="width:100%;padding:8px 10px;border:1px solid #c5e1a5;border-radius:6px;font-size:.88em"><option value="manual_passport_match">manual_passport_match</option><option value="manual_name_review">manual_name_review</option>${USER_ROLE==='admin'?'<option value="admin_override">admin_override</option>':''}</select></div>
+<div><label style="color:#555;font-size:.76em;display:block;margin-bottom:4px">Notes</label><input id="nvLinkReasonText" type="text" placeholder="Optional review note" style="width:240px;max-width:100%;padding:8px 10px;border:1px solid #c5e1a5;border-radius:6px;font-size:.88em;box-sizing:border-box"></div>
+</div>`;
+if(current){
+html+=`<div style="padding:10px;border:1px solid #c8e6c9;border-radius:8px;background:#f7fcf4;margin-bottom:10px">
+<div style="font-size:.8em;font-weight:700;color:#1b5e20;margin-bottom:4px">Current linked NV</div>
+<div style="font-size:.8em;color:#333">${escHtml(current.label||'Linked Note Verbal')}</div>
+<div style="font-size:.76em;color:#607d8b;margin-top:4px">${escHtml(current.link_state_label||'')}</div>
+<div style="font-size:.76em;color:#607d8b;margin-top:2px">${escHtml(current.match_reason||current.link_reason_label||'')}</div>
+<div style="margin-top:8px"><button type="button" class="btn btn-d" style="padding:6px 12px;font-size:.78em" onclick="unlinkViewNvLink()">Unlink</button></div>
+</div>`;
+}else{
+html+=`<div style="font-size:.78em;color:#8d6e63;margin-bottom:10px">No confirmed Note Verbal link is currently attached to this applicant.</div>`;
+}
+html+=`<div style="font-size:.8em;font-weight:700;color:#1b5e20;margin:2px 0 6px">Suggested candidate NVs</div>`;
+if(!suggestions.length){
+html+=`<div style="font-size:.78em;color:#8d6e63;margin-bottom:10px">No high-confidence candidate links yet. Use search below to review manually.</div>`;
+}else{
+html+='<div style="display:grid;gap:8px;margin-bottom:10px">';
+suggestions.forEach(c=>{
+html+=`<div style="padding:10px;border:1px solid #e6ee9c;border-radius:8px;background:#fff">
+<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><div style="font-size:.8em;font-weight:700;color:#2e7d32">${escHtml(c.label||'Candidate NV')}</div><div style="font-size:.76em;color:#607d8b;margin-top:3px">${escHtml(c.match_reason||c.link_reason_label||'Review suggestion')}</div><div style="font-size:.75em;color:#78909c;margin-top:2px">Confidence: ${Math.round(Number(c.confidence||0)*100)}%${c.filename?(' | '+escHtml(c.filename)) : ''}</div></div><button type="button" class="btn btn-p" style="padding:6px 12px;font-size:.78em;white-space:nowrap" onclick="confirmViewNvLink(${Number(c.upload_id)||0}, '${escJsAttr(nvLinkReasonFallback(c))}', 0)">Confirm Link</button></div></div>`;
+});
+html+='</div>';
+}
+html+=`<div style="padding-top:8px;border-top:1px dashed #dce775"><label style="color:#555;font-size:.76em;display:block;margin-bottom:4px">Search NV by passport, name, or NV number</label><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input id="nvLinkSearchInput" type="text" value="${escHtml(data&&data.query||'')}" placeholder="Type passport, name, or NV number" style="flex:1;min-width:220px;padding:8px 10px;border:1px solid #c5e1a5;border-radius:6px;font-size:.88em;box-sizing:border-box" onkeydown="if(event.key==='Enter'){event.preventDefault();searchViewNvLinks();}"><button type="button" class="btn btn-i" style="padding:8px 14px;font-size:.8em" onclick="searchViewNvLinks()">Search NV</button><button type="button" class="btn" style="padding:8px 14px;font-size:.8em;background:#eceff1" onclick="loadViewNvLinkReview('')">Reset</button></div></div>`;
+if(searchResults.length){
+html+=`<div style="font-size:.8em;font-weight:700;color:#1b5e20;margin:10px 0 6px">Search results</div><div style="display:grid;gap:8px">`;
+searchResults.forEach(c=>{
+html+=`<div style="padding:10px;border:1px solid #d7ccc8;border-radius:8px;background:#fff"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><div style="font-size:.8em;font-weight:700;color:#37474f">${escHtml(c.label||'Search match')}</div><div style="font-size:.76em;color:#607d8b;margin-top:3px">${escHtml(c.match_reason||c.link_reason_label||'Search result')}</div><div style="font-size:.75em;color:#78909c;margin-top:2px">Confidence: ${Math.round(Number(c.confidence||0)*100)}%${c.filename?(' | '+escHtml(c.filename)) : ''}</div></div><button type="button" class="btn btn-p" style="padding:6px 12px;font-size:.78em;white-space:nowrap" onclick="confirmViewNvLink(${Number(c.upload_id)||0}, '${escJsAttr(nvLinkReasonFallback(c))}', 0)">Confirm Link</button></div></div>`;
+});
+html+='</div>';
+}
+html+=`<div style="font-size:.76em;color:#607d8b;margin-top:10px">High-confidence passport matches can still auto-link. Name-only candidates stay in review until staff confirms them.</div>`;
+box.innerHTML=html;
+}
+async function loadViewNvLinkReview(query){
+const box=nvLinkBoxEl(); if(!box||!viewRec)return;
+box.innerHTML='<div style="font-size:.79em;color:#607d8b">Loading Note Verbal link review…</div>';
+const q=(query==null?'':String(query));
+const d=await api('/api/nv-link-review?source=evacuees&id='+encodeURIComponent(viewRec.id)+(q?('&q='+encodeURIComponent(q)):''));
+if(!d||!d.success){box.innerHTML='<div style="font-size:.79em;color:#c62828">'+escHtml((d&&d.error)||'Could not load Note Verbal link review.')+'</div>';return}
+renderViewNvLinkReview(d);
+}
+function searchViewNvLinks(){
+const inp=document.getElementById('nvLinkSearchInput');
+loadViewNvLinkReview(inp?inp.value:'');
+}
+async function confirmViewNvLink(uploadId, fallbackReason, replaceConfirmed){
+if(!viewRec||!(Number(uploadId)>0))return;
+const reason_code=(document.getElementById('nvLinkReasonCode')?.value||fallbackReason||'manual_name_review').trim();
+const reason_text=(document.getElementById('nvLinkReasonText')?.value||'').trim();
+const d=await api('/api/nv-link-confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'evacuees',record_id:viewRec.id,upload_id:Number(uploadId),reason_code,reason_text,replace_confirmed:replaceConfirmed?1:0})});
+if(d&&d.success){toast(d.replaced?'Note Verbal link replaced':'Note Verbal link confirmed');await openView(viewRec.id);loadRecords();return}
+if(d&&d.requires_confirmation){
+if(confirm((d.error||'A confirmed link already exists. Replace it?')+(d.current_link&&d.current_link.label?('\n\nCurrent: '+d.current_link.label):''))){
+await confirmViewNvLink(uploadId, fallbackReason, 1);
+}
+return;
+}
+toast('Error: '+((d&&d.error)||'Could not confirm link'));
+}
+async function unlinkViewNvLink(){
+if(!viewRec)return;
+if(!confirm('Unlink the current confirmed Note Verbal from this applicant?'))return;
+const reason_text=(document.getElementById('nvLinkReasonText')?.value||'').trim();
+const d=await api('/api/nv-link-unlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:'evacuees',record_id:viewRec.id,reason_code:'unlink_correction',reason_text})});
+if(d&&d.success){toast('Note Verbal link removed');await openView(viewRec.id);loadRecords();return}
+toast('Error: '+((d&&d.error)||'Could not unlink Note Verbal'));
 }
 function openCombinedLetterWithNV(letterUrl, uploadId, source, recordId){
 const uid=Number(uploadId||0);
