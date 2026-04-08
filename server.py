@@ -1383,6 +1383,33 @@ def _tracking_no(record_id):
     except Exception:
         return 'PKE-0000'
 
+def _normalize_passport_for_match(value):
+    return re.sub(r'[\s-]+', '', str(value or '').strip().upper())
+
+def _is_iraq_related_record(db, record):
+    if not record:
+        return False
+    try:
+        country_val = record.get('country', '')
+    except Exception:
+        country_val = record['country'] if 'country' in record else ''
+    if 'iraq' in str(country_val or '').strip().lower():
+        return True
+    try:
+        passport_val = record.get('passport', '')
+    except Exception:
+        passport_val = record['passport'] if 'passport' in record else ''
+    normalized_passport = _normalize_passport_for_match(passport_val)
+    if not normalized_passport:
+        return False
+    row = db.execute("""
+        SELECT 1
+        FROM iraq_public_submissions
+        WHERE UPPER(REPLACE(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', ''), '-', '')) = ?
+        LIMIT 1
+    """, [normalized_passport]).fetchone()
+    return bool(row)
+
 def _queue_registration_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
     if not _is_valid_email_loose(email):
@@ -1447,12 +1474,14 @@ def _queue_iraq_mofa_forwarded_email(record, changed_by='system'):
     })
 
 def _queue_iraq_mofa_forwarded_if_needed(db, rec_id, changed_by='system'):
-    row = db.execute("""SELECT id, name, passport, email,
+    row = db.execute("""SELECT id, name, passport, email, country,
         COALESCE(iraq_forwarded_email_sent_flag,0) AS iraq_forwarded_email_sent_flag
         FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
     if not row:
         return False
     rec = dict(row)
+    if not _is_iraq_related_record(db, rec):
+        return False
     if int(rec.get('iraq_forwarded_email_sent_flag') or 0) == 1:
         return False
     _queue_iraq_mofa_forwarded_email(rec, changed_by)
@@ -14302,12 +14331,16 @@ function printBoth(){{
                           [user['user'], f'Marked {count} records as Sent to MOFA | Letter: {letter_number} | Date: {letter_date}'])
                 # Queue MOFA status emails for updated records (async, non-blocking)
                 updated_rows = db.execute("""
-                    SELECT id, name, passport, email, border_crossing, mofa_letter_number, mofa_letter_date
+                    SELECT id, name, passport, email, country, border_crossing, mofa_letter_number, mofa_letter_date
                     FROM evacuees
                     WHERE mofa_status='Sent to MOFA' AND mofa_sent_date=? AND updated_by=?
                 """, [sent_date, user['user']]).fetchall()
                 for rr in updated_rows:
-                    _queue_iraq_mofa_forwarded_if_needed(db, rr['id'], user['user'])
+                    rec = dict(rr)
+                    if _is_iraq_related_record(db, rec):
+                        _queue_iraq_mofa_forwarded_if_needed(db, rec['id'], user['user'])
+                    else:
+                        _queue_mofa_sent_email(rec, user['user'])
                 db.commit()
                 db.close()
                 self.send_json({'success': True, 'count': count, 'batch_id': batch_id})
