@@ -56,6 +56,7 @@ if RENDER_DISK.exists() and RENDER_DISK.is_dir():
 else:
     DB_PATH = Path(__file__).parent / 'evacuation.db'
     BACKUP_DIR = Path(__file__).parent / 'backups'
+LOCAL_BACKUP_KEEP_COUNT = 5
 SESSIONS = {}  # token -> {user, role, expires}
 
 # Approval PDF uploads directory
@@ -292,6 +293,8 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_iraq_public_batch ON iraq_public_submissions(linked_batch_id);
     CREATE INDEX IF NOT EXISTS idx_iraq_pub_batch_status ON iraq_batches_public(status);
     CREATE INDEX IF NOT EXISTS idx_iraq_dispatch_status ON iraq_mofa_dispatches(status);
+    CREATE INDEX IF NOT EXISTS idx_iraq_dispatch_public_latest ON iraq_dispatch_applicants(public_submission_id, id);
+    CREATE INDEX IF NOT EXISTS idx_iraq_decision_public_latest ON iraq_applicant_decisions(public_submission_id, id);
     """)
     # ── Visa Fee Collections ──────────────────────────────────────
     db.executescript("""
@@ -315,6 +318,8 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_fee_source ON fee_collections(source_table, source_id);
     CREATE INDEX IF NOT EXISTS idx_fee_status ON fee_collections(fee_status);
     CREATE INDEX IF NOT EXISTS idx_fee_passport ON fee_collections(passport_number);
+    CREATE INDEX IF NOT EXISTS idx_fee_paid_by_status ON fee_collections(paid_by, fee_status);
+    CREATE INDEX IF NOT EXISTS idx_fee_waiver_by_status ON fee_collections(waiver_approved_by, fee_status);
     CREATE TABLE IF NOT EXISTS fee_distributions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         distribution_date TEXT DEFAULT '',
@@ -502,6 +507,7 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass
+    db.execute("CREATE INDEX IF NOT EXISTS idx_iraq_public_portal_visible_created ON iraq_public_submissions(mofa_kw_portal_visible, created_at)")
     for col, coltype in [
         ('fee_status', "TEXT DEFAULT 'pending'"),
         ('fee_amount', 'REAL DEFAULT 2.0'),
@@ -1065,7 +1071,36 @@ def _onedrive_upload_async(file_path):
     except Exception as e:
         print(f'[OneDrive] Background upload error: {e}', flush=True)
 
-def do_backup(reason='scheduled'):
+def prune_local_backups(keep=LOCAL_BACKUP_KEEP_COUNT, preserve_paths=None):
+    backups = []
+    for backup in BACKUP_DIR.glob('evacuation_*.db'):
+        try:
+            backups.append((backup.stat().st_mtime, backup))
+        except Exception as e:
+            print(f'[Backup] Skipped local backup during prune {backup}: {e}', flush=True)
+    backups.sort(key=lambda item: item[0], reverse=True)
+    preserve_paths = {Path(path) for path in (preserve_paths or [])}
+    keep_set = set()
+    for _, backup in backups:
+        if backup not in preserve_paths or backup in keep_set:
+            continue
+        keep_set.add(backup)
+    for _, backup in backups:
+        if len(keep_set) >= keep:
+            break
+        if backup in keep_set:
+            continue
+        keep_set.add(backup)
+    for _, backup in backups:
+        if backup in keep_set:
+            continue
+        try:
+            backup.unlink()
+            print(f'[Backup] Pruned local backup: {backup}', flush=True)
+        except Exception as e:
+            print(f'[Backup] Failed to prune local backup {backup}: {e}', flush=True)
+
+def do_backup(reason='scheduled', preserve_paths=None):
     """Create a timestamped backup of the database"""
     BACKUP_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1077,10 +1112,7 @@ def do_backup(reason='scheduled'):
         src.backup(dst)
         dst.close()
         src.close()
-        # Keep only last 50 backups
-        backups = sorted(BACKUP_DIR.glob('*.db'), key=lambda p: p.stat().st_mtime)
-        while len(backups) > 50:
-            backups.pop(0).unlink()
+        prune_local_backups(preserve_paths=[backup_path, *(preserve_paths or [])])
         if ONEDRIVE_CLIENT_ID and ONEDRIVE_CLIENT_SECRET and (ONEDRIVE_REFRESH_TOKEN or _onedrive_refresh_runtime):
             threading.Thread(target=_onedrive_upload_async, args=(str(backup_path),), daemon=True).start()
         return str(backup_path)
@@ -1097,7 +1129,7 @@ def restore_backup(backup_name):
     if not backup_path.exists():
         return {'success': False, 'error': 'Backup not found'}
     # Backup current before restoring
-    do_backup('pre_restore')
+    do_backup('pre_restore', preserve_paths=[backup_path])
     try:
         src = sqlite3.connect(str(backup_path))
         dst = sqlite3.connect(str(DB_PATH))
@@ -2405,16 +2437,19 @@ def import_csv_data(csv_text, user='system', mode='smart'):
 # ═══════════════════════════════════════════════════════════════
 def _iraq_mission_dashboard_kpi(db):
     """Roll-up for main dashboard: Iraq public intake + mission batches + MOFA KW tracking."""
-    pub_total = db.execute("SELECT COUNT(*) c FROM iraq_public_submissions").fetchone()['c']
-    pub_portal = db.execute(
-        "SELECT COUNT(*) c FROM iraq_public_submissions WHERE COALESCE(mofa_kw_portal_visible,0)=1"
-    ).fetchone()['c']
-    pub_fwd = db.execute(
-        "SELECT COUNT(*) c FROM iraq_public_submissions WHERE status='Forwarded to Embassy Kuwait'"
-    ).fetchone()['c']
-    pub_nv = db.execute(
+    public_totals = db.execute("""
+        SELECT
+          COUNT(*) AS pub_total,
+          COALESCE(SUM(CASE WHEN COALESCE(mofa_kw_portal_visible,0)=1 THEN 1 ELSE 0 END),0) AS pub_portal,
+          COALESCE(SUM(CASE WHEN status='Forwarded to Embassy Kuwait' THEN 1 ELSE 0 END),0) AS pub_fwd
+        FROM iraq_public_submissions
+    """).fetchone()
+    pub_total = int(public_totals['pub_total'] or 0)
+    pub_portal = int(public_totals['pub_portal'] or 0)
+    pub_fwd = int(public_totals['pub_fwd'] or 0)
+    pub_nv = int(db.execute(
         "SELECT COUNT(DISTINCT public_submission_id) c FROM iraq_dispatch_applicants"
-    ).fetchone()['c']
+    ).fetchone()['c'] or 0)
     dec_map = {}
     for r in db.execute("""
         SELECT decision, COUNT(*) c FROM (
@@ -2429,18 +2464,33 @@ def _iraq_mission_dashboard_kpi(db):
     pub_mofa_rej = int(dec_map.get('Rejected') or 0)
     pub_mofa_pend = int(dec_map.get('Pending') or 0)
 
-    batch_apps = db.execute("SELECT COUNT(*) c FROM iraq_applicants").fetchone()['c']
-    b_pen = db.execute("SELECT COUNT(*) c FROM iraq_batches WHERE status='Pending'").fetchone()['c']
-    b_sent = db.execute("SELECT COUNT(*) c FROM iraq_batches WHERE status='Sent to MOFA Kuwait'").fetchone()['c']
-    b_proc = db.execute("SELECT COUNT(*) c FROM iraq_batches WHERE status='Processed'").fetchone()['c']
-    v_app = db.execute(
-        "SELECT COUNT(*) c FROM iraq_applicants WHERE visa_status='KW Transit Approved'"
-    ).fetchone()['c']
-    v_pend = db.execute(
-        """SELECT COUNT(*) c FROM iraq_applicants
-           WHERE visa_status='Pending' OR visa_status='' OR visa_status IS NULL"""
-    ).fetchone()['c']
-    v_rej = db.execute("SELECT COUNT(*) c FROM iraq_applicants WHERE visa_status='Rejected'").fetchone()['c']
+    batch_totals = db.execute("""
+        SELECT
+          COUNT(*) AS batch_apps,
+          COALESCE(SUM(CASE WHEN visa_status='KW Transit Approved' THEN 1 ELSE 0 END),0) AS v_app,
+          COALESCE(SUM(CASE WHEN visa_status='Rejected' THEN 1 ELSE 0 END),0) AS v_rej,
+          COALESCE(SUM(CASE WHEN visa_status='Pending' OR visa_status='' OR visa_status IS NULL THEN 1 ELSE 0 END),0) AS v_pend,
+          COALESCE(SUM(CASE WHEN movement_status='waiting_iraq' THEN 1 ELSE 0 END),0) AS waiting_travel_iraq,
+          COALESCE(SUM(CASE WHEN movement_status='waiting_kw' THEN 1 ELSE 0 END),0) AS waiting_transit_kw
+        FROM iraq_applicants
+    """).fetchone()
+    batch_apps = int(batch_totals['batch_apps'] or 0)
+    v_app = int(batch_totals['v_app'] or 0)
+    v_pend = int(batch_totals['v_pend'] or 0)
+    v_rej = int(batch_totals['v_rej'] or 0)
+    waiting_travel_iraq = int(batch_totals['waiting_travel_iraq'] or 0)
+    waiting_transit_kw = int(batch_totals['waiting_transit_kw'] or 0)
+
+    batch_status_totals = db.execute("""
+        SELECT
+          COALESCE(SUM(CASE WHEN status='Pending' THEN 1 ELSE 0 END),0) AS b_pen,
+          COALESCE(SUM(CASE WHEN status='Sent to MOFA Kuwait' THEN 1 ELSE 0 END),0) AS b_sent,
+          COALESCE(SUM(CASE WHEN status='Processed' THEN 1 ELSE 0 END),0) AS b_proc
+        FROM iraq_batches
+    """).fetchone()
+    b_pen = int(batch_status_totals['b_pen'] or 0)
+    b_sent = int(batch_status_totals['b_sent'] or 0)
+    b_proc = int(batch_status_totals['b_proc'] or 0)
 
     requests_received = int(pub_total) + int(batch_apps)
     mofa_kw_approved_total = int(pub_mofa_app) + int(v_app)
@@ -2458,13 +2508,6 @@ def _iraq_mission_dashboard_kpi(db):
             FROM iraq_public_submissions WHERE LOWER(COALESCE(ksa_mofa_status,''))='approved'
         ) combined WHERE pp != ''
     """).fetchone()['c']
-
-    waiting_travel_iraq = db.execute(
-        "SELECT COUNT(*) c FROM iraq_applicants WHERE movement_status='waiting_iraq'"
-    ).fetchone()['c']
-    waiting_transit_kw = db.execute(
-        "SELECT COUNT(*) c FROM iraq_applicants WHERE movement_status='waiting_kw'"
-    ).fetchone()['c']
 
     return {
         'requests_received': requests_received,
@@ -2617,26 +2660,87 @@ def _median(numbers):
     return (vals[mid - 1] + vals[mid]) / 2.0
 
 
+def _log_perf_if_slow(label, started_at, threshold_ms=250, row_count=None, extra=''):
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    if elapsed_ms < max(float(threshold_ms or 0), 0):
+        return elapsed_ms
+    parts = [f"[Perf] {label}", f"{elapsed_ms:.1f}ms"]
+    if row_count is not None:
+        parts.append(f"rows={row_count}")
+    if extra:
+        parts.append(str(extra))
+    print(' '.join(parts), flush=True)
+    return elapsed_ms
+
+
+def _dashboard_fee_metrics(db, cutoff_date=None):
+    where = []
+    params = []
+    if cutoff_date:
+        where.append("date(COALESCE(paid_at,waived_at,created_at)) >= date(?)")
+        params.append(cutoff_date)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ''
+    row = db.execute(f"""
+        SELECT
+          COALESCE(SUM(CASE WHEN fee_status='paid' THEN fee_amount ELSE 0 END),0) AS fee_total_collected,
+          COALESCE(SUM(CASE WHEN fee_status='waived' THEN fee_amount ELSE 0 END),0) AS fee_total_waived,
+          COALESCE(SUM(CASE WHEN fee_status='paid' AND date(COALESCE(paid_at,created_at))=date('now') THEN fee_amount ELSE 0 END),0) AS fee_today_collected,
+          COALESCE(SUM(CASE WHEN fee_status='waived' AND date(COALESCE(waived_at,created_at))=date('now') THEN fee_amount ELSE 0 END),0) AS fee_today_waived,
+          COALESCE(SUM(CASE WHEN fee_status='paid' THEN 1 ELSE 0 END),0) AS fee_paid_count,
+          COALESCE(SUM(CASE WHEN fee_status='waived' THEN 1 ELSE 0 END),0) AS fee_waived_count,
+          COUNT(DISTINCT CASE
+            WHEN fee_status IN ('paid','waived')
+             AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
+            THEN source_table || ':' || source_id END) AS fee_people_served_today,
+          COUNT(DISTINCT CASE
+            WHEN fee_status IN ('paid','waived')
+             AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
+            THEN source_table || ':' || source_id END) AS fee_released_today,
+          COUNT(DISTINCT CASE
+            WHEN fee_status IN ('paid','waived')
+            THEN source_table || ':' || source_id END) AS fee_released_total
+        FROM fee_collections
+        {where_sql}
+    """, params).fetchone()
+    return dict(row or {})
+
+
 def api_dashboard_stats(user=None):
     db = get_db()
+    started_at = time.perf_counter()
     role = (user or {}).get('role', 'unknown')
-    print(f"[Dash] /api/stats hit by role={role}", flush=True)
     try:
         EV_BASE = "FROM evacuees WHERE dup_flag='CLEAR' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
         EV_ALL = "FROM evacuees WHERE (effective_route = 'kw_to_pk' OR effective_route IS NULL)"
 
-        total_all = db.execute(f"SELECT COUNT(*) c {EV_ALL}").fetchone()['c']
-        total = db.execute(f"SELECT COUNT(*) c {EV_BASE}").fetchone()['c']
-        departed = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed'").fetchone()['c']
-        visa_obtained = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Visa Obtained'").fetchone()['c']
-        pending = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Pending'").fetchone()['c']
-        visa_approved = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND visa_status='Approved'").fetchone()['c']
-        iraq_entries = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND country='Iraq'").fetchone()['c']
-        returned = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned'").fetchone()['c']
+        evac_totals = db.execute(f"""
+            SELECT
+              COUNT(*) AS total_all,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' THEN 1 ELSE 0 END),0) AS total,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND travel_status='Departed' THEN 1 ELSE 0 END),0) AS departed,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND travel_status='Visa Obtained' THEN 1 ELSE 0 END),0) AS visa_obtained,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND travel_status='Pending' THEN 1 ELSE 0 END),0) AS pending,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND visa_status='Approved' THEN 1 ELSE 0 END),0) AS visa_approved,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND country='Iraq' THEN 1 ELSE 0 END),0) AS iraq_entries,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND travel_status='Returned' THEN 1 ELSE 0 END),0) AS returned,
+              COALESCE(SUM(CASE WHEN dup_flag='DUPLICATE' THEN 1 ELSE 0 END),0) AS duplicates,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND travel_status='Departed' AND departure_date=date('now') THEN 1 ELSE 0 END),0) AS departed_today,
+              COALESCE(SUM(CASE WHEN dup_flag='CLEAR' AND travel_status='Returned' AND departure_date=date('now') THEN 1 ELSE 0 END),0) AS returned_today
+            {EV_ALL}
+        """).fetchone()
 
-        departed_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Departed' AND departure_date=date('now')").fetchone()['c']
+        total_all = int(evac_totals['total_all'] or 0)
+        total = int(evac_totals['total'] or 0)
+        departed = int(evac_totals['departed'] or 0)
+        visa_obtained = int(evac_totals['visa_obtained'] or 0)
+        pending = int(evac_totals['pending'] or 0)
+        visa_approved = int(evac_totals['visa_approved'] or 0)
+        iraq_entries = int(evac_totals['iraq_entries'] or 0)
+        returned = int(evac_totals['returned'] or 0)
+        duplicates = int(evac_totals['duplicates'] or 0)
+        departed_today = int(evac_totals['departed_today'] or 0)
         entered_today = departed_today
-        returned_today = db.execute(f"SELECT COUNT(*) c {EV_BASE} AND travel_status='Returned' AND departure_date=date('now')").fetchone()['c']
+        returned_today = int(evac_totals['returned_today'] or 0)
         jazeera_departed = 120
 
         by_country = [dict(r) for r in db.execute(f"""
@@ -2667,7 +2771,6 @@ def api_dashboard_stats(user=None):
 
         by_visa = [dict(r) for r in db.execute(f"SELECT COALESCE(visa_status,'Not Set') status, COUNT(*) count {EV_ALL} GROUP BY visa_status").fetchall()]
         by_border = [dict(r) for r in db.execute(f"SELECT border_crossing, COUNT(*) count {EV_ALL} AND border_crossing != '' GROUP BY border_crossing").fetchall()]
-        duplicates = db.execute("SELECT COUNT(*) c FROM evacuees WHERE dup_flag='DUPLICATE' AND (effective_route = 'kw_to_pk' OR effective_route IS NULL)").fetchone()['c']
 
         # Operational dashboard analytics for the main KW→PK evacuee flow.
         evac_rows = [dict(r) for r in db.execute(f"""
@@ -2877,9 +2980,16 @@ def api_dashboard_stats(user=None):
         }
 
         try:
-            mismatch_total = db.execute("SELECT COUNT(*) c FROM evacuees WHERE route_mismatch = 1").fetchone()['c']
-            mismatch_pending_review = db.execute("SELECT COUNT(*) c FROM evacuees WHERE review_status IN ('pending','under_review','needs_followup')").fetchone()['c']
-            corrected_to_pk = db.execute("SELECT COUNT(*) c FROM evacuees WHERE effective_route = 'pk_to_kw' AND route_mismatch = 1").fetchone()['c']
+            mismatch_totals = db.execute("""
+                SELECT
+                  COALESCE(SUM(CASE WHEN route_mismatch = 1 THEN 1 ELSE 0 END),0) AS mismatch_total,
+                  COALESCE(SUM(CASE WHEN review_status IN ('pending','under_review','needs_followup') THEN 1 ELSE 0 END),0) AS mismatch_pending_review,
+                  COALESCE(SUM(CASE WHEN effective_route = 'pk_to_kw' AND route_mismatch = 1 THEN 1 ELSE 0 END),0) AS corrected_to_pk
+                FROM evacuees
+            """).fetchone()
+            mismatch_total = int(mismatch_totals['mismatch_total'] or 0)
+            mismatch_pending_review = int(mismatch_totals['mismatch_pending_review'] or 0)
+            corrected_to_pk = int(mismatch_totals['corrected_to_pk'] or 0)
         except sqlite3.OperationalError as e:
             print(f"[Dash] route-review query fallback: {e}", flush=True)
             mismatch_total = 0
@@ -2887,38 +2997,16 @@ def api_dashboard_stats(user=None):
             corrected_to_pk = 0
 
         iraq_mission = _iraq_mission_dashboard_kpi(db)
-        fee_today_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at))=date('now')").fetchone()['s']
-        fee_today_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at))=date('now')").fetchone()['s']
-        fee_total_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid'").fetchone()['s']
-        fee_total_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived'").fetchone()['s']
-        fee_paid_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='paid'").fetchone()['c']
-        fee_waived_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='waived'").fetchone()['c']
-        fee_people_served_today = db.execute("""
-            SELECT COUNT(*) c FROM (
-                SELECT source_table, source_id
-                FROM fee_collections
-                WHERE fee_status IN ('paid','waived')
-                  AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
-                GROUP BY source_table, source_id
-            ) t
-        """).fetchone()['c']
-        fee_released_today = db.execute("""
-            SELECT COUNT(*) c FROM (
-                SELECT source_table, source_id, MAX(COALESCE(paid_at,waived_at,created_at)) rel_at
-                FROM fee_collections
-                WHERE fee_status IN ('paid','waived')
-                GROUP BY source_table, source_id
-                HAVING date(rel_at)=date('now')
-            ) x
-        """).fetchone()['c']
-        fee_released_total = db.execute("""
-            SELECT COUNT(*) c FROM (
-                SELECT source_table, source_id
-                FROM fee_collections
-                WHERE fee_status IN ('paid','waived')
-                GROUP BY source_table, source_id
-            ) x
-        """).fetchone()['c']
+        fee_metrics = _dashboard_fee_metrics(db)
+        fee_today_collected = fee_metrics.get('fee_today_collected', 0)
+        fee_today_waived = fee_metrics.get('fee_today_waived', 0)
+        fee_total_collected = fee_metrics.get('fee_total_collected', 0)
+        fee_total_waived = fee_metrics.get('fee_total_waived', 0)
+        fee_paid_count = fee_metrics.get('fee_paid_count', 0)
+        fee_waived_count = fee_metrics.get('fee_waived_count', 0)
+        fee_people_served_today = fee_metrics.get('fee_people_served_today', 0)
+        fee_released_today = fee_metrics.get('fee_released_today', 0)
+        fee_released_total = fee_metrics.get('fee_released_total', 0)
         fee_pending_count = db.execute("""
             SELECT
               (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='pending')
@@ -2928,39 +3016,16 @@ def api_dashboard_stats(user=None):
 
         if _is_operator_special(user):
             _cdt = _OP_SPECIAL_FEE_CUTOFF
-            fee_today_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at))=date('now') AND date(COALESCE(paid_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
-            fee_today_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at))=date('now') AND date(COALESCE(waived_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
-            fee_total_collected = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
-            fee_total_waived = db.execute("SELECT COALESCE(SUM(fee_amount),0) s FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at)) >= date(?)", [_cdt]).fetchone()['s']
-            fee_paid_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='paid' AND date(COALESCE(paid_at,created_at)) >= date(?)", [_cdt]).fetchone()['c']
-            fee_waived_count = db.execute("SELECT COUNT(*) c FROM fee_collections WHERE fee_status='waived' AND date(COALESCE(waived_at,created_at)) >= date(?)", [_cdt]).fetchone()['c']
-            fee_people_served_today = db.execute("""
-                SELECT COUNT(*) c FROM (
-                    SELECT source_table, source_id FROM fee_collections
-                    WHERE fee_status IN ('paid','waived')
-                      AND date(COALESCE(paid_at,waived_at,created_at))=date('now')
-                      AND date(COALESCE(paid_at,waived_at,created_at)) >= date(?)
-                    GROUP BY source_table, source_id
-                ) t
-            """, [_cdt]).fetchone()['c']
-            fee_released_today = db.execute("""
-                SELECT COUNT(*) c FROM (
-                    SELECT source_table, source_id, MAX(COALESCE(paid_at,waived_at,created_at)) rel_at
-                    FROM fee_collections
-                    WHERE fee_status IN ('paid','waived')
-                      AND date(COALESCE(paid_at,waived_at,created_at)) >= date(?)
-                    GROUP BY source_table, source_id
-                    HAVING date(rel_at)=date('now')
-                ) x
-            """, [_cdt]).fetchone()['c']
-            fee_released_total = db.execute("""
-                SELECT COUNT(*) c FROM (
-                    SELECT source_table, source_id FROM fee_collections
-                    WHERE fee_status IN ('paid','waived')
-                      AND date(COALESCE(paid_at,waived_at,created_at)) >= date(?)
-                    GROUP BY source_table, source_id
-                ) x
-            """, [_cdt]).fetchone()['c']
+            fee_metrics = _dashboard_fee_metrics(db, cutoff_date=_cdt)
+            fee_today_collected = fee_metrics.get('fee_today_collected', 0)
+            fee_today_waived = fee_metrics.get('fee_today_waived', 0)
+            fee_total_collected = fee_metrics.get('fee_total_collected', 0)
+            fee_total_waived = fee_metrics.get('fee_total_waived', 0)
+            fee_paid_count = fee_metrics.get('fee_paid_count', 0)
+            fee_waived_count = fee_metrics.get('fee_waived_count', 0)
+            fee_people_served_today = fee_metrics.get('fee_people_served_today', 0)
+            fee_released_today = fee_metrics.get('fee_released_today', 0)
+            fee_released_total = fee_metrics.get('fee_released_total', 0)
             fee_today_collected = _op_special_round(fee_today_collected)
             fee_today_waived = _op_special_round(fee_today_waived)
             fee_total_collected = _op_special_round(fee_total_collected)
@@ -3012,7 +3077,7 @@ def api_dashboard_stats(user=None):
             'border_airline_matrix': border_airline_matrix,
             'longest_pending_cases': longest_pending_cases
         }
-        print(f"[Dash] response keys={list(payload.keys())} total={payload['kpi'].get('total',0)} by_country={len(payload.get('by_country') or [])} by_date={len(payload.get('by_date') or [])}", flush=True)
+        _log_perf_if_slow('/api/stats', started_at, threshold_ms=350, extra=f"role={role} total={payload['kpi'].get('total', 0)}")
         return payload
     except Exception as e:
         print(f"[Dash] ERROR in api_dashboard_stats: {type(e).__name__}: {e}", flush=True)
@@ -3050,8 +3115,21 @@ def api_dashboard_stats(user=None):
     finally:
         db.close()
 
+_EVACUEE_LIST_COLUMNS = """
+    id, created_at, name, passport, cnic, gender, country, civil_id, border_crossing, mobile,
+    company, visa_status, travel_status, departure_date, airline, ticket_number, departure_airport,
+    destination_country, date_of_request, email, dob, emergency_contact, medical, family_group_id,
+    dependents, accommodation, priority, remarks, planned_departure, saudi_city, traveling_with_family,
+    note_verbal_number, note_verbal_date, mofa_approval_serial, fee_status, dup_flag, mofa_status,
+    route_mismatch, review_status, record_locked, location_review_flag
+"""
+ALL_RECORDS_DEFAULT_LIMIT = 10
+ALL_RECORDS_MAX_LIMIT = 100
+
+
 def api_records(params, session_user=None):
     db = get_db()
+    started_at = time.perf_counter()
     try:
         # Single-record fetch (fresh data for View modal after approval PDF / other updates)
         if params.get('id'):
@@ -3115,29 +3193,66 @@ def api_records(params, session_user=None):
             where.append("ip_location_status = ?")
             qparams.append(params['ip_location_status'])
 
-        sql = f"SELECT * FROM evacuees WHERE {' AND '.join(where)} ORDER BY id DESC"
-        page_params = list(qparams)
-        try:
-            limit = int(str(params.get('limit', '')).strip() or 0)
-        except (TypeError, ValueError):
-            limit = 0
-        try:
-            offset = int(str(params.get('offset', '')).strip() or 0)
-        except (TypeError, ValueError):
-            offset = 0
-        if limit > 0:
-            limit = min(limit, 200)
-            offset = max(offset, 0)
-            sql += " LIMIT ? OFFSET ?"
-            page_params.extend([limit, offset])
+        count_sql = f"SELECT COUNT(*) AS c FROM evacuees WHERE {' AND '.join(where)}"
+        total_row = db.execute(count_sql, qparams).fetchone()
+        total = int(total_row['c']) if total_row and total_row['c'] is not None else 0
 
+        try:
+            limit = int(str(params.get('limit', '')).strip() or ALL_RECORDS_DEFAULT_LIMIT)
+        except (TypeError, ValueError):
+            limit = ALL_RECORDS_DEFAULT_LIMIT
+        limit = max(1, min(limit, ALL_RECORDS_MAX_LIMIT))
+
+        requested_page = None
+        raw_page = str(params.get('page', '')).strip()
+        if raw_page:
+            try:
+                requested_page = int(raw_page)
+            except (TypeError, ValueError):
+                requested_page = None
+
+        requested_offset = None
+        raw_offset = str(params.get('offset', '')).strip()
+        if raw_offset:
+            try:
+                requested_offset = int(raw_offset)
+            except (TypeError, ValueError):
+                requested_offset = None
+
+        total_pages = max(1, ((total + limit - 1) // limit)) if total else 1
+        page = 1
+        offset = 0
+        if requested_page and requested_page > 0:
+            page = min(requested_page, total_pages)
+            offset = (page - 1) * limit
+        elif requested_offset is not None:
+            offset = max(requested_offset, 0)
+            if total > 0 and offset >= total:
+                offset = max(0, (total_pages - 1) * limit)
+            page = (offset // limit) + 1
+
+        sql = f"SELECT {_EVACUEE_LIST_COLUMNS} FROM evacuees WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ? OFFSET ?"
+        page_params = list(qparams) + [limit, offset]
         rows = [dict(r) for r in db.execute(sql, page_params).fetchall()]
-        if not rows:
-            return []
         record_ids = [r.get('id') for r in rows]
         nv_links_by_id = bulk_fetch_nv_links_for_records(db, 'evacuees', record_ids)
         latest_releases_by_id = bulk_fetch_latest_nv_releases(db, 'evacuees', record_ids) if _is_admin_user(session_user) else {}
-        return apply_nv_access_fields_bulk(rows, nv_links_by_id, latest_releases_by_id, session_user, 'evacuees')
+        result = apply_nv_access_fields_bulk(rows, nv_links_by_id, latest_releases_by_id, session_user, 'evacuees')
+        _log_perf_if_slow(
+            '/api/records',
+            started_at,
+            threshold_ms=300,
+            row_count=len(result),
+            extra=f"search={1 if params.get('search') else 0} total={total} page={page}"
+        )
+        return {
+            'items': result,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+            'page': page,
+            'pages': total_pages,
+        }
     finally:
         db.close()
 
@@ -3533,6 +3648,50 @@ def _fee_source_meta(source):
     if source == 'iraq_public_submissions':
         return {'table': 'iraq_public_submissions', 'id_col': 'id', 'name_col': 'full_name', 'passport_col': 'passport_number', 'ref_expr': "COALESCE(reference_number, ('IRQ-' || id))"}
     return None
+
+
+def _attach_fee_applicant_names(db, rows):
+    out = [dict(r) for r in (rows or [])]
+    grouped_ids = {
+        'evacuees': set(),
+        'iraq_applicants': set(),
+        'iraq_public_submissions': set(),
+    }
+    for row in out:
+        source = str(row.get('source_table') or '').strip()
+        if source not in grouped_ids:
+            continue
+        try:
+            rid = int(row.get('source_id') or 0)
+        except Exception:
+            rid = 0
+        if rid > 0:
+            grouped_ids[source].add(rid)
+
+    name_maps = {}
+    for source, ids in grouped_ids.items():
+        meta = _fee_source_meta(source)
+        mapping = {}
+        if meta and ids:
+            for chunk in _iter_nv_record_id_chunks(ids):
+                placeholders = ','.join('?' for _ in chunk)
+                rows_chunk = db.execute(
+                    f"SELECT {meta['id_col']} AS id, {meta['name_col']} AS applicant_name "
+                    f"FROM {meta['table']} WHERE {meta['id_col']} IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows_chunk:
+                    mapping[int(row['id'])] = row['applicant_name'] or ''
+        name_maps[source] = mapping
+
+    for row in out:
+        source = str(row.get('source_table') or '').strip()
+        try:
+            rid = int(row.get('source_id') or 0)
+        except Exception:
+            rid = 0
+        row['applicant_name'] = name_maps.get(source, {}).get(rid, '')
+    return out
 
 def api_fee_lookup(params):
     q_raw = (params.get('q') or '').strip()
@@ -7124,8 +7283,20 @@ def api_route_review_queue(params):
     if not ROUTE_REVIEW_ENABLED:
         return []
     db = get_db()
+    started_at = time.perf_counter()
     filter_type = params.get('filter', 'all')  # all, suspects, flagged, pending, finalized
     search_val = (params.get('search', '') or '').strip()
+    select_cols = """id, name, passport, cnic, country, civil_id, mobile, email,
+        border_crossing, mofa_status, mofa_submitted, record_locked,
+        route_mismatch, effective_route, original_form_source, physical_location,
+        review_status, review_decision, flag_reason, review_assigned_to,
+        reviewed_by, reviewed_at, review_notes, admin_override_notes,
+        visa_status, travel_status, created_at,
+        clarification_email_sent, clarification_email_sent_at,
+        clarification_email_count, clarification_email_last_error,
+        clarification_email_last_status, clarification_email_last_trigger_source,
+        clarification_email_last_sent_by, location_review_flag, location_review_reason,
+        ip_location_status"""
 
     # Build search clause if provided
     search_clause = ''
@@ -7157,41 +7328,32 @@ def api_route_review_queue(params):
             )"""
 
     if filter_type == 'suspects':
-        rows = db.execute("""SELECT id, name, passport, cnic, country, civil_id, mobile, email,
-            border_crossing, mofa_status, mofa_submitted, record_locked,
-            route_mismatch, effective_route, original_form_source, physical_location,
-            review_status, review_decision, flag_reason, review_assigned_to,
-            reviewed_by, reviewed_at, review_notes, admin_override_notes,
-            visa_status, travel_status, created_at,
-            clarification_email_sent, clarification_email_sent_at,
-            clarification_email_count, clarification_email_last_error,
-            clarification_email_last_status, clarification_email_last_trigger_source,
-            clarification_email_last_sent_by
-            FROM evacuees
+        rows = db.execute(f"""SELECT {select_cols} FROM evacuees
             WHERE (review_status IS NULL OR review_status = '' OR review_status = 'pending')
             """ + inconsistency_clause + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'flagged':
-        rows = db.execute("""SELECT * FROM evacuees
+        rows = db.execute(f"""SELECT {select_cols} FROM evacuees
             WHERE route_mismatch = 1""" + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'pending':
-        rows = db.execute("""SELECT * FROM evacuees
+        rows = db.execute(f"""SELECT {select_cols} FROM evacuees
             WHERE review_status IN ('pending', 'under_review', 'needs_followup')
             """ + inconsistency_clause + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
     elif filter_type == 'finalized':
-        rows = db.execute("""SELECT * FROM evacuees
+        rows = db.execute(f"""SELECT {select_cols} FROM evacuees
             WHERE review_status = 'finalized'""" + search_clause + """
             ORDER BY reviewed_at DESC LIMIT 200""", search_params).fetchall()
     else:
-        rows = db.execute("""SELECT * FROM evacuees
+        rows = db.execute(f"""SELECT {select_cols} FROM evacuees
             WHERE 1=1
             """ + inconsistency_clause + mofa_exclusion + search_clause + """
             ORDER BY id DESC""", search_params).fetchall()
 
     result = [dict(r) for r in rows]
     db.close()
+    _log_perf_if_slow('/api/route-review-queue', started_at, threshold_ms=300, row_count=len(result), extra=f"filter={filter_type}")
     return result
 
 
@@ -7478,6 +7640,7 @@ def api_fee_report(params):
 
 def api_fee_statement(params, user):
     db = get_db()
+    started_at = time.perf_counter()
     try:
         search = (params.get('search') or '').strip()
         status = (params.get('status') or '').strip().lower()
@@ -7528,49 +7691,26 @@ def api_fee_statement(params, user):
             FROM fee_collections f
             WHERE {' AND '.join(where)}
         """, q).fetchone()
-
-        daily = [dict(r) for r in db.execute(f"""
-            SELECT
-              date(COALESCE(f.paid_at,f.waived_at,f.created_at)) day,
-              SUM(CASE WHEN f.fee_status='paid' THEN 1 ELSE 0 END) paid_cases,
-              SUM(CASE WHEN f.fee_status='waived' THEN 1 ELSE 0 END) waived_cases,
-              COALESCE(SUM(CASE WHEN f.fee_status='paid' THEN f.fee_amount ELSE 0 END),0) collected_amount,
-              COALESCE(SUM(CASE WHEN f.fee_status='waived' THEN f.fee_amount ELSE 0 END),0) waived_amount,
-              COUNT(DISTINCT CASE WHEN f.fee_status IN ('paid','waived') THEN f.source_table||':'||f.source_id ELSE NULL END) people_entertained,
-              COUNT(DISTINCT CASE WHEN f.fee_status IN ('paid','waived') THEN f.source_table||':'||f.source_id ELSE NULL END) print_released_count
-            FROM fee_collections f
-            WHERE {' AND '.join(where)}
-            GROUP BY day
-            ORDER BY day DESC
-            LIMIT 120
-        """, q).fetchall()]
-
-        rows = [dict(r) for r in db.execute(f"""
+        fee_activity_rows = _attach_fee_applicant_names(db, db.execute(f"""
             SELECT
               f.id, COALESCE(f.paid_at,f.waived_at,f.created_at) action_at,
-              f.source_table, f.source_id,
-              CASE
-                WHEN f.source_table='evacuees' THEN (SELECT e.name FROM evacuees e WHERE e.id=f.source_id)
-                WHEN f.source_table='iraq_applicants' THEN (SELECT a.full_name FROM iraq_applicants a WHERE a.id=f.source_id)
-                WHEN f.source_table='iraq_public_submissions' THEN (SELECT p.full_name FROM iraq_public_submissions p WHERE p.id=f.source_id)
-                ELSE ''
-              END applicant_name,
-              f.passport_number, f.tracking_or_reference, f.fee_status, f.fee_amount, f.fee_currency,
+              f.source_table, f.source_id, f.passport_number, f.tracking_or_reference,
+              f.fee_status, f.fee_amount, f.fee_currency,
               f.paid_by, f.waiver_approved_by, f.waiver_reason, f.receipt_notes,
               CASE WHEN f.fee_status IN ('paid','waived') THEN 1 ELSE 0 END print_released
             FROM fee_collections f
             WHERE {' AND '.join(where)}
             ORDER BY f.id DESC
             LIMIT 2000
-        """, q).fetchall()]
+        """, q).fetchall())
 
         settlement = api_fee_settlement_report(params, user)
         result = {
             'success': True,
             'summary': {**dict(summary), **dict(amounts), **(settlement.get('summary') or {})},
-            'daily': settlement.get('daily') or daily,
-            'rows': settlement.get('rows') or rows,
-            'fee_activity_rows': rows
+            'daily': settlement.get('daily') or [],
+            'rows': settlement.get('rows') or [],
+            'fee_activity_rows': fee_activity_rows
         }
 
         # operator_special: apply visibility cutoff only.
@@ -7617,6 +7757,7 @@ def api_fee_statement(params, user):
             result['rows'] = settlement.get('rows') or []
 
 
+        _log_perf_if_slow('/api/fee-statement', started_at, threshold_ms=400, row_count=len(result.get('fee_activity_rows') or []))
         return result
     finally:
         db.close()
@@ -7823,6 +7964,7 @@ def api_iraq_batches(params, user_filter=None):
 
 def api_iraq_batch_detail(batch_id, user_filter=None, session_user=None):
     db = get_db()
+    started_at = time.perf_counter()
     batch = db.execute("SELECT * FROM iraq_batches WHERE id = ?", [batch_id]).fetchone()
     if not batch:
         db.close()
@@ -7831,13 +7973,14 @@ def api_iraq_batch_detail(batch_id, user_filter=None, session_user=None):
     if user_filter and batch['uploaded_by'] != user_filter:
         db.close()
         return {'error': 'Access denied'}
-    applicants = []
-    for rr in db.execute("SELECT * FROM iraq_applicants WHERE batch_id = ? ORDER BY id", [batch_id]).fetchall():
-        a = dict(rr)
-        a = _apply_nv_access_fields(db, a, 'iraq_applicants', session_user)
-        applicants.append(a)
+    applicants = [dict(rr) for rr in db.execute("SELECT * FROM iraq_applicants WHERE batch_id = ? ORDER BY id", [batch_id]).fetchall()]
+    applicant_ids = [row.get('id') for row in applicants]
+    nv_links_by_id = bulk_fetch_nv_links_for_records(db, 'iraq_applicants', applicant_ids)
+    latest_releases_by_id = bulk_fetch_latest_nv_releases(db, 'iraq_applicants', applicant_ids) if _is_admin_user(session_user) else {}
+    applicants = apply_nv_access_fields_bulk(applicants, nv_links_by_id, latest_releases_by_id, session_user, 'iraq_applicants')
     db.close()
     batch['applicants'] = applicants
+    _log_perf_if_slow('/api/iraq-batch-detail', started_at, threshold_ms=300, row_count=len(applicants), extra=f"batch_id={batch_id}")
     return batch
 
 def api_iraq_create_batch(data, user):
@@ -8394,6 +8537,46 @@ def api_iraq_public_submissions(params):
     db.close()
     return [dict(r) for r in rows]
 
+
+def bulk_fetch_latest_iraq_public_decisions(db, submission_ids):
+    by_id = {}
+    for chunk in _iter_nv_record_id_chunks(submission_ids):
+        placeholders = ','.join('?' for _ in chunk)
+        rows = db.execute(f"""
+            SELECT public_submission_id, decision, id
+            FROM iraq_applicant_decisions
+            WHERE public_submission_id IN ({placeholders})
+            ORDER BY public_submission_id ASC, id DESC
+        """, chunk).fetchall()
+        for row in rows:
+            sid = int(row['public_submission_id'] or 0)
+            if sid > 0 and sid not in by_id:
+                by_id[sid] = row['decision'] or ''
+    return by_id
+
+
+def bulk_fetch_latest_iraq_public_dispatches(db, submission_ids):
+    by_id = {}
+    for chunk in _iter_nv_record_id_chunks(submission_ids):
+        placeholders = ','.join('?' for _ in chunk)
+        rows = db.execute(f"""
+            SELECT da.public_submission_id, md.note_verbale_number, md.note_verbale_date, md.sent_date, da.id
+            FROM iraq_dispatch_applicants da
+            JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
+            WHERE da.public_submission_id IN ({placeholders})
+            ORDER BY da.public_submission_id ASC, da.id DESC
+        """, chunk).fetchall()
+        for row in rows:
+            sid = int(row['public_submission_id'] or 0)
+            if sid > 0 and sid not in by_id:
+                by_id[sid] = {
+                    'note_verbale_number': row['note_verbale_number'] or '',
+                    'note_verbale_date': row['note_verbale_date'] or '',
+                    'sent_date': row['sent_date'] or '',
+                }
+    return by_id
+
+
 def api_iraq_public_submission_detail(sub_id, session_user=None):
     db = get_db()
     row = db.execute("SELECT * FROM iraq_public_submissions WHERE id = ?", [sub_id]).fetchone()
@@ -8509,6 +8692,7 @@ def api_iraq_public_release_to_mofa_portal(user):
 
 def api_iraq_public_portal_submissions(params):
     db = get_db()
+    started_at = time.perf_counter()
     where = []
     q = []
     status = (params.get('status') or '').strip()
@@ -8521,50 +8705,45 @@ def api_iraq_public_portal_submissions(params):
     # Visibility: default only rows already released to this portal; optional "today" preview includes not-yet-released (same calendar day only)
     if include_unreleased and created_date:
         where.append("""(
-            (COALESCE(mofa_kw_portal_visible, 0) = 1 AND date(created_at) = date(?))
-            OR (COALESCE(mofa_kw_portal_visible, 0) = 0 AND status NOT IN ('Rejected', 'Duplicate') AND date(created_at) = date(?))
+            (COALESCE(p.mofa_kw_portal_visible, 0) = 1 AND date(p.created_at) = date(?))
+            OR (COALESCE(p.mofa_kw_portal_visible, 0) = 0 AND p.status NOT IN ('Rejected', 'Duplicate') AND date(p.created_at) = date(?))
         )""")
         q.extend([created_date, created_date])
     else:
-        where.append("COALESCE(mofa_kw_portal_visible, 0) = 1")
+        where.append("COALESCE(p.mofa_kw_portal_visible, 0) = 1")
         if created_date:
-            where.append("date(created_at) = date(?)")
+            where.append("date(p.created_at) = date(?)")
             q.append(created_date)
     if pending_nv:
         where.append(
             "NOT EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id)"
         )
     if status:
-        where.append("status = ?")
+        where.append("p.status = ?")
         q.append(status)
     if search:
         sf = f"%{search}%"
-        where.append("(full_name LIKE ? OR passport_number LIKE ? OR reference_number LIKE ? OR phone LIKE ? OR cnic LIKE ?)")
+        where.append("(p.full_name LIKE ? OR p.passport_number LIKE ? OR p.reference_number LIKE ? OR p.phone LIKE ? OR p.cnic LIKE ?)")
         q.extend([sf, sf, sf, sf, sf])
-    rows = db.execute(
-        f"""SELECT p.*,
-            EXISTS (SELECT 1 FROM iraq_dispatch_applicants d WHERE d.public_submission_id = p.id) AS has_nv_dispatch,
-            (SELECT md.note_verbale_number FROM iraq_dispatch_applicants da
-             JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
-             WHERE da.public_submission_id = p.id ORDER BY da.id DESC LIMIT 1) AS nv_number,
-            (SELECT md.note_verbale_date FROM iraq_dispatch_applicants da
-             JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
-             WHERE da.public_submission_id = p.id ORDER BY da.id DESC LIMIT 1) AS nv_date,
-            (SELECT md.sent_date FROM iraq_dispatch_applicants da
-             JOIN iraq_mofa_dispatches md ON md.id = da.dispatch_id
-             WHERE da.public_submission_id = p.id ORDER BY da.id DESC LIMIT 1) AS nv_sent_date,
-            (SELECT d2.decision FROM iraq_applicant_decisions d2
-             WHERE d2.public_submission_id = p.id ORDER BY d2.id DESC LIMIT 1) AS kw_transit_visa_status
-            FROM iraq_public_submissions p WHERE {' AND '.join(where)} ORDER BY p.id DESC""", q
-    ).fetchall()
+    rows = [dict(r) for r in db.execute(
+        f"SELECT p.* FROM iraq_public_submissions p WHERE {' AND '.join(where)} ORDER BY p.id DESC", q
+    ).fetchall()]
+    submission_ids = [row.get('id') for row in rows]
+    decisions_by_id = bulk_fetch_latest_iraq_public_decisions(db, submission_ids)
+    dispatches_by_id = bulk_fetch_latest_iraq_public_dispatches(db, submission_ids)
     out = []
-    for r in rows:
-        d = dict(r)
-        d['has_nv_dispatch'] = bool(d.get('has_nv_dispatch'))
-        kws = d.get('kw_transit_visa_status')
+    for d in rows:
+        sid = int(d.get('id') or 0)
+        dispatch = dispatches_by_id.get(sid)
+        d['has_nv_dispatch'] = bool(dispatch)
+        d['nv_number'] = dispatch.get('note_verbale_number', '') if dispatch else ''
+        d['nv_date'] = dispatch.get('note_verbale_date', '') if dispatch else ''
+        d['nv_sent_date'] = dispatch.get('sent_date', '') if dispatch else ''
+        kws = decisions_by_id.get(sid, '')
         d['kw_transit_visa_status'] = (kws if kws else '') or 'Pending'
         out.append(d)
     db.close()
+    _log_perf_if_slow('/api/iraq-public-portal-submissions', started_at, threshold_ms=325, row_count=len(out), extra=f"search={1 if search else 0} pending_nv={1 if pending_nv else 0}")
     return out
 
 def api_iraq_public_portal_stats():
@@ -17657,6 +17836,27 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 .sb input,.sb select{padding:9px 12px;border:1px solid var(--bd);border-radius:7px;font-size:.88em}
 .sb input{flex:1;min-width:180px}
 .rc{font-size:.82em;color:var(--tl);margin-bottom:8px}
+.records-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.records-head h3{margin-bottom:4px}
+.records-helper{margin:0;font-size:.84em;color:var(--tl);max-width:760px;line-height:1.5}
+.records-search{background:#f8fbf8;border:1px solid #e1ebe1;border-radius:12px;padding:14px;margin-bottom:14px}
+.records-search-main{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.records-search-main input{flex:1;min-width:280px;padding:11px 14px;border:1px solid #c7d9c7;border-radius:9px;font-size:.92em;background:#fff}
+.records-search-main input:focus{outline:none;border-color:var(--p);box-shadow:0 0 0 3px rgba(0,102,0,.08)}
+.records-search-note{margin:0 0 12px;font-size:.8em;color:var(--tl)}
+.adv-filters{margin-top:12px;padding-top:12px;border-top:1px dashed #d7e3d7}
+.adv-filters summary{cursor:pointer;font-weight:700;font-size:.84em;color:#315331;list-style:none}
+.adv-filters summary::-webkit-details-marker{display:none}
+.adv-filters summary::after{content:'Show';margin-left:8px;font-size:.75em;color:var(--tl);font-weight:600}
+.adv-filters[open] summary::after{content:'Hide'}
+.sb-advanced{margin:10px 0 0}
+.records-pager{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}
+.records-pager-info{font-size:.82em;color:var(--tl)}
+.records-pager-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.page-btn{padding:7px 12px;border:1px solid var(--bd);border-radius:7px;background:#fff;color:#234;cursor:pointer;font-size:.82em;font-weight:600}
+.page-btn:hover:not(:disabled){border-color:var(--p);color:var(--p)}
+.page-btn.active{background:var(--p);border-color:var(--p);color:#fff}
+.page-btn:disabled{opacity:.5;cursor:not-allowed}
 .scroll-t{max-height:560px;overflow-y:auto}
 .rp{background:#fff;border:1px solid var(--bd);border-radius:8px;padding:35px;max-width:780px;margin:16px auto;font-family:'Times New Roman',serif}
 .rp h1{text-align:center;font-size:1.5em;border-bottom:3px double #333;padding-bottom:8px;margin-bottom:4px}
@@ -17673,8 +17873,8 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 .stat-ok{background:#c8e6c9;color:#1b5e20}.stat-skip{background:#fff9c4;color:#f57f17}.stat-upd{background:#bbdefb;color:#0d47a1}.stat-err{background:#ffcdd2;color:#b71c1c}
 @media print{.hdr,.nav,.btn,.sb,.np{display:none!important}.tab{display:none!important}#tab-report{display:block!important}.rp{border:none;box-shadow:none;padding:0;margin:0;max-width:100%}body{background:#fff}}
 @media(max-width:1024px){.dash-card.wide{grid-column:auto}.dash-top-shell,.dash-overview-grid,.dash-chart-grid.story,.dash-chart-grid.overview-main{grid-template-columns:1fr}}
-@media(max-width:768px){.kg{grid-template-columns:repeat(2,1fr)}.cg{grid-template-columns:1fr}.ctr{padding:12px}.dash-top-shell{gap:12px;margin:6px 0 20px}.dash-summary-panel{padding:10px;border-radius:16px}.dash-summary-section+.dash-summary-section{margin-top:12px;padding-top:12px}.dash-section{padding:14px 14px 12px;border-radius:16px}.dash-overview-grid,.dash-overview-side,.dash-chart-grid,.dash-chart-grid.story,.dash-chart-grid.tight,.dash-chart-grid.overview-main,.dash-mini-grid{grid-template-columns:1fr}.dash-card{padding:14px;border-radius:14px}.dash-card.table-card{padding:0}.dash-card.table-card .dash-card-head{padding:14px 14px 0}.dash-card-head{margin-bottom:10px}.dash-card-head span{max-width:none;text-align:left}.chart-wrap{min-height:220px}.chart-wrap.compact,.chart-wrap.mini{min-height:190px}.dash-summary-section-head{flex-direction:column}.dash-summary-section-head span{text-align:left;max-width:none}.dash-summary-table-wrap,.data-mini-table-wrap{overflow:visible;border:none;background:transparent;padding:0}.dash-summary-table,.data-mini-table{min-width:0}.dash-summary-table thead,.data-mini-table thead,#longestPendingTable thead{display:none}.dash-summary-table tbody,.data-mini-table tbody,#longestPendingTable tbody{display:grid;gap:10px}.dash-summary-table tr,.data-mini-table tr,#longestPendingTable tr{display:block;border:1px solid #e4ebf3;border-radius:12px;background:#fff;box-shadow:0 6px 16px rgba(15,23,42,.04);overflow:hidden}.dash-summary-table td,.data-mini-table td,#longestPendingTable td{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;padding:8px 10px;border-bottom:1px solid #edf2f7;white-space:normal}.dash-summary-table tbody tr td:last-child,.data-mini-table tbody tr td:last-child,#longestPendingTable tbody tr td:last-child{border-bottom:none}.dash-summary-table td::before,.data-mini-table td::before,#longestPendingTable td::before{content:attr(data-label);font-size:.68em;text-transform:uppercase;letter-spacing:.45px;color:#6b7280;font-weight:700}.dash-summary-label{gap:6px}.dash-summary-value{text-align:left;font-size:1em;white-space:normal}.dash-summary-detail{font-size:.84em}.data-mini-table .sub{margin-top:4px}.tc{padding:12px}.nav button{padding:8px 12px;font-size:.8em}}
-@media(max-width:480px){.ctr{padding:10px}.kg{grid-template-columns:1fr}.sb{flex-direction:column;align-items:stretch}.sb input,.sb select,.sb a,.sb button{width:100%}.bg{flex-direction:column;align-items:stretch}.bg .btn,.bg a.btn{width:100%;text-align:center}.dash-top-shell{margin:4px 0 16px}.dash-summary-panel{padding:9px}.dash-section{padding:12px 12px 10px}.dash-section-head{gap:8px;margin-bottom:12px;padding-bottom:10px}.dash-section-head h3,.dash-card-head h3{font-size:.92em}.dash-section-head p,.dash-card-head span{font-size:.74em;line-height:1.45}.dash-summary-section-head h3{font-size:.93em}.dash-summary-table td,.data-mini-table td,#longestPendingTable td{grid-template-columns:1fr;gap:4px;padding:8px 9px}.chart-wrap{min-height:205px}.chart-wrap.compact,.chart-wrap.mini{min-height:180px}}
+@media(max-width:768px){.kg{grid-template-columns:repeat(2,1fr)}.cg{grid-template-columns:1fr}.ctr{padding:12px}.dash-top-shell{gap:12px;margin:6px 0 20px}.dash-summary-panel{padding:10px;border-radius:16px}.dash-summary-section+.dash-summary-section{margin-top:12px;padding-top:12px}.dash-section{padding:14px 14px 12px;border-radius:16px}.dash-overview-grid,.dash-overview-side,.dash-chart-grid,.dash-chart-grid.story,.dash-chart-grid.tight,.dash-chart-grid.overview-main,.dash-mini-grid{grid-template-columns:1fr}.dash-card{padding:14px;border-radius:14px}.dash-card.table-card{padding:0}.dash-card.table-card .dash-card-head{padding:14px 14px 0}.dash-card-head{margin-bottom:10px}.dash-card-head span{max-width:none;text-align:left}.chart-wrap{min-height:220px}.chart-wrap.compact,.chart-wrap.mini{min-height:190px}.dash-summary-section-head{flex-direction:column}.dash-summary-section-head span{text-align:left;max-width:none}.dash-summary-table-wrap,.data-mini-table-wrap{overflow:visible;border:none;background:transparent;padding:0}.dash-summary-table,.data-mini-table{min-width:0}.dash-summary-table thead,.data-mini-table thead,#longestPendingTable thead{display:none}.dash-summary-table tbody,.data-mini-table tbody,#longestPendingTable tbody{display:grid;gap:10px}.dash-summary-table tr,.data-mini-table tr,#longestPendingTable tr{display:block;border:1px solid #e4ebf3;border-radius:12px;background:#fff;box-shadow:0 6px 16px rgba(15,23,42,.04);overflow:hidden}.dash-summary-table td,.data-mini-table td,#longestPendingTable td{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px;padding:8px 10px;border-bottom:1px solid #edf2f7;white-space:normal}.dash-summary-table tbody tr td:last-child,.data-mini-table tbody tr td:last-child,#longestPendingTable tbody tr td:last-child{border-bottom:none}.dash-summary-table td::before,.data-mini-table td::before,#longestPendingTable td::before{content:attr(data-label);font-size:.68em;text-transform:uppercase;letter-spacing:.45px;color:#6b7280;font-weight:700}.dash-summary-label{gap:6px}.dash-summary-value{text-align:left;font-size:1em;white-space:normal}.dash-summary-detail{font-size:.84em}.data-mini-table .sub{margin-top:4px}.tc{padding:12px}.nav button{padding:8px 12px;font-size:.8em}.records-search-main{flex-direction:column;align-items:stretch}.records-search-main input,.records-search-main button,.records-search-main a{width:100%}}
+@media(max-width:480px){.ctr{padding:10px}.kg{grid-template-columns:1fr}.sb{flex-direction:column;align-items:stretch}.sb input,.sb select,.sb a,.sb button{width:100%}.bg{flex-direction:column;align-items:stretch}.bg .btn,.bg a.btn{width:100%;text-align:center}.dash-top-shell{margin:4px 0 16px}.dash-summary-panel{padding:9px}.dash-section{padding:12px 12px 10px}.dash-section-head{gap:8px;margin-bottom:12px;padding-bottom:10px}.dash-section-head h3,.dash-card-head h3{font-size:.92em}.dash-section-head p,.dash-card-head span{font-size:.74em;line-height:1.45}.dash-summary-section-head h3{font-size:.93em}.dash-summary-table td,.data-mini-table td,#longestPendingTable td{grid-template-columns:1fr;gap:4px;padding:8px 9px}.chart-wrap{min-height:205px}.chart-wrap.compact,.chart-wrap.mini{min-height:180px}.records-pager{align-items:stretch}.records-pager-controls{width:100%}.page-btn{flex:1 1 auto}}
 </style></head><body>
 <div class="hdr"><div style="display:flex;align-items:center"><span class="flag"><img class="flag-img" src="data:image/jpeg;base64,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" alt="Pakistan Flag" style="margin-right:10px"></span><div><h1>CITIZEN SUPPORT FOR TRANSIT KSA SYSTEM</h1><div class="sub">Pakistan Embassy Kuwait &mdash; CWA Kuwait</div></div></div>
 <div class="user-info"><span id="userDisplay"></span><a href="#" onclick="document.getElementById('pwModal').classList.add('show');return false" style="background:rgba(255,255,255,.08)">Change Password</a><a href="/logout">Logout</a></div></div>
@@ -17816,18 +18016,34 @@ td{padding:7px 10px;border-bottom:1px solid #f0f0f0}tr:hover{background:#f8f9fa}
 
 <!-- RECORDS -->
 <div id="tab-recs" class="tab"><div class="ctr"><div class="tc">
+<div class="records-head">
+<div>
 <h3>All Registered Evacuees</h3>
-<div class="sb">
-<input id="sInput" placeholder="Search name, passport, CNIC, mobile, or tracking # (PKE-0001)..." oninput="loadRecords()">
-<select id="fStatus" onchange="loadRecords()"><option value="">All Status</option><option>Departed</option><option>Visa Obtained</option><option>Pending</option><option>Returned</option></select>
-<select id="fFee" onchange="loadRecords()"><option value="">All Fee</option><option value="pending">Fee Pending</option><option value="paid">Fee Paid</option><option value="waived">Fee Waived</option></select>
-<select id="fCountry" onchange="loadRecords()"><option value="">All Countries</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>US</option><option>KSA</option><option>UAE</option><option>Dubai</option></select>
-<select id="fGender" onchange="loadRecords()"><option value="">All Gender</option><option>Male</option><option>Female</option><option>Child</option></select>
-<select id="fDup" onchange="loadRecords()"><option value="">All</option><option value="DUPLICATE">Duplicates Only</option><option value="CLEAR">Clean Only</option></select>
+<p class="records-helper">Use search to quickly find a record for editing, travel details, letter issuance, and Note Verbal actions.</p>
+</div>
 <a href="/api/export" class="btn btn-i" style="text-decoration:none;color:#fff" data-admin-only>Export CSV</a>
+</div>
+<div class="records-search">
+<p class="records-search-note">Search is the fastest way to reach a specific applicant. The table below now loads in small pages for smoother day-to-day use.</p>
+<div class="records-search-main">
+<input id="sInput" type="search" autocomplete="off" spellcheck="false" placeholder="Search by passport, tracking ID, name, CNIC, or civil ID" onkeydown="if(event.key==='Enter'){event.preventDefault();submitRecordSearch()}">
+<button type="button" class="btn btn-p" onclick="submitRecordSearch()">Search</button>
+<button type="button" class="btn" style="background:#eef3f8" onclick="resetRecordFilters()">Reset</button>
+</div>
+<details class="adv-filters" id="recordAdvancedFilters">
+<summary>Advanced Filters</summary>
+<div class="sb sb-advanced">
+<select id="fStatus" onchange="applyRecordFilters()"><option value="">All Status</option><option>Departed</option><option>Visa Obtained</option><option>Pending</option><option>Returned</option></select>
+<select id="fFee" onchange="applyRecordFilters()"><option value="">All Fee</option><option value="pending">Fee Pending</option><option value="paid">Fee Paid</option><option value="waived">Fee Waived</option></select>
+<select id="fCountry" onchange="applyRecordFilters()"><option value="">All Countries</option><option>Kuwait</option><option>Pakistan</option><option>Iraq</option><option>US</option><option>KSA</option><option>UAE</option><option>Dubai</option></select>
+<select id="fGender" onchange="applyRecordFilters()"><option value="">All Gender</option><option>Male</option><option>Female</option><option>Child</option></select>
+<select id="fDup" onchange="applyRecordFilters()"><option value="">All</option><option value="DUPLICATE">Duplicates Only</option><option value="CLEAR">Clean Only</option></select>
+</div>
+</details>
 </div>
 <div class="rc" id="recCount"></div>
 <div class="scroll-t"><table id="recTbl"></table></div>
+<div class="records-pager" id="recPager"></div>
 </div></div></div>
 
 <!-- RETURNEES (Pakistan → Kuwait) -->
@@ -18676,7 +18892,9 @@ No deterioration in ground security situation so far.</textarea>
 <div class="toast" id="toast"></div>
 
 <script>
+const RECORDS_PAGE_SIZE=10;
 let charts={},allRecords=[];
+let recordListState={page:1,limit:RECORDS_PAGE_SIZE,total:0,offset:0,pages:1};
 const F=['name','passport','cnic','gender','country','civil_id','border_crossing','mobile','company',
 'visa_status','travel_status','departure_date','airline','ticket_number','departure_airport','destination_country',
 'date_of_request','email','dob','emergency_contact','medical','family_group_id','dependents',
@@ -18948,17 +19166,81 @@ else toast(r.error||'Parse failed');
 }
 
 // RECORDS
-async function loadRecords(){
+function recordRangeLabel(total,offset,count){
+if(!total||!count)return 'No matching records';
+const start=offset+1;
+const end=Math.min(offset+count,total);
+return `Showing ${start}-${end} of ${total}`;
+}
+function recordFilters(){
+return {
+search:(document.getElementById('sInput').value||'').trim(),
+status:document.getElementById('fStatus').value||'',
+fee_status:document.getElementById('fFee').value||'',
+country:document.getElementById('fCountry').value||'',
+gender:document.getElementById('fGender').value||'',
+dup:document.getElementById('fDup').value||''
+};
+}
+function submitRecordSearch(){recordListState.page=1;loadRecords()}
+function applyRecordFilters(){recordListState.page=1;loadRecords()}
+function resetRecordFilters(){
+document.getElementById('sInput').value='';
+document.getElementById('fStatus').value='';
+document.getElementById('fFee').value='';
+document.getElementById('fCountry').value='';
+document.getElementById('fGender').value='';
+document.getElementById('fDup').value='';
+const adv=document.getElementById('recordAdvancedFilters'); if(adv)adv.open=false;
+recordListState.page=1;
+loadRecords();
+}
+function renderRecordPagination(){
+const pager=document.getElementById('recPager');
+if(!pager)return;
+const total=Number(recordListState.total)||0;
+const page=Math.max(1,Number(recordListState.page)||1);
+const pages=Math.max(1,Number(recordListState.pages)||1);
+if(!total){
+pager.innerHTML='<div class="records-pager-info">No pages to show</div><div class="records-pager-controls"><button type="button" class="page-btn" disabled>Previous</button><button type="button" class="page-btn" disabled>Next</button></div>';
+return;
+}
+let start=Math.max(1,page-2);
+let end=Math.min(pages,start+4);
+start=Math.max(1,end-4);
+const buttons=[];
+for(let p=start;p<=end;p++){
+buttons.push(`<button type="button" class="page-btn ${p===page?'active':''}" onclick="loadRecords(${p})" ${p===page?'aria-current="page"':''}>${p}</button>`);
+}
+pager.innerHTML=`<div class="records-pager-info">Page ${page} of ${pages}</div><div class="records-pager-controls"><button type="button" class="page-btn" onclick="loadRecords(${page-1})" ${page<=1?'disabled':''}>Previous</button>${buttons.join('')}<button type="button" class="page-btn" onclick="loadRecords(${page+1})" ${page>=pages?'disabled':''}>Next</button></div>`;
+}
+async function loadRecords(page){
+if(Number.isFinite(page))recordListState.page=Math.max(1,Math.floor(page));
+const filters=recordFilters();
 const p=new URLSearchParams();
-const s=document.getElementById('sInput').value;if(s)p.set('search',s);
-const st=document.getElementById('fStatus').value;if(st)p.set('status',st);
-const fs=document.getElementById('fFee').value;if(fs)p.set('fee_status',fs);
-const co=document.getElementById('fCountry').value;if(co)p.set('country',co);
-const ge=document.getElementById('fGender').value;if(ge)p.set('gender',ge);
-const du=document.getElementById('fDup').value;if(du)p.set('dup',du);
-allRecords=await api('/api/records?'+p.toString());if(!allRecords)return;
-document.getElementById('recCount').textContent=`Showing ${allRecords.length} records`;
+if(filters.search)p.set('search',filters.search);
+if(filters.status)p.set('status',filters.status);
+if(filters.fee_status)p.set('fee_status',filters.fee_status);
+if(filters.country)p.set('country',filters.country);
+if(filters.gender)p.set('gender',filters.gender);
+if(filters.dup)p.set('dup',filters.dup);
+p.set('limit',String(recordListState.limit||RECORDS_PAGE_SIZE));
+p.set('page',String(recordListState.page||1));
+document.getElementById('recCount').textContent='Loading records...';
+document.getElementById('recTbl').innerHTML='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>NV No.</th><th>NV Date</th><th>Route</th><th>Actions</th></tr></thead><tbody><tr><td colspan="15" style="text-align:center;color:#6b7280;padding:18px">Loading records...</td></tr></tbody>';
+const payload=await api('/api/records?'+p.toString());if(!payload)return;
+const listPayload=Array.isArray(payload)?{items:payload,total:payload.length,limit:RECORDS_PAGE_SIZE,offset:0,page:1,pages:1}:payload;
+allRecords=Array.isArray(listPayload.items)?listPayload.items:[];
+recordListState.limit=Math.max(1,Number(listPayload.limit)||RECORDS_PAGE_SIZE);
+recordListState.total=Math.max(0,Number(listPayload.total)||0);
+recordListState.offset=Math.max(0,Number(listPayload.offset)||0);
+recordListState.page=Math.max(1,Number(listPayload.page)||1);
+recordListState.pages=Math.max(1,Number(listPayload.pages)||1);
+document.getElementById('recCount').textContent=recordRangeLabel(recordListState.total,recordListState.offset,allRecords.length);
 let h='<thead><tr><th>#</th><th>Name</th><th>Passport</th><th>Gender</th><th>Country</th><th>Mobile</th><th>Visa</th><th>Status</th><th>Date</th><th>Dup</th><th>MOFA</th><th>NV No.</th><th>NV Date</th><th>Route</th><th>Actions</th></tr></thead><tbody>';
+if(!allRecords.length){
+h+='<tr><td colspan="15" style="text-align:center;color:#6b7280;padding:18px">No records found for the current search or filters.</td></tr>';
+}
 allRecords.forEach((r,i)=>{
 const sb=r.travel_status==='Departed'?'bdg-dep':r.travel_status==='Pending'?'bdg-pen':r.travel_status==='Returned'?'bdg-rej':'bdg-vis';
 const vb=r.visa_status==='Approved'?'bdg-app':r.visa_status==='Rejected'?'bdg-rej':'bdg-pen';
@@ -18977,8 +19259,11 @@ const nvNo=(r.note_verbal_number||'').trim();
 const nvDt=(r.note_verbal_date||'').trim();
 const nvNoDisp=nvNo?`<span style="font-size:.78em;font-weight:600;color:#1b5e20" title="${String(nvNo).replace(/"/g,'&quot;')}">${nvNo.length>14?nvNo.slice(0,12)+'\u2026':nvNo}</span>`:'<span style="color:#bbb;font-size:.75em">\u2014</span>';
 const nvDtDisp=nvDt?`<span style="font-size:.78em">${nvDt.length>12?nvDt.slice(0,10)+'\u2026':nvDt}</span>`:'<span style="color:#bbb;font-size:.75em">\u2014</span>';
-h+=`<tr ${rowBg}><td>${i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td>${nvNoDisp}</td><td>${nvDtDisp}</td><td>${routeBdg}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button> <button style="padding:2px 6px;font-size:.68em;border:1px solid #ffcc80;background:#fff8e1;color:#e65100;border-radius:5px;cursor:pointer" onclick="flagForRouteReview(${r.id})" title="Flag for route review">\u2691</button></td></tr>`;
-});h+='</tbody>';document.getElementById('recTbl').innerHTML=h;
+h+=`<tr ${rowBg}><td>${recordListState.offset+i+1}</td><td><strong>${r.name||''}</strong></td><td>${r.passport||''}</td><td>${r.gender||''}</td><td>${r.country||''}</td><td>${r.mobile||''}</td><td><span class="bdg ${vb}">${r.visa_status||'-'}</span></td><td><span class="bdg ${sb}">${r.travel_status||'-'}</span></td><td>${r.date_of_request||'-'}</td><td><span class="bdg ${db}">${r.dup_flag||'CLEAR'}</span>${cmpBtn}</td><td>${ms}</td><td>${nvNoDisp}</td><td>${nvDtDisp}</td><td>${routeBdg}</td><td><button class="btn btn-p" style="padding:3px 8px;font-size:.75em" onclick="openView(${r.id})">View</button> <button style="padding:2px 6px;font-size:.68em;border:1px solid #ffcc80;background:#fff8e1;color:#e65100;border-radius:5px;cursor:pointer" onclick="flagForRouteReview(${r.id})" title="Flag for route review">\u2691</button></td></tr>`;
+});
+h+='</tbody>';
+document.getElementById('recTbl').innerHTML=h;
+renderRecordPagination();
 }
 
 // VIEW RECORD
@@ -21213,7 +21498,7 @@ const posInQueue=_reviewQueueIds.indexOf(id);
 const queueTotal=_reviewQueueIds.length;
 document.getElementById('reviewModalId').innerHTML='PKE-'+String(id).padStart(4,'0')+(queueTotal>0?' <span style="font-size:.7em;color:#666;font-weight:400">('+(posInQueue>=0?posInQueue+1:'?')+' of '+queueTotal+')</span>':'');
 // Load record details
-fetch('/api/records?search='+id).then(r=>r.json()).then(data=>{
+fetch('/api/records?id='+id).then(r=>r.json()).then(data=>{
 const recs=Array.isArray(data)?data:[];
 const r=recs.find(x=>x.id===id)||recs[0]||{};
 const routeMap={kw_to_pk:'Kuwait \u2192 Pakistan',pk_to_kw:'Pakistan \u2192 Kuwait'};
