@@ -1455,6 +1455,7 @@ def _queue_mofa_sent_email(record, changed_by='system'):
         'border_crossing': (record.get('border_crossing') or '').strip(),
         'mofa_letter_number': (record.get('mofa_letter_number') or '').strip(),
         'mofa_letter_date': (record.get('mofa_letter_date') or '').strip(),
+        'mofa_sent_date': (record.get('mofa_sent_date') or '').strip(),
         'record_id': record.get('id'),
         'changed_by': changed_by
     })
@@ -1859,6 +1860,13 @@ IRAQ_PUBLIC_EMAIL_PASSPORT_ADDR = 'parepkuwaitcwa37@gmail.com'
 IRAQ_PUBLIC_EMAIL_HOC_PHONE = '+964 7839800899'
 IRAQ_PUBLIC_EMAIL_BABAR_PHONE = '+964 7854000'
 
+# Riyadh follow-up contact details shown in public tracking and MOFA-forwarded emails.
+RIYADH_CWA_WEBSITE = 'https://pakistaninksa.com/community-welfare-wing/'
+RIYADH_CWA_EMAIL = 'info-parepriyadh@mofa.gov.pk'
+RIYADH_CWA_PHONE = '+966-11-4887272'
+RIYADH_CWA_OTHER_PHONES = '+966-11-4884111, +966-11-4884222, +966-11-4884666'
+RIYADH_CWA_JEDDAH_CONSULATE = '+966-12-6691046'
+
 DEFAULT_EMAIL_TEMPLATES = {
     'registration_success': (
         "{salutation}\n\n"
@@ -1882,7 +1890,15 @@ DEFAULT_EMAIL_TEMPLATES = {
         "Passport: {passport}\n"
         "Border Crossing: {border_crossing}\n"
         "MOFA Letter/Fax: {mofa_letter_number}\n"
-        "Letter Date: {mofa_letter_date}\n\n"
+        "Letter Date: {mofa_letter_date}\n"
+        "Date Sent: {mofa_sent_date}\n\n"
+        "For follow-up, please quote the reference details above.\n\n"
+        "Embassy of Pakistan, Riyadh (Community Welfare Wing):\n"
+        "Website: {riyadh_cwa_website}\n"
+        "Email: {riyadh_cwa_email}\n"
+        "Phone: {riyadh_cwa_phone}\n"
+        "Other Phones: {riyadh_cwa_other_phones}\n"
+        "Jeddah Consulate: {riyadh_cwa_jeddah_consulate}\n\n"
         "You will be notified again once MOFA approval is received.\n\n"
         "Pakistan Embassy Kuwait\n"
         "Citizen Support for Transit KSA System"
@@ -1976,6 +1992,25 @@ def _render_email_template(template_text, vars_map):
         out = out.replace('{' + k + '}', str(v if v is not None else ''))
     return out
 
+def _mofa_riyadh_followup_email_block(job):
+    return (
+        "MOFA Riyadh follow-up reference:\n"
+        f"Letter Number: {job.get('mofa_letter_number', '-') or '-'}\n"
+        f"Letter Date: {job.get('mofa_letter_date', '-') or '-'}\n"
+        f"Date Sent: {job.get('mofa_sent_date', '-') or '-'}\n\n"
+        "For follow-up with Embassy of Pakistan, Riyadh (Community Welfare Wing):\n"
+        f"Website: {RIYADH_CWA_WEBSITE}\n"
+        f"Email: {RIYADH_CWA_EMAIL}\n"
+        f"Phone: {RIYADH_CWA_PHONE}\n"
+        f"Other Phones: {RIYADH_CWA_OTHER_PHONES}\n"
+        f"Jeddah Consulate: {RIYADH_CWA_JEDDAH_CONSULATE}"
+    )
+
+def _ensure_mofa_riyadh_followup_email_block(body, job):
+    if RIYADH_CWA_EMAIL in (body or '') and 'Date Sent:' in (body or ''):
+        return body
+    return (body or '').rstrip() + "\n\n" + _mofa_riyadh_followup_email_block(job)
+
 def _email_worker_loop():
     while True:
         job = EMAIL_QUEUE.get()
@@ -2010,8 +2045,15 @@ def _email_worker_loop():
                     'passport': job.get('passport', ''),
                     'border_crossing': job.get('border_crossing', ''),
                     'mofa_letter_number': job.get('mofa_letter_number', '-') or '-',
-                    'mofa_letter_date': job.get('mofa_letter_date', '-') or '-'
+                    'mofa_letter_date': job.get('mofa_letter_date', '-') or '-',
+                    'mofa_sent_date': job.get('mofa_sent_date', '-') or '-',
+                    'riyadh_cwa_website': RIYADH_CWA_WEBSITE,
+                    'riyadh_cwa_email': RIYADH_CWA_EMAIL,
+                    'riyadh_cwa_phone': RIYADH_CWA_PHONE,
+                    'riyadh_cwa_other_phones': RIYADH_CWA_OTHER_PHONES,
+                    'riyadh_cwa_jeddah_consulate': RIYADH_CWA_JEDDAH_CONSULATE
                 })
+                body = _ensure_mofa_riyadh_followup_email_block(body, job)
                 ok, detail = _send_email_smtp(job['to'], subject, body)
                 db = get_db()
                 db.execute(
@@ -11686,6 +11728,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         COALESCE(mofa_ksa_sent_at,'') as mofa_ksa_sent_at,
                         COALESCE(mofa_sent_date,'') as mofa_sent_date,
                         COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                        COALESCE(mofa_letter_date,'') as mofa_letter_date,
                         date_of_request, created_at,
                         COALESCE(effective_route,'kw_to_pk') as effective_route,
                         COALESCE(route_mismatch,0) as route_mismatch,
@@ -11702,6 +11745,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     COALESCE(mofa_ksa_sent_at,'') as mofa_ksa_sent_at,
                     COALESCE(mofa_sent_date,'') as mofa_sent_date,
                     COALESCE(mofa_letter_number,'') as mofa_letter_number,
+                    COALESCE(mofa_letter_date,'') as mofa_letter_date,
                     date_of_request, created_at,
                     COALESCE(effective_route,'kw_to_pk') as effective_route,
                     COALESCE(route_mismatch,0) as route_mismatch,
@@ -11718,6 +11762,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 status_info['name'] = r['name']
                 status_info['passport'] = r['passport'][:3] + '****' + r['passport'][-2:] if r['passport'] and len(r['passport']) > 5 else '****'
                 status_info['registered_date'] = r['date_of_request'] or r['created_at'] or ''
+                status_info['mofa_letter_number'] = r['mofa_letter_number'] or ''
+                status_info['mofa_letter_date'] = r['mofa_letter_date'] or ''
                 status_info['mofa_sent_date'] = r['mofa_sent_date'] or ''
                 # If route was corrected, show the correct route context
                 if r.get('route_mismatch') == 1 and r.get('effective_route') == 'pk_to_kw':
@@ -11744,7 +11790,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status_info['action_required'] = True
                 elif (r.get('mofa_kw_status') == 'Sent' or r.get('mofa_ksa_status') == 'Sent' or r['mofa_status'] == 'Sent to MOFA'):
                     status_info['status'] = 'PENDING_MOFA'
-                    status_info['status_detail'] = 'Your application has been forwarded to Embassy of Pakistan, Riyadh for compilation and onward submission to MOFA KSA for final approval.'
+                    status_info['status_detail'] = 'Your application has been forwarded to Riyadh for onward follow-up with MOFA KSA. Please use the reference details below when following up.'
                     status_info['action_required'] = False
                 else:
                     status_info['status'] = 'PROCESSING'
@@ -14331,7 +14377,8 @@ function printBoth(){{
                           [user['user'], f'Marked {count} records as Sent to MOFA | Letter: {letter_number} | Date: {letter_date}'])
                 # Queue MOFA status emails for updated records (async, non-blocking)
                 updated_rows = db.execute("""
-                    SELECT id, name, passport, email, country, border_crossing, mofa_letter_number, mofa_letter_date
+                    SELECT id, name, passport, email, country, border_crossing,
+                           mofa_letter_number, mofa_letter_date, mofa_sent_date
                     FROM evacuees
                     WHERE mofa_status='Sent to MOFA' AND mofa_sent_date=? AND updated_by=?
                 """, [sent_date, user['user']]).fetchall()
@@ -15988,6 +16035,7 @@ ${s.status==='ROUTE_HOLD'?`<div style="background:#c62828;color:#fff;padding:16p
 <div class="status-icon">${icon}</div>
 <div class="status-label">${label}</div>
 <div class="status-detail">${s.status_detail}</div>
+${s.status==='PENDING_MOFA'&&s.mofa_letter_number?`<div style="display:inline-block;margin-top:12px;padding:10px 16px;background:#fff;border:1px solid #ffcc80;border-radius:10px;color:#e65100;font-size:.96em;font-weight:800;box-shadow:0 2px 6px rgba(230,81,0,.08)">MOFA Riyadh Letter No.: ${s.mofa_letter_number}</div>`:''}
 <div class="status-detail-ur">${labelUr}</div>
 </div>`;
 // Timeline (Kuwait registrations: Pakistan Embassy Riyadh -> MOFA KSA)
@@ -16011,8 +16059,21 @@ let grid=`<div class="info-grid">
 if(s.status==='ROUTE_HOLD'){
 grid+=`<div class="info-item" style="grid-column:1/-1;background:#ffebee;border-color:#ef9a9a"><div class="lbl" style="color:#c62828">&#9888; Application Status</div><div class="val" style="color:#c62828;font-weight:700">ON HOLD \u2014 Travel route direction under suspicion. Contact Embassy Staff Mr. Awais urgently at +965 55977292</div></div>`;
 }
-if(s.mofa_sent_date){
-grid+=`<div class="info-item" style="grid-column:1/-1;background:#fff3e0;border-color:#ffe0b2"><div class="lbl">Sent to Pakistan Embassy Riyadh / MOFA KSA on</div><div class="val" style="color:#e65100">${s.mofa_sent_date}</div></div>`;
+if(sentToRiyadh||s.mofa_sent_date||s.mofa_letter_number||s.mofa_letter_date){
+grid+=`<div class="info-item" style="grid-column:1/-1;background:#fff3e0;border-color:#ffe0b2"><div class="lbl">MOFA Riyadh Follow-up Reference</div><div class="val" style="color:#e65100;line-height:1.7">
+<div><span style="color:#666;font-weight:600">Letter Number:</span> ${s.mofa_letter_number||'-'}</div>
+<div><span style="color:#666;font-weight:600">Letter Date:</span> ${s.mofa_letter_date||'-'}</div>
+<div><span style="color:#666;font-weight:600">Date Sent:</span> ${s.mofa_sent_date||'Forwarded'}</div>
+</div></div>`;
+grid+=`<div class="info-item" style="grid-column:1/-1;background:#f7fcf4;border-color:#c8e6c9"><div class="lbl">Embassy of Pakistan, Riyadh (Community Welfare Wing)</div><div class="val" style="font-size:.9em;line-height:1.85;font-weight:600;color:#333">
+<div><span style="color:#666">Website:</span> <a href="https://pakistaninksa.com/community-welfare-wing/" target="_blank" rel="noopener" style="color:#006600;text-decoration:none">pakistaninksa.com/community-welfare-wing</a></div>
+<div><span style="color:#666">Email:</span> <a href="mailto:info-parepriyadh@mofa.gov.pk" style="color:#006600;text-decoration:none">info-parepriyadh@mofa.gov.pk</a></div>
+<div><span style="color:#666">Main Phone:</span> <a href="tel:+966114887272" style="color:#006600;text-decoration:none">+966-11-4887272</a></div>
+<div><span style="color:#666">Other Phones:</span> +966-11-4884111, +966-11-4884222, +966-11-4884666</div>
+<div><span style="color:#666">Jeddah Consulate:</span> +966-12-6691046</div>
+</div></div>`;
+}else{
+grid+=`<div class="info-item" style="grid-column:1/-1"><div class="lbl">MOFA Riyadh Follow-up Reference</div><div class="val" style="color:#666">Not yet forwarded to MOFA Riyadh</div></div>`;
 }
 grid+='</div>';
 document.getElementById('infoGrid').innerHTML=grid;
@@ -18759,7 +18820,7 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div class="fs" style="border-left:3px solid #8e24aa" data-admin-only>
 <h3>Email Message Templates</h3>
-<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Use placeholders like <code>{salutation}</code>, <code>{name}</code>, <code>{passport}</code>, <code>{tracking_number}</code>, <code>{border_crossing}</code>, <code>{mofa_letter_number}</code>, <code>{mofa_letter_date}</code>, <code>{embassy_name}</code>, <code>{embassy_contact}</code>, <code>{embassy_hours}</code>. Iraq templates also support <code>{reference_number}</code>, <code>{email}</code>, <code>{phone}</code>, <code>{current_city}</code>, <code>{submitted_at}</code>, <code>{passport_submission_email}</code>, <code>{iraq_hoc_phone}</code>, <code>{iraq_babar_phone}</code>.</p>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Use placeholders like <code>{salutation}</code>, <code>{name}</code>, <code>{passport}</code>, <code>{tracking_number}</code>, <code>{border_crossing}</code>, <code>{mofa_letter_number}</code>, <code>{mofa_letter_date}</code>, <code>{mofa_sent_date}</code>, <code>{riyadh_cwa_website}</code>, <code>{riyadh_cwa_email}</code>, <code>{riyadh_cwa_phone}</code>, <code>{riyadh_cwa_other_phones}</code>, <code>{riyadh_cwa_jeddah_consulate}</code>, <code>{embassy_name}</code>, <code>{embassy_contact}</code>, <code>{embassy_hours}</code>. Iraq templates also support <code>{reference_number}</code>, <code>{email}</code>, <code>{phone}</code>, <code>{current_city}</code>, <code>{submitted_at}</code>, <code>{passport_submission_email}</code>, <code>{iraq_hoc_phone}</code>, <code>{iraq_babar_phone}</code>.</p>
 <div class="fg" style="margin-bottom:10px">
 <div class="fgp"><label>Registration Success Template</label><textarea id="tplRegistration" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
 <div class="fgp"><label>Sent to MOFA KSA Template</label><textarea id="tplMofaSent" rows="8" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:7px;font-size:.84em;font-family:monospace"></textarea></div>
