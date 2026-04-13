@@ -11,7 +11,7 @@ MOFA approval PDF parsing order: (1) pypdf text layer, (2) Poppler pdftotext CLI
 pip install pypdf. macOS: brew install poppler gives pdftotext without extra pip packages.
 """
 
-import http.server, sqlite3, json, hashlib, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback
+import http.server, sqlite3, json, hashlib, hmac, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta, date
@@ -143,6 +143,18 @@ def init_db():
         mofa_status TEXT DEFAULT '',
         dup_flag TEXT DEFAULT 'CLEAR',
         departure_date TEXT,
+        applicant_travel_date TEXT,
+        applicant_airline TEXT,
+        applicant_flight_number TEXT,
+        applicant_ticket_number TEXT,
+        applicant_departure_from TEXT,
+        applicant_arrival_to TEXT,
+        applicant_border_route TEXT,
+        applicant_travel_remarks TEXT,
+        applicant_travel_submitted_at TIMESTAMP,
+        applicant_travel_updated_at TIMESTAMP,
+        applicant_travel_locked INTEGER DEFAULT 0,
+        applicant_travel_source TEXT DEFAULT '',
         form_submission_id TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -760,7 +772,19 @@ def init_db():
                          ('iraq_forwarded_email_sent_flag', 'INTEGER DEFAULT 0'),
                          ('iraq_forwarded_email_sent_at', 'TIMESTAMP'),
                          ('iraq_final_email_sent_flag', 'INTEGER DEFAULT 0'),
-                         ('iraq_final_email_sent_at', 'TIMESTAMP')]:
+                         ('iraq_final_email_sent_at', 'TIMESTAMP'),
+                         ('applicant_travel_date', 'TEXT'),
+                         ('applicant_airline', 'TEXT'),
+                         ('applicant_flight_number', 'TEXT'),
+                         ('applicant_ticket_number', 'TEXT'),
+                         ('applicant_departure_from', 'TEXT'),
+                         ('applicant_arrival_to', 'TEXT'),
+                         ('applicant_border_route', 'TEXT'),
+                         ('applicant_travel_remarks', 'TEXT'),
+                         ('applicant_travel_submitted_at', 'TIMESTAMP'),
+                         ('applicant_travel_updated_at', 'TIMESTAMP'),
+                         ('applicant_travel_locked', 'INTEGER DEFAULT 0'),
+                         ('applicant_travel_source', "TEXT DEFAULT ''")]:
         try:
             db.execute(f"ALTER TABLE evacuees ADD COLUMN {col} {coltype}")
             db.commit()
@@ -1385,6 +1409,95 @@ def _tracking_no(record_id):
 
 def _normalize_passport_for_match(value):
     return re.sub(r'[\s-]+', '', str(value or '').strip().upper())
+
+PUBLIC_TRAVEL_SUCCESS_MESSAGE = {
+    'en': 'Your travel details have been submitted successfully. Please go to the Embassy immediately to collect the necessary documents and your travel letter.',
+    'ur': 'آپ کی سفری تفصیلات کامیابی کے ساتھ جمع ہو گئی ہیں۔ براہِ کرم ضروری دستاویزات اور اپنا سفری خط حاصل کرنے کے لیے فوری طور پر سفارت خانے تشریف لائیں۔'
+}
+PUBLIC_TRAVEL_LOCKED_MESSAGE = {
+    'en': 'Travel details are now locked. Please contact the Embassy for any further change.',
+    'ur': 'سفری تفصیلات اب لاک ہو چکی ہیں۔ کسی بھی مزید تبدیلی کے لیے براہِ کرم سفارت خانے سے رابطہ کریں۔'
+}
+
+def _record_get(record, key, default=''):
+    if not record:
+        return default
+    try:
+        return record.get(key, default)
+    except AttributeError:
+        try:
+            return record[key]
+        except Exception:
+            return default
+
+def _public_tracking_token(record_id, passport):
+    key = _get_enc_key().encode()
+    msg = f"{int(record_id)}:{_normalize_passport_for_match(passport)}".encode()
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+def _verify_public_tracking_token(record, token):
+    if not record or not token:
+        return False
+    expected = _public_tracking_token(_record_get(record, 'id'), _record_get(record, 'passport'))
+    return hmac.compare_digest(str(token), expected)
+
+def _public_travel_details_eligible(record):
+    visa = str(_record_get(record, 'visa_status') or '').strip().lower()
+    travel = str(_record_get(record, 'travel_status') or '').strip().lower()
+    mofa_ksa = str(_record_get(record, 'mofa_ksa_status') or '').strip().lower()
+    mofa_status = str(_record_get(record, 'mofa_status') or '').strip().lower()
+    if visa in ('rejected', 'returned', 'incomplete') or travel in ('returned',):
+        return False
+    return (
+        visa in ('approved', 'visa approved', 'ksa approved')
+        or travel in ('visa obtained', 'approved', 'ready for travel details')
+        or mofa_ksa == 'approved'
+        or mofa_status in ('approved', 'visa approved')
+    )
+
+def _public_travel_details_locked(record):
+    if str(_record_get(record, 'applicant_travel_locked') or '').strip().lower() in ('1', 'true', 'yes', 'locked'):
+        return True
+    if str(_record_get(record, 'travel_status') or '').strip().lower() in ('departed', 'returned'):
+        return True
+    if str(_record_get(record, 'fee_status') or '').strip().lower() in ('paid', 'waived'):
+        return True
+    if str(_record_get(record, 'embassy_letter_issued_at') or '').strip():
+        return True
+    try:
+        return int(_record_get(record, 'embassy_letter_print_count') or 0) > 0
+    except Exception:
+        return False
+
+def _public_travel_details_payload(record):
+    details = {
+        'travel_date': _record_get(record, 'applicant_travel_date') or '',
+        'airline': _record_get(record, 'applicant_airline') or '',
+        'flight_number': _record_get(record, 'applicant_flight_number') or '',
+        'ticket_number': _record_get(record, 'applicant_ticket_number') or '',
+        'departure_from': _record_get(record, 'applicant_departure_from') or '',
+        'arrival_to': _record_get(record, 'applicant_arrival_to') or '',
+        'border_route': _record_get(record, 'applicant_border_route') or '',
+        'remarks': _record_get(record, 'applicant_travel_remarks') or '',
+        'submitted_at': _record_get(record, 'applicant_travel_submitted_at') or '',
+        'updated_at': _record_get(record, 'applicant_travel_updated_at') or '',
+        'source': _record_get(record, 'applicant_travel_source') or ''
+    }
+    return {
+        'travel_details_eligible': _public_travel_details_eligible(record),
+        'travel_details_locked': _public_travel_details_locked(record),
+        'travel_details_submitted': bool(details['submitted_at'] or details['updated_at'] or any(details[k] for k in (
+            'travel_date', 'airline', 'flight_number', 'ticket_number', 'departure_from', 'arrival_to', 'border_route'
+        ))),
+        'travel_details': details,
+        'travel_locked_message': PUBLIC_TRAVEL_LOCKED_MESSAGE
+    }
+
+def _letter_field(record, staff_field, applicant_field=None):
+    val = _record_get(record, staff_field) or ''
+    if str(val).strip():
+        return val
+    return _record_get(record, applicant_field) if applicant_field else val
 
 def _is_iraq_related_record(db, record):
     if not record:
@@ -3721,6 +3834,83 @@ def api_save_record(data, user):
 
         db.commit(); db.close()
         return {'success': True, 'id': new_id, 'dup_flag': dup_flag, 'dup_details': dup_flags}
+
+def api_public_travel_details_submit(data, client_ip=''):
+    """Applicant self-service travel details for approved public-tracking records."""
+    try:
+        rec_id = int(str(data.get('record_id') or data.get('id') or '0').strip())
+    except (TypeError, ValueError):
+        rec_id = 0
+    token = str(data.get('tracking_token') or '').strip()
+    if rec_id <= 0 or not token:
+        return {'success': False, 'error': 'Invalid tracking session. Please search your record again.'}
+
+    def clean(key, limit=160):
+        return str(data.get(key) or '').strip()[:limit]
+
+    required = {
+        'travel_date': 'Travel Date',
+        'airline': 'Airline',
+        'flight_number': 'Flight Number',
+        'ticket_number': 'Ticket Number / PNR',
+        'departure_from': 'Departure From',
+        'arrival_to': 'Arrival To',
+        'border_route': 'Border / Transit Route'
+    }
+    cleaned = {k: clean(k, 220) for k in required}
+    cleaned['remarks'] = clean('remarks', 1000)
+    missing = [label for key, label in required.items() if not cleaned[key]]
+    if missing:
+        return {'success': False, 'error': 'Please complete: ' + ', '.join(missing)}
+
+    db = get_db()
+    try:
+        rec = db.execute("SELECT * FROM evacuees WHERE id = ?", [rec_id]).fetchone()
+        if not rec:
+            return {'success': False, 'error': 'Record not found. Please search again.'}
+        rec = dict(rec)
+        if not _verify_public_tracking_token(rec, token):
+            return {'success': False, 'error': 'Tracking verification failed. Please search your record again.'}
+        if not _public_travel_details_eligible(rec):
+            return {'success': False, 'error': 'Travel details can be submitted only after approval is available.'}
+        if _public_travel_details_locked(rec):
+            payload = _public_travel_details_payload(rec)
+            payload['tracking_number'] = _tracking_no(rec_id)
+            return {'success': False, 'locked': True, 'message': PUBLIC_TRAVEL_LOCKED_MESSAGE, 'data': payload}
+
+        db.execute("""
+            UPDATE evacuees SET
+                applicant_travel_date = ?,
+                applicant_airline = ?,
+                applicant_flight_number = ?,
+                applicant_ticket_number = ?,
+                applicant_departure_from = ?,
+                applicant_arrival_to = ?,
+                applicant_border_route = ?,
+                applicant_travel_remarks = ?,
+                applicant_travel_submitted_at = CASE
+                    WHEN applicant_travel_submitted_at IS NULL OR TRIM(applicant_travel_submitted_at) = ''
+                    THEN CURRENT_TIMESTAMP ELSE applicant_travel_submitted_at END,
+                applicant_travel_updated_at = CURRENT_TIMESTAMP,
+                applicant_travel_source = 'tracking_portal',
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = 'applicant_self_service'
+            WHERE id = ?
+        """, [
+            cleaned['travel_date'], cleaned['airline'], cleaned['flight_number'],
+            cleaned['ticket_number'], cleaned['departure_from'], cleaned['arrival_to'],
+            cleaned['border_route'], cleaned['remarks'], rec_id
+        ])
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('public_travel_details_submit', ?, ?, ?)",
+                   [rec_id, client_ip or 'public', json.dumps({'source': 'tracking_portal', 'fields': list(cleaned.keys())})])
+        db.commit()
+        fresh = dict(db.execute("SELECT * FROM evacuees WHERE id = ?", [rec_id]).fetchone())
+        payload = _public_travel_details_payload(fresh)
+        payload['tracking_number'] = _tracking_no(rec_id)
+        payload['tracking_token'] = _public_tracking_token(rec_id, fresh.get('passport'))
+        return {'success': True, 'message': PUBLIC_TRAVEL_SUCCESS_MESSAGE, 'data': payload}
+    finally:
+        db.close()
 
 def _norm_compact(val):
     return re.sub(r'[\s\-]+', '', (val or '').strip().upper())
@@ -10773,14 +10963,23 @@ def _embassy_letterhead_data_url():
 
 def is_letter_print_ready(record):
     """Check if a record has all required fields for embassy letter printing."""
-    required = ['ticket_number', 'airline', 'departure_date', 'departure_airport',
-                'destination_country', 'note_verbal_number', 'note_verbal_date', 'mofa_approval_serial']
+    required_travel = [
+        ('ticket_number', 'applicant_ticket_number'),
+        ('airline', 'applicant_airline'),
+        ('departure_date', 'applicant_travel_date'),
+        ('departure_airport', 'applicant_departure_from'),
+        ('destination_country', 'applicant_arrival_to'),
+    ]
+    required_staff = ['note_verbal_number', 'note_verbal_date', 'mofa_approval_serial']
     if record.get('visa_status') != 'Approved':
         return False
     if not _fee_is_cleared(record):
         return False
-    for f in required:
-        if not (record.get(f) or '').strip():
+    for staff_field, applicant_field in required_travel:
+        if not str(_letter_field(record, staff_field, applicant_field) or '').strip():
+            return False
+    for f in required_staff:
+        if not str(record.get(f) or '').strip():
             return False
     return True
 
@@ -10791,11 +10990,11 @@ def generate_embassy_letter_html(record):
     nv_number = esc(record.get('note_verbal_number', ''))
     nv_date = esc(record.get('note_verbal_date', ''))
     serial = esc(record.get('mofa_approval_serial', ''))
-    airline = esc(record.get('airline', ''))
-    ticket = esc(record.get('ticket_number', ''))
-    dep_airport = esc(record.get('departure_airport', ''))
-    dep_date = esc(record.get('departure_date', ''))
-    dest_country = esc(record.get('destination_country', ''))
+    airline = esc(_letter_field(record, 'airline', 'applicant_airline') or '')
+    ticket = esc(_letter_field(record, 'ticket_number', 'applicant_ticket_number') or '')
+    dep_airport = esc(_letter_field(record, 'departure_airport', 'applicant_departure_from') or '')
+    dep_date = esc(_letter_field(record, 'departure_date', 'applicant_travel_date') or '')
+    dest_country = esc(_letter_field(record, 'destination_country', 'applicant_arrival_to') or '')
     issue_date = esc(datetime.now().strftime('%d %B %Y'))
     rec_id = int(record.get('id') or 0)
     tracking_ref = f"PKE-{str(rec_id).zfill(4)}" if rec_id > 0 else "PKE-UNKNOWN"
@@ -11766,7 +11965,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         COALESCE(route_mismatch,0) as route_mismatch,
                         COALESCE(location_review_flag,0) as location_review_flag,
                         COALESCE(ip_location_status,'') as ip_location_status,
-                        COALESCE(review_status,'') as review_status
+                        COALESCE(review_status,'') as review_status,
+                        COALESCE(applicant_travel_date,'') as applicant_travel_date,
+                        COALESCE(applicant_airline,'') as applicant_airline,
+                        COALESCE(applicant_flight_number,'') as applicant_flight_number,
+                        COALESCE(applicant_ticket_number,'') as applicant_ticket_number,
+                        COALESCE(applicant_departure_from,'') as applicant_departure_from,
+                        COALESCE(applicant_arrival_to,'') as applicant_arrival_to,
+                        COALESCE(applicant_border_route,'') as applicant_border_route,
+                        COALESCE(applicant_travel_remarks,'') as applicant_travel_remarks,
+                        COALESCE(applicant_travel_submitted_at,'') as applicant_travel_submitted_at,
+                        COALESCE(applicant_travel_updated_at,'') as applicant_travel_updated_at,
+                        COALESCE(applicant_travel_locked,0) as applicant_travel_locked,
+                        COALESCE(applicant_travel_source,'') as applicant_travel_source,
+                        COALESCE(fee_status,'pending') as fee_status,
+                        COALESCE(embassy_letter_issued_at,'') as embassy_letter_issued_at,
+                        COALESCE(embassy_letter_print_count,0) as embassy_letter_print_count
                         FROM evacuees WHERE id = ?""", [rec_id]).fetchone()
             else:
                 passport = search_val.upper().strip()
@@ -11784,13 +11998,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     COALESCE(route_mismatch,0) as route_mismatch,
                     COALESCE(location_review_flag,0) as location_review_flag,
                     COALESCE(ip_location_status,'') as ip_location_status,
-                    COALESCE(review_status,'') as review_status
+                    COALESCE(review_status,'') as review_status,
+                    COALESCE(applicant_travel_date,'') as applicant_travel_date,
+                    COALESCE(applicant_airline,'') as applicant_airline,
+                    COALESCE(applicant_flight_number,'') as applicant_flight_number,
+                    COALESCE(applicant_ticket_number,'') as applicant_ticket_number,
+                    COALESCE(applicant_departure_from,'') as applicant_departure_from,
+                    COALESCE(applicant_arrival_to,'') as applicant_arrival_to,
+                    COALESCE(applicant_border_route,'') as applicant_border_route,
+                    COALESCE(applicant_travel_remarks,'') as applicant_travel_remarks,
+                    COALESCE(applicant_travel_submitted_at,'') as applicant_travel_submitted_at,
+                    COALESCE(applicant_travel_updated_at,'') as applicant_travel_updated_at,
+                    COALESCE(applicant_travel_locked,0) as applicant_travel_locked,
+                    COALESCE(applicant_travel_source,'') as applicant_travel_source,
+                    COALESCE(fee_status,'pending') as fee_status,
+                    COALESCE(embassy_letter_issued_at,'') as embassy_letter_issued_at,
+                    COALESCE(embassy_letter_print_count,0) as embassy_letter_print_count
                     FROM evacuees WHERE UPPER(TRIM(passport)) = ?""", [passport]).fetchone()
             db.close()
             if rec:
                 r = dict(rec)
                 # Determine public-facing status
                 status_info = {}
+                status_info['record_id'] = r['id']
                 status_info['tracking_number'] = 'PKE-' + str(r['id']).zfill(4)
                 status_info['name'] = r['name']
                 status_info['passport'] = r['passport'][:3] + '****' + r['passport'][-2:] if r['passport'] and len(r['passport']) > 5 else '****'
@@ -11811,6 +12041,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     or r.get('location_review_flag', 0) == 1
                     or r.get('ip_location_status', '') == 'needs_review'
                 )
+                approved_for_travel_details = _public_travel_details_eligible(r)
 
                 if ROUTE_REVIEW_ENABLED and review_held and inconsistency_found and r['visa_status'] != 'Approved' and r['mofa_status'] != 'Sent to MOFA':
                     status_info['status'] = 'ROUTE_HOLD'
@@ -11818,7 +12049,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status_info['action_required'] = True
                 # Main Kuwait portal public tracking (PKE-xxxx) is KSA-visa workflow.
                 # Keep this separate from Iraq dual-approval logic.
-                elif (r.get('visa_status') == 'Approved'):
+                elif approved_for_travel_details:
                     status_info['status'] = 'APPROVED'
                     status_info['status_detail'] = 'Final approval is complete. Please contact the Embassy immediately for further instructions on travelling.'
                     status_info['action_required'] = True
@@ -11831,7 +12062,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     status_info['status_detail'] = 'Application Submitted. Under Review. Requests will be sent to concerned authorities.'
                     status_info['action_required'] = False
                 status_info['approved_kw'] = False
-                status_info['approved_ksa'] = (r.get('visa_status') == 'Approved')
+                status_info['approved_ksa'] = approved_for_travel_details
+                travel_payload = _public_travel_details_payload(r)
+                status_info.update(travel_payload)
+                if travel_payload.get('travel_details_eligible') and not travel_payload.get('travel_details_locked'):
+                    status_info['tracking_token'] = _public_tracking_token(r['id'], r.get('passport'))
                 self.send_json({'success': True, 'data': status_info})
             else:
                 self.send_json({'success': False, 'error': 'No application found with this information. Please check your passport number or reference number and try again.'})
@@ -13527,6 +13762,16 @@ function printBoth(){{
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400)
                 return
             self.send_json(api_iraq_public_submit(data))
+            return
+
+        if path == '/api/public-travel-details':
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            result = api_public_travel_details_submit(data, self.client_address[0])
+            self.send_json(result, 200 if result.get('success') or result.get('locked') else 400)
             return
 
         if path == '/api/public-register':
@@ -16050,6 +16295,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-s
 .result{display:none}
 .status-box{background:var(--beige);border-color:var(--beige-border)}
 .status-approved{background:#f0fbf3;border-color:#b9e4c2}
+.approved-action-banner{background:linear-gradient(135deg,#e8f8ed,#ffffff);border:1px solid #a5d6a7;border-left:5px solid var(--green)}
+.approved-action-banner .status-header{border-bottom:0;padding-bottom:0;margin-bottom:8px}
+.approved-action-banner .status-title{font-size:1.22rem}
+.approved-action-banner .card-p{font-size:.95rem;color:#1b5e20;font-weight:700;line-height:1.55}
 .status-pending{background:var(--beige);border-color:var(--beige-border)}
 .status-processing{background:#f3f8ff;border-color:#d6e8fb}
 .status-hold{background:#fff1f1;border-color:#ffc9c9}
@@ -16086,6 +16335,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-s
 .contact-value{min-width:0;overflow-wrap:anywhere;word-break:break-word}
 .contact-value a{color:var(--green);font-weight:700;text-decoration:none;border-bottom:1px dotted #9fcbac}
 .helper-card{background:#f8fbf9;border-style:dashed}
+.travel-self-card{border-left:4px solid var(--green);background:#fff}
+.approval-instruction{background:#f0fbf3;border:1px solid #b9e4c2;border-radius:10px;padding:12px;margin-bottom:14px;color:#1b5e20}
+.approval-instruction p{margin:0 0 8px;font-size:.9rem;line-height:1.6}
+.approval-instruction .ur,.travel-success .ur,.travel-locked .ur{direction:rtl;text-align:right;font-family:'Noto Nastaliq Urdu','Jameel Noori Nastaleeq','Urdu Typesetting',Tahoma,sans-serif;line-height:1.9}
+.travel-form{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}
+.travel-field label{display:block;font-size:.8rem;color:var(--muted);font-weight:800;margin-bottom:4px}
+.travel-field input,.travel-field textarea{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:8px;font-size:.95rem;background:#fff;text-transform:none;letter-spacing:0}
+.travel-field input:focus,.travel-field textarea:focus{border-color:var(--green);outline:none;box-shadow:0 0 0 3px rgba(0,77,38,.12)}
+.travel-field textarea{min-height:82px;resize:vertical}
+.travel-meta{font-size:.8rem;color:var(--muted);margin-top:8px}
+.travel-success{display:none;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:9px;padding:11px;margin:10px 0;color:#1b5e20;font-size:.9rem}
+.travel-locked{background:#fff8e1;border:1px solid #ffe082;border-radius:9px;padding:11px;margin-top:10px;color:#7a5200;font-size:.9rem}
+.approved-summary{border-left:4px solid #2e7d32}
+.more-details{background:#fff;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;box-shadow:var(--shadow);overflow:hidden}
+.more-details summary{cursor:pointer;padding:13px 16px;font-weight:800;color:var(--green);list-style:none}
+.more-details summary::-webkit-details-marker{display:none}
+.more-details summary:after{content:'+';float:right;font-size:1.1rem;color:var(--muted)}
+.more-details[open] summary:after{content:'-'}
+.more-details .more-body{padding:0 16px 16px}
 .copy-btn{margin-top:12px;background:var(--green);color:#fff;border:1px solid var(--green)}
 .copy-btn.copied{background:#2e7d32;border-color:#2e7d32}
 .copy-status{min-height:18px;margin-top:8px;color:#2e7d32;font-size:.82rem;font-weight:700;text-align:center}
@@ -16105,6 +16373,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-s
 .ctr{padding:18px 14px 32px}
 .card,.sec-card{padding:20px}
 .result-actions{grid-template-columns:1fr 1fr}
+.travel-form{grid-template-columns:1fr 1fr}
+.travel-field.full{grid-column:1/-1}
 .track-step{font-size:.75rem}
 .data-row{padding:10px 0}
 }
@@ -16146,6 +16416,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-s
 <div id="statusBox"></div>
 <div id="handlingOffice"></div>
 <div id="guidanceCard"></div>
+<div id="travelDetailsCard"></div>
 <div id="infoGrid"></div>
 <div id="followupCard"></div>
 <div id="emergencySection" style="display:none">
@@ -16185,6 +16456,8 @@ _lastTrackData=null;
 document.getElementById('resultBox').style.display='none';
 document.getElementById('passportInput').value='';
 document.getElementById('errMsg').style.display='none';
+const travelBox=document.getElementById('travelDetailsCard');
+if(travelBox)travelBox.innerHTML='';
 const quickBack=document.getElementById('quickBackLink');
 if(quickBack)quickBack.style.display='block';
 document.getElementById('passportInput').focus();
@@ -16209,6 +16482,84 @@ if(msg){msg.textContent='Follow-up details copied.';setTimeout(()=>{msg.textCont
 };
 const fallback=()=>{const ta=document.createElement('textarea');ta.value=txt;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);markCopied()};
 if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(markCopied).catch(fallback)}else{fallback()}
+}
+function trackClean(v){return(v===undefined||v===null)?'':String(v)}
+function trackEsc(v){return trackClean(v).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
+function travelAttr(v){return trackEsc(v)}
+function renderTravelDetailsCard(s){
+const box=document.getElementById('travelDetailsCard');
+if(!box)return;
+if(!s||!s.travel_details_eligible){box.innerHTML='';return}
+const td=s.travel_details||{};
+const locked=!!s.travel_details_locked;
+const submitted=!!s.travel_details_submitted;
+const meta=submitted?`<div class="travel-meta">${td.updated_at?'Last updated: '+trackEsc(td.updated_at):'Submitted: '+trackEsc(td.submitted_at||'')}</div>`:'';
+const savedRows=locked?`<div class="data-list" style="margin-top:10px">
+<div class="data-row"><span class="data-label">Travel Date</span><span class="data-value">${trackEsc(td.travel_date||'—')}</span></div>
+<div class="data-row"><span class="data-label">Airline</span><span class="data-value">${trackEsc(td.airline||'—')}</span></div>
+<div class="data-row"><span class="data-label">Flight Number</span><span class="data-value">${trackEsc(td.flight_number||'—')}</span></div>
+<div class="data-row"><span class="data-label">Ticket / PNR</span><span class="data-value">${trackEsc(td.ticket_number||'—')}</span></div>
+<div class="data-row"><span class="data-label">Departure From</span><span class="data-value">${trackEsc(td.departure_from||'—')}</span></div>
+<div class="data-row"><span class="data-label">Arrival To</span><span class="data-value">${trackEsc(td.arrival_to||'—')}</span></div>
+<div class="data-row"><span class="data-label">Border / Transit Route</span><span class="data-value">${trackEsc(td.border_route||'—')}</span></div>
+</div>`:'';
+if(locked){
+box.innerHTML=`<section class="sec-card travel-self-card"><h3 class="sc-hdr">Travel Details for Letter Issuance</h3>
+${savedRows}
+<div class="travel-locked"><p><strong>Travel details are now locked. Please contact the Embassy for any further change.</strong></p><p class="ur">سفری تفصیلات اب لاک ہو چکی ہیں۔ کسی بھی مزید تبدیلی کے لیے براہِ کرم سفارت خانے سے رابطہ کریں۔</p></div>
+${meta}</section>`;
+return;
+}
+box.innerHTML=`<section class="sec-card travel-self-card">
+<h3 class="sc-hdr">Travel Details for Letter Issuance</h3>
+<p class="card-p">Approved applicants must complete these travel details before collecting their travel letter.</p>
+<p class="status-detail-ur" style="border-top:none;margin-top:4px;padding-top:0">منظور شدہ درخواست گزاروں کو اپنا سفری خط حاصل کرنے سے پہلے یہ سفری تفصیلات مکمل کرنا ضروری ہیں۔</p>
+<div class="travel-success" id="travelSaveMsg" aria-live="polite"></div>
+${meta}
+<form class="travel-form" onsubmit="return submitTravelDetails(event)">
+<div class="travel-field"><label>Travel Date</label><input name="travel_date" type="date" value="${travelAttr(td.travel_date||'')}" required></div>
+<div class="travel-field"><label>Airline</label><input name="airline" value="${travelAttr(td.airline||'')}" required></div>
+<div class="travel-field"><label>Flight Number</label><input name="flight_number" value="${travelAttr(td.flight_number||'')}" required></div>
+<div class="travel-field"><label>Ticket Number / PNR</label><input name="ticket_number" value="${travelAttr(td.ticket_number||'')}" required></div>
+<div class="travel-field"><label>Departure From</label><input name="departure_from" value="${travelAttr(td.departure_from||'')}" required></div>
+<div class="travel-field"><label>Arrival To</label><input name="arrival_to" value="${travelAttr(td.arrival_to||'')}" required></div>
+<div class="travel-field full"><label>Border / Transit Route</label><input name="border_route" value="${travelAttr(td.border_route||'')}" required></div>
+<div class="travel-field full"><label>Remarks (optional)</label><textarea name="remarks">${trackEsc(td.remarks||'')}</textarea></div>
+<div class="travel-field full"><button class="btn btn-p" id="travelSubmitBtn" type="submit">${submitted?'Update Travel Details':'Submit Travel Details'}</button></div>
+</form>
+</section>`;
+}
+function showTravelSaveMessage(message){
+const msg=document.getElementById('travelSaveMsg');
+if(!msg||!message)return;
+msg.innerHTML='<p><strong>'+trackEsc(message.en||'Your travel details have been submitted successfully. Please go to the Embassy immediately to collect the necessary documents and your travel letter.')+'</strong></p><p class="ur">'+trackEsc(message.ur||'آپ کی سفری تفصیلات کامیابی کے ساتھ جمع ہو گئی ہیں۔ براہِ کرم ضروری دستاویزات اور اپنا سفری خط حاصل کرنے کے لیے فوری طور پر سفارت خانے تشریف لائیں۔')+'</p>';
+msg.style.display='block';
+}
+async function submitTravelDetails(event){
+event.preventDefault();
+if(!_lastTrackData||!_lastTrackData.record_id||!_lastTrackData.tracking_token){alert('Please search your record again before submitting travel details.');return false}
+const btn=document.getElementById('travelSubmitBtn');
+if(btn)btn.disabled=true;
+const fd=new FormData(event.target);
+const payload={record_id:_lastTrackData.record_id,tracking_token:_lastTrackData.tracking_token};
+fd.forEach((v,k)=>payload[k]=v);
+try{
+const r=await fetch('/api/public-travel-details',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+const d=await r.json();
+if(d.success){
+_lastTrackData=Object.assign({},_lastTrackData,d.data||{});
+renderTravelDetailsCard(_lastTrackData);
+showTravelSaveMessage(d.message);
+document.getElementById('travelDetailsCard').scrollIntoView({behavior:'smooth',block:'start'});
+}else if(d.locked){
+_lastTrackData=Object.assign({},_lastTrackData,d.data||{}, {travel_details_locked:true});
+renderTravelDetailsCard(_lastTrackData);
+}else{
+alert(d.error||'Could not submit travel details. Please try again.');
+}
+}catch(err){alert('Network error. Please try again.')}
+if(btn)btn.disabled=false;
+return false;
 }
 async function doTrack(){
 const q=document.getElementById('passportInput').value.trim();
@@ -16235,42 +16586,66 @@ const approved=s.status==='APPROVED';
 const onHold=s.status==='ROUTE_HOLD';
 const sentToRiyadh=s.status==='PENDING_MOFA'||approved||!!s.mofa_sent_date||!!s.mofa_letter_number||!!s.mofa_letter_date;
 let statusClass='status-processing',label='Under Review',labelUr='درخواست زیرِ جائزہ ہے',detail=s.status_detail||'Your application is being processed by Embassy of Pakistan, Kuwait.';
-if(approved){statusClass='status-approved';label='Final Approval Complete';labelUr='حتمی منظوری مکمل ہے۔ براہ کرم فوری طور پر سفارت خانے سے رابطہ کریں۔';detail=s.status_detail||'Final approval is complete. Please contact the Embassy of Pakistan, Kuwait for further instructions.'}
+if(approved){statusClass='status-approved approved-action-banner';label='Transit Visa / Final Approval Complete';labelUr='آپ کا ٹرانزٹ ویزا منظور ہو چکا ہے۔ براہِ کرم سفری تفصیلات فوراً درج کریں، پھر سفر کے لیے اپنا سفری خط حاصل کرنے کے لیے فوری طور پر Embassy of Pakistan Kuwait تشریف لائیں۔';detail='Your transit visa / final approval is complete. Fill the travel-details form immediately, then go to Embassy of Pakistan Kuwait immediately to collect your travel letter for travel.'}
 else if(s.status==='PENDING_MOFA'){statusClass='status-pending';label='Pending MOFA KSA Approval';labelUr='آپ کی درخواست سفارت خانہ پاکستان، ریاض کو ارسال کر دی گئی ہے، جہاں اسے مرتب کرنے کے بعد حتمی منظوری کے لیے سعودی عرب کی وزارتِ خارجہ کو بھیجا جائے گا۔';detail=s.status_detail||'Your application has been forwarded to Pakistan Embassy Riyadh and is awaiting processing with MOFA KSA.'}
 else if(onHold){statusClass='status-hold';label='Application on Hold';labelUr='آپ کی درخواست سفری راستے کی وضاحت نہ ہونے کی وجہ سے روک دی گئی ہے۔ براہ کرم فوری طور پر جناب اویس سے رابطہ کریں: +965-55977292';detail='Your application is on hold due to a travel route concern. Please contact Embassy staff urgently.'}
 function step(text,state){return`<div class="track-step ${state}"><span class="track-dot"></span><span>${text}</span></div>`}
 document.getElementById('statusBox').innerHTML=`<section class="card status-box ${statusClass}">
 <div class="status-header"><div><div class="eyebrow">Current Status</div><div class="status-title">${esc(label)}</div></div><span class="status-chip">${esc(s.tracking_number)}</span></div>
 <p class="card-p">${esc(detail)}</p>
-${sentToRiyadh&&s.mofa_letter_number?`<div class="letter-badge">Letter No. ${esc(s.mofa_letter_number)}</div>`:''}
+${sentToRiyadh&&s.mofa_letter_number&&!approved?`<div class="letter-badge">Letter No. ${esc(s.mofa_letter_number)}</div>`:''}
+${approved?`<div class="status-detail-ur">${labelUr}</div>`:''}
+${approved?'':`
 <div class="track-steps">
 ${step('Registered','done')}
 ${step('Pakistan Embassy Riyadh',sentToRiyadh?'done':'')}
 ${step('MOFA KSA',approved?'done':(sentToRiyadh?'active':''))}
 ${step('Decision',approved?'done':'')}
 </div>
-<div class="status-detail-ur">${labelUr}</div>
+<div class="status-detail-ur">${labelUr}</div>`}
 </section>`;
 let hoName='Embassy of Pakistan, Kuwait',hoSub='Under processing in Kuwait';
 if(approved){hoSub='Final approval complete. Please contact Kuwait Embassy for travel instructions.'}
 else if(sentToRiyadh){hoName='Pakistan Embassy Riyadh (Community Welfare Wing)';hoSub='For onward follow-up with MOFA KSA'}
+if(approved){
+document.getElementById('handlingOffice').innerHTML='';
+document.getElementById('guidanceCard').innerHTML='';
+}else{
 document.getElementById('handlingOffice').innerHTML=`<section class="sec-card handling-card"><h3 class="sc-hdr">Current Handling Office</h3><div class="sc-body"><div class="office-name">${esc(hoName)}</div><div class="office-sub">${esc(hoSub)}</div></div></section>`;
 let guideHtml='';
-if(approved){guideHtml='<p class="card-p">Final approval is complete. Please contact the Embassy of Pakistan, Kuwait immediately for further instructions regarding your travel arrangements.</p>'}
-else if(onHold){guideHtml='<p class="card-p">Your application is on hold due to a travel route concern. Please contact <strong>Mr. Awais</strong> immediately at <a href="tel:+96555977292" style="color:#856404;font-weight:800">+965-55977292</a>.</p>'}
+if(onHold){guideHtml='<p class="card-p">Your application is on hold due to a travel route concern. Please contact <strong>Mr. Awais</strong> immediately at <a href="tel:+96555977292" style="color:#856404;font-weight:800">+965-55977292</a>.</p>'}
 else if(sentToRiyadh){guideHtml='<ul class="guidance-list"><li>Please wait for the automated update.</li><li>Contact Riyadh Mission only if follow-up is required.</li><li>Keep your Letter No., Passport No., and Tracking No. ready.</li></ul>'}
 else{guideHtml='<ul class="guidance-list"><li>Your case is still under processing at the Embassy of Pakistan, Kuwait.</li><li>No action is required at this stage unless contacted by the Embassy.</li><li>Please check this page again for official updates.</li></ul>'}
 document.getElementById('guidanceCard').innerHTML=`<section class="sec-card guidance-card"><h3 class="sc-hdr">What You Should Do Now</h3><div class="sc-body">${guideHtml}</div></section>`;
-document.getElementById('infoGrid').innerHTML=`<section class="sec-card applicant-card"><h3 class="sc-hdr">Applicant Information</h3><div class="data-list">
-${row('Name',s.name)}
+}
+renderTravelDetailsCard(s);
+const applicantSummary=approved?
+`${row('Name',s.name)}
+${row('Passport No.',s.passport)}
+${row('Tracking No.',s.tracking_number)}
+${row('Border Crossing',s.border_crossing)}
+${row('Letter No.',s.mofa_letter_number)}`:
+`${row('Name',s.name)}
 ${row('Passport No.',s.passport)}
 ${row('Tracking No.',s.tracking_number)}
 ${row('Border Crossing',s.border_crossing)}
 ${row('Letter No.',s.mofa_letter_number)}
 ${row('Letter Date',s.mofa_letter_date)}
-${row('Date Sent',s.mofa_sent_date)}
+${row('Date Sent',s.mofa_sent_date)}`;
+document.getElementById('infoGrid').innerHTML=`<section class="sec-card applicant-card ${approved?'approved-summary':''}"><h3 class="sc-hdr">Applicant Information</h3><div class="data-list">
+${applicantSummary}
 </div></section>`;
 let letterHtml=sentToRiyadh?`<div class="data-list">${row('Letter No.',s.mofa_letter_number)}${row('Letter Date',s.mofa_letter_date)}${row('Date Sent',s.mofa_sent_date)}</div>`:`<p class="card-p"><strong>Not yet forwarded to MOFA Riyadh</strong></p>`;
+if(approved){
+document.getElementById('followupCard').innerHTML=`<details class="more-details"><summary>More Details</summary><div class="more-body">
+<section class="sec-card handling-card"><h3 class="sc-hdr">Current Handling Office</h3><div class="sc-body"><div class="office-name">Embassy of Pakistan, Kuwait</div><div class="office-sub">Transit visa / final approval complete. Submit travel details, then collect your travel letter from Embassy of Pakistan Kuwait.</div></div></section>
+<section class="sec-card ref-card"><h3 class="sc-hdr">Letter Reference Details</h3><div class="data-list">
+${row('Letter No.',s.mofa_letter_number)}
+${row('Letter Date',s.mofa_letter_date)}
+${row('Date Sent',s.mofa_sent_date)}
+</div></section>
+</div></details>`;
+}else{
 document.getElementById('followupCard').innerHTML=`<section class="sec-card ref-card"><h3 class="sc-hdr">Pakistan Embassy Kuwait Letter to Pakistan Embassy Riyadh</h3>${letterHtml}</section>
 <section class="sec-card contact-card"><h3 class="sc-hdr">Embassy of Pakistan, Riyadh &ndash; Follow-up Contact Details</h3>
 <div class="contact-row"><span class="contact-label">Website</span><span class="contact-value"><a href="https://pakistaninksa.com/community-welfare-wing/" target="_blank" rel="noopener">https://pakistaninksa.com/community-welfare-wing/</a></span></div>
@@ -16286,13 +16661,15 @@ ${row('Letter No.',s.mofa_letter_number)}
 ${row('Border Crossing',s.border_crossing)}
 </div><button type="button" class="btn copy-btn" onclick="copyFollowup()">Copy Follow-up Details</button><div class="copy-status" id="copyStatus" aria-live="polite"></div></section>
 <div class="note-bar"><strong>Important:</strong> ${sentToRiyadh?'Please keep your reference details ready when following up with Pakistan Embassy Riyadh.':'Your case is not yet forwarded to MOFA Riyadh. Please wait for the forwarded status before contacting Riyadh Mission.'}</div>`;
-document.getElementById('emergencySection').style.display=(approved||onHold)?'block':'none';
+}
+document.getElementById('emergencySection').style.display=onHold?'block':'none';
 document.getElementById('resultBox').style.display='block';
 const quickBack=document.getElementById('quickBackLink');
 if(quickBack)quickBack.style.display='none';
 document.getElementById('resultBox').scrollIntoView({behavior:'smooth',block:'start'});
 }else{
 _lastTrackData=null;
+const travelBox=document.getElementById('travelDetailsCard');if(travelBox)travelBox.innerHTML='';
 document.getElementById('errMsg').innerHTML=(d.error||'No application found for this passport or reference number.')+'<br><span dir="rtl" style="font-family:Tahoma,sans-serif;font-size:.9em">اس پاسپورٹ نمبر یا ریفرنس نمبر سے کوئی درخواست نہیں ملی</span>';
 document.getElementById('errMsg').style.display='block';
 }
@@ -19828,11 +20205,23 @@ html+=sec('Travel Details',[
 ['Airline',r.airline],['Ticket Number',r.ticket_number],
 ['Departure Airport',r.departure_airport],['Destination',r.destination_country]
 ]);
+const applicantTravelHas=!!(r.applicant_travel_submitted_at||r.applicant_travel_updated_at||r.applicant_travel_date||r.applicant_airline||r.applicant_ticket_number);
+const applicantTravelState=r.applicant_travel_locked==1?'Locked':(r.applicant_travel_updated_at?'Updated':(r.applicant_travel_submitted_at?'Submitted':'Not Submitted'));
+html+=sec('Applicant-Submitted Travel Details',[
+['Travel Details',applicantTravelHas?'<span style="color:#2e7d32;font-weight:700">'+escHtml(applicantTravelState)+'</span>':'<span style="color:#888;font-weight:700">Not Submitted</span>'],
+['Travel Date',escHtml(r.applicant_travel_date||'')],['Airline',escHtml(r.applicant_airline||'')],
+['Flight Number',escHtml(r.applicant_flight_number||'')],['Ticket / PNR',escHtml(r.applicant_ticket_number||'')],
+['Departure From',escHtml(r.applicant_departure_from||'')],['Arrival To',escHtml(r.applicant_arrival_to||'')],
+['Border / Transit Route',escHtml(r.applicant_border_route||'')],['Submitted At',escHtml(r.applicant_travel_submitted_at||'')],
+['Updated At',escHtml(r.applicant_travel_updated_at||'')],['Remarks',escHtml(r.applicant_travel_remarks||'')]
+]);
 (function(){
 const need=['ticket_number','airline','departure_date','departure_airport','destination_country','note_verbal_number','note_verbal_date','mofa_approval_serial'];
+const applicantTravelFallback={ticket_number:'applicant_ticket_number',airline:'applicant_airline',departure_date:'applicant_travel_date',departure_airport:'applicant_departure_from',destination_country:'applicant_arrival_to'};
+const hasLetterField=(k)=>String(r[k]||r[applicantTravelFallback[k]]||'').trim()!=='';
 const feeState=(r.fee_status||'pending').toLowerCase();
 const feeCleared=(feeState==='paid'||feeState==='waived');
-const lr=(r.visa_status||'')==='Approved'&&feeCleared&&need.every(k=>String(r[k]||'').trim()!=='');
+const lr=(r.visa_status||'')==='Approved'&&feeCleared&&need.every(hasLetterField);
 const tip=lr?'':(!feeCleared?'Fee must be paid or waived before printing.':'Fill all travel fields and note verbal details below to enable printing.');
 const vq=(s)=>String(s==null?'':s).replace(/"/g,'&quot;');
 const letterIssued=r.embassy_letter_issued_at?String(r.embassy_letter_issued_at)+' by '+(r.embassy_letter_issued_by||''):'\u2014';
