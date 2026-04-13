@@ -16,7 +16,7 @@ from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta, date
 from pathlib import Path
-from queue import Queue
+from queue import Queue, Full
 from email.message import EmailMessage
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -58,6 +58,7 @@ else:
     BACKUP_DIR = Path(__file__).parent / 'backups'
 LOCAL_BACKUP_KEEP_COUNT = 5
 SESSIONS = {}  # token -> {user, role, expires}
+SESSIONS_LOCK = threading.Lock()  # guards SESSIONS under ThreadingHTTPServer
 
 # Approval PDF uploads directory
 if RENDER_DISK.exists() and RENDER_DISK.is_dir():
@@ -86,15 +87,20 @@ ONEDRIVE_CLIENT_SECRET = _onedrive_env_clean(os.environ.get('ONEDRIVE_CLIENT_SEC
 ONEDRIVE_REFRESH_TOKEN = unquote(_onedrive_env_clean(os.environ.get('ONEDRIVE_REFRESH_TOKEN', '')))
 ONEDRIVE_TENANT = os.environ.get('ONEDRIVE_TENANT', 'consumers').strip() or 'consumers'
 ONEDRIVE_FOLDER = os.environ.get('ONEDRIVE_FOLDER', 'EmbassyBackups').strip() or 'EmbassyBackups'
+ONEDRIVE_SIMPLE_UPLOAD_MAX_BYTES = int(os.environ.get('ONEDRIVE_SIMPLE_UPLOAD_MAX_BYTES', str(3 * 1024 * 1024)))
+ONEDRIVE_UPLOAD_CHUNK_BYTES = int(os.environ.get('ONEDRIVE_UPLOAD_CHUNK_BYTES', str(5 * 320 * 1024)))
+MAX_REQUEST_BODY_BYTES = int(os.environ.get('MAX_REQUEST_BODY_BYTES', str(50 * 1024 * 1024)))
 _onedrive_refresh_runtime = ONEDRIVE_REFRESH_TOKEN  # updated in-process if Microsoft returns a new refresh_token
+ONEDRIVE_LOCK = threading.Lock()  # guards _onedrive_refresh_runtime under ThreadingHTTPServer
 
 # ═══════════════════════════════════════════════════════════════
 # DATABASE
 # ═══════════════════════════════════════════════════════════════
 def get_db():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 def init_db():
@@ -186,7 +192,11 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_passport ON evacuees(passport);
     CREATE INDEX IF NOT EXISTS idx_cnic ON evacuees(cnic);
+    CREATE INDEX IF NOT EXISTS idx_civil_id ON evacuees(civil_id);
+    CREATE INDEX IF NOT EXISTS idx_visa_status ON evacuees(visa_status);
     CREATE INDEX IF NOT EXISTS idx_travel_status ON evacuees(travel_status);
+    CREATE INDEX IF NOT EXISTS idx_date_request ON evacuees(date_of_request);
+    CREATE INDEX IF NOT EXISTS idx_ev_email ON evacuees(email);
     CREATE INDEX IF NOT EXISTS idx_name ON evacuees(name);
     """)
 
@@ -854,6 +864,7 @@ def init_db():
     db.execute("CREATE INDEX IF NOT EXISTS idx_ev_mismatch ON evacuees(route_mismatch)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_ev_effective_route ON evacuees(effective_route)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_ev_review_status ON evacuees(review_status)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ev_dashboard_scope ON evacuees(dup_flag, effective_route, travel_status, date_of_request)")
 
     # ── Route clarification email tracking columns ───────────────
     for col, coltype in [
@@ -1028,13 +1039,15 @@ def init_db():
 # ═══════════════════════════════════════════════════════════════
 def _onedrive_get_access_token():
     global _onedrive_refresh_runtime
-    if not all([ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, _onedrive_refresh_runtime]):
+    with ONEDRIVE_LOCK:
+        current_refresh = _onedrive_refresh_runtime
+    if not all([ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, current_refresh]):
         return None
     token_url = f'https://login.microsoftonline.com/{ONEDRIVE_TENANT}/oauth2/v2.0/token'
     body = urlencode({
         'client_id': ONEDRIVE_CLIENT_ID,
         'client_secret': ONEDRIVE_CLIENT_SECRET,
-        'refresh_token': _onedrive_refresh_runtime,
+        'refresh_token': current_refresh,
         'grant_type': 'refresh_token',
         'scope': 'Files.ReadWrite offline_access',
     }).encode()
@@ -1051,11 +1064,45 @@ def _onedrive_get_access_token():
         print(f'[OneDrive] Token request failed: {e}', flush=True)
         return None
     if result.get('refresh_token'):
-        _onedrive_refresh_runtime = result['refresh_token']
+        with ONEDRIVE_LOCK:
+            _onedrive_refresh_runtime = result['refresh_token']
     return result.get('access_token')
 
+def _onedrive_upload_session(token, path, folder, filename):
+    size = path.stat().st_size
+    session_url = f'https://graph.microsoft.com/v1.0/me/drive/root:/{folder}/{filename}:/createUploadSession'
+    body = json.dumps({'item': {'@microsoft.graph.conflictBehavior': 'replace', 'name': filename}}).encode()
+    req = urllib.request.Request(session_url, data=body, method='POST')
+    req.add_header('Authorization', f'Bearer {token}')
+    req.add_header('Content-Type', 'application/json')
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        session = json.loads(resp.read().decode())
+    upload_url = session.get('uploadUrl')
+    if not upload_url:
+        raise RuntimeError('Upload session did not return uploadUrl')
+
+    chunk_size = max(320 * 1024, ONEDRIVE_UPLOAD_CHUNK_BYTES)
+    chunk_size = (chunk_size // (320 * 1024)) * (320 * 1024)
+    if chunk_size <= 0:
+        chunk_size = 320 * 1024
+    sent = 0
+    with path.open('rb') as fh:
+        while sent < size:
+            chunk = fh.read(min(chunk_size, size - sent))
+            if not chunk:
+                break
+            start = sent
+            end = sent + len(chunk) - 1
+            put = urllib.request.Request(upload_url, data=chunk, method='PUT')
+            put.add_header('Content-Length', str(len(chunk)))
+            put.add_header('Content-Range', f'bytes {start}-{end}/{size}')
+            with urllib.request.urlopen(put, timeout=120) as resp:
+                resp.read()
+            sent = end + 1
+    return sent
+
 def upload_to_onedrive(file_path, folder=None):
-    """Upload a file to the signed-in user's OneDrive (simple PUT; fine for files well under ~4 MB)."""
+    """Upload a backup to OneDrive without reading large database files into RAM."""
     folder = folder or ONEDRIVE_FOLDER
     if not all([ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, _onedrive_refresh_runtime or ONEDRIVE_REFRESH_TOKEN]):
         return False
@@ -1067,19 +1114,20 @@ def upload_to_onedrive(file_path, folder=None):
         print(f'[OneDrive] Missing file: {file_path}', flush=True)
         return False
     filename = path.name
+    file_size = path.stat().st_size
     upload_url = f'https://graph.microsoft.com/v1.0/me/drive/root:/{folder}/{filename}:/content'
     try:
-        file_data = path.read_bytes()
-    except Exception as e:
-        print(f'[OneDrive] Read failed: {e}', flush=True)
-        return False
-    req = urllib.request.Request(upload_url, data=file_data, method='PUT')
-    req.add_header('Authorization', f'Bearer {token}')
-    req.add_header('Content-Type', 'application/octet-stream')
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            json.loads(resp.read().decode())
-        print(f'[OneDrive] Uploaded {filename} ({len(file_data)} bytes) → {folder}/', flush=True)
+        if file_size > ONEDRIVE_SIMPLE_UPLOAD_MAX_BYTES:
+            sent = _onedrive_upload_session(token, path, folder, filename)
+            print(f'[OneDrive] Uploaded {filename} ({sent} bytes, chunked) → {folder}/', flush=True)
+        else:
+            file_data = path.read_bytes()
+            req = urllib.request.Request(upload_url, data=file_data, method='PUT')
+            req.add_header('Authorization', f'Bearer {token}')
+            req.add_header('Content-Type', 'application/octet-stream')
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                resp.read()
+            print(f'[OneDrive] Uploaded {filename} ({len(file_data)} bytes) → {folder}/', flush=True)
         return True
     except urllib.error.HTTPError as e:
         err = e.read().decode() if e.fp else str(e)
@@ -1315,8 +1363,19 @@ def _grant_office_expense_access(session_user, minutes=15):
 # ═══════════════════════════════════════════════════════════════
 # EMAIL NOTIFICATIONS (SAFE BACKGROUND WORKER)
 # ═══════════════════════════════════════════════════════════════
-EMAIL_QUEUE = Queue()
+EMAIL_QUEUE_MAXSIZE = int(os.environ.get('EMAIL_QUEUE_MAXSIZE', '5000'))
+ADVISORY_ENQUEUE_BATCH_SIZE = int(os.environ.get('ADVISORY_ENQUEUE_BATCH_SIZE', '100'))
+EMAIL_QUEUE = Queue(maxsize=max(100, EMAIL_QUEUE_MAXSIZE))
 EMAIL_WORKER_STARTED = False
+
+def _enqueue_email_job(job):
+    """Bounded enqueue to prevent broadcast/admin activity from exhausting RAM."""
+    try:
+        EMAIL_QUEUE.put_nowait(job)
+        return True
+    except Full:
+        print(f"[EmailQueue] full; skipped {job.get('type', 'email')} to {job.get('to', '-')}", flush=True)
+        return False
 
 def _get_setting(db, key, default=''):
     row = db.execute("SELECT value FROM settings WHERE key = ?", [key]).fetchone()
@@ -1391,8 +1450,8 @@ def _send_email_smtp(to_email, subject, body_text):
 def _queue_visa_approved_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
     if not _is_valid_email_loose(email):
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'visa_approved',
         'to': email,
         'name': (record.get('name') or 'Applicant').strip(),
@@ -1526,8 +1585,8 @@ def _is_iraq_related_record(db, record):
 def _queue_registration_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
     if not _is_valid_email_loose(email):
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'registration_success',
         'to': email,
         'name': (record.get('name') or 'Applicant').strip(),
@@ -1540,8 +1599,8 @@ def _queue_registration_email(record, changed_by='system'):
 def _queue_iraq_public_submitted_email(submission_id, reference_number, full_name, passport_number, email, phone, current_city, submitted_at, changed_by='public'):
     to_addr = (email or '').strip()
     if not _is_valid_email_loose(to_addr):
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'iraq_public_submitted',
         'to': to_addr,
         'applicant_email': to_addr,
@@ -1558,8 +1617,8 @@ def _queue_iraq_public_submitted_email(submission_id, reference_number, full_nam
 def _queue_mofa_sent_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
     if not _is_valid_email(email):
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'mofa_sent',
         'to': email,
         'name': (record.get('name') or 'Applicant').strip(),
@@ -1576,8 +1635,8 @@ def _queue_mofa_sent_email(record, changed_by='system'):
 def _queue_iraq_mofa_forwarded_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
     if not _is_valid_email_loose(email):
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'iraq_mofa_forwarded',
         'to': email,
         'name': (record.get('name') or 'Applicant').strip(),
@@ -1598,14 +1657,13 @@ def _queue_iraq_mofa_forwarded_if_needed(db, rec_id, changed_by='system'):
         return False
     if int(rec.get('iraq_forwarded_email_sent_flag') or 0) == 1:
         return False
-    _queue_iraq_mofa_forwarded_email(rec, changed_by)
-    return True
+    return _queue_iraq_mofa_forwarded_email(rec, changed_by)
 
 def _queue_iraq_final_approval_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
     if not _is_valid_email_loose(email):
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'iraq_final_approval',
         'to': email,
         'name': (record.get('name') or 'Applicant').strip(),
@@ -1637,7 +1695,8 @@ def _queue_iraq_final_approval_if_ready(db, rec_id, changed_by='system'):
         return
     rec = dict(row)
     if _has_both_approvals(rec) and int(rec.get('iraq_final_email_sent_flag') or 0) == 0:
-        _queue_iraq_final_approval_email(rec, changed_by)
+        return _queue_iraq_final_approval_email(rec, changed_by)
+    return False
 
 
 def _iraq_public_get_kw_decision(db, submission_id):
@@ -1652,9 +1711,9 @@ def _queue_iraq_public_final_approval_email(record, changed_by='system'):
     """Queue a final-approval email for an Iraq public submission."""
     email = (record.get('email') or '').strip()
     if not _is_valid_email_loose(email):
-        return
+        return False
     ref = record.get('reference_number') or f"IRQ-{record.get('id', 0)}"
-    EMAIL_QUEUE.put({
+    return _enqueue_email_job({
         'type': 'iraq_public_final_approval',
         'to': email,
         'name': (record.get('full_name') or 'Applicant').strip(),
@@ -1680,7 +1739,8 @@ def _queue_iraq_public_final_approval_if_ready(db, submission_id, changed_by='sy
     kw_decision = _iraq_public_get_kw_decision(db, submission_id)
     kw_ok = kw_decision.strip().lower() == 'approved'
     if ksa_ok and kw_ok and int(rec.get('final_email_sent_flag') or 0) == 0:
-        _queue_iraq_public_final_approval_email(rec, changed_by)
+        return _queue_iraq_public_final_approval_email(rec, changed_by)
+    return False
 
 
 def _queue_iraq_public_final_approval_resend(changed_by='system'):
@@ -1704,8 +1764,8 @@ def _queue_iraq_public_final_approval_resend(changed_by='system'):
         if not _is_valid_email_loose((rec.get('email') or '').strip()):
             invalid_email += 1
             continue
-        _queue_iraq_public_final_approval_email(rec, changed_by)
-        queued += 1
+        if _queue_iraq_public_final_approval_email(rec, changed_by):
+            queued += 1
     db.execute("INSERT INTO audit_log (action, user, details) VALUES ('iraq_public_final_email_resend', ?, ?)",
                [changed_by, json.dumps({'total_matched': len(rows), 'queued': queued, 'invalid_email': invalid_email})])
     db.commit()
@@ -1744,8 +1804,8 @@ def _queue_iraq_forwarded_backfill_emails(changed_by='system', limit=3000):
         if not _is_valid_email_loose((rec.get('email') or '').strip()):
             skipped_invalid_email += 1
             continue
-        _queue_iraq_mofa_forwarded_email(rec, changed_by)
-        queued += 1
+        if _queue_iraq_mofa_forwarded_email(rec, changed_by):
+            queued += 1
     db.execute("INSERT INTO audit_log (action, user, details) VALUES ('iraq_forwarded_email_backfill_queue', ?, ?)",
                [changed_by, json.dumps({'queued': queued, 'candidate_rows': len(rows), 'skipped_invalid_email': skipped_invalid_email})])
     db.commit()
@@ -1783,8 +1843,8 @@ def _queue_iraq_forwarded_resend_emails(changed_by='system', limit=3000):
         if not _is_valid_email_loose((rec.get('email') or '').strip()):
             skipped_invalid_email += 1
             continue
-        _queue_iraq_mofa_forwarded_email(rec, changed_by)
-        queued += 1
+        if _queue_iraq_mofa_forwarded_email(rec, changed_by):
+            queued += 1
     db.execute("INSERT INTO audit_log (action, user, details) VALUES ('iraq_forwarded_email_manual_resend_queue', ?, ?)",
                [changed_by, json.dumps({'queued': queued, 'candidate_rows': len(rows), 'skipped_invalid_email': skipped_invalid_email})])
     db.commit()
@@ -1804,8 +1864,8 @@ def _queue_route_clarification_email(record, changed_by='system', trigger_source
             clarification_email_last_sent_by = ?
             WHERE id = ?""", [trigger_source, changed_by, rec_id])
         db.commit(); db.close()
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'route_clarification',
         'to': email,
         'name': (record.get('name') or 'Applicant').strip(),
@@ -1822,8 +1882,8 @@ def _queue_route_cleared_email(record, changed_by='system'):
     email = (record.get('email') or '').strip()
     rec_id = record.get('id')
     if not _is_valid_email(email):
-        return
-    EMAIL_QUEUE.put({
+        return False
+    return _enqueue_email_job({
         'type': 'route_cleared',
         'to': email,
         'name': (record.get('name') or 'Applicant').strip(),
@@ -1908,18 +1968,94 @@ def collect_admin_advisory_recipients(category):
     db.close()
     return list(by_email.values())
 
+def iter_admin_advisory_recipients(category):
+    """Stream unique advisory recipients without building a full recipient list."""
+    db = get_db()
+    seen = set()
+    try:
+        if category == 'evacuees':
+            rows = db.execute("""
+                SELECT id, name, email FROM evacuees
+                WHERE (dup_flag IS NULL OR UPPER(TRIM(COALESCE(dup_flag,''))) = 'CLEAR')
+                  AND (
+                      visa_status IS NULL OR TRIM(COALESCE(visa_status,'')) = ''
+                      OR UPPER(TRIM(visa_status)) <> 'REJECTED'
+                  )
+                  AND email IS NOT NULL AND TRIM(email) <> ''
+            """)
+            for r in rows:
+                em = (r['email'] or '').strip()
+                key = em.lower()
+                if key in seen or not _is_valid_email_loose(em):
+                    continue
+                seen.add(key)
+                yield {'email': em, 'name': (r['name'] or '').strip(), 'source': 'evacuee', 'record_id': r['id']}
+        elif category == 'returnees':
+            rows = db.execute("""
+                SELECT ci.id, pm.full_name AS name, pm.email AS email
+                FROM charter_interest ci
+                JOIN person_master pm ON pm.id = ci.person_id
+                WHERE ci.cancellation_status = 'active'
+                  AND COALESCE(ci.dup_flag,'CLEAR') = 'CLEAR'
+                  AND (
+                      ci.saudi_visa_approved IS NULL OR TRIM(COALESCE(ci.saudi_visa_approved,'')) = ''
+                      OR LOWER(TRIM(ci.saudi_visa_approved)) <> 'no'
+                  )
+                  AND pm.email IS NOT NULL AND TRIM(pm.email) <> ''
+            """)
+            for r in rows:
+                em = (r['email'] or '').strip()
+                key = em.lower()
+                if key in seen or not _is_valid_email_loose(em):
+                    continue
+                seen.add(key)
+                yield {'email': em, 'name': (r['name'] or '').strip(), 'source': 'returnee', 'record_id': r['id']}
+        elif category == 'iraq_requests':
+            rows_pub = db.execute("""
+                SELECT id, full_name AS name, email FROM iraq_public_submissions
+                WHERE (status IS NULL OR TRIM(COALESCE(status,'')) = '' OR status <> 'Rejected')
+                  AND email IS NOT NULL AND TRIM(email) <> ''
+            """)
+            for r in rows_pub:
+                em = (r['email'] or '').strip()
+                key = em.lower()
+                if key in seen or not _is_valid_email_loose(em):
+                    continue
+                seen.add(key)
+                yield {'email': em, 'name': (r['name'] or '').strip(), 'source': 'iraq_public', 'record_id': r['id']}
+            rows_app = db.execute("""
+                SELECT id, full_name AS name, email_address AS email FROM iraq_applicants
+                WHERE (
+                    visa_status IS NULL OR TRIM(COALESCE(visa_status,'')) = ''
+                    OR visa_status <> 'Rejected'
+                )
+                AND email_address IS NOT NULL AND TRIM(email_address) <> ''
+            """)
+            for r in rows_app:
+                em = (r['email'] or '').strip()
+                key = em.lower()
+                if key in seen or not _is_valid_email_loose(em):
+                    continue
+                seen.add(key)
+                yield {'email': em, 'name': (r['name'] or '').strip(), 'source': 'iraq_mission', 'record_id': r['id']}
+    finally:
+        db.close()
+
+def count_admin_advisory_recipients(category):
+    return sum(1 for _ in iter_admin_advisory_recipients(category))
+
 def _queue_admin_advisory_email(to_email, subject, body_text, meta, changed_by):
     if not _is_valid_email_loose(to_email):
         return False
-    EMAIL_QUEUE.put({
+    return _enqueue_email_job({
         'type': 'admin_advisory',
         'to': to_email.strip(),
         'subject': subject,
-        'body': body_text,
+        'body_template': body_text,
+        'name': (meta or {}).get('name', ''),
         'meta': meta or {},
         'changed_by': changed_by
     })
-    return True
 
 def api_admin_advisory_broadcast(data, user):
     cat = (data.get('category') or '').strip()
@@ -1940,24 +2076,33 @@ def api_admin_advisory_broadcast(data, user):
         return {'success': False, 'error': 'SMTP is disabled. Enable it under Auto Email Notifications.'}
     if not cfg['from_email'] or not cfg['app_password_enc']:
         return {'success': False, 'error': 'SMTP is not fully configured (from address / app password)'}
-    recipients = collect_admin_advisory_recipients(cat)
-    if len(recipients) > ADVISORY_MAX_RECIPIENTS:
-        return {'success': False, 'error': f'Too many recipients ({len(recipients)}). Maximum is {ADVISORY_MAX_RECIPIENTS}.'}
+    # Single-pass streaming enqueue: count + enqueue while iterating recipients.
+    # This avoids a second full DB iteration just to count, and still enforces
+    # the recipient cap and queue-backpressure cap safely.
+    queue_room = EMAIL_QUEUE.maxsize - EMAIL_QUEUE.qsize()
+    if queue_room <= 0:
+        return {'success': False, 'error': 'Email queue is busy; please wait and try again.'}
     queued = 0
-    for rec in recipients:
+    seen = 0
+    for rec in iter_admin_advisory_recipients(cat):
+        seen += 1
+        if seen > ADVISORY_MAX_RECIPIENTS:
+            return {'success': False, 'error': f'Too many recipients (>{ADVISORY_MAX_RECIPIENTS}). Please narrow the audience.'}
+        if seen > queue_room:
+            return {'success': False, 'error': f'Email queue is busy. Room for {queue_room} message(s); please wait or split this advisory into smaller batches.'}
         name = (rec.get('name') or 'Applicant').strip() or 'Applicant'
-        personalized = body_tpl.replace('{name}', name)
-        full_body = personalized + ADVISORY_EMAIL_FOOTER
-        meta = {'source': rec.get('source'), 'record_id': rec.get('record_id')}
-        if _queue_admin_advisory_email(rec['email'], subject, full_body, meta, user['user']):
+        meta = {'source': rec.get('source'), 'record_id': rec.get('record_id'), 'name': name}
+        if _queue_admin_advisory_email(rec['email'], subject, body_tpl, meta, user['user']):
             queued += 1
+        if queued and queued % max(1, ADVISORY_ENQUEUE_BATCH_SIZE) == 0:
+            time.sleep(0.01)
     db = get_db()
     db.execute(
         "INSERT INTO audit_log (action, user, details) VALUES ('admin_advisory_broadcast', ?, ?)",
-        [user['user'], json.dumps({'category': cat, 'queued': queued, 'unique_recipients': len(recipients), 'subject': subject})])
+        [user['user'], json.dumps({'category': cat, 'queued': queued, 'unique_recipients': seen, 'subject': subject})])
     db.commit()
     db.close()
-    return {'success': True, 'queued': queued, 'unique_recipients': len(recipients)}
+    return {'success': True, 'queued': queued, 'unique_recipients': seen}
 
 def _recipient_salutation(name):
     nm = (name or '').strip()
@@ -2359,7 +2504,11 @@ def _email_worker_loop():
                 db.close()
             elif job.get('type') == 'admin_advisory':
                 subj = (job.get('subject') or 'Advisory').strip()[:ADVISORY_MAX_SUBJECT_LEN]
-                body = job.get('body') or ''
+                body = job.get('body')
+                if body is None:
+                    body_tpl = job.get('body_template') or ''
+                    name = (job.get('name') or 'Applicant').strip() or 'Applicant'
+                    body = body_tpl.replace('{name}', name) + ADVISORY_EMAIL_FOOTER
                 ok, detail = _send_email_smtp(job['to'], subj, body)
                 db = get_db()
                 meta = job.get('meta') or {}
@@ -2370,9 +2519,14 @@ def _email_worker_loop():
                 )
                 db.commit()
                 db.close()
-        except Exception:
-            # Never crash worker loop
-            pass
+        except Exception as _ew_exc:
+            # Never crash worker loop, but make failures visible.
+            try:
+                _job_type = (job or {}).get('type', 'unknown') if isinstance(job, dict) else 'unknown'
+                _job_to = (job or {}).get('to', '') if isinstance(job, dict) else ''
+                print(f"[EmailWorker] ERROR job_type={_job_type} to={_job_to} {type(_ew_exc).__name__}: {_ew_exc}", flush=True)
+            except Exception:
+                pass
         finally:
             EMAIL_QUEUE.task_done()
 
@@ -2435,7 +2589,8 @@ def record_login_success(ip):
 
 def create_session(username, role):
     token = secrets.token_hex(32)
-    SESSIONS[token] = {'user': username, 'role': role, 'expires': time.time() + 86400}
+    with SESSIONS_LOCK:
+        SESSIONS[token] = {'user': username, 'role': role, 'expires': time.time() + 86400}
     return token
 
 def get_session(cookie_str):
@@ -2444,7 +2599,8 @@ def get_session(cookie_str):
     c.load(cookie_str)
     token = c.get('session')
     if not token: return None
-    s = SESSIONS.get(token.value)
+    with SESSIONS_LOCK:
+        s = SESSIONS.get(token.value)
     if s and s['expires'] > time.time(): return s
     return None
 
@@ -2929,6 +3085,7 @@ def api_dashboard_stats(user=None):
         returned_today = int(evac_totals['returned_today'] or 0)
         jazeera_departed = 120
 
+        # Kept for SITREP/report generation. These are not rendered as dashboard charts.
         by_country = [dict(r) for r in db.execute(f"""
             SELECT country, COUNT(*) total,
             SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
@@ -2946,24 +3103,12 @@ def api_dashboard_stats(user=None):
             {EV_ALL} GROUP BY gender
         """).fetchall()]
 
-        by_date = [dict(r) for r in db.execute(f"""
-            SELECT date_of_request date, COUNT(*) new_requests,
-            SUM(CASE WHEN travel_status='Departed' THEN 1 ELSE 0 END) departed,
-            SUM(CASE WHEN travel_status='Visa Obtained' THEN 1 ELSE 0 END) visa_obtained,
-            SUM(CASE WHEN travel_status='Pending' THEN 1 ELSE 0 END) pending
-            {EV_ALL} AND date_of_request IS NOT NULL AND date_of_request != ''
-            GROUP BY date_of_request ORDER BY date_of_request
-        """).fetchall()]
-
-        by_visa = [dict(r) for r in db.execute(f"SELECT COALESCE(visa_status,'Not Set') status, COUNT(*) count {EV_ALL} GROUP BY visa_status").fetchall()]
-        by_border = [dict(r) for r in db.execute(f"SELECT border_crossing, COUNT(*) count {EV_ALL} AND border_crossing != '' GROUP BY border_crossing").fetchall()]
-
         # Operational dashboard analytics for the main KW→PK evacuee flow.
-        evac_rows = [dict(r) for r in db.execute(f"""
-            SELECT id, name, passport, company, remarks, medical, visa_status, travel_status,
-                   airline, border_crossing, date_of_request, departure_date, created_at
+        # Stream only the fields needed for the remaining dashboard charts.
+        evac_rows = db.execute(f"""
+            SELECT company, remarks, medical, travel_status, date_of_request, created_at
             {EV_BASE}
-        """).fetchall()]
+        """)
 
         today = datetime.now().date()
 
@@ -2972,90 +3117,27 @@ def api_dashboard_stats(user=None):
             # for legacy rows where date_of_request was never captured.
             return _parse_date_safe(row.get('date_of_request')) or _parse_date_safe(row.get('created_at'))
 
-        def _processing_days_for_row(row):
-            req_date = _request_start_date(row)
-            if not req_date:
-                return None
-            travel_status = (row.get('travel_status') or '').strip()
-            if travel_status in ('Departed', 'Returned'):
-                end_date = _parse_date_safe(row.get('departure_date'))
-                if not end_date:
-                    return None
-            else:
-                end_date = today
-            return _days_between(req_date, end_date)
-
-        def _init_group():
-            return {
-                'pending': 0,
-                'visa_obtained': 0,
-                'departed': 0,
-                'returned': 0,
-                'total': 0,
-                'days': []
-            }
-
-        def _status_key(status):
-            st = (status or '').strip()
-            if st == 'Visa Obtained':
-                return 'visa_obtained'
-            if st == 'Departed':
-                return 'departed'
-            if st == 'Returned':
-                return 'returned'
-            return 'pending'
-
-        processing_days = []
-        profession_identified_count = 0
-        longest_pending_days = 0
         pending_age_map = {'0-3 days': 0, '4-7 days': 0, '8-14 days': 0, '15-30 days': 0, '31+ days': 0}
         processing_trend_map = {}
-        airline_groups = {}
         profession_groups = {}
-        border_airline_map = {}
-        longest_pending_cases = []
-
-        for row in evac_rows:
+        for raw_row in evac_rows:
+            row = dict(raw_row)
             travel_status = (row.get('travel_status') or '').strip()
-            airline = _normalize_airline(row.get('airline'))
             profession = _extract_profession(row)
-            border = normalize_border(row.get('border_crossing') or '') or 'Unknown'
             req_date = _request_start_date(row)
-            days_open = _processing_days_for_row(row)
-
-            if days_open is not None:
-                processing_days.append(days_open)
-
-            if profession != 'Unknown':
-                profession_identified_count += 1
 
             if req_date:
                 iso_date = req_date.isoformat()
                 slot = processing_trend_map.setdefault(iso_date, {
                     'date': iso_date,
                     'new_requests': 0,
-                    'pending': 0,
-                    'visa_obtained': 0,
-                    'departed': 0,
-                    'returned': 0
+                    'visa_obtained': 0
                 })
                 slot['new_requests'] += 1
-                slot[_status_key(travel_status)] += 1
+                if travel_status == 'Visa Obtained':
+                    slot['visa_obtained'] += 1
 
-            ag = airline_groups.setdefault(airline, _init_group())
-            ag['total'] += 1
-            ag[_status_key(travel_status)] += 1
-            if days_open is not None:
-                ag['days'].append(days_open)
-
-            pg = profession_groups.setdefault(profession, _init_group())
-            pg['total'] += 1
-            pg[_status_key(travel_status)] += 1
-            if days_open is not None:
-                pg['days'].append(days_open)
-
-            ba_key = (airline, border)
-            border_airline_map[ba_key] = border_airline_map.get(ba_key, 0) + 1
+            profession_groups[profession] = profession_groups.get(profession, 0) + 1
 
             if travel_status == 'Pending' and req_date:
                 pending_days = _days_between(req_date, today)
@@ -3070,100 +3152,39 @@ def api_dashboard_stats(user=None):
                         pending_age_map['15-30 days'] += 1
                     else:
                         pending_age_map['31+ days'] += 1
-                    longest_pending_days = max(longest_pending_days, pending_days)
-                    longest_pending_cases.append({
-                        'id': row.get('id'),
-                        'name': row.get('name') or '',
-                        'passport': row.get('passport') or '',
-                        'profession': profession,
-                        'airline': airline,
-                        'border_crossing': border,
-                        'visa_status': row.get('visa_status') or '',
-                        'travel_status': travel_status or '',
-                        'date_of_request': req_date.isoformat(),
-                        'pending_days': pending_days,
-                        'company': row.get('company') or '',
-                        'remarks': row.get('remarks') or '',
-                    })
-
-        processing_funnel = [
-            {'stage': 'Registered', 'count': int(total or 0)},
-            {'stage': 'Pending', 'count': int(pending or 0)},
-            {'stage': 'Visa Obtained', 'count': int(visa_obtained or 0)},
-            {'stage': 'Departed', 'count': int(departed or 0)},
-            {'stage': 'Returned', 'count': int(returned or 0)},
-        ]
 
         pending_age_buckets = [{'label': label, 'count': count} for label, count in pending_age_map.items()]
         processing_trend = [processing_trend_map[k] for k in sorted(processing_trend_map.keys())]
+        top_professions = sorted(
+            [{'profession': profession, 'count': count, 'total': count}
+             for profession, count in profession_groups.items() if profession != 'Unknown'],
+            key=lambda x: (-x['count'], x['profession'])
+        )[:10]
 
-        airline_distribution = sorted(
-            [{'airline': airline, 'count': data['total']} for airline, data in airline_groups.items()],
-            key=lambda x: (-x['count'], x['airline'])
-        )
-        airline_outcomes = sorted(
-            [{'airline': airline, 'pending': data['pending'], 'visa_obtained': data['visa_obtained'],
-              'departed': data['departed'], 'returned': data['returned'], 'total': data['total']}
-             for airline, data in airline_groups.items()],
-            key=lambda x: (-x['total'], x['airline'])
-        )
-        airline_processing_time = sorted(
-            [{'airline': airline,
-              'avg_days': round(sum(data['days']) / len(data['days']), 1) if data['days'] else 0,
-              'median_days': round(_median(data['days']) or 0, 1),
-              'total': len(data['days'])}
-             for airline, data in airline_groups.items() if data['days']],
-            key=lambda x: (-x['avg_days'], -x['total'], x['airline'])
-        )
-        airline_completed = sorted(
-            [{'airline': airline, 'departed': data['departed'], 'returned': data['returned'],
-              'completed_total': data['departed'] + data['returned']}
-             for airline, data in airline_groups.items()],
-            key=lambda x: (-x['completed_total'], x['airline'])
-        )
-
-        profession_outcomes = sorted(
-            [{'profession': profession, 'pending': data['pending'], 'visa_obtained': data['visa_obtained'],
-              'departed': data['departed'], 'returned': data['returned'], 'total': data['total']}
-             for profession, data in profession_groups.items()],
-            key=lambda x: (-x['total'], x['profession'])
-        )
-        profession_processing = sorted(
-            [{'profession': profession,
-              'avg_days': round(sum(data['days']) / len(data['days']), 1) if data['days'] else 0,
-              'median_days': round(_median(data['days']) or 0, 1),
-              'total': len(data['days'])}
-             for profession, data in profession_groups.items() if data['days']],
-            key=lambda x: (-x['avg_days'], -x['total'], x['profession'])
-        )
-        profession_summary = sorted(
-            [{'profession': profession, 'total': data['total'], 'pending': data['pending'],
-              'visa_obtained': data['visa_obtained'], 'departed': data['departed'], 'returned': data['returned'],
-              'avg_days': round(sum(data['days']) / len(data['days']), 1) if data['days'] else 0,
-              'median_days': round(_median(data['days']) or 0, 1)}
-             for profession, data in profession_groups.items()],
-            key=lambda x: (-x['total'], x['profession'])
-        )
-        top_professions = [p for p in profession_summary if p['profession'] != 'Unknown'][:10]
-        border_airline_matrix = sorted(
-            [{'airline': airline, 'border_crossing': border, 'count': count}
-             for (airline, border), count in border_airline_map.items()],
-            key=lambda x: (-x['count'], x['airline'], x['border_crossing'])
-        )
+        longest_pending_candidates = [dict(r) for r in db.execute(f"""
+            SELECT id, name, passport, visa_status, travel_status, date_of_request, created_at
+            {EV_BASE}
+              AND travel_status = 'Pending'
+              AND COALESCE(NULLIF(date_of_request,''), created_at) IS NOT NULL
+            ORDER BY COALESCE(NULLIF(date_of_request,''), created_at) ASC, id ASC
+            LIMIT 50
+        """).fetchall()]
+        longest_pending_cases = []
+        for row in longest_pending_candidates:
+            req_date = _request_start_date(row)
+            pending_days = _days_between(req_date, today) if req_date else None
+            if pending_days is None:
+                continue
+            longest_pending_cases.append({
+                'id': row.get('id'),
+                'name': row.get('name') or '',
+                'passport': row.get('passport') or '',
+                'visa_status': row.get('visa_status') or '',
+                'travel_status': row.get('travel_status') or '',
+                'date_of_request': req_date.isoformat(),
+                'pending_days': pending_days
+            })
         longest_pending_cases = sorted(longest_pending_cases, key=lambda x: (-x['pending_days'], x['id'] or 0))[:10]
-
-        kpi_v2 = {
-            'total_active_cases': int(total or 0),
-            'pending_cases': int(pending or 0),
-            'visa_obtained_cases': int(visa_obtained or 0),
-            'departed_cases': int(departed or 0),
-            'returned_cases': int(returned or 0),
-            'avg_processing_days': round(sum(processing_days) / len(processing_days), 1) if processing_days else 0,
-            'median_processing_days': round(_median(processing_days) or 0, 1),
-            'profession_identified_count': profession_identified_count,
-            'profession_identified_pct': round((profession_identified_count * 100.0 / len(evac_rows)), 1) if evac_rows else 0,
-            'longest_pending_days': int(longest_pending_days or 0),
-        }
 
         try:
             mismatch_totals = db.execute("""
@@ -3182,47 +3203,6 @@ def api_dashboard_stats(user=None):
             mismatch_pending_review = 0
             corrected_to_pk = 0
 
-        iraq_mission = _iraq_mission_dashboard_kpi(db)
-        fee_metrics = _dashboard_fee_metrics(db)
-        fee_today_collected = fee_metrics.get('fee_today_collected', 0)
-        fee_today_waived = fee_metrics.get('fee_today_waived', 0)
-        fee_total_collected = fee_metrics.get('fee_total_collected', 0)
-        fee_total_waived = fee_metrics.get('fee_total_waived', 0)
-        fee_paid_count = fee_metrics.get('fee_paid_count', 0)
-        fee_waived_count = fee_metrics.get('fee_waived_count', 0)
-        fee_people_served_today = fee_metrics.get('fee_people_served_today', 0)
-        fee_released_today = fee_metrics.get('fee_released_today', 0)
-        fee_released_total = fee_metrics.get('fee_released_total', 0)
-        fee_pending_count = db.execute("""
-            SELECT
-              (SELECT COUNT(*) FROM evacuees WHERE COALESCE(fee_status,'pending')='pending')
-              + (SELECT COUNT(*) FROM iraq_applicants WHERE COALESCE(fee_status,'pending')='pending')
-              + (SELECT COUNT(*) FROM iraq_public_submissions WHERE COALESCE(fee_status,'pending')='pending') AS c
-        """).fetchone()['c']
-
-        if _is_operator_special(user):
-            _cdt = _OP_SPECIAL_FEE_CUTOFF
-            fee_metrics = _dashboard_fee_metrics(db, cutoff_date=_cdt)
-            fee_today_collected = fee_metrics.get('fee_today_collected', 0)
-            fee_today_waived = fee_metrics.get('fee_today_waived', 0)
-            fee_total_collected = fee_metrics.get('fee_total_collected', 0)
-            fee_total_waived = fee_metrics.get('fee_total_waived', 0)
-            fee_paid_count = fee_metrics.get('fee_paid_count', 0)
-            fee_waived_count = fee_metrics.get('fee_waived_count', 0)
-            fee_people_served_today = fee_metrics.get('fee_people_served_today', 0)
-            fee_released_today = fee_metrics.get('fee_released_today', 0)
-            fee_released_total = fee_metrics.get('fee_released_total', 0)
-            fee_today_collected = _op_special_round(fee_today_collected)
-            fee_today_waived = _op_special_round(fee_today_waived)
-            fee_total_collected = _op_special_round(fee_total_collected)
-            fee_total_waived = _op_special_round(fee_total_waived)
-            total_fee_scope = db.execute("""
-                SELECT (SELECT COUNT(*) FROM evacuees)
-                     + (SELECT COUNT(*) FROM iraq_applicants)
-                     + (SELECT COUNT(*) FROM iraq_public_submissions) AS c
-            """).fetchone()['c']
-            fee_pending_count = max(int(total_fee_scope or 0) - int(fee_paid_count or 0) - int(fee_waived_count or 0), 0)
-
         payload = {
             'kpi': {'total': total, 'total_all': total_all, 'departed': departed, 'visa_obtained': visa_obtained, 'pending': pending,
                     'visa_approved': visa_approved, 'iraq_entries': iraq_entries, 'duplicates': duplicates,
@@ -3230,37 +3210,14 @@ def api_dashboard_stats(user=None):
                     'returned': returned, 'returned_today': returned_today,
                     'jazeera_departed': jazeera_departed,
                     'mismatch_total': mismatch_total, 'mismatch_pending_review': mismatch_pending_review,
-                    'corrected_to_pk': corrected_to_pk,
-                    'fee_today_collected': float(fee_today_collected or 0),
-                    'fee_today_waived': float(fee_today_waived or 0),
-                    'fee_total_collected': float(fee_total_collected or 0),
-                    'fee_total_waived': float(fee_total_waived or 0),
-                    'fee_people_served_today': int(fee_people_served_today or 0),
-                    'fee_released_today': int(fee_released_today or 0),
-                    'fee_released_total': int(fee_released_total or 0),
-                    'fee_pending_count': int(fee_pending_count or 0),
-                    'fee_paid_count': int(fee_paid_count or 0),
-                    'fee_waived_count': int(fee_waived_count or 0)},
-            'kpi_v2': kpi_v2,
-            'iraq_mission': iraq_mission,
-            'by_country': by_country, 'by_gender': by_gender, 'by_date': by_date,
-            'by_visa': by_visa, 'by_border': by_border,
-            'processing_funnel': processing_funnel,
+                    'corrected_to_pk': corrected_to_pk},
+            'by_country': by_country,
+            'by_gender': by_gender,
             'pending_age_buckets': pending_age_buckets,
             'processing_trend': processing_trend,
-            'airline_stats': {
-                'distribution': airline_distribution,
-                'outcomes': airline_outcomes,
-                'processing_time': airline_processing_time,
-                'completed_departures': airline_completed
-            },
             'profession_stats': {
-                'top_professions': top_professions,
-                'outcomes': profession_outcomes,
-                'processing_time': profession_processing,
-                'summary_table': profession_summary
+                'top_professions': top_professions
             },
-            'border_airline_matrix': border_airline_matrix,
             'longest_pending_cases': longest_pending_cases
         }
         _log_perf_if_slow('/api/stats', started_at, threshold_ms=350, extra=f"role={role} total={payload['kpi'].get('total', 0)}")
@@ -3271,31 +3228,12 @@ def api_dashboard_stats(user=None):
             'kpi': {'total': 0, 'total_all': 0, 'departed': 0, 'visa_obtained': 0, 'pending': 0,
                     'visa_approved': 0, 'iraq_entries': 0, 'duplicates': 0,
                     'departed_today': 0, 'entered_today': 0, 'returned': 0, 'returned_today': 0,
-                    'jazeera_departed': 120, 'mismatch_total': 0, 'mismatch_pending_review': 0, 'corrected_to_pk': 0,
-                    'fee_today_collected': 0.0, 'fee_today_waived': 0.0, 'fee_total_collected': 0.0, 'fee_total_waived': 0.0,
-                    'fee_people_served_today': 0, 'fee_released_today': 0, 'fee_released_total': 0,
-                    'fee_pending_count': 0, 'fee_paid_count': 0, 'fee_waived_count': 0},
-            'kpi_v2': {
-                'total_active_cases': 0,
-                'pending_cases': 0,
-                'visa_obtained_cases': 0,
-                'departed_cases': 0,
-                'returned_cases': 0,
-                'avg_processing_days': 0,
-                'median_processing_days': 0,
-                'profession_identified_count': 0,
-                'profession_identified_pct': 0,
-                'longest_pending_days': 0
-            },
-            'iraq_mission': {'total_batches': 0, 'pending': 0, 'sent': 0, 'processed': 0, 'total_applicants': 0,
-                             'batches_sent_mofa': 0, 'batches_processed': 0, 'visa_kw_approved': 0, 'visa_kw_pending': 0, 'visa_kw_rejected': 0},
-            'by_country': [], 'by_gender': [], 'by_date': [], 'by_visa': [], 'by_border': [],
-            'processing_funnel': [],
+                    'jazeera_departed': 120, 'mismatch_total': 0, 'mismatch_pending_review': 0, 'corrected_to_pk': 0},
+            'by_country': [],
+            'by_gender': [],
             'pending_age_buckets': [],
             'processing_trend': [],
-            'airline_stats': {'distribution': [], 'outcomes': [], 'processing_time': [], 'completed_departures': []},
-            'profession_stats': {'top_professions': [], 'outcomes': [], 'processing_time': [], 'summary_table': []},
-            'border_airline_matrix': [],
+            'profession_stats': {'top_professions': []},
             'longest_pending_cases': []
         }
     finally:
@@ -4840,12 +4778,41 @@ def _norm_name_compact(v):
     return re.sub(r'[^A-Z0-9]+', '', (v or '').upper())
 
 def _collect_nv_candidate_records(db):
+    """Collect candidate records for NV auto-link matching.
+
+    Safety: rows with empty name AND empty passport cannot match anything,
+    so we filter them out at the SQL level (filter first). A high per-table
+    LIMIT is then applied as a memory safety net (limit second). The cap
+    is intentionally generous and configurable via NV_CANDIDATE_LIMIT so
+    staff-side reliability is not degraded — exact staff search/lookup
+    paths use their own queries and are not affected by this function.
+    """
+    try:
+        per_table_limit = int(os.environ.get('NV_CANDIDATE_LIMIT', '50000'))
+    except Exception:
+        per_table_limit = 50000
+    if per_table_limit <= 0:
+        per_table_limit = 50000
     out = []
-    for r in db.execute("SELECT id, name AS full_name, passport AS passport_number FROM evacuees").fetchall():
+    # Order by id DESC so most-recent records (most likely to match a
+    # freshly uploaded NV) are always included even if the cap is hit.
+    for r in db.execute(
+        "SELECT id, name AS full_name, passport AS passport_number FROM evacuees "
+        "WHERE TRIM(COALESCE(passport,'')) <> '' OR TRIM(COALESCE(name,'')) <> '' "
+        "ORDER BY id DESC LIMIT ?", [per_table_limit]
+    ).fetchall():
         d = dict(r); d['source_table'] = 'evacuees'; out.append(d)
-    for r in db.execute("SELECT id, full_name, passport_number FROM iraq_applicants").fetchall():
+    for r in db.execute(
+        "SELECT id, full_name, passport_number FROM iraq_applicants "
+        "WHERE TRIM(COALESCE(passport_number,'')) <> '' OR TRIM(COALESCE(full_name,'')) <> '' "
+        "ORDER BY id DESC LIMIT ?", [per_table_limit]
+    ).fetchall():
         d = dict(r); d['source_table'] = 'iraq_applicants'; out.append(d)
-    for r in db.execute("SELECT id, full_name, passport_number FROM iraq_public_submissions").fetchall():
+    for r in db.execute(
+        "SELECT id, full_name, passport_number FROM iraq_public_submissions "
+        "WHERE TRIM(COALESCE(passport_number,'')) <> '' OR TRIM(COALESCE(full_name,'')) <> '' "
+        "ORDER BY id DESC LIMIT ?", [per_table_limit]
+    ).fetchall():
         d = dict(r); d['source_table'] = 'iraq_public_submissions'; out.append(d)
     return out
 
@@ -11902,6 +11869,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def read_body(self):
         length = int(self.headers.get('Content-Length', 0))
+        if length > MAX_REQUEST_BODY_BYTES:
+            raise ValueError(f'Request body too large. Maximum is {MAX_REQUEST_BODY_BYTES // (1024 * 1024)} MB.')
         return self.rfile.read(length) if length else b''
 
     def get_user(self):
@@ -12931,13 +12900,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cat = (params.get('category') or '').strip()
             if cat not in ('evacuees', 'returnees', 'iraq_requests'):
                 self.send_json({'error': 'Invalid category'}, 400); return
-            recs = collect_admin_advisory_recipients(cat)
-            self.send_json({'category': cat, 'count': len(recs)})
+            self.send_json({'category': cat, 'count': count_admin_advisory_recipients(cat)})
         elif path == '/logout':
             cookie_str = self.headers.get('Cookie', '')
             c = SimpleCookie(); c.load(cookie_str)
             token = c.get('session')
-            if token and token.value in SESSIONS: del SESSIONS[token.value]
+            if token:
+                with SESSIONS_LOCK:
+                    SESSIONS.pop(token.value, None)
             self.send_response(302)
             self.send_header('Set-Cookie', 'session=; Path=/; Max-Age=0')
             self.send_header('Location', '/login')
@@ -13753,7 +13723,11 @@ function printBoth(){{
 
     def do_POST(self):
         path = urlparse(self.path).path
-        body = self.read_body()
+        try:
+            body = self.read_body()
+        except ValueError as e:
+            self.send_json({'success': False, 'error': str(e)}, 413)
+            return
 
         if path == '/api/iraq-public-submit':
             try:
@@ -13765,6 +13739,13 @@ function printBoth(){{
             return
 
         if path == '/api/public-travel-details':
+            # Endpoint-specific tight body cap: this form only accepts small
+            # text fields (tracking number + a handful of travel detail fields).
+            # Reject anything larger to protect against accidental or abusive
+            # oversized submissions, regardless of the global body cap.
+            if body and len(body) > 32 * 1024:
+                self.send_json({'success': False, 'error': 'Request too large'}, 413)
+                return
             try:
                 data = json.loads(body)
             except json.JSONDecodeError:
@@ -14929,7 +14910,11 @@ function printBoth(){{
 
     def do_PUT(self):
         path = urlparse(self.path).path
-        body = self.read_body()
+        try:
+            body = self.read_body()
+        except ValueError as e:
+            self.send_json({'success': False, 'error': str(e)}, 413)
+            return
 
         if path == '/api/fee-settlement-update':
             user = self.require_auth()
@@ -18707,15 +18692,6 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <div class="dash-summary-section-head"><h3>Assisted Travellers (Kuwait &rarr; Pakistan)</h3><span>Main movement summary</span></div>
 <div id="kpiGrid"></div>
 </div>
-<div class="dash-summary-section">
-<div class="dash-summary-section-head"><h3>Iraq mission &mdash; requests from Iraq &amp; MOFA Kuwait</h3><span>Combined intake view</span></div>
-<p style="font-size:.82em;color:var(--tl);margin:-2px 0 12px;line-height:1.45">Summary below combines public intake and mission batches. Full detail (portal, NV, batches, KW transit, MOFA KSA, movement) is under <strong>Iraq Transit Visas</strong> and the Iraq public / embassy workflow.</p>
-<div id="dashIraqMissionKpi"></div>
-</div>
-<div class="dash-summary-section">
-<div class="dash-summary-section-head"><h3>Returnees (Pakistan &rarr; Kuwait)</h3><span>Charter-interest summary</span></div>
-<div id="dashRetKpi"></div>
-</div>
 </div>
 <div class="dash-top-main">
 <div class="dash-section featured">
@@ -18724,46 +18700,12 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <div class="dash-card processing-trend-card"><div class="dash-card-head"><h3>Processing Trend</h3><span>Daily requests and outcomes by request date</span></div><div class="chart-wrap processing-trend-chart" id="processingTrendChartWrap" data-canvas-id="processingTrendChart"><canvas id="processingTrendChart"></canvas></div><div class="embedded-actionable-cases"><div class="embedded-actionable-head"><div><h4>Actionable Cases</h4><p>Longest-pending evacuee records that may need escalation or direct follow-up.</p></div></div><div class="table-meta">Top 10 longest-pending clear records in the main KW&rarr;PK flow.</div><div class="scroll-t actionable-cases-scroll"><table class="actionable-cases-table" id="longestPendingTable"></table></div></div></div>
 <div class="dash-overview-side">
 <div class="dash-card"><div class="dash-card-head"><h3>Top Professions Helped</h3><span>Identified profession groups</span></div><div class="chart-wrap compact" id="topProfessionsChartWrap" data-canvas-id="topProfessionsChart"><canvas id="topProfessionsChart"></canvas></div></div>
-<div class="dash-card"><div class="dash-card-head"><h3>Processing Funnel</h3><span>Main flow progression</span></div><div class="chart-wrap compact" id="processingFunnelChartWrap" data-canvas-id="processingFunnelChart"><canvas id="processingFunnelChart"></canvas></div></div>
-</div>
-</div>
-<div class="dash-chart-grid tight">
 <div class="dash-card"><div class="dash-card-head"><h3>Pending Age Buckets</h3><span>Cases still awaiting movement</span></div><div class="chart-wrap compact" id="pendingAgeChartWrap" data-canvas-id="pendingAgeChart"><canvas id="pendingAgeChart"></canvas></div></div>
 </div>
 </div>
 </div>
 </div>
-<div class="dash-section">
-<div class="dash-section-head"><div><h3>Professions Helped</h3><p>Outcome mix and operational depth for identified profession groups in the main dashboard scope.</p></div></div>
-<div class="dash-chart-grid story">
-<div class="dash-card"><div class="dash-card-head"><h3>Profession vs Outcome</h3><span>Pending, visa obtained, departed, returned</span></div><div class="chart-wrap" id="professionOutcomeChartWrap" data-canvas-id="professionOutcomeChart"><canvas id="professionOutcomeChart"></canvas></div></div>
-<div class="dash-card table-card">
-<div class="dash-card-head" style="padding:18px 18px 0"><h3>Profession Summary</h3><span>Top classified groups with movement and processing age</span></div>
-<div class="data-mini-table-wrap"><table class="data-mini-table" id="professionSummaryTable"></table></div>
-</div>
-</div>
-</div>
-<div class="dash-section">
-<div class="dash-section-head"><div><h3>Airline Intelligence</h3><p>Airline usage, outcome mix, and processing-time patterns for completed movement tracking.</p></div></div>
-<div class="dash-chart-grid">
-<div class="dash-card"><div class="dash-card-head"><h3>Airline Distribution</h3><span>Normalized carrier usage</span></div><div class="chart-wrap" id="airlineDistributionChartWrap" data-canvas-id="airlineDistributionChart"><canvas id="airlineDistributionChart"></canvas></div></div>
-<div class="dash-card"><div class="dash-card-head"><h3>Airline vs Outcome</h3><span>Outcome mix by airline</span></div><div class="chart-wrap" id="airlineOutcomeChartWrap" data-canvas-id="airlineOutcomeChart"><canvas id="airlineOutcomeChart"></canvas></div></div>
-<div class="dash-card"><div class="dash-card-head"><h3>Average Processing Time by Airline</h3><span>Average days from request to movement/current date</span></div><div class="chart-wrap" id="airlineProcessingChartWrap" data-canvas-id="airlineProcessingChart"><canvas id="airlineProcessingChart"></canvas></div></div>
-<div class="dash-card"><div class="dash-card-head"><h3>Completed Departures by Airline</h3><span>Departed and returned movement counts</span></div><div class="chart-wrap" id="airlineCompletedChartWrap" data-canvas-id="airlineCompletedChart"><canvas id="airlineCompletedChart"></canvas></div></div>
-</div>
-</div>
-<div class="dash-section">
-<div class="dash-section-head"><div><h3>Returnees</h3><p>Pakistan&rarr;Kuwait returnee movement, verification funnel, and operational demand signals.</p></div></div>
-<div class="dash-chart-grid">
-<div class="dash-card wide"><div class="dash-card-head"><h3>Returnee Funnel</h3><span>Status progression for active charter-interest records</span></div><div class="chart-wrap" id="returneeFunnelChartWrap" data-canvas-id="returneeFunnelChart"><canvas id="returneeFunnelChart"></canvas></div></div>
-</div>
-<div class="dash-mini-grid">
-<div class="dash-card"><div class="dash-card-head"><h3>Visa Status</h3><span>Approved, pending, not applied</span></div><div class="chart-wrap mini" id="returneeVisaStatusChartWrap" data-canvas-id="returneeVisaStatusChart"><canvas id="returneeVisaStatusChart"></canvas></div></div>
-<div class="dash-card"><div class="dash-card-head"><h3>With Family vs Alone</h3><span>Household travel mix</span></div><div class="chart-wrap mini" id="returneeFamilyChartWrap" data-canvas-id="returneeFamilyChart"><canvas id="returneeFamilyChart"></canvas></div></div>
-<div class="dash-card"><div class="dash-card-head"><h3>MOH vs Non-MOH</h3><span>Employment profile</span></div><div class="chart-wrap mini" id="returneeMohChartWrap" data-canvas-id="returneeMohChart"><canvas id="returneeMohChart"></canvas></div></div>
-</div>
-</div>
-</div></div>
+</div></div></div>
 
 <!-- REGISTER -->
 <div id="tab-reg" class="tab"><div class="ctr">
@@ -19881,8 +19823,8 @@ h+='</tbody>';el.innerHTML=h;
 // DASHBOARD
 async function loadDash(){
 try{
-const [d,rd]=await Promise.all([api('/api/stats'),api('/api/returnees-stats')]);if(!d)return;
-const k=d.kpi||{},k2=d.kpi_v2||{},im=d.iraq_mission||{},rk=(rd&&rd.kpi)||{};
+const d=await api('/api/stats');if(!d)return;
+const k=d.kpi||{};
 const totalDeparted=safeValue(k.departed)+safeValue(k.jazeera_departed);
 const evacRows=[
 {label:'Total Registered',valueDisplay:safeValue(k.total),detail:'Clean records ('+safeValue(k.duplicates)+' duplicates excluded)',tone:'info'},
@@ -19896,98 +19838,24 @@ const evacRows=[
 if(safeValue(k.returned)>0)evacRows.splice(6,0,{label:'Returned',valueDisplay:safeValue(k.returned),detail:safeValue(k.returned_today)+' today',tone:'danger'});
 if(safeValue(k.mismatch_total)>0)evacRows.push({label:'Route Mismatches',valueDisplay:safeValue(k.mismatch_total),detail:safeValue(k.corrected_to_pk)+' corrected to PK→KW | '+safeValue(k.mismatch_pending_review)+' pending review',tone:'warn'});
 renderCompactSummary('kpiGrid',evacRows,'No summary available');
-if(im&&Object.keys(im).length){
-renderCompactSummary('dashIraqMissionKpi',[
-{label:'Iraq requests received',valueDisplay:safeValue(im.requests_received),detail:safeValue(im.public_total)+' public + '+safeValue(im.batch_applicants)+' mission applicants',tone:'info'},
-{label:'Approved by MOFA Kuwait',valueDisplay:safeValue(im.mofa_kw_approved_total),detail:safeValue(im.public_mofa_approved)+' public + '+safeValue(im.visa_kw_approved)+' KW transit (mission)',tone:'good'},
-{label:'Approved by MOFA KSA',valueDisplay:safeValue(im.mofa_ksa_approved),detail:'Set in Iraq Transit Visas',tone:'good'},
-{label:'Waiting travel from Iraq',valueDisplay:safeValue(im.waiting_travel_iraq),detail:'Movement flag (Iraq Transit Visas)',tone:'warn'}
-],'No summary available');
-}else renderCompactSummary('dashIraqMissionKpi',[],'No summary available');
-const alertBar=document.getElementById('alertBar'),alertText=document.getElementById('alertText');
-if(alertBar&&alertText){
-if(k.pending>k.visa_approved){alertBar.style.display='flex';alertText.textContent=`ALERT: Pending (${k.pending}) outpacing resolved (${k.visa_approved}) — urgent KSA action needed`}
-else alertBar.style.display='none';
-}
 
-const funnel=asArray(d.processing_funnel),trend=asArray(d.processing_trend),pendingAges=asArray(d.pending_age_buckets);
-const professionStats=d.profession_stats||{},airlineStats=d.airline_stats||{};
+const trend=asArray(d.processing_trend),pendingAges=asArray(d.pending_age_buckets);
+const professionStats=d.profession_stats||{};
 const topProfessions=asArray(professionStats.top_professions);
-const professionOutcomes=asArray(professionStats.outcomes).filter(x=>safeLabel(x.profession)!=='Unknown').slice(0,8);
-let professionSummary=asArray(professionStats.summary_table).filter(x=>safeLabel(x.profession)!=='Unknown').slice(0,8);
-if(!professionSummary.length)professionSummary=asArray(professionStats.summary_table).slice(0,8);
-const airlineDistribution=asArray(airlineStats.distribution).slice(0,8);
-const airlineOutcomes=asArray(airlineStats.outcomes).slice(0,8);
-const airlineProcessing=asArray(airlineStats.processing_time).slice(0,8);
-const airlineCompleted=asArray(airlineStats.completed_departures).filter(x=>safeValue(x.completed_total)>0).slice(0,8);
-
-renderProfessionSummaryTable(professionSummary);
-
-mkChart('processingFunnelChart','bar',{labels:funnel.map(x=>safeLabel(x.stage,'')),datasets:[{label:'Cases',data:funnel.map(x=>safeValue(x.count)),backgroundColor:['#90a4ae','#e65100','#1565c0','#2e7d32','#8d6e63'],borderRadius:6,maxBarThickness:42}]},{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
 mkChart('pendingAgeChart','bar',{labels:pendingAges.map(x=>safeLabel(x.label,'')),datasets:[{label:'Pending cases',data:pendingAges.map(x=>safeValue(x.count)),backgroundColor:'#607d8b',borderRadius:6,maxBarThickness:48}]},{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
 mkChart('processingTrendChart','line',{labels:trend.map(x=>formatShortDate(x.date)),datasets:[
 {label:'New Requests',data:trend.map(x=>safeValue(x.new_requests)),borderColor:'#1565c0',backgroundColor:'rgba(21,101,192,.12)',tension:.25,fill:false,borderWidth:2},
-{label:'Visa Obtained',data:trend.map(x=>safeValue(x.visa_obtained)),borderColor:'#0f766e',backgroundColor:'rgba(15,118,110,.12)',tension:.25,fill:false,borderWidth:2},
-{label:'Departed',data:trend.map(x=>safeValue(x.departed)),borderColor:'#2e7d32',backgroundColor:'rgba(46,125,50,.12)',tension:.25,fill:false,borderWidth:2},
-{label:'Returned',data:trend.map(x=>safeValue(x.returned)),borderColor:'#8d6e63',backgroundColor:'rgba(141,110,99,.12)',tension:.25,fill:false,borderWidth:2}
+{label:'Visa Obtained',data:trend.map(x=>safeValue(x.visa_obtained)),borderColor:'#0f766e',backgroundColor:'rgba(15,118,110,.12)',tension:.25,fill:false,borderWidth:2}
 ]},{scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
 
 mkChart('topProfessionsChart','bar',{labels:topProfessions.map(x=>safeLabel(x.profession,'')),datasets:[{label:'Cases',data:topProfessions.map(x=>safeValue(x.count||x.total)),backgroundColor:'#546e7a',borderRadius:6}]},{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,ticks:{precision:0}},y:{grid:{display:false}}}});
-mkChart('professionOutcomeChart','bar',{labels:professionOutcomes.map(x=>safeLabel(x.profession,'')),datasets:[
-{label:'Pending',data:professionOutcomes.map(x=>safeValue(x.pending)),backgroundColor:'#e65100'},
-{label:'Visa Obtained',data:professionOutcomes.map(x=>safeValue(x.visa_obtained)),backgroundColor:'#1565c0'},
-{label:'Departed',data:professionOutcomes.map(x=>safeValue(x.departed)),backgroundColor:'#2e7d32'},
-{label:'Returned',data:professionOutcomes.map(x=>safeValue(x.returned)),backgroundColor:'#8d6e63'}
-]},{scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true,ticks:{precision:0}}}});
-
-mkChart('airlineDistributionChart','bar',{labels:airlineDistribution.map(x=>safeLabel(x.airline,'')),datasets:[{label:'Cases',data:airlineDistribution.map(x=>safeValue(x.count)),backgroundColor:'#455a64',borderRadius:6}]},{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,ticks:{precision:0}},y:{grid:{display:false}}}});
-mkChart('airlineOutcomeChart','bar',{labels:airlineOutcomes.map(x=>safeLabel(x.airline,'')),datasets:[
-{label:'Pending',data:airlineOutcomes.map(x=>safeValue(x.pending)),backgroundColor:'#e65100'},
-{label:'Visa Obtained',data:airlineOutcomes.map(x=>safeValue(x.visa_obtained)),backgroundColor:'#1565c0'},
-{label:'Departed',data:airlineOutcomes.map(x=>safeValue(x.departed)),backgroundColor:'#2e7d32'},
-{label:'Returned',data:airlineOutcomes.map(x=>safeValue(x.returned)),backgroundColor:'#8d6e63'}
-]},{scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true,ticks:{precision:0}}}});
-mkChart('airlineProcessingChart','bar',{labels:airlineProcessing.map(x=>safeLabel(x.airline,'')),datasets:[{label:'Avg Days',data:airlineProcessing.map(x=>safeValue(x.avg_days)),backgroundColor:'#607d8b',borderRadius:6,maxBarThickness:44}]},{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true}}});
-mkChart('airlineCompletedChart','bar',{labels:airlineCompleted.map(x=>safeLabel(x.airline,'')),datasets:[
-{label:'Departed',data:airlineCompleted.map(x=>safeValue(x.departed)),backgroundColor:'#2e7d32',borderRadius:6},
-{label:'Returned',data:airlineCompleted.map(x=>safeValue(x.returned)),backgroundColor:'#8d6e63',borderRadius:6}
-]},{scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
-
-if(rd&&rd.kpi){
-const retRows=[
-{label:'TOTAL REGISTERED',valueDisplay:safeValue(rk.total),tone:'info'},
-{label:'SUBMITTED',valueDisplay:safeValue(rk.submitted),tone:'info'},
-{label:'VERIFIED',valueDisplay:safeValue(rk.verified),tone:'good'},
-{label:'CONTACTED',valueDisplay:safeValue(rk.contacted),tone:'warn'},
-{label:'VISA APPROVED',valueDisplay:safeValue(rk.approved_visa),tone:'good'},
-{label:'PENDING VISA',valueDisplay:safeValue(rk.pending_visa),tone:'danger'},
-{label:'WITH FAMILY',valueDisplay:safeValue(rk.with_family),tone:'info'},
-{label:'READY TO TRAVEL',valueDisplay:safeValue(rk.ready_to_travel),tone:'good'}
-];
-if(safeValue(rk.corrected_from_evacuees)>0)retRows.push({label:'CORRECTED FROM KW→PK',valueDisplay:safeValue(rk.corrected_from_evacuees),detail:'Route-corrected evacuees',tone:'warn'});
-renderCompactSummary('dashRetKpi',retRows,'No summary available');
-}else renderCompactSummary('dashRetKpi',[],'No summary available');
-
-
-const retFunnel=asArray(rd&&rd.processing_funnel);
-const retVisa=asArray(rd&&rd.by_visa_status);
-const retFamily=asArray(rd&&rd.with_family_vs_alone);
-const retMoh=asArray(rd&&rd.moh_vs_non_moh);
-
-mkChart('returneeFunnelChart','bar',{labels:retFunnel.map(x=>safeLabel(x.stage,'')),datasets:[{label:'Cases',data:retFunnel.map(x=>safeValue(x.count)),backgroundColor:'#1565c0',borderRadius:6,maxBarThickness:42}]},{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
-mkChart('returneeVisaStatusChart','doughnut',{labels:retVisa.map(x=>safeLabel(x.status,'')),datasets:[{data:retVisa.map(x=>safeValue(x.count)),backgroundColor:['#2e7d32','#e65100','#90a4ae'],borderWidth:1}]},{});
-mkChart('returneeFamilyChart','doughnut',{labels:retFamily.map(x=>safeLabel(x.label,'')),datasets:[{data:retFamily.map(x=>safeValue(x.count)),backgroundColor:['#1565c0','#2e7d32'],borderWidth:1}]},{});
-mkChart('returneeMohChart','doughnut',{labels:retMoh.map(x=>safeLabel(x.label,'')),datasets:[{data:retMoh.map(x=>safeValue(x.count)),backgroundColor:['#2e7d32','#90a4ae'],borderWidth:1}]},{});
 
 renderLongestPendingTable(asArray(d.longest_pending_cases));
 }catch(err){
 console.error(err);
 toast('Dashboard refresh failed');
 renderCompactSummary('kpiGrid',[],'Dashboard data unavailable');
-renderCompactSummary('dashIraqMissionKpi',[],'Dashboard data unavailable');
-renderCompactSummary('dashRetKpi',[],'Dashboard data unavailable');
-['processingFunnelChart','pendingAgeChart','processingTrendChart','topProfessionsChart','professionOutcomeChart','airlineDistributionChart','airlineOutcomeChart','airlineProcessingChart','airlineCompletedChart','returneeFunnelChart','returneeVisaStatusChart','returneeFamilyChart','returneeMohChart'].forEach(id=>renderNoData(id,'Dashboard data unavailable'));
-renderProfessionSummaryTable([]);
+['pendingAgeChart','processingTrendChart','topProfessionsChart'].forEach(id=>renderNoData(id,'Dashboard data unavailable'));
 renderLongestPendingTable([]);
 }
 }
@@ -22299,8 +22167,9 @@ applyRoleRestrictions();
 loadDash();
 setTimeout(loadSitrepData,1000);
 
-// Auto-refresh dashboard every 30s
-setInterval(()=>{if(document.getElementById('tab-dash').classList.contains('active'))loadDash()},30000);
+// Auto-refresh dashboard every 5 minutes to avoid repeated chart recomputation.
+const DASH_AUTO_REFRESH_MS=300000;
+setInterval(()=>{if(document.getElementById('tab-dash').classList.contains('active'))loadDash()},DASH_AUTO_REFRESH_MS);
 
 // ═══════════════════════════════════════════════════════════════
 // ROUTE REVIEW QUEUE
@@ -22547,7 +22416,8 @@ if __name__ == '__main__':
     for i in range(max_tries):
         try:
             candidate = PORT + i
-            server = http.server.HTTPServer(('0.0.0.0', candidate), Handler)
+            server = http.server.ThreadingHTTPServer(('0.0.0.0', candidate), Handler)
+            server.daemon_threads = True
             bind_port = candidate
             break
         except OSError as e:
