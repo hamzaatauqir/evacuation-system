@@ -146,7 +146,34 @@ def get_db():
 # ONLY the heavy rasterization/OCR/NV render paths — lightweight routes
 # remain fully concurrent.
 _HEAVY_JOB_MAX = int(os.environ.get('HEAVY_JOB_CONCURRENCY', '1'))
+_HEAVY_JOB_WAIT_SECONDS = float(os.environ.get('HEAVY_JOB_WAIT_SECONDS', '10'))
 _HEAVY_JOB_SEM = threading.BoundedSemaphore(max(1, _HEAVY_JOB_MAX))
+_MALLOC_TRIM_FN = None
+_MALLOC_TRIM_CHECKED = False
+
+
+class HeavyJobBusy(RuntimeError):
+    """Raised when the process is already running the allowed heavy job load."""
+
+
+def _malloc_trim_safe():
+    """Best-effort glibc arena trim after large PDF/OCR jobs."""
+    global _MALLOC_TRIM_FN, _MALLOC_TRIM_CHECKED
+    try:
+        if not _MALLOC_TRIM_CHECKED:
+            _MALLOC_TRIM_CHECKED = True
+            if os.path.exists('/proc/self/status'):
+                import ctypes
+                libc = ctypes.CDLL("libc.so.6")
+                trim = getattr(libc, 'malloc_trim', None)
+                if trim:
+                    trim.argtypes = [ctypes.c_size_t]
+                    trim.restype = ctypes.c_int
+                    _MALLOC_TRIM_FN = trim
+        if _MALLOC_TRIM_FN:
+            _MALLOC_TRIM_FN(0)
+    except Exception:
+        pass
 
 
 class _HeavyJobGuard:
@@ -156,15 +183,21 @@ class _HeavyJobGuard:
         self.tag = tag
         self._acquired = False
     def __enter__(self):
-        self._acquired = _HEAVY_JOB_SEM.acquire(timeout=120)
+        self._acquired = _HEAVY_JOB_SEM.acquire(timeout=max(0.1, _HEAVY_JOB_WAIT_SECONDS))
         if not self._acquired:
-            # Degrade gracefully: proceed without the bound rather than failing.
-            print(f"[HeavyJob] {self.tag}: sem timeout, proceeding unguarded", flush=True)
+            print(f"[HeavyJob] {self.tag}: busy, rejecting with temporary 503", flush=True)
+            raise HeavyJobBusy('Heavy processing is busy. Please retry shortly.')
         return self
     def __exit__(self, exc_type, exc, tb):
         if self._acquired:
             try:
                 _HEAVY_JOB_SEM.release()
+            except Exception:
+                pass
+            try:
+                gc.collect()
+                _malloc_trim_safe()
+                _log_rss(f"{self.tag} guard exit")
             except Exception:
                 pass
         return False
@@ -10067,7 +10100,7 @@ def _extract_pdf_text_per_page(pdf_path):
 
 def _extract_pdf_text_via_pdftotext(pdf_path):
     """
-    Poppler's pdftotext to stdout — works when Poppler is installed but pypdf is not.
+    Poppler's pdftotext to stdout, extracted in bounded page ranges only.
     No extra pip packages beyond the OS tool (e.g. brew install poppler / apt install poppler-utils).
     """
     exe = shutil.which('pdftotext')
@@ -10087,47 +10120,53 @@ def _extract_pdf_text_via_pdftotext(pdf_path):
             return out
         return [(1, txt)]
 
-    # Fast path: whole-file extraction (works for many PDFs)
-    try:
-        r = subprocess.run(
-            [exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
-            capture_output=True,
-            text=True,
-            timeout=420,
-            check=False,
-        )
-        if r.returncode == 0:
-            pages = _parse_stdout_to_pages(r.stdout or '')
-            if pages:
-                return pages
-    except Exception as e:
-        print(f'[ApprovalPDF] pdftotext full-file path error: {e}', flush=True)
-
-    # Render-safe fallback: chunk page ranges so large PDFs do not fail as one giant call
+    # Render-safe only: never extract a whole PDF in one pdftotext process.
+    # Large approval/NV PDFs can briefly exceed Render's RAM if stdout is
+    # materialized for the whole file. Keep each subprocess bounded by page range.
     page_count = _pdf_page_count(pdf_path)
     if page_count <= 0:
         return []
     out_pages = []
-    chunk = 40
+    try:
+        chunk = int(os.environ.get('PDFTOTEXT_CHUNK_PAGES', '20'))
+    except Exception:
+        chunk = 20
+    chunk = max(1, min(chunk, 25))
     for start in range(1, page_count + 1, chunk):
         end = min(start + chunk - 1, page_count)
+        rr = None
+        raw_stdout = b''
+        decoded = ''
+        chunk_pages = []
         try:
             rr = subprocess.run(
                 [exe, '-layout', '-enc', 'UTF-8', '-f', str(start), '-l', str(end), str(pdf_path), '-'],
-                capture_output=True,
-                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=False,
                 timeout=180,
                 check=False,
             )
             if rr.returncode != 0:
                 continue
-            chunk_pages = _parse_stdout_to_pages(rr.stdout or '')
+            raw_stdout = rr.stdout or b''
+            if not raw_stdout:
+                continue
+            decoded = raw_stdout.decode('utf-8', errors='replace')
+            chunk_pages = _parse_stdout_to_pages(decoded)
             for local_idx, ptxt in chunk_pages:
                 if ptxt:
                     out_pages.append((start + local_idx - 1, ptxt))
         except Exception as ee:
             print(f'[ApprovalPDF] pdftotext chunk {start}-{end} error: {ee}', flush=True)
             continue
+        finally:
+            raw_stdout = b''
+            decoded = ''
+            chunk_pages = []
+            rr = None
+            if start % (chunk * 5) == 1:
+                gc.collect()
     out_pages.sort(key=lambda x: x[0])
     return out_pages
 
@@ -10311,13 +10350,23 @@ except Exception:
     _PSUTIL_AVAILABLE = False
 
 def _mem_log(tag):
-    """Lightweight memory diagnostic. No-op safe if psutil missing."""
+    """Lightweight memory diagnostic with a Linux /proc fallback."""
     try:
+        rss = None
         if _PSUTIL_AVAILABLE:
             rss = _psutil.Process().memory_info().rss / (1024 * 1024)
+        elif os.path.exists('/proc/self/status'):
+            with open('/proc/self/status', 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if line.startswith('VmRSS:'):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            rss = int(parts[1]) / 1024.0
+                        break
+        if rss is not None:
             print(f"[Mem] {tag} rss={rss:.1f}MB", flush=True)
         else:
-            print(f"[Mem] {tag}", flush=True)
+            print(f"[Mem] {tag} rss=unknown", flush=True)
     except Exception:
         pass
 
@@ -10409,19 +10458,19 @@ def _pdf_page_count(pdf_path):
                             return n
     except Exception as e:
         print(f'[NV Extract] pdfinfo page-count error: {e}', flush=True)
-    # Method 2: pdftotext page-form-feed count (parses PDF natively, low memory)
+    # Method 2: PyMuPDF metadata page count. Do not extract document text just to count pages.
     try:
-        pdftotext_exe = shutil.which('pdftotext')
-        if pdftotext_exe:
-            r = subprocess.run([pdftotext_exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
-                               capture_output=True, text=True, timeout=180, check=False)
-            if r.returncode == 0 and r.stdout:
-                n = r.stdout.count('\f') + 1
+        if HAVE_PYMUPDF and fitz:
+            doc = fitz.open(str(pdf_path))
+            try:
+                n = int(getattr(doc, 'page_count', 0) or len(doc) or 0)
                 if n > 0:
-                    print(f"[NV Extract] page-count via pdftotext: {n}", flush=True)
+                    print(f"[NV Extract] page-count via pymupdf: {n}", flush=True)
                     return n
+            finally:
+                doc.close()
     except Exception as e:
-        print(f'[NV Extract] pdftotext page-count error: {e}', flush=True)
+        print(f'[NV Extract] pymupdf page-count error: {e}', flush=True)
     # Method 3: pypdf (loads whole file into Python — may OOM on large PDFs on Render)
     try:
         if _PYPDF_AVAILABLE and PdfReader:
@@ -12384,6 +12433,22 @@ loadBatch();
 # HTTP SERVER
 # ═══════════════════════════════════════════════════════════════
 class Handler(http.server.BaseHTTPRequestHandler):
+    def handle_one_request(self):
+        try:
+            return super().handle_one_request()
+        except HeavyJobBusy:
+            try:
+                body = b'Heavy processing is busy. Please retry shortly.'
+                self.send_response(503)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Retry-After', '10')
+                self.send_header('Content-Length', len(body))
+                self._security_headers()
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+
     def log_message(self, format, *args):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {args[0]}")
 
@@ -13241,6 +13306,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._security_headers()
                 self.end_headers()
                 self.wfile.write(pdf_body)
+            except HeavyJobBusy:
+                raise
             except Exception as e:
                 tb = traceback.format_exc()
                 rel_dict = rel if isinstance(rel, dict) else (dict(rel) if rel else {})
