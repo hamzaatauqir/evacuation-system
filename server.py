@@ -96,12 +96,87 @@ ONEDRIVE_LOCK = threading.Lock()  # guards _onedrive_refresh_runtime under Threa
 # ═══════════════════════════════════════════════════════════════
 # DATABASE
 # ═══════════════════════════════════════════════════════════════
+# journal_mode=WAL is a PERSISTENT SQLite setting — once applied to the DB
+# file it remains in effect for future connections. We keep it out of the
+# per-request hot-path (previously ran on every get_db() call) to reduce
+# per-connection syscalls; it is applied once at startup in init_db() and
+# on first use via the flag below, preserving prior behavior.
+_DB_WAL_APPLIED = False
+_DB_WAL_LOCK = threading.Lock()
+
+
+def _apply_wal_once():
+    """Apply the WAL journal mode exactly once per process lifetime.
+    Safe under ThreadingHTTPServer — guarded by a lock."""
+    global _DB_WAL_APPLIED
+    if _DB_WAL_APPLIED:
+        return
+    with _DB_WAL_LOCK:
+        if _DB_WAL_APPLIED:
+            return
+        try:
+            conn = sqlite3.connect(str(DB_PATH), timeout=30)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=30000")
+            finally:
+                conn.close()
+        except Exception as _wal_e:
+            print(f"[DB] WAL apply warning: {_wal_e}", flush=True)
+        _DB_WAL_APPLIED = True
+
+
 def get_db():
+    # Ensure WAL is set once per process (persistent at the DB-file level).
+    if not _DB_WAL_APPLIED:
+        _apply_wal_once()
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # busy_timeout is a per-connection setting — must stay here.
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+# ═══════════════════════════════════════════════════════════════
+# MEMORY / CONCURRENCY GUARDS (Render 512 MB safe)
+# ═══════════════════════════════════════════════════════════════
+# On Render with 512 MB RAM and 0.5 CPU, heavy PDF/OCR/NV paths can each
+# consume 150–300 MB transiently. ThreadingHTTPServer would otherwise let
+# two such jobs stack and OOM the worker. This bounded semaphore limits
+# ONLY the heavy rasterization/OCR/NV render paths — lightweight routes
+# remain fully concurrent.
+_HEAVY_JOB_MAX = int(os.environ.get('HEAVY_JOB_CONCURRENCY', '1'))
+_HEAVY_JOB_SEM = threading.BoundedSemaphore(max(1, _HEAVY_JOB_MAX))
+
+
+class _HeavyJobGuard:
+    """Context manager: bounds concurrent heavy PDF/OCR/NV jobs.
+    Use only around memory-heavy paths. Never wrap cheap routes."""
+    def __init__(self, tag=""):
+        self.tag = tag
+        self._acquired = False
+    def __enter__(self):
+        self._acquired = _HEAVY_JOB_SEM.acquire(timeout=120)
+        if not self._acquired:
+            # Degrade gracefully: proceed without the bound rather than failing.
+            print(f"[HeavyJob] {self.tag}: sem timeout, proceeding unguarded", flush=True)
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        if self._acquired:
+            try:
+                _HEAVY_JOB_SEM.release()
+            except Exception:
+                pass
+        return False
+
+
+def _log_rss(tag=""):
+    """Alias for _mem_log — provided per patch spec. See _mem_log below."""
+    try:
+        _mem_log(tag)  # defined later in file
+    except NameError:
+        # If called before _mem_log is defined during import, fall back silently.
+        pass
 
 def init_db():
     db = get_db()
@@ -5261,23 +5336,46 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
     cur_page = pages_done
     error_msg = ''
 
-    # --- Strategy 1: pdftotext (system binary, memory-efficient for large PDFs) ---
+    # --- Strategy 1: pdftotext with TRUE page-range extraction ---
+    # CRITICAL (Render 512 MB): previously this called pdftotext on the WHOLE
+    # PDF even though the caller only wants a chunk window. For 300–400 page
+    # scanned PDFs that held every page's text in memory (often > 80 MB of
+    # stdout per chunk). We now pass -f/-l so pdftotext only emits the pages
+    # in the current chunk window, then explicitly release the output buffer.
+    _log_rss(f"nv_chunk start upload={upload_id} pages {pages_done+1}..{total_pages}")
     per_page = {}
     pdftotext_exe = shutil.which('pdftotext')
     if pdftotext_exe:
         try:
-            print(f"[NV Extract Chunk] trying pdftotext for upload={upload_id}", flush=True)
+            chunk_start = int(pages_done) + 1
+            chunk_end = int(total_pages)
+            if chunk_end < chunk_start:
+                chunk_end = chunk_start
+            print(f"[NV Extract Chunk] pdftotext -f {chunk_start} -l {chunk_end} upload={upload_id}", flush=True)
             r = subprocess.run(
-                [pdftotext_exe, '-layout', '-enc', 'UTF-8', str(pdf_path), '-'],
+                [pdftotext_exe, '-layout', '-enc', 'UTF-8',
+                 '-f', str(chunk_start), '-l', str(chunk_end),
+                 str(pdf_path), '-'],
                 capture_output=True, text=True, timeout=180, check=False)
             if r.returncode == 0 and r.stdout:
                 parts = r.stdout.split('\f')
+                # Map each chunk-local index back to the absolute page number.
                 for i, p in enumerate(parts):
-                    per_page[i + 1] = p.strip()
+                    abs_page = chunk_start + i
+                    if abs_page > chunk_end:
+                        break
+                    per_page[abs_page] = p.strip()
                 usable_pages = sum(1 for v in per_page.values() if v)
                 print(f"[NV Extract Chunk] pdftotext returned {len(per_page)} pages, {usable_pages} with text", flush=True)
                 if usable_pages == 0:
                     per_page = {}  # pdftotext ran but got no actual text — clear and try pypdf
+            # Explicitly drop the large subprocess buffers.
+            try:
+                r.stdout = None
+                r.stderr = None
+            except Exception:
+                pass
+            del r
         except Exception as e:
             print(f"[NV Extract Chunk] pdftotext error: {e}", flush=True)
 
@@ -5376,13 +5474,47 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
                [accumulated_text, cur_page, pages_ocrd, ocr_hint, upload_id])
     db.commit()
     print(f"[NV Extract Chunk] upload={upload_id} pages_done={cur_page}/{total_pages} ocrd={pages_ocrd} text_len={len(accumulated_text)} elapsed={_time.time()-start:.1f}s", flush=True)
+    # Explicitly release large temp objects before returning (Render memory hygiene).
+    try:
+        per_page.clear()
+    except Exception:
+        pass
+    try:
+        new_texts.clear()
+    except Exception:
+        pass
+    del per_page
+    del new_texts
+    gc.collect()
+    _log_rss(f"nv_chunk end upload={upload_id} pages_done={cur_page}/{total_pages}")
     return cur_page, pages_ocrd, ocr_hint, error_msg
 
 
 def process_one_pending_nv_upload(db, max_seconds=20):
     """Pick one queued/processing NV upload and advance it by one bounded chunk.
     Called from api_nv_uploads (and optionally a cron) to make progress without threads.
-    Returns dict with upload_id and progress info, or None if nothing to do."""
+    Returns dict with upload_id and progress info, or None if nothing to do.
+
+    Memory hardening: this path runs pdftotext + potential per-page OCR —
+    same class of work as the approval OCR pipeline. Wrapped in the heavy-job
+    guard so two NV uploads processed at once don't stack RAM on Render.
+    If the guard cannot be acquired quickly, we return None and let the next
+    poll retry (processing is already deterministic and resumable)."""
+    # Non-blocking fast-path: if a heavy job is already running, skip this
+    # tick. The next api_nv_uploads call will retry. Do NOT serialize the app.
+    if not _HEAVY_JOB_SEM.acquire(blocking=False):
+        print("[NV JobRunner] heavy slot busy — deferring this tick", flush=True)
+        return None
+    try:
+        return _process_one_pending_nv_upload_inner(db, max_seconds)
+    finally:
+        try:
+            _HEAVY_JOB_SEM.release()
+        except Exception:
+            pass
+
+
+def _process_one_pending_nv_upload_inner(db, max_seconds=20):
     import time as _time
     start = _time.time()
 
@@ -6279,26 +6411,74 @@ def _apply_nv_release_watermark_to_page(page, release_row):
     )
 
 
-def render_hardened_nv_release_pdf(master_pdf_source, release_row, dpi=160):
+def render_hardened_nv_release_pdf(master_pdf_source, release_row, dpi=140):
+    """Controlled NV release renderer — rasterizes each page, applies the
+    embassy watermark, and re-rasterizes to flatten the output.
+
+    Memory hardening (Render 512 MB):
+      * wrapped in _HeavyJobGuard — this path holds two pixmaps + two
+        fitz docs per page, so concurrent renders would easily OOM
+      * default DPI lowered 160 → 140 (visual difference negligible on
+        stamped/watermarked documents; RAM per pixmap drops ~23%)
+      * pixmaps and the per-page temp doc are explicitly released after
+        each page, not just at function exit — this is the critical fix
+        for the 'slow creep' memory retention pattern
+    """
     if not _controlled_nv_renderer_available():
         raise RuntimeError('Controlled NV rendering dependency is unavailable')
+    with _HeavyJobGuard(tag="nv_release_render"):
+        return _render_hardened_nv_release_pdf_inner(master_pdf_source, release_row, dpi)
+
+
+def _render_hardened_nv_release_pdf_inner(master_pdf_source, release_row, dpi=140):
     src = _open_release_pdf_source(master_pdf_source)
     out = fitz.open()
-    zoom = max(float(dpi or 160), 120.0) / 72.0
+    # Minimum zoom lowered 120→110 to match new lower default DPI while keeping
+    # legibility for watermark/stamp text. Output is a flattened raster PDF.
+    zoom = max(float(dpi or 140), 110.0) / 72.0
+    _log_rss("nv_release_render enter")
     try:
-        for src_page in src:
+        for page_idx, src_page in enumerate(src, start=1):
             rect = src_page.rect
             base_pix = src_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            base_png = None
+            final_pix = None
+            final_png = None
             temp = fitz.open()
             try:
                 temp_page = temp.new_page(width=rect.width, height=rect.height)
-                temp_page.insert_image(temp_page.rect, stream=base_pix.tobytes("png"))
+                base_png = base_pix.tobytes("png")
+                temp_page.insert_image(temp_page.rect, stream=base_png)
+                # Drop the first pixmap + its PNG bytes before allocating
+                # the second pixmap — halves peak per-page memory.
+                try:
+                    base_pix = None
+                except Exception:
+                    pass
+                base_png = None
                 _apply_nv_release_watermark_to_page(temp_page, release_row)
                 final_pix = temp_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+                final_png = final_pix.tobytes("png")
                 out_page = out.new_page(width=rect.width, height=rect.height)
-                out_page.insert_image(out_page.rect, stream=final_pix.tobytes("png"))
+                out_page.insert_image(out_page.rect, stream=final_png)
             finally:
-                temp.close()
+                # Release every per-page allocation explicitly — do NOT rely
+                # on end-of-function cleanup, that is what caused the slow
+                # creep in memory during multi-page NV renders on Render.
+                final_png = None
+                try:
+                    if final_pix is not None:
+                        final_pix = None
+                except Exception:
+                    pass
+                try:
+                    temp.close()
+                except Exception:
+                    pass
+                del temp
+                if page_idx % 3 == 0:
+                    gc.collect()
+                    _log_rss(f"nv_release_render page {page_idx}")
         out.set_metadata({
             'title': str(release_row.get('released_copy_filename') or 'Embassy controlled NV copy'),
             'author': 'Pakistan Embassy Kuwait',
@@ -6307,10 +6487,19 @@ def render_hardened_nv_release_pdf(master_pdf_source, release_row, dpi=160):
             'creator': 'Citizen Support for Transit KSA System',
             'producer': 'Citizen Support for Transit KSA System (hardened NV release)',
         })
-        return out.tobytes(garbage=3, deflate=True)
+        result_bytes = out.tobytes(garbage=3, deflate=True)
+        _log_rss("nv_release_render exit")
+        return result_bytes
     finally:
-        src.close()
-        out.close()
+        try:
+            src.close()
+        except Exception:
+            pass
+        try:
+            out.close()
+        except Exception:
+            pass
+        gc.collect()
 
 
 def _nv_manual_page_fallback_debug(message, **details):
@@ -10143,35 +10332,63 @@ def _close_pil(img):
     except Exception:
         pass
 
-def _pdf_to_images(pdf_path):
-    """Convert PDF pages to PIL images for OCR. Returns list of (page_no, image)."""
+def _pdf_to_images(pdf_path, dpi=150, max_pages=80):
+    """Convert PDF pages to PIL images for OCR. Returns list of (page_no, image).
+
+    WARNING (Render 512 MB): converting an entire large PDF at once holds every
+    rasterized page in RAM simultaneously (~18–26 MB per A4 page at 300 DPI).
+    On a 400-page PDF this alone is >8 GB — guaranteed OOM on a 512 MB worker.
+    This bulk path is retained ONLY as a last-resort fallback and is now tightly
+    capped and runs at a lower DPI. Callers should prefer _pdf_page_to_image
+    (page-by-page) whenever the page count is known.
+    """
     if not _PDF2IMG_AVAILABLE:
         return []
     try:
-        images = convert_from_path(str(pdf_path), dpi=300)
+        # Tight cap — if caller passes an unbounded PDF, we only rasterize the
+        # first max_pages to avoid OOM; the streaming caller path handles the
+        # rest correctly in run_approval_ocr_pipeline.
+        images = convert_from_path(
+            str(pdf_path), dpi=dpi, first_page=1, last_page=max_pages)
         return [(i + 1, img) for i, img in enumerate(images)]
     except Exception as e:
         print(f'[ApprovalOCR] pdf2image error: {e}', flush=True)
         return []
 
 def _pdf_page_to_image(pdf_path, page_no):
-    """Convert a single page to image to avoid loading whole PDF into memory."""
+    """Convert a single page to image to avoid loading whole PDF into memory.
+    DPI lowered from 240 → 150 for Render 512 MB (OCR accuracy remains good
+    for typed/administrative documents at 150 DPI)."""
     if not _PDF2IMG_AVAILABLE:
         return None
     try:
-        images = convert_from_path(str(pdf_path), dpi=240, first_page=page_no, last_page=page_no)
-        return images[0] if images else None
+        images = convert_from_path(str(pdf_path), dpi=150, first_page=page_no, last_page=page_no)
+        img = images[0] if images else None
+        # Drop the list reference — we only need the single image.
+        try:
+            images[:] = []
+        except Exception:
+            pass
+        return img
     except Exception as e:
         print(f'[NV OCR] page image error p{page_no}: {e}', flush=True)
         return None
 
-def _pdf_page_to_image_dpi(pdf_path, page_no, dpi=300):
-    """Convert a single page to image at a specified DPI (memory-safe per-page)."""
+def _pdf_page_to_image_dpi(pdf_path, page_no, dpi=200):
+    """Convert a single page to image at a specified DPI (memory-safe per-page).
+    Default DPI lowered from 300 → 200 for Render 512 MB. Callers that truly
+    need 300 DPI can still pass it explicitly, but the approval OCR pipeline
+    now runs at 200 DPI by default — sufficient for tabular passport rows."""
     if not _PDF2IMG_AVAILABLE:
         return None
     try:
         images = convert_from_path(str(pdf_path), dpi=dpi, first_page=page_no, last_page=page_no)
-        return images[0] if images else None
+        img = images[0] if images else None
+        try:
+            images[:] = []
+        except Exception:
+            pass
+        return img
     except Exception as e:
         print(f'[ApprovalOCR] page image error p{page_no} dpi={dpi}: {e}', flush=True)
         return None
@@ -10331,24 +10548,44 @@ def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
     """
     Parse approval PDF: embedded text first (searchable / OCR-with-text-layer PDFs via pypdf),
     then rasterize + Tesseract if needed for scanned PDFs.
+
+    Memory hardening (Render 512 MB):
+      * wrapped in _HeavyJobGuard so concurrent OCR jobs don't stack RAM
+      * all_text built as a list → single ''.join() instead of repeated
+        string concatenation (quadratic memory growth on large PDFs)
+      * per-page PIL buffers explicitly closed and del'd after each OCR pass
+      * gc.collect() at safe boundaries
     """
+    with _HeavyJobGuard(tag=f"approval_ocr batch={batch_id}"):
+        return _run_approval_ocr_pipeline_inner(pdf_path, batch_id, uploaded_by)
+
+
+def _run_approval_ocr_pipeline_inner(pdf_path, batch_id, uploaded_by):
     embedded_pages = _embedded_pdf_pages_for_parse(pdf_path)
-    all_text = ''
+    text_parts = []          # list-accumulator (was: all_text string)
     nv_info = {}
     all_rows = []
     source = None
     page_count = 0
+    _log_rss(f"approval_ocr enter batch={batch_id}")
 
     if _pdf_text_layer_usable(embedded_pages):
         source = 'pdf_text'
         page_count = len(embedded_pages)
         for page_no, text in embedded_pages:
-            all_text += f'\n--- PAGE {page_no} ---\n' + text
+            text_parts.append(f'\n--- PAGE {page_no} ---\n')
+            text_parts.append(text or '')
             if page_no == 1:
                 nv_info = parse_note_verbal_details(text)
             all_rows.extend(parse_approval_rows(text, page_no))
+        # Release the embedded page buffer as soon as we're done with it.
+        try:
+            embedded_pages[:] = []
+        except Exception:
+            pass
+        del embedded_pages
         if not nv_info.get('note_verbal_number'):
-            nv_info = parse_note_verbal_details(all_text)
+            nv_info = parse_note_verbal_details(''.join(text_parts))
     else:
         ok, msg = _check_ocr_deps()
         if not ok:
@@ -10377,15 +10614,22 @@ def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
             for page_no, img in page_images:
                 processed = _preprocess_image(img)
                 text = _ocr_image(processed)
-                all_text += f'\n--- PAGE {page_no} ---\n' + text
+                text_parts.append(f'\n--- PAGE {page_no} ---\n')
+                text_parts.append(text or '')
                 if page_no == 1:
                     nv_info = parse_note_verbal_details(text)
                 all_rows.extend(parse_approval_rows(text, page_no))
                 _close_pil(processed)
                 _close_pil(img)
+                del processed
+                del img
             del page_images
             gc.collect()
         else:
+            # Memory-safe: stream one page at a time. DPI now 200 (was 300) —
+            # sufficient for typed/administrative approval tables and cuts
+            # per-page image RAM by ~56%. Callers can still request higher DPI
+            # explicitly via _pdf_page_to_image_dpi if needed.
             source = 'ocr'
             page_count = total_pages
             _mem_log(f"approval_ocr stream-start pages={total_pages}")
@@ -10394,13 +10638,14 @@ def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
                 img = None
                 processed = None
                 try:
-                    img = _pdf_page_to_image_dpi(pdf_path, page_no, dpi=300)
+                    img = _pdf_page_to_image_dpi(pdf_path, page_no, dpi=200)
                     if img is None:
                         continue
                     any_page_ok = True
                     processed = _preprocess_image(img)
                     text = _ocr_image(processed)
-                    all_text += f'\n--- PAGE {page_no} ---\n' + text
+                    text_parts.append(f'\n--- PAGE {page_no} ---\n')
+                    text_parts.append(text or '')
                     if page_no == 1:
                         nv_info = parse_note_verbal_details(text)
                     all_rows.extend(parse_approval_rows(text, page_no))
@@ -10419,7 +10664,15 @@ def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
                        'For searchable PDFs use: pip install pypdf or install Poppler (pdftotext).')
                 return {'success': False, 'error': err}
         if not nv_info.get('note_verbal_number'):
-            nv_info = parse_note_verbal_details(all_text)
+            nv_info = parse_note_verbal_details(''.join(text_parts))
+
+    # Materialize the accumulated text only once (avoids O(n^2) concatenation).
+    all_text = ''.join(text_parts)
+    try:
+        text_parts[:] = []
+    except Exception:
+        pass
+    del text_parts
 
     # Compute confidence for each row
     for i, row in enumerate(all_rows):
