@@ -961,6 +961,7 @@ def init_db():
         ('note_verbal_number', 'TEXT'),
         ('note_verbal_date', 'TEXT'),
         ('mofa_approval_serial', 'TEXT'),
+        ('manual_nv_page_no', 'INTEGER'),
         ('approval_pdf_filename', 'TEXT'),
         ('approval_pdf_uploaded_at', 'TIMESTAMP'),
         ('approval_pdf_uploaded_by', 'TEXT'),
@@ -3244,7 +3245,7 @@ _EVACUEE_LIST_COLUMNS = """
     company, visa_status, travel_status, departure_date, airline, ticket_number, departure_airport,
     destination_country, date_of_request, email, dob, emergency_contact, medical, family_group_id,
     dependents, accommodation, priority, remarks, planned_departure, saudi_city, traveling_with_family,
-    note_verbal_number, note_verbal_date, mofa_approval_serial, fee_status, dup_flag, mofa_status,
+    note_verbal_number, note_verbal_date, mofa_approval_serial, manual_nv_page_no, fee_status, dup_flag, mofa_status,
     mofa_sent_date, route_mismatch, review_status, record_locked, location_review_flag
 """
 ALL_RECORDS_DEFAULT_LIMIT = 10
@@ -3672,9 +3673,26 @@ def normalize_border(val):
     if 'salmi' in v or 'salmy' in v: return 'Salmi Border'
     return val
 
-def api_save_record(data, user):
+def _normalize_manual_nv_page_no(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    if not re.fullmatch(r'\d+', raw):
+        return ''
+    page_no = int(raw)
+    return str(page_no) if page_no > 0 else ''
+
+def api_save_record(data, user, role=''):
     if data.get('border_crossing'):
         data['border_crossing'] = normalize_border(data['border_crossing'])
+    if 'manual_nv_page_no' in data and role != 'admin':
+        data.pop('manual_nv_page_no', None)
+    if 'manual_nv_page_no' in data:
+        raw_manual_page = str(data.get('manual_nv_page_no') or '').strip()
+        clean_manual_page = _normalize_manual_nv_page_no(raw_manual_page)
+        if raw_manual_page and not clean_manual_page:
+            return {'success': False, 'error': 'Applicant page in linked NV PDF must be a positive whole number.'}
+        data['manual_nv_page_no'] = clean_manual_page
     db = get_db()
     rec_id = data.get('id')
     fields = ['name','passport','cnic','gender','country','civil_id','border_crossing',
@@ -3684,7 +3702,7 @@ def api_save_record(data, user):
               'accommodation','priority','remarks','planned_departure','saudi_city',
               'traveling_with_family','confirm_ksa_3days','departure_date',
               'current_country','current_city_pakistan','current_area_kuwait',
-              'note_verbal_number','note_verbal_date','mofa_approval_serial']
+              'note_verbal_number','note_verbal_date','mofa_approval_serial','manual_nv_page_no']
 
     if rec_id:  # Update
         # Get old record to detect changes
@@ -3715,6 +3733,39 @@ def api_save_record(data, user):
         db.execute(f"UPDATE evacuees SET {', '.join(sets)} WHERE id = ?", vals)
         db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES ('update', ?, ?, ?)",
                    (rec_id, user, json.dumps(data)))
+        if 'manual_nv_page_no' in data:
+            old_page = _normalize_manual_nv_page_no(old_rec.get('manual_nv_page_no'))
+            new_page = _normalize_manual_nv_page_no(data.get('manual_nv_page_no'))
+            if old_page != new_page:
+                if new_page and old_page:
+                    action = 'manual_nv_page_updated'
+                elif new_page:
+                    action = 'manual_nv_page_saved'
+                else:
+                    action = 'manual_nv_page_cleared'
+                linked_nv = _nv_best_link_for_record(db, 'evacuees', rec_id)
+                db.execute(
+                    "INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                    [
+                        action,
+                        rec_id,
+                        user,
+                        json.dumps({
+                            'tracking_id': _nv_tracking_id('evacuees', old_rec),
+                            'applicant_name': old_rec.get('name', ''),
+                            'passport': old_rec.get('passport', ''),
+                            'old_manual_nv_page_no': old_page,
+                            'new_manual_nv_page_no': new_page,
+                            'linked_nv_upload_id': linked_nv.get('upload_id') if linked_nv else '',
+                            'linked_nv_number': linked_nv.get('note_verbal_number') if linked_nv else '',
+                            'linked_nv_date': linked_nv.get('note_verbal_date') if linked_nv else '',
+                            'note_verbal_number': data.get('note_verbal_number', old_rec.get('note_verbal_number', '')),
+                            'note_verbal_date': data.get('note_verbal_date', old_rec.get('note_verbal_date', '')),
+                            'mofa_approval_serial': data.get('mofa_approval_serial', old_rec.get('mofa_approval_serial', '')),
+                            'timestamp': _nv_now_iso(),
+                        }),
+                    ],
+                )
 
         # Apply workflow rules only for fields actually sent and changed
         workflow_changes = []
@@ -6262,10 +6313,124 @@ def render_hardened_nv_release_pdf(master_pdf_source, release_row, dpi=160):
         out.close()
 
 
-def render_selective_applicant_nv_copy(master_pdf_path, release_row):
-    if not _controlled_nv_renderer_available():
-        raise RuntimeError('Controlled NV rendering dependency is unavailable')
-    plan = find_applicant_nv_pages(master_pdf_path, release_row)
+def _nv_manual_page_fallback_debug(message, **details):
+    try:
+        payload = json.dumps(details, ensure_ascii=False, default=str)
+    except Exception:
+        payload = str(details)
+    print(f"[NV Manual Page Fallback] {message}: {payload}", flush=True)
+
+
+def _build_manual_nv_page_fallback_plan(master_pdf_path, release_row, auto_error):
+    source_table = str(release_row.get('source_table') or '').strip()
+    source_id = int(release_row.get('source_record_id') or 0)
+    if source_table != 'evacuees':
+        _nv_manual_page_fallback_debug(
+            'fallback rejected',
+            reason='unsupported_source',
+            source_table=source_table,
+            record_id=source_id,
+            auto_error=str(auto_error),
+        )
+        return None
+
+    db = get_db()
+    try:
+        record = _nv_fetch_record(db, source_table, source_id)
+        link_row = _nv_best_link_for_record(db, source_table, source_id)
+    finally:
+        db.close()
+
+    if not record:
+        _nv_manual_page_fallback_debug(
+            'fallback rejected',
+            reason='missing_record',
+            source_table=source_table,
+            record_id=source_id,
+            auto_error=str(auto_error),
+        )
+        return None
+
+    linked_upload_id = int((link_row or {}).get('upload_id') or 0)
+    release_upload_id = int(release_row.get('master_nv_upload_id') or 0)
+    linked_full_nv_exists = bool(link_row and (link_row.get('file_path') or link_row.get('filename')))
+    manual_page_no = int(_normalize_manual_nv_page_no(record.get('manual_nv_page_no')) or 0)
+    manual_details_ok = all(str(record.get(k) or '').strip() for k in ('note_verbal_number', 'note_verbal_date', 'mofa_approval_serial'))
+    master_exists = Path(str(master_pdf_path)).exists()
+
+    _nv_manual_page_fallback_debug(
+        'auto selective extraction failed',
+        source_table=source_table,
+        record_id=source_id,
+        passport=record.get('passport', ''),
+        tracking_id=_nv_tracking_id(source_table, record),
+        linked_full_nv_exists=1 if linked_full_nv_exists else 0,
+        manual_page_exists=1 if manual_page_no else 0,
+        manual_details_ok=1 if manual_details_ok else 0,
+        auto_error=str(auto_error),
+    )
+
+    if not linked_full_nv_exists:
+        _nv_manual_page_fallback_debug('fallback rejected', reason='no_confirmed_linked_master_nv', record_id=source_id)
+        return None
+    if release_upload_id and linked_upload_id != release_upload_id:
+        _nv_manual_page_fallback_debug(
+            'fallback rejected',
+            reason='release_token_master_nv_mismatch',
+            record_id=source_id,
+            linked_upload_id=linked_upload_id,
+            release_upload_id=release_upload_id,
+        )
+        return None
+    if not master_exists:
+        _nv_manual_page_fallback_debug('fallback rejected', reason='master_pdf_missing_on_disk', record_id=source_id)
+        return None
+    if not manual_page_no:
+        _nv_manual_page_fallback_debug('fallback rejected', reason='manual_page_number_missing', record_id=source_id)
+        return None
+    if not manual_details_ok:
+        _nv_manual_page_fallback_debug('fallback rejected', reason='manual_nv_details_incomplete', record_id=source_id)
+        return None
+
+    total_pages = _pdf_page_count(str(master_pdf_path))
+    if total_pages <= 0:
+        _nv_manual_page_fallback_debug('fallback rejected', reason='page_count_unavailable', record_id=source_id)
+        return None
+    if manual_page_no > total_pages:
+        _nv_manual_page_fallback_debug(
+            'fallback rejected',
+            reason='manual_page_out_of_range',
+            record_id=source_id,
+            manual_page_no=manual_page_no,
+            total_pages=total_pages,
+        )
+        return None
+
+    lead_pages = [p for p in (1, 2) if p <= total_pages]
+    page_numbers = list(lead_pages)
+    if manual_page_no not in page_numbers:
+        page_numbers.append(manual_page_no)
+    _nv_manual_page_fallback_debug(
+        'fallback accepted',
+        record_id=source_id,
+        manual_page_no=manual_page_no,
+        linked_upload_id=linked_upload_id,
+        page_numbers=page_numbers,
+    )
+    return {
+        'record': record,
+        'link_row': link_row or {},
+        'applicant_page': manual_page_no,
+        'include_following_page': False,
+        'page_numbers': page_numbers,
+        'total_pages': total_pages,
+        'match_score': 0,
+        'manual_page_fallback': 1,
+        'auto_error': str(auto_error),
+    }
+
+
+def _render_selective_applicant_nv_copy_from_plan(master_pdf_path, release_row, plan):
     src = fitz.open(str(master_pdf_path))
     selective_doc = fitz.open()
     try:
@@ -6273,7 +6438,7 @@ def render_selective_applicant_nv_copy(master_pdf_path, release_row):
             raise RuntimeError('Selective applicant Note Verbal copy could not be prepared because the linked Note Verbal has no readable pages.')
         first_rect = src[0].rect
         lead_pages = [p for p in (1, 2) if p <= len(src)]
-        tail_pages = [p for p in (plan.get('page_numbers') or []) if p not in lead_pages]
+        tail_pages = [p for p in (plan.get('page_numbers') or []) if p not in lead_pages and 1 <= int(p or 0) <= len(src)]
         for pno in lead_pages:
             selective_doc.insert_pdf(src, from_page=pno - 1, to_page=pno - 1)
         _nv_insert_selective_detail_page(
@@ -6285,17 +6450,33 @@ def render_selective_applicant_nv_copy(master_pdf_path, release_row):
             plan.get('link_row') or {},
         )
         for pno in tail_pages:
-            selective_doc.insert_pdf(src, from_page=pno - 1, to_page=pno - 1)
+            selective_doc.insert_pdf(src, from_page=int(pno) - 1, to_page=int(pno) - 1)
         return selective_doc.tobytes(garbage=3, deflate=True), {
             'page_numbers': plan.get('page_numbers') or [],
             'applicant_page': plan.get('applicant_page') or 0,
             'include_following_page': 1 if plan.get('include_following_page') else 0,
             'detail_page_inserted': 1,
             'match_score': plan.get('match_score') or 0,
+            'manual_page_fallback': 1 if plan.get('manual_page_fallback') else 0,
+            'manual_nv_page_no': plan.get('applicant_page') if plan.get('manual_page_fallback') else '',
+            'auto_selective_error': plan.get('auto_error') if plan.get('manual_page_fallback') else '',
         }
     finally:
         src.close()
         selective_doc.close()
+
+
+def render_selective_applicant_nv_copy(master_pdf_path, release_row):
+    if not _controlled_nv_renderer_available():
+        raise RuntimeError('Controlled NV rendering dependency is unavailable')
+    try:
+        plan = find_applicant_nv_pages(master_pdf_path, release_row)
+    except Exception as auto_error:
+        fallback_plan = _build_manual_nv_page_fallback_plan(master_pdf_path, release_row, auto_error)
+        if fallback_plan:
+            return _render_selective_applicant_nv_copy_from_plan(master_pdf_path, release_row, fallback_plan)
+        raise
+    return _render_selective_applicant_nv_copy_from_plan(master_pdf_path, release_row, plan)
 
 
 def render_controlled_nv_copy(master_pdf_path, release_row):
@@ -12770,6 +12951,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     pdf_body, render_meta = render_controlled_nv_copy(master_path, rel)
                     used_at = _nv_now_iso()
                     db.execute("UPDATE nv_release_log SET token_used_at = ? WHERE id = ?", [used_at, rel['id']])
+                    if (render_meta or {}).get('manual_page_fallback'):
+                        log_nv_release_event(
+                            db, 'nv_release_manual_page_fallback', user, rel.get('source_table', ''), rel.get('source_record_id') or 0,
+                            applicant_name=rel.get('applicant_name', ''), passport_no=rel.get('passport_no', ''),
+                            tracking_id=rel.get('tracking_id', ''), release_mode=rel.get('release_mode', ''),
+                            token_id=token_id, client_ip=self.get_client_ip(), user_agent=self.get_user_agent(),
+                            extra={
+                                'manual_nv_page_no': (render_meta or {}).get('manual_nv_page_no') or '',
+                                'page_numbers': (render_meta or {}).get('page_numbers') or [],
+                                'master_nv_upload_id': rel.get('master_nv_upload_id') or '',
+                                'master_nv_filename': rel.get('master_nv_filename') or '',
+                                'auto_selective_error': (render_meta or {}).get('auto_selective_error') or '',
+                                'used_at': used_at,
+                            },
+                        )
                     log_nv_release_event(
                         db, 'nv_release_token_consumed', user, rel.get('source_table', ''), rel.get('source_record_id') or 0,
                         applicant_name=rel.get('applicant_name', ''), passport_no=rel.get('passport_no', ''),
@@ -14073,7 +14269,7 @@ function printBoth(){{
             user = self.require_auth()
             if not user: return
             data = json.loads(body)
-            result = api_save_record(data, user['user'])
+            result = api_save_record(data, user['user'], user.get('role', ''))
             self.send_json(result)
 
         elif path == '/api/record/delete':
@@ -20216,6 +20412,7 @@ const nvLabelUser='Linked full Note Verbal available';
 const lastRelease=(r.last_nv_release_at&&USER_ROLE==='admin')?('Last release: '+vq(r.last_nv_release_at||'')+' by '+vq(r.last_nv_release_by||'')+' ('+vq(r.last_nv_release_mode||'')+')'):'';
 const showNvCopyActions=(USER_ROLE==='admin'||USER_ROLE==='operator'||USER_ROLE==='operator_special')&&nvLinked;
 const nvCopyHelp=!nvLinked?'No linked Note Verbal available.':(r.can_release_nv?'Selective applicant copy will be generated through the secure release system.':'Available after fee payment or waiver.');
+const nvPageAdminAttr=USER_ROLE==='admin'?'':'disabled title="Only admin can set fallback selective print page"';
 if(USER_ROLE!=='viewer'){
 html+=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85em;color:#1b5e20;text-transform:uppercase;letter-spacing:.5px;padding-bottom:4px;border-bottom:2px solid #c8e6c9;margin-bottom:8px">Embassy letter \u2014 Note verbal &amp; approval</div>
 <p style="font-size:.78em;color:#666;margin:0 0 10px;line-height:1.45">Enter or correct <strong>Note Verbal number</strong> and <strong>date</strong> manually, then click <strong>Save these fields</strong>. They are stored on this applicant and used for the printable embassy letter (with travel details and MOFA list serial).</p>
@@ -20223,8 +20420,9 @@ html+=`<div style="margin-bottom:14px"><div style="font-weight:700;font-size:.85
 <div><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Note Verbal number</label><input id="view_nv_number" type="text" value="${vq(r.note_verbal_number)}" placeholder="e.g. NV-KW/2026/123" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>
 <div><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Note Verbal date</label><input id="view_nv_date" type="text" value="${vq(r.note_verbal_date)}" placeholder="e.g. 29/03/2026" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>
 <div style="grid-column:1/-1"><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">MOFA approval serial (from list)</label><input id="view_nv_serial" type="text" value="${vq(r.mofa_approval_serial)}" placeholder="Serial number on approval list" style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"></div>
+<div style="grid-column:1/-1"><label style="color:#555;font-size:.78em;display:block;margin-bottom:4px">Applicant page in linked NV PDF</label><input id="view_nv_page" type="number" min="1" step="1" value="${vq(r.manual_nv_page_no)}" placeholder="e.g. 4" ${nvPageAdminAttr} style="width:100%;padding:8px 10px;border:1px solid #a5d6a7;border-radius:6px;font-size:.9em;box-sizing:border-box"><div style="font-size:.74em;color:#607d8b;margin-top:4px;line-height:1.35">Used only if automatic selective NV extraction fails. The system will print the relevant applicant page from the linked master Note Verbal.</div></div>
 </div>
-<button type="button" class="btn btn-p" style="padding:8px 18px;margin-bottom:10px" onclick="saveViewEmbassyFields()">Save note verbal &amp; serial</button>
+<button type="button" class="btn btn-p" style="padding:8px 18px;margin-bottom:10px" onclick="saveViewEmbassyFields()">Save note verbal, serial &amp; page</button>
 <div style="font-size:.8em;color:#555;padding:8px 0;border-top:1px dashed #c5e1a5;margin-bottom:4px"><strong>Fee status:</strong> ${(r.fee_status||'pending').toUpperCase()} ${feeAt?(' | '+feeAt):''} ${feeActor?(' by '+feeActor):''}</div>
 ${nvLinked?`<div style="font-size:.8em;color:#1565c0;margin-bottom:8px"><strong>Linked full Note Verbal:</strong> ${USER_ROLE==='admin'?nvLabelAdmin:nvLabelUser} ${r.linked_nv_number?('| NV# '+vq(r.linked_nv_number)):''} ${r.linked_nv_date?('| '+vq(r.linked_nv_date)):''}</div>`:''}
 ${r.can_review_nv_link?`<div id="nvLinkReviewBox" style="margin:8px 0 10px;padding:12px;border:1px solid #dcedc8;border-radius:9px;background:#fcfff8">
@@ -20356,11 +20554,13 @@ html+=sec('Travel Details',[
 ['Airline',inp('airline',r.airline)],['Ticket Number',inp('ticket_number',r.ticket_number)],
 ['Departure Airport',inp('departure_airport',r.departure_airport)],['Destination',inp('destination_country',r.destination_country)]
 ]);
-html+=sec('Embassy Letter Approval (editing)',[
+const embassyEditFields=[
 ['Note Verbal Number',inp('note_verbal_number',r.note_verbal_number)],
 ['Note Verbal Date',inp('note_verbal_date',r.note_verbal_date)],
 ['MOFA Approval Serial',inp('mofa_approval_serial',r.mofa_approval_serial)]
-]);
+];
+if(USER_ROLE==='admin')embassyEditFields.push(['Applicant Page in Linked NV PDF',inp('manual_nv_page_no',r.manual_nv_page_no,'number')]);
+html+=sec('Embassy Letter Approval (editing)',embassyEditFields);
 html+=sec('Status & Processing',[
 ['KSA Visa Status',sel('visa_status',['Approved','Pending','Rejected'],r.visa_status)],
 ['Travel Status',sel('travel_status',['Pending','Visa Obtained','Departed','Returned'],r.travel_status)],
@@ -20397,12 +20597,14 @@ if(!viewRec||USER_ROLE==='viewer')return;
 const n1=document.getElementById('view_nv_number');
 const n2=document.getElementById('view_nv_date');
 const n3=document.getElementById('view_nv_serial');
+const n4=document.getElementById('view_nv_page');
 if(!n1||!n2||!n3){toast('Open the applicant profile first');return}
 const data={id:viewRec.id,note_verbal_number:n1.value.trim(),note_verbal_date:n2.value.trim(),mofa_approval_serial:n3.value.trim()};
+if(USER_ROLE==='admin')data.manual_nv_page_no=n4?n4.value.trim():'';
 try{
 const res=await api('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 if(res&&res.success){
-toast('Note verbal & approval serial saved');
+toast('Note verbal, approval serial & page saved');
 Object.assign(viewRec,data);
 loadRecords();loadDash();
 await openView(viewRec.id);
