@@ -11,7 +11,7 @@ MOFA approval PDF parsing order: (1) pypdf text layer, (2) Poppler pdftotext CLI
 pip install pypdf. macOS: brew install poppler gives pdftotext without extra pip packages.
 """
 
-import http.server, sqlite3, json, hashlib, hmac, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback
+import http.server, sqlite3, json, hashlib, hmac, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback, gc
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta, date
@@ -5280,15 +5280,23 @@ def _nv_extract_pages_chunk(db, upload_id, pdf_path, pages_done, total_pages, ma
         if not ocr_ok or pages_ocrd >= max_ocr_pages:
             cur_page = pno
             continue
+        im = None
+        im_proc = None
         try:
             im = _pdf_page_to_image(pdf_path, pno)
             if im is not None:
-                otxt = str(_ocr_image(_preprocess_image(im)) or '').strip()
+                im_proc = _preprocess_image(im)
+                otxt = str(_ocr_image(im_proc) or '').strip()
                 if otxt:
                     new_texts.append(otxt)
                 pages_ocrd += 1
         except Exception as e:
             print(f"[NV Extract Chunk] OCR error page {pno}: {e}", flush=True)
+        finally:
+            _close_pil(im_proc)
+            _close_pil(im)
+            del im_proc
+            del im
         cur_page = pno
         if _time.time() - start > max_seconds:
             break
@@ -9797,12 +9805,21 @@ def _extract_full_pdf_text_with_fallback(pdf_path):
             if meta['pages_ocrd'] >= max_ocr_pages:
                 meta['pages_processed'] += 1
                 continue
-            im = _pdf_page_to_image(pdf_path, pno)
-            if im is not None:
-                otxt = str(_ocr_image(_preprocess_image(im)) or '').strip()
-                if otxt:
-                    text_pages.append(otxt)
-                meta['pages_ocrd'] += 1
+            im = None
+            im_proc = None
+            try:
+                im = _pdf_page_to_image(pdf_path, pno)
+                if im is not None:
+                    im_proc = _preprocess_image(im)
+                    otxt = str(_ocr_image(im_proc) or '').strip()
+                    if otxt:
+                        text_pages.append(otxt)
+                    meta['pages_ocrd'] += 1
+            finally:
+                _close_pil(im_proc)
+                _close_pil(im)
+                del im_proc
+                del im
             meta['pages_processed'] += 1
 
         full_text = '\n\n'.join(x for x in text_pages if x).strip()
@@ -9916,6 +9933,35 @@ def _name_similarity(a, b):
 
 # ---------- OCR / Parsing pipeline ----------
 
+try:
+    import psutil as _psutil  # optional; used only for diagnostic logging
+    _PSUTIL_AVAILABLE = True
+except Exception:
+    _psutil = None
+    _PSUTIL_AVAILABLE = False
+
+def _mem_log(tag):
+    """Lightweight memory diagnostic. No-op safe if psutil missing."""
+    try:
+        if _PSUTIL_AVAILABLE:
+            rss = _psutil.Process().memory_info().rss / (1024 * 1024)
+            print(f"[Mem] {tag} rss={rss:.1f}MB", flush=True)
+        else:
+            print(f"[Mem] {tag}", flush=True)
+    except Exception:
+        pass
+
+def _close_pil(img):
+    """Safely close a PIL image and drop underlying buffers."""
+    try:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 def _pdf_to_images(pdf_path):
     """Convert PDF pages to PIL images for OCR. Returns list of (page_no, image)."""
     if not _PDF2IMG_AVAILABLE:
@@ -9936,6 +9982,17 @@ def _pdf_page_to_image(pdf_path, page_no):
         return images[0] if images else None
     except Exception as e:
         print(f'[NV OCR] page image error p{page_no}: {e}', flush=True)
+        return None
+
+def _pdf_page_to_image_dpi(pdf_path, page_no, dpi=300):
+    """Convert a single page to image at a specified DPI (memory-safe per-page)."""
+    if not _PDF2IMG_AVAILABLE:
+        return None
+    try:
+        images = convert_from_path(str(pdf_path), dpi=dpi, first_page=page_no, last_page=page_no)
+        return images[0] if images else None
+    except Exception as e:
+        print(f'[ApprovalOCR] page image error p{page_no} dpi={dpi}: {e}', flush=True)
         return None
 
 def _pdf_page_count(pdf_path):
@@ -10121,20 +10178,65 @@ def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
                    '(3) Scanned PDFs: pip install Pillow pytesseract pdf2image + system Tesseract.')
             hint = 'This PDF has little or no extractable text (common for scan-only files). ' if tiny else ''
             return {'success': False, 'error': (hint + msg.strip() + fix).strip()}
-        page_images = _pdf_to_images(pdf_path)
-        if not page_images:
-            err = ('Could not convert PDF to images (Poppler pdftoppm required for OCR path). '
-                   'For searchable PDFs use: pip install pypdf or install Poppler (pdftotext).')
-            return {'success': False, 'error': err}
-        source = 'ocr'
-        page_count = len(page_images)
-        for page_no, img in page_images:
-            processed = _preprocess_image(img)
-            text = _ocr_image(processed)
-            all_text += f'\n--- PAGE {page_no} ---\n' + text
-            if page_no == 1:
-                nv_info = parse_note_verbal_details(text)
-            all_rows.extend(parse_approval_rows(text, page_no))
+        # Memory-safe: stream one page at a time at DPI 300 (accuracy preserved).
+        # Avoids holding every rasterized page in RAM at once (~26 MB/A4 page).
+        if not _PDF2IMG_AVAILABLE:
+            return {'success': False, 'error': 'pdf2image/Poppler not available for OCR.'}
+        total_pages = _pdf_page_count(pdf_path)
+        if total_pages <= 0:
+            # Fallback to legacy bulk convert if page count unknown
+            page_images = _pdf_to_images(pdf_path)
+            if not page_images:
+                err = ('Could not convert PDF to images (Poppler pdftoppm required for OCR path). '
+                       'For searchable PDFs use: pip install pypdf or install Poppler (pdftotext).')
+                return {'success': False, 'error': err}
+            source = 'ocr'
+            page_count = len(page_images)
+            _mem_log(f"approval_ocr bulk-fallback pages={page_count}")
+            for page_no, img in page_images:
+                processed = _preprocess_image(img)
+                text = _ocr_image(processed)
+                all_text += f'\n--- PAGE {page_no} ---\n' + text
+                if page_no == 1:
+                    nv_info = parse_note_verbal_details(text)
+                all_rows.extend(parse_approval_rows(text, page_no))
+                _close_pil(processed)
+                _close_pil(img)
+            del page_images
+            gc.collect()
+        else:
+            source = 'ocr'
+            page_count = total_pages
+            _mem_log(f"approval_ocr stream-start pages={total_pages}")
+            any_page_ok = False
+            for page_no in range(1, total_pages + 1):
+                img = None
+                processed = None
+                try:
+                    img = _pdf_page_to_image_dpi(pdf_path, page_no, dpi=300)
+                    if img is None:
+                        continue
+                    any_page_ok = True
+                    processed = _preprocess_image(img)
+                    text = _ocr_image(processed)
+                    all_text += f'\n--- PAGE {page_no} ---\n' + text
+                    if page_no == 1:
+                        nv_info = parse_note_verbal_details(text)
+                    all_rows.extend(parse_approval_rows(text, page_no))
+                finally:
+                    _close_pil(processed)
+                    _close_pil(img)
+                    del processed
+                    del img
+                    if page_no % 5 == 0:
+                        gc.collect()
+                        _mem_log(f"approval_ocr streamed page {page_no}/{total_pages}")
+            gc.collect()
+            _mem_log(f"approval_ocr stream-done pages={total_pages}")
+            if not any_page_ok:
+                err = ('Could not convert PDF to images (Poppler pdftoppm required for OCR path). '
+                       'For searchable PDFs use: pip install pypdf or install Poppler (pdftotext).')
+                return {'success': False, 'error': err}
         if not nv_info.get('note_verbal_number'):
             nv_info = parse_note_verbal_details(all_text)
 
@@ -10182,7 +10284,7 @@ def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
     finally:
         db.close()
 
-    return {
+    result = {
         'success': True,
         'batch_id': batch_id,
         'pages': page_count,
@@ -10191,6 +10293,16 @@ def run_approval_ocr_pipeline(pdf_path, batch_id, uploaded_by):
         'note_verbal_date': nv_info.get('note_verbal_date', ''),
         'parse_source': source,
     }
+    # Release large temporaries immediately; caller only needs the summary dict.
+    try:
+        del all_text
+        del all_rows
+        del embedded_pages
+    except Exception:
+        pass
+    gc.collect()
+    _mem_log("approval_ocr done")
+    return result
 
 # ---------- Matching engine ----------
 
