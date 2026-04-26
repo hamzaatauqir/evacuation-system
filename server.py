@@ -12720,6 +12720,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             self.send_json(api_dashboard_stats(user))
+        elif path == '/api/sitrep-workflow':
+            user = self.require_auth()
+            if not user: return
+            db = get_db()
+            row = db.execute("SELECT value FROM settings WHERE key = 'sitrep_workflow_template'").fetchone()
+            db.close()
+            if not row or not row['value']:
+                self.send_json({'success': True, 'workflow': None})
+                return
+            try:
+                workflow = json.loads(row['value'])
+                self.send_json({'success': True, 'workflow': workflow})
+            except json.JSONDecodeError:
+                self.send_json({'success': True, 'workflow': None, 'warning': 'Saved SITREP workflow is invalid'})
         elif path == '/api/records':
             user = self.require_auth()
             if not user: return
@@ -15171,6 +15185,33 @@ function printBoth(){{
             self.send_header('Content-Length', len(docx_bytes))
             self.end_headers()
             self.wfile.write(docx_bytes)
+
+        elif path == '/api/save-sitrep-workflow':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as e:
+                self.send_json({'success': False, 'error': f'Invalid JSON: {str(e)}'}, 400)
+                return
+            try:
+                saved_at = datetime.now().isoformat()
+                saved_by = user['user']
+                if not isinstance(data, dict):
+                    data = {}
+                payload = dict(data)
+                payload['saved_by'] = saved_by
+                payload['saved_at'] = saved_at
+                db = get_db()
+                db.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    ['sitrep_workflow_template', json.dumps(payload)]
+                )
+                db.commit()
+                db.close()
+                self.send_json({'success': True, 'saved_at': saved_at, 'saved_by': saved_by})
+            except Exception as e:
+                self.send_json({'success': False, 'error': f'Failed to save SITREP workflow: {str(e)}'}, 500)
 
         elif path == '/api/mofa-mark-sent':
             user = self.require_auth()
@@ -19767,7 +19808,8 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <div id="tab-sitrep" class="tab"><div class="ctr">
 <div class="np" style="margin-bottom:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
 <button class="btn btn-p" onclick="loadSitrepData()">Refresh Data from Dashboard</button>
-<button class="btn btn-i" onclick="downloadSitrepDocx()">Download as Word (.docx)</button>
+<button class="btn btn-s" onclick="saveSitrepWorkflow()">Save Workflow</button>
+<button class="btn btn-i" onclick="saveAndDownloadSitrepDocx()">Save &amp; Download Word</button>
 <button class="btn btn-w" onclick="window.print()">Print / PDF</button>
 </div>
 <div class="fs"><h3>SITUATION REPORT — Editable Template</h3>
@@ -22164,6 +22206,59 @@ const r=await api('/api/restore',{method:'POST',headers:{'Content-Type':'applica
 if(r?.success){toast('Restored successfully');loadDash();loadRecords()}else toast('Restore failed: '+(r?.error||'unknown'))}
 
 // SITREP EDITOR
+const SITREP_MANUAL_FIELD_MAP={
+country:'sr_country',hotline:'sr_hotline',stranded:'sr_stranded',situation:'sr_situation',
+diaspora_num:'sr_diaspora_num',diaspora_loc:'sr_diaspora_loc',airspace:'sr_airspace',
+airport:'sr_airport',notam:'sr_notam',land:'sr_land',facilitation:'sr_facilitation',
+coordination:'sr_coordination',evac_air:'sr_evac_air',evac_land:'sr_evac_land',
+risks:'sr_risks',assessment:'sr_assessment'
+};
+function collectSitrepData(){
+return{
+date:document.getElementById('sr_date').value,country:document.getElementById('sr_country').value,
+hotline:document.getElementById('sr_hotline').value,stranded:document.getElementById('sr_stranded').value,
+situation:document.getElementById('sr_situation').value,diaspora_num:document.getElementById('sr_diaspora_num').value,
+diaspora_loc:document.getElementById('sr_diaspora_loc').value,registered:document.getElementById('sr_registered').value,
+evac_requested:document.getElementById('sr_evac_requested').value,airspace:document.getElementById('sr_airspace').value,
+airport:document.getElementById('sr_airport').value,notam:document.getElementById('sr_notam').value,
+land:document.getElementById('sr_land').value,facilitation:document.getElementById('sr_facilitation').value,
+coordination:document.getElementById('sr_coordination').value,evac_air:document.getElementById('sr_evac_air').value,
+evac_land:document.getElementById('sr_evac_land').value,evac_status:document.getElementById('sr_evac_status').innerText,
+returnees_status:document.getElementById('sr_returnees_status').innerText,
+risks:document.getElementById('sr_risks').value,assessment:document.getElementById('sr_assessment').value
+};
+}
+function applySitrepWorkflow(workflow){
+if(!workflow||typeof workflow!=='object')return;
+Object.entries(SITREP_MANUAL_FIELD_MAP).forEach(([k,id])=>{
+if(workflow[k]===undefined||workflow[k]===null)return;
+const el=document.getElementById(id);
+if(!el)return;
+if(el.tagName==='SELECT'){
+const val=String(workflow[k]);
+const hasOption=[...el.options].some(opt=>opt.value===val||opt.text===val);
+if(hasOption)el.value=val;
+}else{
+el.value=String(workflow[k]);
+}
+});
+}
+async function loadSitrepWorkflow(){
+const r=await api('/api/sitrep-workflow');
+if(!r)return;
+if(r.warning)toast(r.warning);
+if(r.workflow)applySitrepWorkflow(r.workflow);
+}
+async function saveSitrepWorkflow(showToast=true){
+const payload=collectSitrepData();
+const r=await api('/api/save-sitrep-workflow',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+if(!r||!r.success){
+if(showToast)toast('Failed to save workflow: '+(r?.error||'unknown error'));
+return null;
+}
+if(showToast)toast('SITREP workflow saved');
+return r;
+}
 async function loadSitrepData(){
 const d=await api('/api/stats');if(!d)return;
 const k=d.kpi;const now=new Date();
@@ -22184,22 +22279,17 @@ document.getElementById('sr_returnees_status').innerText=retText;
 }
 toast('SITREP data refreshed')}
 
-async function downloadSitrepDocx(){
-const data={date:document.getElementById('sr_date').value,country:document.getElementById('sr_country').value,
-hotline:document.getElementById('sr_hotline').value,stranded:document.getElementById('sr_stranded').value,
-situation:document.getElementById('sr_situation').value,diaspora_num:document.getElementById('sr_diaspora_num').value,
-diaspora_loc:document.getElementById('sr_diaspora_loc').value,registered:document.getElementById('sr_registered').value,
-evac_requested:document.getElementById('sr_evac_requested').value,airspace:document.getElementById('sr_airspace').value,
-airport:document.getElementById('sr_airport').value,notam:document.getElementById('sr_notam').value,
-land:document.getElementById('sr_land').value,facilitation:document.getElementById('sr_facilitation').value,
-coordination:document.getElementById('sr_coordination').value,evac_air:document.getElementById('sr_evac_air').value,
-evac_land:document.getElementById('sr_evac_land').value,evac_status:document.getElementById('sr_evac_status').innerText,
-returnees_status:document.getElementById('sr_returnees_status').innerText,
-risks:document.getElementById('sr_risks').value,assessment:document.getElementById('sr_assessment').value};
+async function downloadSitrepDocx(data){
 const r=await fetch('/api/generate-sitrep-docx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 if(r.ok){const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);
 a.download='SITREP_'+new Date().toISOString().slice(0,10)+'.docx';a.click();toast('SITREP downloaded')}
 else toast('Generation failed')}
+async function saveAndDownloadSitrepDocx(){
+const data=collectSitrepData();
+const saved=await saveSitrepWorkflow(false);
+if(!saved){toast('Save failed. Word download cancelled');return;}
+await downloadSitrepDocx(data);
+}
 
 // RETURNEES
 let retAllRows=[],retViewRec=null,retEditMode=false;
@@ -22799,6 +22889,7 @@ document.getElementById('repDate').value=new Date().toISOString().slice(0,10);
 document.getElementById('sr_date').value=new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
 applyRoleRestrictions();
 loadDash();
+setTimeout(loadSitrepWorkflow,600);
 setTimeout(loadSitrepData,1000);
 
 // Auto-refresh dashboard every 5 minutes to avoid repeated chart recomputation.
