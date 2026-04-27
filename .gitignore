@@ -11,3 +11,22 @@ note_verbal_uploads/
 .fuse_hidden*
 backup_onedrive.log
 *.docx
+
+# Local design/workspace files not deployed
+.cursor/
+Design.html
+Embassy Community Welfare Portal Design, landing page and services/
+Iraq_Transit_Visa_Template.csv
+Iraq_Visa_Approval_Template.csv
+backup_onedrive.sh
+cwakuwait_landing.html
+exchange_onedrive_code.py
+pakistan-embassy-kuwait-—-transit-operations-dashboard/
+templates/admin_death_cases.html
+templates/admin_legal_cases.html
+templates/death_cases.html
+templates/legal_opf.html
+templates/nurses_accommodation.html
+templates/nurses_complaint.html
+templates/nurses_leaving_notice.html
+templates/nurses_login.html
