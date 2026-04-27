@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { T } from "../lib/tokens";
 
@@ -9,6 +10,7 @@ const LINKS: [string, string][] = [
 ];
 
 export function PageFooter() {
+  const [logoError, setLogoError] = useState(false);
   return (
     <footer style={{ background: T.surface, borderTop: `1px solid ${T.borderLt}`, marginTop: "auto" }}>
       <div
@@ -23,13 +25,35 @@ export function PageFooter() {
           alignItems: "center",
         }}
       >
-        <div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {!logoError ? (
+            <img
+              src="/images/embassy-of-pakistan-logo.png"
+              alt="Embassy of Pakistan logo"
+              style={{ height: 40, width: "auto", objectFit: "contain", flexShrink: 0 }}
+              onError={() => setLogoError(true)}
+            />
+          ) : (
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: "50%",
+                border: `1px solid ${T.borderLt}`,
+                background: T.surfaceLow,
+                flexShrink: 0,
+              }}
+              aria-hidden="true"
+            />
+          )}
+          <div>
           <div style={{ fontSize: 13, fontWeight: 700, color: T.navy, marginBottom: 3 }}>
             Embassy of Pakistan, Kuwait
           </div>
           <div style={{ fontSize: 12, color: T.muted }}>
             Community Welfare Wing — Digital Services Portal
           </div>
+        </div>
         </div>
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
           {LINKS.map(([to, label]) => (

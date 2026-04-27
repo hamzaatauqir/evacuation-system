@@ -22,6 +22,7 @@ const NURSES_LINKS: NavLink[] = [
 
 export function PublicHeader() {
   const [mob, setMob] = useState(false);
+  const [logoError, setLogoError] = useState(false);
   const location = useLocation();
   const isNurses = location.pathname.startsWith("/nurses");
   const links = isNurses ? NURSES_LINKS : MAIN_LINKS;
@@ -33,7 +34,26 @@ export function PublicHeader() {
     <header style={{ background: T.navy, position: "sticky", top: 0, zIndex: 100, boxShadow: "0 2px 10px rgba(30,58,82,.18)" }}>
       <div style={{ maxWidth: 1280, margin: "0 auto", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", minHeight: 64 }}>
         <Link to="/" style={{ display: "flex", alignItems: "center", gap: 13, background: "none", border: "none", cursor: "pointer", padding: 0, flexShrink: 0 }}>
-          <PakEmblem />
+          {logoError ? (
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: "50%",
+                background: "rgba(255,255,255,.08)",
+                border: "1px solid rgba(255,255,255,.18)",
+                flexShrink: 0,
+              }}
+              aria-hidden="true"
+            />
+          ) : (
+            <img
+              src="/images/embassy-of-pakistan-logo.png"
+              alt="Embassy of Pakistan logo"
+              style={{ height: 56, width: "auto", objectFit: "contain", flexShrink: 0 }}
+              onError={() => setLogoError(true)}
+            />
+          )}
           <div style={{ textAlign: "left" }}>
             <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", marginBottom: 2 }}>Government of Pakistan</div>
             <div style={{ fontSize: 14, fontWeight: 700, color: "#fff", lineHeight: 1.2 }}>Embassy of Pakistan, Kuwait</div>
@@ -70,8 +90,4 @@ export function PublicHeader() {
       )}
     </header>
   );
-}
-
-function PakEmblem() {
-  return <div style={{ width: 50, height: 50, borderRadius: "50%", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><svg viewBox="0 0 64 64" width="34" height="34" aria-hidden="true"><path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#ffffff"/><polygon points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5" fill="#ffffff"/></svg></div>;
 }

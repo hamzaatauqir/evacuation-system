@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { T } from "../lib/tokens";
 import { Icon, type IconName } from "./Icon";
@@ -12,6 +12,7 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
 
 function AdminHeader() {
   const navigate = useNavigate();
+  const [logoError, setLogoError] = useState(false);
   return (
     <header
       style={{
@@ -28,27 +29,26 @@ function AdminHeader() {
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1 }}>
-        <div
-          style={{
-            width: 38,
-            height: 38,
-            borderRadius: "50%",
-            background: "rgba(255,255,255,.08)",
-            border: "1px solid rgba(255,255,255,.18)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-          }}
-        >
-          <svg viewBox="0 0 64 64" width="26" height="26" aria-hidden="true">
-            <path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#ffffff" />
-            <polygon
-              points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5"
-              fill="#ffffff"
-            />
-          </svg>
-        </div>
+        {logoError ? (
+          <div
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: "50%",
+              background: "rgba(255,255,255,.08)",
+              border: "1px solid rgba(255,255,255,.18)",
+              flexShrink: 0,
+            }}
+            aria-hidden="true"
+          />
+        ) : (
+          <img
+            src="/images/embassy-of-pakistan-logo.png"
+            alt="Embassy of Pakistan logo"
+            style={{ height: 44, width: "auto", objectFit: "contain", flexShrink: 0 }}
+            onError={() => setLogoError(true)}
+          />
+        )}
         <div>
           <div
             style={{
