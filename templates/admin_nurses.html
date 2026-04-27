@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Admin Nurses Dashboard</title>
+  <link rel="stylesheet" href="/static/css/cwa-ui.css">
+</head>
+<body class="cwa-ui">
+  <header class="cwa-topbar">
+    <div class="cwa-shell">
+      <div class="cwa-logo-strip">Embassy of Pakistan, Kuwait · Community Welfare Wing</div>
+      <nav class="cwa-nav">
+        <a href="/admin/nurses">Nurses</a>
+        <a href="/admin/nurses/my-complaints">My Assigned Cases</a>
+        <a href="/dashboard">Main Dashboard</a>
+      </nav>
+      <a class="cwa-login" href="/login">Session</a>
+    </div>
+  </header>
+
+  <section class="admin-wrap">
+    <div class="cwa-shell">
+      <h1 style="margin:0 0 8px">Admin Nurses Dashboard</h1>
+      <div class="tabs">
+        <span class="tab">All Nurses</span>
+        <span class="tab">Pending Registrations</span>
+        <span class="tab">Accommodation</span>
+        <span class="tab">Complaints / Welfare</span>
+        <span class="tab">Leaving Notices</span>
+        <span class="tab">My Assigned Cases</span>
+        <span class="tab">Resolved / Closed</span>
+      </div>
+
+      <div id="kpi" class="kpi-grid"></div>
+
+      <div class="panel">
+        <h3 style="margin-top:0">Search / Filters</h3>
+        <div class="nurses-grid">
+          <input id="q" placeholder="Search name/passport/civil id/phone/complaint id">
+          <select id="status"><option value="">All Status</option><option>Submitted</option><option>Assigned</option><option>In Progress</option><option>Resolved</option><option>Closed</option></select>
+          <input id="category" placeholder="Request Type / Category">
+          <select id="assigned_to"><option value="">All Assigned Staff</option></select>
+        </div>
+        <div class="actions" style="margin-top:10px">
+          <button id="btnLoad">Load</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 style="margin-top:0">Complaints / Welfare Queue</h3>
+        <div style="overflow:auto">
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr><th style="text-align:left">Ref No.</th><th>Nurse Name</th><th>Passport / Civil ID</th><th>Type</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Last Updated</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+  async function api(url, opts){const r=await fetch(url,opts||{});return r.json();}
+  function statusBadge(v){
+    const x=(v||'').toLowerCase();
+    if(x.includes('submitted')) return '<span class="badge status-submitted">Submitted</span>';
+    if(x.includes('assigned')) return '<span class="badge status-assigned">Assigned</span>';
+    if(x.includes('progress')) return '<span class="badge status-progress">In Progress</span>';
+    if(x.includes('resolved')||x.includes('closed')) return '<span class="badge status-resolved">'+(v||'Resolved')+'</span>';
+    return '<span class="badge">'+(v||'N/A')+'</span>';
+  }
+  async function loadAssignees(){
+    const d=await api('/api/admin/nurses/complaint-assignees');
+    assigned_to.innerHTML='<option value="">All Assigned Staff</option>'+(d.items||[]).map(i=>'<option value="'+i.username+'">'+(i.display_name||i.username)+'</option>').join('');
+  }
+  async function loadData(){
+    const s=await api('/api/admin/nurses/summary');
+    const t=s.totals||{};
+    const cards=[['Total Nurses',t.total_registrations||0],['Pending Review',t.pending_registrations||0],['Accommodation Requests',t.accommodation_requests||0],['Open Complaints',t.open_complaints||0],['Assigned to Me',t.my_complaints||0],['Resolved',t.resolved_complaints||0]];
+    kpi.innerHTML=cards.map(c=>'<div class="kpi"><div class="lbl">'+c[0]+'</div><div class="val">'+c[1]+'</div></div>').join('');
+    const p=new URLSearchParams({page:'1',page_size:'50',search:q.value,status:status.value,category:category.value,assigned_to:assigned_to.value});
+    const c=await api('/api/admin/nurses/complaints?'+p.toString());
+    rows.innerHTML=(c.items||[]).map(r=>{
+      const ref=r.complaint_id||'';
+      const id=(r.passport_number||'')+' / '+(r.civil_id||'');
+      return '<tr><td>'+ref+'</td><td>'+(r.nurse_full_name||'')+'</td><td>'+id+'</td><td>'+(r.category||r.complaint_category||'')+'</td><td>'+(r.priority||'')+'</td><td>'+statusBadge(r.status||r.complaint_status||'')+'</td><td>'+(r.assigned_to_name||r.assigned_to_username||'')+'</td><td>'+((r.updated_at||'').slice(0,16))+'</td></tr>';
+    }).join('') || '<tr><td colspan="8" class="muted">No results</td></tr>';
+  }
+  btnLoad.onclick=loadData;
+  loadAssignees().then(loadData);
+  </script>
+</body>
+</html>
