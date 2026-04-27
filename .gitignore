@@ -1,0 +1,13 @@
+__pycache__/
+.pycache/
+*.pyc
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+backups/
+approval_uploads/
+note_verbal_uploads/
+.fuse_hidden*
+backup_onedrive.log
+*.docx
