@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { NursePortalGuard } from "../components/NursePortalGuard";
+import { addLocalPortalRequest, getNursePortalContext } from "../lib/nursePortal";
 import { useNavigate } from "react-router-dom";
 import { FormPage, SuccessState } from "../components/FormPage";
 import { Card, Grid } from "../components/Layout";
@@ -32,6 +34,7 @@ const CATEGORIES = [
 
 export function NursesComplaintPage() {
   const navigate = useNavigate();
+  const nurse = getNursePortalContext();
   const [form, setForm] = useState<FormState>({});
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -47,9 +50,9 @@ export function NursesComplaintPage() {
     setSubmitting(true);
     try {
       await api.post("/api/nurses/complaint", {
-        nurse_reference_id: (form.id || "").trim(),
-        passport_number: (form.id || "").trim(),
-        verifier: (form.phone || "").trim(),
+        nurse_reference_id: (nurse?.referenceId || form.id || "").trim(),
+        passport_number: (nurse?.passportNumber || form.id || "").trim(),
+        verifier: (nurse?.mobile || form.phone || "").trim(),
         complaint_category: (form.category || "").trim(),
         priority: (form.priority || "Normal").trim(),
         subject: (form.subject || "").trim(),
@@ -57,6 +60,7 @@ export function NursesComplaintPage() {
         preferred_contact_method: "WhatsApp",
         consent: true,
       });
+      addLocalPortalRequest({ type: "Complaint", summary: (form.subject || form.desc || "Complaint submitted").toString() });
       setSubmitted(true);
     } catch (err) {
       setError((err as Error).message);
@@ -66,6 +70,7 @@ export function NursesComplaintPage() {
   }
 
   return (
+    <NursePortalGuard next="complaint">
     <FormPage
       title="Complaint / Welfare Issue"
       subtitle="Report workplace grievances, administrative issues, or urgent welfare concerns"
@@ -182,5 +187,6 @@ export function NursesComplaintPage() {
         )}
       </Card>
     </FormPage>
+    </NursePortalGuard>
   );
 }

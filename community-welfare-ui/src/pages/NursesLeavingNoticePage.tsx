@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { NursePortalGuard } from "../components/NursePortalGuard";
+import { addLocalPortalRequest, getNursePortalContext } from "../lib/nursePortal";
 import { useNavigate } from "react-router-dom";
 import { FormPage, SuccessState } from "../components/FormPage";
 import { Card, Grid } from "../components/Layout";
@@ -21,6 +23,7 @@ interface FormState {
 
 export function NursesLeavingNoticePage() {
   const navigate = useNavigate();
+  const nurse = getNursePortalContext();
   const [form, setForm] = useState<FormState>({});
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -36,13 +39,14 @@ export function NursesLeavingNoticePage() {
     setSubmitting(true);
     try {
       await api.post("/api/nurses/leave-notice", {
-        nurse_reference_id: (form.id || "").trim(),
-        passport_number: (form.id || "").trim(),
+        nurse_reference_id: (nurse?.referenceId || form.id || "").trim(),
+        passport_number: (nurse?.passportNumber || form.id || "").trim(),
         current_facility: (form.current || "").trim(),
         room_number: "",
         intended_leaving_date: (form.date || "").trim(),
         reason: (form.reason || "").trim(),
       });
+      addLocalPortalRequest({ type: "Leaving Notice", summary: (form.reason || "Leaving notice submitted").toString() });
       setSubmitted(true);
     } catch (err) {
       setError((err as Error).message);
@@ -52,6 +56,7 @@ export function NursesLeavingNoticePage() {
   }
 
   return (
+    <NursePortalGuard next="leaving-notice">
     <FormPage
       title="Leaving Notice / Exit from Accommodation"
       subtitle="Submit official notification before vacating Embassy or hospital-provided accommodation"
@@ -133,5 +138,6 @@ export function NursesLeavingNoticePage() {
         )}
       </Card>
     </FormPage>
+    </NursePortalGuard>
   );
 }

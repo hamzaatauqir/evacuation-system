@@ -3,6 +3,7 @@ import { CwaHomePage } from "./pages/CwaHomePage";
 import { NursesHomePage } from "./pages/NursesHomePage";
 import { NursesRegisterPage } from "./pages/NursesRegisterPage";
 import { NursesLoginPage } from "./pages/NursesLoginPage";
+import { NursesPortalPage } from "./pages/NursesPortalPage";
 import { NursesAccommodationPage } from "./pages/NursesAccommodationPage";
 import { NursesComplaintPage } from "./pages/NursesComplaintPage";
 import { NursesLeavingNoticePage } from "./pages/NursesLeavingNoticePage";
@@ -20,6 +21,7 @@ export default function App() {
       <Route path="/nurses" element={<NursesHomePage />} />
       <Route path="/nurses/register" element={<NursesRegisterPage />} />
       <Route path="/nurses/login" element={<NursesLoginPage />} />
+      <Route path="/nurses/portal" element={<NursesPortalPage />} />
       <Route path="/nurses/accommodation" element={<NursesAccommodationPage />} />
       <Route path="/nurses/complaint" element={<NursesComplaintPage />} />
       <Route path="/nurses/leaving-notice" element={<NursesLeavingNoticePage />} />

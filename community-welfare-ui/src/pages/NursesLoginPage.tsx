@@ -1,214 +1,73 @@
 import { useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
-import { Section } from "../components/Layout";
-import { Card } from "../components/Layout";
 import { Btn } from "../components/Btn";
-import { Icon } from "../components/Icon";
-import { StatusBadge } from "../components/StatusBadge";
 import { NoticeCard } from "../components/NoticeCard";
-import { T } from "../lib/tokens";
 import { API_BASE, api } from "../lib/api";
-
-interface TrackResult {
-  ref: string;
-  name: string;
-  type: string;
-  status: "pending" | "processing" | "assigned" | "resolved";
-  updated: string;
-  note?: string;
-}
+import { buildPortalContextFromTrackResponse, setNursePortalContext } from "../lib/nursePortal";
 
 export function NursesLoginPage() {
-  const [id, setId] = useState("");
-  const [result, setResult] = useState<TrackResult | null>(null);
+  const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const [identity, setIdentity] = useState("");
+  const [verifier, setVerifier] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const next = params.get('next') || 'portal';
+
   async function lookup() {
-    if (!id.trim()) return;
+    if (!identity.trim() || !verifier.trim()) {
+      setError('Please provide identity and verifier details.');
+      return;
+    }
     setError("");
     setLoading(true);
     try {
-      const res = await api.post<{
-        success?: boolean;
-        error?: string;
-        ref?: string;
-        name?: string;
-        type?: string;
-        status?: TrackResult["status"];
-        updated?: string;
-        note?: string;
-      }>("/api/nurses/track", { identity: id.trim(), verifier: id.trim() });
-      if (res.success === false || res.error) {
-        setError(res.error || "No record found for that reference.");
-        setResult(null);
-      } else {
-        setResult({
-          ref: res.ref || id.trim(),
-          name: res.name || "—",
-          type: res.type || "Nurses Registration",
-          status: res.status || "processing",
-          updated: res.updated || new Date().toLocaleDateString(),
-          note: res.note,
-        });
+      const res = await api.post<{ success?: boolean; error?: string; data?: any }>("/api/nurses/track", {
+        identity: identity.trim(),
+        verifier: verifier.trim(),
+      });
+      if (!res.success || !res.data) {
+        setError(res.error || 'No matching registration found.');
+        return;
       }
+      const ctx = buildPortalContextFromTrackResponse(res.data);
+      setNursePortalContext(ctx);
+      const nextRoute = next === 'accommodation' ? '/nurses/accommodation' : next === 'complaint' ? '/nurses/complaint' : next === 'leaving-notice' ? '/nurses/leaving-notice' : '/nurses/portal';
+      navigate(nextRoute, { replace: true });
     } catch (err) {
-      // Backend may not be running yet — fall back to a clear message
-      setError(
-        (err as Error).message ||
-          `Could not reach the backend. Please confirm the server is running on ${API_BASE}.`
-      );
-      setResult(null);
+      setError((err as Error).message || `Could not reach backend at ${API_BASE}.`);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="fade-in" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+    <div className="fade-in" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <PublicHeader />
-      <section
-        style={{
-          background: "linear-gradient(160deg,#2D4A6B 0%,#3A6080 100%)",
-          padding: "56px 24px",
-        }}
-      >
-        <div style={{ maxWidth: 560, margin: "0 auto", textAlign: "center" }}>
-          <h1 style={{ fontSize: 28, fontWeight: 800, color: "#fff", marginBottom: 12 }}>
-            Track Your Application
-          </h1>
-          <p
-            style={{
-              fontSize: 14,
-              color: "rgba(255,255,255,.65)",
-              marginBottom: 28,
-            }}
-          >
-            Enter your reference number, passport number, or Civil ID to check your application status.
+      <main style={{ flex: 1, padding: 24, display: 'grid', placeItems: 'center' }}>
+        <div style={{ maxWidth: 700, width: '100%', background: '#fff', border: '1px solid #E3EBF0', borderRadius: 14, padding: 24 }}>
+          <h1 style={{ color: '#2D4A6B', marginBottom: 8 }}>Existing Nurse Login / Track Registration</h1>
+          <p style={{ color: '#5B6773', marginBottom: 16 }}>
+            Enter your registration reference/passport as identity and provide your mobile/CNIC/Civil ID as verifier.
           </p>
-          <div
-            style={{
-              display: "flex",
-              gap: 10,
-              background: "rgba(255,255,255,.1)",
-              padding: 8,
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,.15)",
-            }}
-          >
-            <input
-              className="f-input"
-              placeholder="Reference No., Passport No., or Civil ID"
-              value={id}
-              onChange={(e) => setId(e.target.value)}
-              style={{
-                flex: 1,
-                background: "transparent",
-                border: "none",
-                color: "#fff",
-                fontSize: 14,
-              }}
-              onKeyDown={(e) => e.key === "Enter" && lookup()}
-            />
-            <Btn variant="primary" onClick={lookup} disabled={loading}>
-              <Icon name="search" size={16} color="white" />
-              {loading ? "Searching…" : "Search"}
-            </Btn>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <label>
+              Identity (Reference or Passport)
+              <input className="f-input" value={identity} onChange={(e) => setIdentity(e.target.value)} placeholder="e.g. NUR-00001 or passport" />
+            </label>
+            <label>
+              Verifier (Mobile, Civil ID, or CNIC)
+              <input className="f-input" value={verifier} onChange={(e) => setVerifier(e.target.value)} placeholder="Enter verifier" />
+            </label>
           </div>
+          <div style={{ marginTop: 14 }}>
+            <Btn variant="primary" onClick={lookup} disabled={loading}>{loading ? 'Verifying…' : 'Login / Track'}</Btn>
+          </div>
+          {error ? <div style={{ marginTop: 14 }}><NoticeCard type="warning" title="Unable to login">{error}</NoticeCard></div> : null}
         </div>
-      </section>
-
-      <main style={{ flex: 1 }}>
-        <Section bg={T.bg}>
-          {result ? (
-            <div style={{ maxWidth: 560, margin: "0 auto" }} className="fade-in">
-              <Card>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "flex-start",
-                    marginBottom: 16,
-                  }}
-                >
-                  <div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: T.muted,
-                        fontWeight: 600,
-                        marginBottom: 4,
-                      }}
-                    >
-                      REFERENCE
-                    </div>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: T.navy }}>{result.ref}</div>
-                  </div>
-                  <StatusBadge
-                    type={result.status}
-                    label={result.status === "processing" ? "In Review" : result.status.charAt(0).toUpperCase() + result.status.slice(1)}
-                  />
-                </div>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 1fr",
-                    gap: 12,
-                    paddingTop: 16,
-                    borderTop: `1px solid ${T.borderLt}`,
-                  }}
-                >
-                  {[
-                    ["Applicant", result.name],
-                    ["Service Type", result.type],
-                    ["Last Updated", result.updated],
-                  ].map(([l, v]) => (
-                    <div key={l}>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: T.muted,
-                          fontWeight: 600,
-                          marginBottom: 3,
-                        }}
-                      >
-                        {l}
-                      </div>
-                      <div style={{ fontSize: 13, color: T.text, fontWeight: 600 }}>{v}</div>
-                    </div>
-                  ))}
-                </div>
-                {result.note && (
-                  <div style={{ marginTop: 16 }}>
-                    <NoticeCard type="info">{result.note}</NoticeCard>
-                  </div>
-                )}
-              </Card>
-            </div>
-          ) : error ? (
-            <div style={{ maxWidth: 560, margin: "0 auto" }}>
-              <NoticeCard type="warning" title="No result">
-                {error}
-              </NoticeCard>
-            </div>
-          ) : (
-            <div
-              style={{
-                maxWidth: 560,
-                margin: "0 auto",
-                textAlign: "center",
-                padding: "40px 0",
-                color: T.muted,
-              }}
-            >
-              <Icon name="search" size={40} color={T.border} />
-              <div style={{ fontSize: 14, marginTop: 14, color: T.muted }}>
-                Enter your application details above to check status.
-              </div>
-            </div>
-          )}
-        </Section>
       </main>
       <PageFooter />
     </div>

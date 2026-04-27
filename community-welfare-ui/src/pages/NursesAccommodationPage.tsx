@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { NursePortalGuard } from "../components/NursePortalGuard";
+import { addLocalPortalRequest, getNursePortalContext } from "../lib/nursePortal";
 import { useNavigate } from "react-router-dom";
 import { FormPage, SuccessState } from "../components/FormPage";
 import { Card, Grid } from "../components/Layout";
@@ -23,6 +25,7 @@ interface FormState {
 
 export function NursesAccommodationPage() {
   const navigate = useNavigate();
+  const nurse = getNursePortalContext();
   const [form, setForm] = useState<FormState>({});
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -38,12 +41,13 @@ export function NursesAccommodationPage() {
     setSubmitting(true);
     try {
       await api.post("/api/nurses/accommodation", {
-        nurse_reference_id: (form.id || "").trim(),
-        passport_number: (form.id || "").trim(),
+        nurse_reference_id: (nurse?.referenceId || form.id || "").trim(),
+        passport_number: (nurse?.passportNumber || form.id || "").trim(),
         current_accommodation_status: (form.currentAcc || "").trim(),
         requested_facility: (form.reqType || "").trim(),
         reason_remarks: (form.details || "").trim(),
       });
+      addLocalPortalRequest({ type: "Accommodation", summary: (form.details || "Accommodation request submitted").toString() });
       setSubmitted(true);
     } catch (err) {
       setError((err as Error).message);
@@ -102,6 +106,7 @@ export function NursesAccommodationPage() {
   );
 
   return (
+    <NursePortalGuard next="accommodation">
     <FormPage
       title="Accommodation Request"
       subtitle="Submit requests for MOH or private hospital accommodation-related facilitation"
@@ -214,5 +219,6 @@ export function NursesAccommodationPage() {
         )}
       </Card>
     </FormPage>
+    </NursePortalGuard>
   );
 }
