@@ -1,0 +1,10 @@
+# Core deps for Render.
+# MOFA approval PDF: text-layer PDFs need pypdf (searchable PDFs).
+pypdf>=4.0.0
+PyMuPDF>=1.24.0
+
+# OCR for scanned/image-based PDFs (MOFA Note Verbal uploads).
+# System deps (tesseract-ocr, poppler-utils) installed via Aptfile.
+Pillow>=10.0.0
+pytesseract>=0.3.10
+pdf2image>=1.16.0

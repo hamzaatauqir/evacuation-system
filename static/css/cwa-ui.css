@@ -1,0 +1,102 @@
+:root{
+  --cwa-navy:#002147;
+  --cwa-navy-dark:#001530;
+  --cwa-green:#106e09;
+  --cwa-bg:#f6f9ff;
+  --cwa-surface:#ffffff;
+  --cwa-surface-low:#eef4fd;
+  --cwa-text:#151c22;
+  --cwa-muted:#44474e;
+  --cwa-border:#c4c6cf;
+  --cwa-shadow:0 4px 12px rgba(0,0,0,0.05);
+}
+*{box-sizing:border-box}
+body.cwa-ui{
+  margin:0;
+  font-family:"Public Sans",system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  background:var(--cwa-bg);
+  color:var(--cwa-text);
+}
+.cwa-shell{max-width:1200px;margin:0 auto;padding:0 24px}
+.cwa-topbar{background:var(--cwa-navy);color:#fff;border-bottom:1px solid rgba(255,255,255,.1)}
+.cwa-topbar .cwa-shell{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:72px;flex-wrap:wrap}
+.cwa-logo-strip{background:#fff;color:var(--cwa-navy);border:1px solid var(--cwa-border);border-radius:4px;font-size:11px;padding:6px 10px;font-weight:600}
+.cwa-nav{display:flex;gap:16px;flex-wrap:wrap}
+.cwa-nav a{color:#dbeafe;text-decoration:none;font-size:14px}
+.cwa-nav a:hover{color:#fff}
+.cwa-login{display:inline-block;background:var(--cwa-green);color:#fff;text-decoration:none;padding:9px 13px;border-radius:9px;font-weight:600}
+.cwa-hero{background:linear-gradient(135deg,var(--cwa-navy),var(--cwa-navy-dark));color:#fff;padding:56px 0}
+.cwa-hero-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:24px;align-items:stretch}
+.cwa-kicker{font-size:14px;color:#dbeafe}
+.cwa-hero h1{font-size:40px;line-height:48px;margin:8px 0;font-weight:700}
+.cwa-hero p{font-size:16px;line-height:24px;color:#dbeafe}
+.cwa-notice{margin-top:14px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.25);padding:11px 12px;border-radius:11px}
+.cwa-visual{background:linear-gradient(145deg,#9adbe8,#2d6f89);border-radius:14px;box-shadow:var(--cwa-shadow);min-height:240px;display:flex;align-items:center;justify-content:center;color:#fff;text-align:center;padding:14px}
+.cwa-section{padding:40px 0}
+.cwa-section h2{font-size:32px;line-height:40px;margin:0 0 14px}
+.cwa-service-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.cwa-card{background:var(--cwa-surface);border:1px solid #e9ecef;border-radius:12px;box-shadow:var(--cwa-shadow);padding:18px;display:flex;flex-direction:column;min-height:230px;transition:all .16s ease}
+.cwa-card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.08)}
+.cwa-card h3{font-size:24px;line-height:32px;margin:8px 0}
+.cwa-card p{font-size:16px;line-height:24px;color:var(--cwa-muted)}
+.cwa-btn{margin-top:auto;display:inline-block;text-decoration:none;text-align:center;padding:10px 12px;border-radius:9px;font-weight:600}
+.cwa-btn.primary{background:var(--cwa-green);color:#fff;border:1px solid var(--cwa-green)}
+.cwa-btn.secondary{background:#fff;color:var(--cwa-navy);border:1px solid var(--cwa-navy)}
+.cwa-process{background:var(--cwa-surface-low);border:1px solid #d9e4f5;border-radius:12px;padding:20px}
+.cwa-process-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.cwa-step{background:#fff;border:1px solid var(--cwa-border);border-radius:11px;padding:10px;box-shadow:var(--cwa-shadow)}
+.cwa-help{margin-top:16px;background:var(--cwa-navy);color:#fff;border-radius:12px;padding:20px;box-shadow:var(--cwa-shadow)}
+.cwa-help a{color:#dcfce7}
+.cwa-footer{padding:22px 0;color:var(--cwa-muted)}
+.cwa-footer-links{display:flex;gap:12px;flex-wrap:wrap}
+.cwa-footer-links a{text-decoration:none;color:#475569;font-size:14px}
+
+.nurses-register-wrap{padding:30px 0}
+.nurses-layout{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-top:16px}
+.nurses-form-card,.nurses-sidebar-card{background:#fff;border:1px solid var(--cwa-border);border-radius:12px;box-shadow:var(--cwa-shadow)}
+.nurses-form-card{padding:16px}
+.nurses-sidebar-card{padding:14px}
+.nurses-stepper{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.nurses-step{background:var(--cwa-surface-low);border:1px solid var(--cwa-border);border-radius:10px;padding:8px}
+.nurses-step b{display:block;color:var(--cwa-navy);font-size:13px}
+.nurses-step span{font-size:12px;color:var(--cwa-muted)}
+.nurses-step.active{border-color:var(--cwa-green);box-shadow:inset 0 0 0 1px var(--cwa-green);background:#f0fdf4}
+.nurses-pane{display:none}
+.nurses-pane.active{display:block}
+.nurses-sec{background:#fff;border:1px solid #e9ecef;border-radius:12px;padding:14px;margin-bottom:10px}
+.nurses-sec h3{margin:0 0 10px;font-size:24px;line-height:32px}
+.nurses-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{display:block;margin:8px 0 5px;font-size:14px;font-weight:600}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--cwa-border);border-radius:8px;background:#fff;color:var(--cwa-text);font:inherit}
+button{padding:10px 12px;border-radius:9px;border:1px solid var(--cwa-green);background:var(--cwa-green);color:#fff;cursor:pointer;font-weight:600}
+.btn-outline{display:inline-block;text-decoration:none;padding:10px 12px;border-radius:9px;border:1px solid var(--cwa-navy);color:var(--cwa-navy);background:#fff}
+.inline-error{display:none;color:#b91c1c;background:#fee2e2;border:1px solid #fecaca;padding:8px;border-radius:8px;margin-bottom:8px}
+.muted{color:var(--cwa-muted);font-size:13px}
+.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+.admin-wrap{padding:24px 0}
+.kpi-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+.kpi{background:#fff;border:1px solid #e9ecef;border-radius:11px;padding:12px;box-shadow:var(--cwa-shadow)}
+.kpi .lbl{font-size:11px;color:#64748b;text-transform:uppercase}
+.kpi .val{font-size:20px;font-weight:700;color:#0b3d2e}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.tab{background:#fff;border:1px solid #cbd5e1;border-radius:999px;padding:6px 10px;font-size:12px}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;border:1px solid #cbd5e1}
+.badge.status-submitted{background:#dbeafe;color:#1d4ed8;border-color:#bfdbfe}
+.badge.status-assigned{background:#fef3c7;color:#92400e;border-color:#fde68a}
+.badge.status-progress{background:#cffafe;color:#0e7490;border-color:#a5f3fc}
+.badge.status-resolved{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+.panel{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;box-shadow:var(--cwa-shadow);margin-bottom:12px}
+
+@media(max-width:1024px){
+  .cwa-service-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .cwa-process-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .nurses-layout{grid-template-columns:1fr}
+  .nurses-stepper{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media(max-width:640px){
+  .cwa-shell{padding:0 14px}
+  .cwa-hero-grid,.cwa-service-grid,.cwa-process-grid,.nurses-grid,.nurses-stepper,.kpi-grid{grid-template-columns:1fr}
+  .cwa-hero h1{font-size:30px;line-height:38px}
+}
