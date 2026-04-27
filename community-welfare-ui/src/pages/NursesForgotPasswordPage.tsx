@@ -16,7 +16,7 @@ export function NursesForgotPasswordPage() {
     setError("");
     setMessage("");
     if (!identity.trim()) {
-      setError("Please enter your registered email, passport number, or Civil ID.");
+      setError("Please enter your registered email or passport number (or Civil ID if you have one).");
       return;
     }
     setLoading(true);
@@ -39,11 +39,11 @@ export function NursesForgotPasswordPage() {
         <div style={{ maxWidth: 440, width: "100%", background: "#fff", border: "1px solid #E3EBF0", borderRadius: 14, padding: 28 }}>
           <h1 style={{ color: "#2D4A6B", marginBottom: 8, fontSize: 22 }}>Forgot password</h1>
           <p style={{ color: "#5B6773", marginBottom: 18, fontSize: 14, lineHeight: 1.65 }}>
-            Enter the email, passport number, or Civil ID associated with your nurse registration. If we find a
-            match, we will email reset instructions to the address on file.
+            Enter the email or passport number associated with your nurse registration (or Civil ID if you have one on
+            file). If we find a match, we will email reset instructions to the address on file.
           </p>
           <label style={{ display: "block", marginBottom: 14, fontSize: 13 }}>
-            Email / Passport / Civil ID
+            Email or passport (Civil ID if issued)
             <input className="f-input" value={identity} onChange={(e) => setIdentity(e.target.value)} />
           </label>
           <Btn variant="primary" onClick={submit} disabled={loading}>

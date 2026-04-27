@@ -128,3 +128,198 @@ textarea.f-input { resize: vertical; min-height: 90px; }
 @media (min-width: 769px) {
   .show-mobile { display: none !important; }
 }
+
+/* ── Public site header (white bar; heroes stay blue/slate below) ───────── */
+.cwa-public-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: #ffffff;
+  border-bottom: 2px solid var(--green);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.06);
+}
+.cwa-public-header__inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 68px;
+}
+@media (max-width: 768px) {
+  .cwa-public-header__inner {
+    min-height: 58px;
+    padding: 0 16px;
+  }
+}
+.cwa-public-header__brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0;
+  flex-shrink: 0;
+  text-decoration: none;
+  color: inherit;
+}
+.cwa-public-header__logo {
+  width: auto;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+}
+@media (min-width: 769px) {
+  .cwa-public-header__logo {
+    height: clamp(56px, 4.5vw, 70px);
+  }
+}
+@media (max-width: 768px) {
+  .cwa-public-header__logo {
+    height: clamp(44px, 11vw, 52px);
+  }
+}
+.cwa-public-header__logo-fallback {
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--surface-low);
+  border: 1px solid var(--border-lt);
+}
+@media (min-width: 769px) {
+  .cwa-public-header__logo-fallback {
+    width: 56px;
+    height: 56px;
+  }
+}
+@media (max-width: 768px) {
+  .cwa-public-header__logo-fallback {
+    width: 44px;
+    height: 44px;
+  }
+}
+.cwa-public-header__titles {
+  text-align: left;
+  min-width: 0;
+}
+.cwa-public-header__gov {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.cwa-public-header__embassy {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--navy);
+  line-height: 1.2;
+}
+.cwa-public-header__wing {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.cwa-public-header__nav {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.cwa-public-header__nav-link {
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--navy);
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease;
+  border: 1px solid transparent;
+}
+.cwa-public-header__nav-link:hover {
+  background: rgba(45, 74, 107, 0.07);
+  color: var(--navy-dark);
+}
+.cwa-public-header__nav-link.is-active {
+  background: #e8edf4;
+  color: var(--navy-dark);
+  border-color: rgba(45, 74, 107, 0.12);
+}
+.cwa-public-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.cwa-public-header__menu-btn {
+  background: var(--surface-low);
+  border: 1px solid var(--border-lt);
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--navy);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.cwa-public-header__menu-btn:hover {
+  background: #e2e8f0;
+  border-color: var(--border);
+}
+.cwa-public-header__drawer {
+  background: #fafbfc;
+  padding: 8px 16px 16px;
+  border-top: 1px solid var(--border-lt);
+}
+.cwa-public-header__drawer-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--navy);
+  text-decoration: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.cwa-public-header__drawer-link:hover {
+  background: rgba(45, 74, 107, 0.08);
+}
+.cwa-public-header__drawer-link.is-active {
+  background: #e8edf4;
+  color: var(--navy-dark);
+}
+
+/* Admin top bar — same white treatment for embassy logo clarity */
+.cwa-admin-topbar {
+  background: #ffffff;
+  border-bottom: 2px solid var(--green);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06), 0 6px 20px rgba(15, 23, 42, 0.05);
+}
+.cwa-admin-topbar__logo {
+  height: 44px;
+  width: auto;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+@media (min-width: 769px) {
+  .cwa-admin-topbar__logo {
+    height: clamp(48px, 3vw, 56px);
+  }
+}
+.cwa-admin-topbar__logo-fallback {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: var(--surface-low);
+  border: 1px solid var(--border-lt);
+  flex-shrink: 0;
+}

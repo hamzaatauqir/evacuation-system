@@ -13,7 +13,7 @@ import { T } from "../lib/tokens";
 export function NursesHomePage() {
   const navigate = useNavigate();
   const steps = [
-    { title: "Register / Login", desc: "Create or access your account using your Civil ID and Passport." },
+    { title: "Register / Login", desc: "Create or access your account with your email and passport (Civil ID when available)." },
     { title: "Submit Request", desc: "Use services from inside your nurse portal." },
     { title: "Embassy Review", desc: "Community Welfare Wing officers verify your information." },
     { title: "Track Status", desc: "Receive updates in your nurse portal dashboard." },

@@ -15,45 +15,34 @@ function AdminHeader() {
   const [logoError, setLogoError] = useState(false);
   return (
     <header
+      className="cwa-admin-topbar"
       style={{
-        background: T.navy,
-        height: 58,
+        minHeight: 58,
         display: "flex",
         alignItems: "center",
         padding: "0 24px",
-        borderBottom: "1px solid rgba(255,255,255,.08)",
         position: "sticky",
         top: 0,
         zIndex: 100,
         flexShrink: 0,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
         {logoError ? (
-          <div
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: "50%",
-              background: "rgba(255,255,255,.08)",
-              border: "1px solid rgba(255,255,255,.18)",
-              flexShrink: 0,
-            }}
-            aria-hidden="true"
-          />
+          <div className="cwa-admin-topbar__logo-fallback" aria-hidden="true" />
         ) : (
           <img
             src="/images/embassy-of-pakistan-logo.png"
             alt="Embassy of Pakistan logo"
-            style={{ height: 44, width: "auto", objectFit: "contain", flexShrink: 0 }}
+            className="cwa-admin-topbar__logo"
             onError={() => setLogoError(true)}
           />
         )}
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div
             style={{
               fontSize: 10,
-              color: "rgba(255,255,255,.4)",
+              color: T.muted,
               fontWeight: 600,
               letterSpacing: ".06em",
               textTransform: "uppercase",
@@ -61,15 +50,11 @@ function AdminHeader() {
           >
             Government of Pakistan
           </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>
-            Embassy of Pakistan, Kuwait
-          </div>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", fontWeight: 500 }}>
-            Admin — Community Welfare Wing
-          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.navy }}>Embassy of Pakistan, Kuwait</div>
+          <div style={{ fontSize: 10, color: T.mutedLt, fontWeight: 500 }}>Admin — Community Welfare Wing</div>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 14, alignItems: "center", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div
             style={{
@@ -85,27 +70,37 @@ function AdminHeader() {
             <Icon name="user" size={15} color="white" />
           </div>
           <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#fff" }}>Officer Khalid</div>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)" }}>Welfare Officer</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: T.navy }}>Officer Khalid</div>
+            <div style={{ fontSize: 10, color: T.muted }}>Welfare Officer</div>
           </div>
         </div>
         <button
+          type="button"
           onClick={() => navigate("/")}
           style={{
-            background: "rgba(255,255,255,.1)",
-            border: "1px solid rgba(255,255,255,.15)",
-            color: "rgba(255,255,255,.8)",
-            padding: "5px 12px",
-            borderRadius: 6,
+            background: T.surfaceLow,
+            border: `1px solid ${T.borderLt}`,
+            color: T.navy,
+            padding: "6px 12px",
+            borderRadius: 8,
             fontSize: 12,
             fontWeight: 600,
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
             gap: 6,
+            transition: "background .15s, border-color .15s",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "#e2e8f0";
+            e.currentTarget.style.borderColor = T.border;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = T.surfaceLow;
+            e.currentTarget.style.borderColor = T.borderLt;
           }}
         >
-          <Icon name="logout" size={14} color="rgba(255,255,255,.7)" />
+          <Icon name="logout" size={14} color={T.muted} />
           Logout
         </button>
       </div>

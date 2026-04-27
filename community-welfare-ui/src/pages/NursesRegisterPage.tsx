@@ -199,7 +199,12 @@ export function NursesRegisterPage() {
                       options={["Female", "Male", "Other"]}
                     />
                     <FInput label="Passport Number" req {...inp("passport")} placeholder="e.g. AK1234567" />
-                    <FInput label="Civil ID Number" req {...inp("civilId")} placeholder="e.g. 285-123-456-7" />
+                    <FInput
+                      label="Civil ID Number (optional)"
+                      hint="Leave blank if not yet issued."
+                      {...inp("civilId")}
+                      placeholder="e.g. 285-123-456-7"
+                    />
                     <FInput label="CNIC (Pakistan National ID)" req {...inp("cnic")} placeholder="13-digit CNIC" />
                     <FSelect
                       label="Nationality"
@@ -339,7 +344,7 @@ export function NursesRegisterPage() {
                   </h3>
                   <p style={{ fontSize: 13, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
                     Create a password for your Nurse Portal (minimum 8 characters, at least one letter and one
-                    number). You will use this with your email or passport or Civil ID to sign in.
+                    number). You will sign in with your email or passport number (or Civil ID if you add one later).
                   </p>
                   <label style={{ display: "block", marginBottom: 12, fontSize: 13 }}>
                     Password
@@ -429,7 +434,7 @@ export function NursesRegisterPage() {
                           }>("/api/nurses/register", {
                             full_name: form.fullName,
                             passport_number: form.passport,
-                            civil_id: form.civilId,
+                            civil_id: (form.civilId || "").trim(),
                             cnic: form.cnic,
                             mobile: form.phone,
                             email: form.email,

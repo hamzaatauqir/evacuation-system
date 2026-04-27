@@ -20,7 +20,7 @@ export function NursesLoginPage() {
 
   async function login() {
     if (!identity.trim() || !password) {
-      setError("Please enter your email or passport or Civil ID and your password.");
+      setError("Please enter your email or passport number and your password.");
       return;
     }
     setError("");
@@ -72,16 +72,17 @@ export function NursesLoginPage() {
         >
           <h1 style={{ color: "#2D4A6B", marginBottom: 6, fontSize: 22 }}>Nurse Portal Login</h1>
           <p style={{ color: "#5B6773", marginBottom: 20, fontSize: 14, lineHeight: 1.6 }}>
-            Sign in with the email, passport number, or Civil ID you used at registration, and your password.
+            Sign in with the email or passport number you used at registration (or your Civil ID if you have one on
+            file), and your password.
           </p>
           <label style={{ display: "block", marginBottom: 12, fontSize: 13, color: "#334155" }}>
-            Email / Passport / Civil ID
+            Email or passport (Civil ID if issued)
             <input
               className="f-input"
               value={identity}
               onChange={(e) => setIdentity(e.target.value)}
               autoComplete="username"
-              placeholder="Registered email or document number"
+              placeholder="Email or passport (Civil ID if issued)"
             />
           </label>
           <label style={{ display: "block", marginBottom: 8, fontSize: 13, color: "#334155" }}>

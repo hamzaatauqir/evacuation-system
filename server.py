@@ -3280,7 +3280,10 @@ def _find_nurse_by_login_identity(db, identity_raw):
     return db.execute(
         """SELECT * FROM nurse_registrations WHERE
             UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = ?
-            OR REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(civil_id,''))), '-', ''), ' ', ''), '_', '') = ?
+            OR (
+                TRIM(COALESCE(civil_id,'')) != ''
+                AND REPLACE(REPLACE(REPLACE(UPPER(TRIM(civil_id)), '-', ''), ' ', ''), '_', '') = ?
+            )
             OR REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(cnic,''))), '-', ''), ' ', ''), '_', '') = ?
             ORDER BY id DESC LIMIT 1""",
         [ppn, nid, nid]
@@ -3317,7 +3320,7 @@ def api_nurse_register(data):
     full_name = (data.get('full_name') or '').strip()
     passport = _nurse_normalize_passport(data.get('passport_number') or '')
     cnic = (data.get('cnic') or '').strip()
-    civil_id = (data.get('civil_id') or '').strip()
+    civil_id = (data.get('civil_id') or '').strip()  # optional — new arrivals may not have Civil ID yet
     mobile = (data.get('mobile') or '').strip()
     arrival_date = (data.get('arrival_date') or '').strip()
     batch_number = (data.get('batch_number') or '').strip()
@@ -3341,8 +3344,11 @@ def api_nurse_register(data):
     try:
         conds = ['UPPER(REPLACE(TRIM(COALESCE(passport_number,\'\')), \' \', \'\')) = ?']
         vals = [passport]
+        # Duplicate civil ID only when the applicant provided one (ignore blank / not-yet-issued)
         if civil_key:
-            conds.append("REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(civil_id,''))), '-', ''), ' ', ''), '_', '') = ?")
+            conds.append(
+                "(TRIM(COALESCE(civil_id,'')) != '' AND REPLACE(REPLACE(REPLACE(UPPER(TRIM(civil_id)), '-', ''), ' ', ''), '_', '') = ?)"
+            )
             vals.append(civil_key)
         if cnic_key:
             conds.append("REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(cnic,''))), '-', ''), ' ', ''), '_', '') = ?")

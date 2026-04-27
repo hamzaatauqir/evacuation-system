@@ -180,7 +180,7 @@ export function NursesPortalPage() {
                   <Field label="Name" value={ctx.fullName || "-"} />
                   <Field label="Email" value={ctx.email || "-"} />
                   <Field label="Passport" value={ctx.passportMasked || "-"} />
-                  <Field label="Civil ID" value={ctx.civilIdMasked || "-"} />
+                  <Field label="Civil ID (if any)" value={ctx.civilIdMasked || "—"} />
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
                 </div>
