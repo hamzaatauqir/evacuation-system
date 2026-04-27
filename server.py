@@ -13349,6 +13349,14 @@ loadBatch();
 # HTTP SERVER
 # ═══════════════════════════════════════════════════════════════
 class Handler(http.server.BaseHTTPRequestHandler):
+    CORS_ALLOWED_ORIGINS = {
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'https://cwakuwait.com',
+        'https://www.cwakuwait.com',
+        'https://community-welfare-ui.onrender.com',
+    }
+
     def handle_one_request(self):
         try:
             return super().handle_one_request()
@@ -13376,14 +13384,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Referrer-Policy', 'strict-origin-when-cross-origin')
         self.send_header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
 
+    def _cors_origin(self):
+        origin = (self.headers.get('Origin') or '').strip()
+        if origin in self.CORS_ALLOWED_ORIGINS:
+            return origin
+        return None
+
+    def _cors_headers_if_api(self):
+        path = urlparse(getattr(self, 'path', '')).path
+        if not path.startswith('/api/'):
+            return
+        origin = self._cors_origin()
+        if not origin:
+            return
+        self.send_header('Access-Control-Allow-Origin', origin)
+        self.send_header('Vary', 'Origin')
+        self.send_header('Access-Control-Allow-Credentials', 'true')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+
     def send_json(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', len(body))
         self._security_headers()
+        self._cors_headers_if_api()
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        path = urlparse(self.path).path
+        if not path.startswith('/api/'):
+            self.send_response(204)
+            self._security_headers()
+            self.end_headers()
+            return
+        self.send_response(204)
+        self._security_headers()
+        self._cors_headers_if_api()
+        self.end_headers()
 
     def send_html(self, html, status=200):
         body = html.encode()
@@ -13458,6 +13498,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_file(target, 'text/css; charset=utf-8')
             elif path.endswith('.js'):
                 self.send_file(target, 'application/javascript; charset=utf-8')
+            elif path.endswith('.jpg') or path.endswith('.jpeg'):
+                self.send_file(target, 'image/jpeg')
+            elif path.endswith('.png'):
+                self.send_file(target, 'image/png')
+            elif path.endswith('.webp'):
+                self.send_file(target, 'image/webp')
+            elif path.endswith('.svg'):
+                self.send_file(target, 'image/svg+xml')
             else:
                 self.send_json({'success': False, 'error': 'Unsupported static type'}, 415)
             return
@@ -13658,19 +13706,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/nurses/register/success':
             self.send_html(NURSES_REGISTER_SUCCESS_PAGE)
         elif path in ('/nurses/track', '/nurses/login'):
-            self.send_html(NURSES_TRACK_PAGE)
+            if not self.render_template('nurses_login.html'):
+                self.send_html(NURSES_TRACK_PAGE)
         elif path == '/nurses/accommodation':
-            self.send_html(NURSES_ACCOMMODATION_PAGE)
+            if not self.render_template('nurses_accommodation.html'):
+                self.send_html(NURSES_ACCOMMODATION_PAGE)
         elif path == '/nurses/complaint':
-            self.send_html(NURSES_COMPLAINT_PAGE)
+            if not self.render_template('nurses_complaint.html'):
+                self.send_html(NURSES_COMPLAINT_PAGE)
         elif path in ('/nurses/leave-notice', '/nurses/leaving-notice'):
-            self.send_html(NURSES_LEAVE_NOTICE_PAGE)
-        elif path == '/legal-opf':
-            self.send_html(LEGAL_CASE_PUBLIC_PAGE)
+            if not self.render_template('nurses_leaving_notice.html'):
+                self.send_html(NURSES_LEAVE_NOTICE_PAGE)
+        elif path in ('/legal-opf', '/legal-cases'):
+            if not self.render_template('legal_opf.html'):
+                self.send_html(LEGAL_CASE_PUBLIC_PAGE)
         elif path == '/legal-opf/track' or path == '/legal-cases/track':
             self.send_html(LEGAL_CASE_TRACK_PAGE)
         elif path == '/death-cases':
-            self.send_html(DEATH_CASE_PUBLIC_PAGE)
+            if not self.render_template('death_cases.html'):
+                self.send_html(DEATH_CASE_PUBLIC_PAGE)
         elif path == '/death-cases/track':
             self.send_html(DEATH_CASE_TRACK_PAGE)
         elif path == '/dashboard':
@@ -13704,13 +13758,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] not in ('admin', 'operator'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(ADMIN_LEGAL_OPF_COMING_SOON_PAGE)
+            if not self.render_template('admin_legal_cases.html'):
+                self.send_html(ADMIN_LEGAL_OPF_COMING_SOON_PAGE)
         elif path == '/admin/death-cases':
             user = self.require_auth()
             if not user: return
             if user['role'] not in ('admin', 'operator'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(ADMIN_DEATH_CASES_COMING_SOON_PAGE)
+            if not self.render_template('admin_death_cases.html'):
+                self.send_html(ADMIN_DEATH_CASES_COMING_SOON_PAGE)
         elif path == '/fee-collection':
             user = self.require_auth()
             if not user: return
