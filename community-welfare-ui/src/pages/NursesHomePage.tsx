@@ -1,14 +1,13 @@
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { PublicHeader } from "../components/PublicHeader";
 import { HeroCarousel } from "../components/HeroCarousel";
 import { NoticeCard } from "../components/NoticeCard";
 import { ServiceCard } from "../components/ServiceCard";
-import { Section, SecTitle, Card } from "../components/Layout";
+import { Section, SecTitle } from "../components/Layout";
 import { ProcessSteps } from "../components/ProcessSteps";
 import { ContactCard } from "../components/ContactCard";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
-import { Icon } from "../components/Icon";
 import { T } from "../lib/tokens";
 
 export function NursesHomePage() {
@@ -18,12 +17,6 @@ export function NursesHomePage() {
     { title: "Submit Request", desc: "Use services from inside your nurse portal." },
     { title: "Embassy Review", desc: "Community Welfare Wing officers verify your information." },
     { title: "Track Status", desc: "Receive updates in your nurse portal dashboard." },
-  ];
-
-  const locked = [
-    { key: 'accommodation', title: 'Accommodation Request', to: '/nurses/login?next=accommodation' },
-    { key: 'complaint', title: 'Complaint / Welfare Issue', to: '/nurses/login?next=complaint' },
-    { key: 'leaving-notice', title: 'Leaving Notice / Exit', to: '/nurses/login?next=leaving-notice' },
   ];
 
   return (
@@ -44,12 +37,12 @@ export function NursesHomePage() {
               <span style={{ color: "#9cf987" }}>Registration Portal</span>
             </h1>
             <p style={{ fontSize: 14, color: "rgba(255,255,255,.68)", maxWidth: 460, lineHeight: 1.75, marginBottom: 22 }}>
-              Register first, then login/track your registration to access accommodation requests,
-              welfare complaints, and leaving notices inside your personal nurse dashboard.
+              Register first, then log in or track your registration to use your personal nurse portal for
+              Community Welfare Wing services and updates.
             </p>
             <NoticeCard type="info">
-              <strong>Important:</strong> Accommodation requests, welfare complaints, and leaving notices are
-              available inside the nurse portal after registration/login.
+              <strong>Important:</strong> After you register and verify your login, requests, welfare matters, and
+              Embassy messages are handled inside the secure nurse portal only.
             </NoticeCard>
           </div>
           <div style={{ flex: "1 1 300px", maxWidth: 420 }}>
@@ -63,25 +56,22 @@ export function NursesHomePage() {
           <SecTitle title="Nurses Public Access" sub="Start from registration or login/track to continue into your nurse portal." center />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(255px,1fr))', gap: 18 }}>
             <ServiceCard icon="user-add" title="New Nurses Registration" desc="Initial registration for newly arrived Pakistani nursing staff in Kuwait." cta="Register Now" ctaVariant="primary" accent={T.green} onClick={() => navigate('/nurses/register')} />
-            <ServiceCard icon="user" title="Existing Nurse Login / Track Registration" desc="Login and open your nurse portal dashboard for requests and tracking." cta="Login / Track" ctaVariant="navy" accent={T.navy} onClick={() => navigate('/nurses/login')} />
+            <ServiceCard icon="user" title="Existing Nurse Login / Track Registration" desc="Login and open your nurse portal dashboard for requests and tracking." cta="Open Nurse Portal" ctaVariant="navy" accent={T.navy} onClick={() => navigate('/nurses/login')} />
           </div>
         </Section>
 
         <Section bg={T.surfaceLow}>
-          <SecTitle title="Services Available Inside Nurse Portal" sub="These services require registration/login verification." center />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))', gap: 14 }}>
-            {locked.map((s) => (
-              <Card key={s.key} style={{ borderTop: '3px solid #94a3b8' }}>
-                <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 }}>
-                  <Icon name="info" size={16} color="#64748b" />
-                  <strong style={{ color: '#334155' }}>{s.title}</strong>
-                </div>
-                <p style={{ color: '#64748b', fontSize: 13, marginBottom: 12 }}>
-                  Available after login/track verification inside nurse portal.
-                </p>
-                <Link to={s.to}><Btn variant="light">Login to Access</Btn></Link>
-              </Card>
-            ))}
+          <SecTitle
+            title="Services available inside Nurse Portal"
+            sub="After registration/login, nurses can submit requests, view Embassy messages, and track updates from one secure portal."
+            center
+          />
+          <div style={{ maxWidth: 640, margin: "0 auto", textAlign: "center" }}>
+            <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+              <Btn variant="navy" onClick={() => navigate("/nurses/login")}>
+                Open Nurse Portal
+              </Btn>
+            </div>
           </div>
         </Section>
 

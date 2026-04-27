@@ -11,7 +11,9 @@ export type NurseComplaintItem = {
 
 export type NursePortalContext = {
   referenceId: string;
+  nurseDbId?: number;
   fullName: string;
+  email: string;
   passportMasked: string;
   civilIdMasked: string;
   passportNumber: string;
@@ -22,6 +24,8 @@ export type NursePortalContext = {
   lastUpdated: string;
   remarks: string;
   complaints: NurseComplaintItem[];
+  /** Opaque marker from server after password login (not a secret session token). */
+  sessionMarker?: string;
 };
 
 export type LocalPortalRequest = {
@@ -52,29 +56,43 @@ function readJson<T>(key: string): T | null {
   }
 }
 
-export function getNursePortalContext(): NursePortalContext | null {
+export function getNursePortal(): NursePortalContext | null {
   if (typeof window === 'undefined') return null;
   return readJson<NursePortalContext>(SESSION_KEY);
 }
 
-export function setNursePortalContext(ctx: NursePortalContext) {
+export function setNursePortal(ctx: NursePortalContext) {
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(ctx));
 }
 
-export function clearNursePortalContext() {
+export function clearNursePortal() {
   sessionStorage.removeItem(SESSION_KEY);
   sessionStorage.removeItem(REQUESTS_KEY);
 }
 
-export function buildPortalContextFromTrackResponse(data: any): NursePortalContext {
+export function hasNursePortal() {
+  return !!getNursePortal();
+}
+
+export function maskPassport(value: string) {
+  return maskValue(value, 3);
+}
+
+export function maskCivilId(value: string) {
+  return maskValue(value, 3);
+}
+
+export function buildPortalContextFromApiData(data: any): NursePortalContext {
   const ref = (data?.reference_id || '').toString();
   const passport = (data?.passport_number || '').toString();
   const civil = (data?.civil_id || '').toString();
   return {
     referenceId: ref,
+    nurseDbId: typeof data?.nurse_db_id === "number" ? data.nurse_db_id : undefined,
     fullName: (data?.full_name || '').toString(),
-    passportMasked: maskValue(passport),
-    civilIdMasked: maskValue(civil),
+    email: (data?.email || '').toString(),
+    passportMasked: maskPassport(passport),
+    civilIdMasked: maskCivilId(civil),
     passportNumber: passport,
     civilId: civil,
     mobile: (data?.mobile || '').toString(),
@@ -83,8 +101,12 @@ export function buildPortalContextFromTrackResponse(data: any): NursePortalConte
     lastUpdated: (data?.process_last_updated_at || '').toString(),
     remarks: (data?.latest_admin_remarks || data?.remarks || '').toString(),
     complaints: Array.isArray(data?.complaints) ? data.complaints : [],
+    sessionMarker: (data?.session_marker || "").toString() || undefined,
   };
 }
+
+/** @deprecated use buildPortalContextFromApiData */
+export const buildPortalContextFromTrackResponse = buildPortalContextFromApiData;
 
 export function getLocalPortalRequests(): LocalPortalRequest[] {
   if (typeof window === 'undefined') return [];
@@ -101,5 +123,10 @@ export function addLocalPortalRequest(item: Omit<LocalPortalRequest, 'id' | 'sub
   };
   sessionStorage.setItem(REQUESTS_KEY, JSON.stringify([next, ...list].slice(0, 30)));
 }
+
+// Backward-compatible aliases during transition
+export const getNursePortalContext = getNursePortal;
+export const setNursePortalContext = setNursePortal;
+export const clearNursePortalContext = clearNursePortal;
 
 // TODO: Backend should enforce nurse verification for request endpoints (not only frontend UX guards).

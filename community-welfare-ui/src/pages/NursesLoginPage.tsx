@@ -1,41 +1,52 @@
 import { useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { NoticeCard } from "../components/NoticeCard";
 import { API_BASE, api } from "../lib/api";
-import { buildPortalContextFromTrackResponse, setNursePortalContext } from "../lib/nursePortal";
+import { buildPortalContextFromApiData, setNursePortal } from "../lib/nursePortal";
 
 export function NursesLoginPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [identity, setIdentity] = useState("");
-  const [verifier, setVerifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const next = params.get('next') || 'portal';
+  const next = params.get("next") || "portal";
 
-  async function lookup() {
-    if (!identity.trim() || !verifier.trim()) {
-      setError('Please provide identity and verifier details.');
+  async function login() {
+    if (!identity.trim() || !password) {
+      setError("Please enter your email or passport or Civil ID and your password.");
       return;
     }
     setError("");
     setLoading(true);
     try {
-      const res = await api.post<{ success?: boolean; error?: string; data?: any }>("/api/nurses/track", {
-        identity: identity.trim(),
-        verifier: verifier.trim(),
-      });
+      const res = await api.post<{ success?: boolean; error?: string; data?: Record<string, unknown> }>(
+        "/api/nurses/login",
+        {
+          identity: identity.trim(),
+          password,
+        }
+      );
       if (!res.success || !res.data) {
-        setError(res.error || 'No matching registration found.');
+        setError(res.error || "Login failed.");
         return;
       }
-      const ctx = buildPortalContextFromTrackResponse(res.data);
-      setNursePortalContext(ctx);
-      const nextRoute = next === 'accommodation' ? '/nurses/accommodation' : next === 'complaint' ? '/nurses/complaint' : next === 'leaving-notice' ? '/nurses/leaving-notice' : '/nurses/portal';
+      const ctx = buildPortalContextFromApiData(res.data);
+      setNursePortal(ctx);
+      const nextRoute =
+        next === "accommodation"
+          ? "/nurses/portal?tab=accommodation"
+          : next === "complaint"
+            ? "/nurses/portal?tab=complaint"
+            : next === "leaving" || next === "leaving-notice"
+              ? "/nurses/portal?tab=leaving"
+              : "/nurses/portal";
       navigate(nextRoute, { replace: true });
     } catch (err) {
       setError((err as Error).message || `Could not reach backend at ${API_BASE}.`);
@@ -45,28 +56,76 @@ export function NursesLoginPage() {
   }
 
   return (
-    <div className="fade-in" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div className="fade-in" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <PublicHeader />
-      <main style={{ flex: 1, padding: 24, display: 'grid', placeItems: 'center' }}>
-        <div style={{ maxWidth: 700, width: '100%', background: '#fff', border: '1px solid #E3EBF0', borderRadius: 14, padding: 24 }}>
-          <h1 style={{ color: '#2D4A6B', marginBottom: 8 }}>Existing Nurse Login / Track Registration</h1>
-          <p style={{ color: '#5B6773', marginBottom: 16 }}>
-            Enter your registration reference/passport as identity and provide your mobile/CNIC/Civil ID as verifier.
+      <main style={{ flex: 1, padding: 24, display: "grid", placeItems: "center" }}>
+        <div
+          style={{
+            maxWidth: 440,
+            width: "100%",
+            background: "#fff",
+            border: "1px solid #E3EBF0",
+            borderRadius: 14,
+            padding: 28,
+            boxShadow: "0 8px 32px rgba(45,74,107,.08)",
+          }}
+        >
+          <h1 style={{ color: "#2D4A6B", marginBottom: 6, fontSize: 22 }}>Nurse Portal Login</h1>
+          <p style={{ color: "#5B6773", marginBottom: 20, fontSize: 14, lineHeight: 1.6 }}>
+            Sign in with the email, passport number, or Civil ID you used at registration, and your password.
           </p>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <label>
-              Identity (Reference or Passport)
-              <input className="f-input" value={identity} onChange={(e) => setIdentity(e.target.value)} placeholder="e.g. NUR-00001 or passport" />
-            </label>
-            <label>
-              Verifier (Mobile, Civil ID, or CNIC)
-              <input className="f-input" value={verifier} onChange={(e) => setVerifier(e.target.value)} placeholder="Enter verifier" />
-            </label>
+          <label style={{ display: "block", marginBottom: 12, fontSize: 13, color: "#334155" }}>
+            Email / Passport / Civil ID
+            <input
+              className="f-input"
+              value={identity}
+              onChange={(e) => setIdentity(e.target.value)}
+              autoComplete="username"
+              placeholder="Registered email or document number"
+            />
+          </label>
+          <label style={{ display: "block", marginBottom: 8, fontSize: 13, color: "#334155" }}>
+            Password
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                className="f-input"
+                style={{ flex: 1 }}
+                type={showPw ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                placeholder="Your password"
+              />
+              <button
+                type="button"
+                className="f-input"
+                style={{ width: "auto", cursor: "pointer", whiteSpace: "nowrap", padding: "8px 12px" }}
+                onClick={() => setShowPw((s) => !s)}
+              >
+                {showPw ? "Hide" : "Show"}
+              </button>
+            </div>
+          </label>
+          <div style={{ marginTop: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+            <Btn variant="primary" onClick={login} disabled={loading}>
+              {loading ? "Signing in…" : "Login"}
+            </Btn>
+            <Link to="/nurses/forgot-password" style={{ fontSize: 13, color: "#2563eb", textAlign: "center" }}>
+              Forgot password?
+            </Link>
+            <Link to="/nurses/register">
+              <Btn variant="light" style={{ width: "100%" }}>
+                New nurse registration
+              </Btn>
+            </Link>
           </div>
-          <div style={{ marginTop: 14 }}>
-            <Btn variant="primary" onClick={lookup} disabled={loading}>{loading ? 'Verifying…' : 'Login / Track'}</Btn>
-          </div>
-          {error ? <div style={{ marginTop: 14 }}><NoticeCard type="warning" title="Unable to login">{error}</NoticeCard></div> : null}
+          {error ? (
+            <div style={{ marginTop: 16 }}>
+              <NoticeCard type="warning" title="Unable to sign in">
+                {error}
+              </NoticeCard>
+            </div>
+          ) : null}
         </div>
       </main>
       <PageFooter />

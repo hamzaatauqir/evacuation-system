@@ -9,14 +9,16 @@ import { Btn } from "../components/Btn";
 import { Icon } from "../components/Icon";
 import { NoticeCard } from "../components/NoticeCard";
 import { T } from "../lib/tokens";
+import { api } from "../lib/api";
 
-const STEPS = ["Personal", "Contact", "Employment", "Welfare"];
+const STEPS = ["Personal", "Contact", "Employment", "Welfare", "Account"];
 
 interface FormState {
   fullName?: string;
   gender?: string;
   passport?: string;
   civilId?: string;
+  cnic?: string;
   nationality?: string;
   phone?: string;
   email?: string;
@@ -26,10 +28,21 @@ interface FormState {
   dept?: string;
   empType?: string;
   workPermit?: string;
+  arrivalDate?: string;
+  batchNumber?: string;
   accommodation?: string;
   emergency?: string;
   remarks?: string;
   declared?: boolean;
+  password?: string;
+  confirmPassword?: string;
+}
+
+function passwordOk(pw: string): string | null {
+  if (!pw || pw.length < 8) return "Password must be at least 8 characters.";
+  if (!/[A-Za-z]/.test(pw)) return "Password must contain at least one letter.";
+  if (!/\d/.test(pw)) return "Password must contain at least one number.";
+  return null;
 }
 
 export function NursesRegisterPage() {
@@ -37,6 +50,10 @@ export function NursesRegisterPage() {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormState>({});
   const [done, setDone] = useState(false);
+  const [submittedRef, setSubmittedRef] = useState("");
+  const [submitError, setSubmitError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [showPw, setShowPw] = useState(false);
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((p) => ({ ...p, [k]: v }));
@@ -79,17 +96,21 @@ export function NursesRegisterPage() {
             <h2 style={{ fontSize: 24, fontWeight: 800, color: T.navy, marginBottom: 10 }}>
               Registration Submitted
             </h2>
-            <p style={{ fontSize: 14, color: T.muted, lineHeight: 1.7, marginBottom: 24 }}>
-              Your registration has been received by the Community Welfare Wing. A reference number
-              will be sent to your provided contact details within 1–2 working days.
+            <p style={{ fontSize: 14, color: T.muted, lineHeight: 1.7, marginBottom: 12 }}>
+              Registration submitted successfully. Please log in to access your Nurse Portal.
             </p>
+            {submittedRef ? (
+              <p style={{ fontSize: 14, color: T.navy, fontWeight: 700, marginBottom: 24 }}>
+                Your reference: {submittedRef}
+              </p>
+            ) : null}
             <NoticeCard type="info">
               Staff may contact you via WhatsApp for verification. No document upload was required at
               this stage.
             </NoticeCard>
             <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 24 }}>
               <Btn variant="primary" onClick={() => navigate("/nurses/login")}>
-                Track Your Status
+                Log in to Nurse Portal
               </Btn>
               <Btn variant="light" onClick={() => navigate("/nurses")}>
                 Back to Nurses Home
@@ -179,6 +200,7 @@ export function NursesRegisterPage() {
                     />
                     <FInput label="Passport Number" req {...inp("passport")} placeholder="e.g. AK1234567" />
                     <FInput label="Civil ID Number" req {...inp("civilId")} placeholder="e.g. 285-123-456-7" />
+                    <FInput label="CNIC (Pakistan National ID)" req {...inp("cnic")} placeholder="13-digit CNIC" />
                     <FSelect
                       label="Nationality"
                       req
@@ -202,9 +224,9 @@ export function NursesRegisterPage() {
                     type="tel"
                     placeholder="+965 XXXX XXXX"
                   />
-                  <FInput label="Email Address" {...inp("email")} type="email" placeholder="your@email.com" />
+                  <FInput label="Email Address (required for your account)" req {...inp("email")} type="email" placeholder="your@email.com" />
                   <FTextarea
-                    label="Current Residential Address in Kuwait"
+                    label="Current address in Kuwait"
                     req
                     {...inp("address")}
                     placeholder="Block, Street, Area, Governorate"
@@ -244,16 +266,20 @@ export function NursesRegisterPage() {
                     {...inp("workPermit")}
                     placeholder="If available"
                   />
+                  <Grid cols={2} gap={14} style={{ marginTop: 8 }}>
+                    <FInput label="Date arrived in Kuwait" req {...inp("arrivalDate")} type="date" />
+                    <FInput label="Batch / cohort reference" req {...inp("batchNumber")} placeholder="As issued by authorities" />
+                  </Grid>
                 </div>
               )}
 
               {step === 3 && (
                 <div className="fade-in">
                   <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
-                    Welfare & Accommodation
+                    Welfare & current arrangement
                   </h3>
                   <FSelect
-                    label="Current Accommodation Status"
+                    label="Current arrangement (MOH / hospital / private / other)"
                     req
                     {...inp("accommodation")}
                     placeholder="Select"
@@ -306,7 +332,55 @@ export function NursesRegisterPage() {
                 </div>
               )}
 
+              {step === 4 && (
+                <div className="fade-in">
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
+                    Account password
+                  </h3>
+                  <p style={{ fontSize: 13, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
+                    Create a password for your Nurse Portal (minimum 8 characters, at least one letter and one
+                    number). You will use this with your email or passport or Civil ID to sign in.
+                  </p>
+                  <label style={{ display: "block", marginBottom: 12, fontSize: 13 }}>
+                    Password
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        className="f-input"
+                        style={{ flex: 1 }}
+                        type={showPw ? "text" : "password"}
+                        value={form.password || ""}
+                        onChange={(e) => set("password", e.target.value)}
+                        autoComplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        className="f-input"
+                        style={{ width: "auto", cursor: "pointer", padding: "8px 12px" }}
+                        onClick={() => setShowPw((s) => !s)}
+                      >
+                        {showPw ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                  </label>
+                  <label style={{ display: "block", marginBottom: 12, fontSize: 13 }}>
+                    Confirm password
+                    <input
+                      className="f-input"
+                      type={showPw ? "text" : "password"}
+                      value={form.confirmPassword || ""}
+                      onChange={(e) => set("confirmPassword", e.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </label>
+                </div>
+              )}
+
               {/* Navigation buttons */}
+              {submitError ? (
+                <div style={{ marginTop: 16 }}>
+                  <NoticeCard type="warning">{submitError}</NoticeCard>
+                </div>
+              ) : null}
               <div
                 style={{
                   display: "flex",
@@ -324,13 +398,67 @@ export function NursesRegisterPage() {
                   {step === 0 ? "Cancel" : "← Back"}
                 </Btn>
                 <div style={{ display: "flex", gap: 10 }}>
-                  {step < 3 ? (
+                  {step < 4 ? (
                     <Btn variant="navy" onClick={() => setStep((s) => s + 1)}>
                       Continue →
                     </Btn>
                   ) : (
-                    <Btn variant="primary" disabled={!form.declared} onClick={() => setDone(true)}>
-                      Submit Registration
+                    <Btn
+                      variant="primary"
+                      disabled={!form.declared || submitting}
+                      onClick={async () => {
+                        setSubmitError("");
+                        const pwErr = passwordOk(form.password || "");
+                        if (pwErr) {
+                          setSubmitError(pwErr);
+                          return;
+                        }
+                        if ((form.password || "") !== (form.confirmPassword || "")) {
+                          setSubmitError("Password and confirmation do not match.");
+                          return;
+                        }
+                        const applyAcc = /shelter|embassy/i.test(form.accommodation || "") ? "Yes" : "No";
+                        setSubmitting(true);
+                        try {
+                          const res = await api.post<{
+                            success?: boolean;
+                            ok?: boolean;
+                            reference?: string;
+                            reference_id?: string;
+                            error?: string;
+                          }>("/api/nurses/register", {
+                            full_name: form.fullName,
+                            passport_number: form.passport,
+                            civil_id: form.civilId,
+                            cnic: form.cnic,
+                            mobile: form.phone,
+                            email: form.email,
+                            arrival_date: form.arrivalDate,
+                            batch_number: form.batchNumber,
+                            hospital: form.hospital,
+                            designation: form.jobTitle,
+                            degree_type: form.dept || "",
+                            remarks: form.remarks || "",
+                            current_accommodation: form.accommodation || "",
+                            applying_for_accommodation: applyAcc,
+                            issue_notice: "",
+                            password: form.password,
+                            confirm_password: form.confirmPassword,
+                          });
+                          if (!res.success && !res.ok) {
+                            setSubmitError(res.error || "Registration failed.");
+                            return;
+                          }
+                          setSubmittedRef((res.reference || res.reference_id || "").toString());
+                          setDone(true);
+                        } catch (e) {
+                          setSubmitError((e as Error).message || "Registration failed.");
+                        } finally {
+                          setSubmitting(false);
+                        }
+                      }}
+                    >
+                      {submitting ? "Submitting…" : "Submit registration"}
                     </Btn>
                   )}
                 </div>
@@ -432,7 +560,7 @@ export function NursesRegisterPage() {
                     textDecoration: "underline",
                   }}
                 >
-                  Already registered? Login / Track →
+                  Already registered? Sign in →
                 </button>
               </div>
             </Card>

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { T } from "../lib/tokens";
 import { BACKEND_PORTAL } from "../lib/api";
+import { hasNursePortal } from "../lib/nursePortal";
 import { Btn } from "./Btn";
 import { Icon } from "./Icon";
 
@@ -25,7 +26,10 @@ export function PublicHeader() {
   const [logoError, setLogoError] = useState(false);
   const location = useLocation();
   const isNurses = location.pathname.startsWith("/nurses");
-  const links = isNurses ? NURSES_LINKS : MAIN_LINKS;
+  const nurseLinks = hasNursePortal()
+    ? [...NURSES_LINKS, { to: "/nurses/portal", label: "Nurse Portal" }]
+    : NURSES_LINKS;
+  const links = isNurses ? nurseLinks : MAIN_LINKS;
 
   const isActive = (to: string) =>
     to === "/" ? location.pathname === "/" : location.pathname === to || location.pathname.startsWith(to + "/");

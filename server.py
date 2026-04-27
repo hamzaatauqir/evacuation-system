@@ -724,6 +724,21 @@ def init_db():
     db.execute("CREATE INDEX IF NOT EXISTS idx_nurse_arrival_date ON nurse_registrations(arrival_date)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_nurse_grading_letter ON nurse_registrations(grading_letter_issued)")
     for col, coltype in [
+        ('password_hash', "TEXT"),
+        ('password_salt', "TEXT"),
+        ('password_updated_at', "TEXT"),
+        ('email_verified', "INTEGER DEFAULT 0"),
+        ('reset_token_hash', "TEXT"),
+        ('reset_token_expires_at', "TEXT"),
+        ('reset_token_used_at', "TEXT"),
+        ('last_login_at', "TEXT"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE nurse_registrations ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    for col, coltype in [
         ('complaint_id', "TEXT DEFAULT ''"),
         ('subject', "TEXT DEFAULT ''"),
         ('preferred_contact_method', "TEXT DEFAULT ''"),
@@ -3071,28 +3086,215 @@ def _complaint_status_allowed_for_staff(status):
     return status in ('In Progress', 'Awaiting Nurse Response', 'Resolved', 'Reopened')
 
 
-def _send_nurse_ack_email(record):
-    to_email = (record.get('email') or '').strip()
-    if not to_email or not _is_valid_email_loose(to_email):
-        return False, 'missing_or_invalid_email'
+NURSE_ACCOUNT_DUP_MSG = (
+    'A nurse profile already exists for this passport/Civil ID/email. Please login or reset your password.'
+)
+NURSE_GENERIC_RESET_MSG = (
+    'If a matching nurse account exists, password reset instructions have been sent.'
+)
+
+
+def _nurse_portal_public_base_url():
+    return (os.environ.get('NURSE_PORTAL_PUBLIC_URL') or os.environ.get('VITE_APP_ORIGIN') or 'https://cwakuwait.com').rstrip('/')
+
+
+def _nurse_normalize_passport(v):
+    return re.sub(r'\s+', '', (v or '').strip().upper())
+
+
+def _nurse_normalize_id_key(v):
+    return re.sub(r'[\s\-_]', '', (v or '').strip().upper())
+
+
+def _nurse_normalize_email(v):
+    return (v or '').strip().lower()
+
+
+def _nurse_validate_password_strength(pw):
+    if not pw or len(pw) < 8:
+        return False, 'Password must be at least 8 characters.'
+    if not re.search(r'[A-Za-z]', pw):
+        return False, 'Password must contain at least one letter.'
+    if not re.search(r'\d', pw):
+        return False, 'Password must contain at least one number.'
+    return True, ''
+
+
+def _nurse_hash_password_pbkdf2(plain_password):
+    salt_hex = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac(
+        'sha256', plain_password.encode('utf-8'), bytes.fromhex(salt_hex), 200000
+    ).hex()
+    return dk, salt_hex
+
+
+def _nurse_verify_password_pbkdf2(plain_password, salt_hex, stored_hash_hex):
+    if not plain_password or not salt_hex or not stored_hash_hex:
+        return False
+    try:
+        calc = hashlib.pbkdf2_hmac(
+            'sha256', plain_password.encode('utf-8'), bytes.fromhex(salt_hex), 200000
+        ).hex()
+    except Exception:
+        return False
+    return hmac.compare_digest(calc, stored_hash_hex)
+
+
+def _nurse_smtp_env_config():
     host = (os.environ.get('SMTP_HOST') or '').strip()
-    username = (os.environ.get('SMTP_USERNAME') or '').strip()
-    password = os.environ.get('SMTP_PASSWORD') or ''
-    if not host or not username or not password:
-        return False, 'smtp_env_not_configured'
-    from_email = (os.environ.get('SMTP_FROM_EMAIL') or 'noreply@cwakuwait.com').strip()
-    from_name = (os.environ.get('SMTP_FROM_NAME') or 'Community Welfare Wing - Embassy of Pakistan, Kuwait').strip()
     try:
         port = int((os.environ.get('SMTP_PORT') or '587').strip())
     except Exception:
         port = 587
+    user = (os.environ.get('SMTP_USER') or os.environ.get('SMTP_USERNAME') or '').strip()
+    password = os.environ.get('SMTP_PASSWORD') or ''
+    from_email = (
+        (os.environ.get('SMTP_FROM') or os.environ.get('SMTP_FROM_EMAIL') or user or 'noreply@cwakuwait.com')
+    ).strip()
+    from_name = (
+        os.environ.get('SMTP_FROM_NAME') or 'Embassy of Pakistan Kuwait - Community Welfare Wing'
+    ).strip()
+    use_tls = str(os.environ.get('SMTP_USE_TLS', 'true')).lower() in ('1', 'true', 'yes', 'on')
+    ok = bool(host and user and password)
+    return {'host': host, 'port': port, 'user': user, 'password': password, 'from_email': from_email,
+            'from_name': from_name, 'use_tls': use_tls, 'ok': ok}
+
+
+def _nurse_send_email_smtp_env(to_addr, subject, body_text):
+    cfg = _nurse_smtp_env_config()
+    if not _is_valid_email_loose(to_addr):
+        return False, 'invalid_recipient'
+    if not cfg['ok']:
+        print('[NurseSMTP] Missing SMTP_HOST/SMTP_USER/SMTP_PASSWORD; email not sent', flush=True)
+        return False, 'smtp_env_not_configured'
     msg = EmailMessage()
-    msg['From'] = f'{from_name} <{from_email}>'
-    msg['To'] = to_email
-    msg['Subject'] = 'Nurse Registration Acknowledgment'
+    msg['From'] = f"{cfg['from_name']} <{cfg['from_email']}>"
+    msg['To'] = to_addr.strip()
+    msg['Subject'] = subject
+    msg.set_content(body_text)
+    try:
+        if cfg['port'] == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(cfg['host'], cfg['port'], context=ctx, timeout=25) as server:
+                server.login(cfg['user'], cfg['password'])
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(cfg['host'], cfg['port'], timeout=25) as server:
+                server.ehlo()
+                if cfg['use_tls'] and cfg['port'] != 465:
+                    try:
+                        server.starttls(context=ssl.create_default_context())
+                        server.ehlo()
+                    except Exception:
+                        pass
+                server.login(cfg['user'], cfg['password'])
+                server.send_message(msg)
+        return True, 'sent'
+    except Exception as e:
+        print(f'[NurseSMTP] send failed: {e}', flush=True)
+        return False, str(e)
+
+
+def _build_nurse_public_profile_bundle(db, rec):
+    """Build portal-safe JSON for a nurse row (no password fields)."""
+    acc = db.execute("""SELECT request_status, admin_remarks
+                        FROM nurse_accommodation_requests
+                        WHERE nurse_reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+                        ORDER BY id DESC LIMIT 1""", [rec.get('reference_id', ''), rec.get('passport_number', '')]).fetchone()
+    steps = []
+    completed = 0
+    for col, label in NURSE_PROCESS_STEPS:
+        st = 1 if int(rec.get(col, 0) or 0) == 1 else 0
+        completed += st
+        steps.append({'key': col, 'label': label, 'status': 'Completed' if st else 'Not Completed', 'value': st})
+    total = len(NURSE_PROCESS_STEPS)
+    complaints_rows = db.execute("""SELECT complaint_id, subject, category, complaint_category, priority,
+                                           COALESCE(status, complaint_status) AS status,
+                                           created_at, updated_at, public_response
+                                    FROM nurse_complaints
+                                    WHERE nurse_reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+                                    ORDER BY id DESC LIMIT 50""", [rec.get('reference_id', ''), rec.get('passport_number', '')]).fetchall()
+    complaints = []
+    for c in complaints_rows:
+        cd = dict(c)
+        actions = db.execute("""SELECT action_type, note, created_at
+                                FROM nurse_complaint_actions
+                                WHERE complaint_id = ? AND visible_to_nurse = 1
+                                ORDER BY id DESC LIMIT 5""", [cd.get('complaint_id', '')]).fetchall()
+        complaints.append({
+            'complaint_id': cd.get('complaint_id', ''),
+            'subject': cd.get('subject', ''),
+            'category': cd.get('category', '') or cd.get('complaint_category', ''),
+            'priority': cd.get('priority', ''),
+            'status': cd.get('status', ''),
+            'submitted_date': cd.get('created_at', ''),
+            'last_update_date': cd.get('updated_at', ''),
+            'public_response': cd.get('public_response', ''),
+            'public_actions': [dict(a) for a in actions]
+        })
+    return {
+        'nurse_db_id': int(rec.get('id') or 0),
+        'reference_id': rec.get('reference_id', ''),
+        'full_name': rec.get('full_name', ''),
+        'passport_number': rec.get('passport_number', ''),
+        'cnic': rec.get('cnic', ''),
+        'civil_id': rec.get('civil_id', ''),
+        'mobile': rec.get('mobile', ''),
+        'email': rec.get('email', ''),
+        'batch_number': rec.get('batch_number', ''),
+        'arrival_date': rec.get('arrival_date', ''),
+        'hospital': rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
+        'degree_type': rec.get('degree_type', ''),
+        'job_title_moh': rec.get('job_title_moh', '') or rec.get('designation', ''),
+        'moh_offer_salary_kwd': rec.get('moh_offer_salary_kwd', ''),
+        'grading_letter_issued': rec.get('grading_letter_issued', ''),
+        'registration_status': rec.get('registration_status', ''),
+        'documents_status': rec.get('documents_status', ''),
+        'accommodation_status': (acc['request_status'] if acc else rec.get('accommodation_status', '') or 'N/A'),
+        'remarks': rec.get('remarks', ''),
+        'issue_notice': rec.get('issue_notice', ''),
+        'latest_admin_remarks': rec.get('admin_remarks', ''),
+        'steps': steps,
+        'steps_completed': completed,
+        'steps_pending': total - completed,
+        'steps_total': total,
+        'progress_percent': int(round((completed * 100.0) / total)) if total else 0,
+        'process_last_updated_at': rec.get('updated_at', '') or rec.get('created_at', ''),
+        'complaints': complaints,
+        'login_at': rec.get('last_login_at', ''),
+    }
+
+
+def _find_nurse_by_login_identity(db, identity_raw):
+    raw = (identity_raw or '').strip()
+    if not raw:
+        return None
+    if '@' in raw:
+        em = _nurse_normalize_email(raw)
+        return db.execute(
+            "SELECT * FROM nurse_registrations WHERE LOWER(TRIM(COALESCE(email,''))) = ? ORDER BY id DESC LIMIT 1",
+            [em]
+        ).fetchone()
+    ppn = _nurse_normalize_passport(raw)
+    nid = _nurse_normalize_id_key(raw)
+    return db.execute(
+        """SELECT * FROM nurse_registrations WHERE
+            UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = ?
+            OR REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(civil_id,''))), '-', ''), ' ', ''), '_', '') = ?
+            OR REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(cnic,''))), '-', ''), ' ', ''), '_', '') = ?
+            ORDER BY id DESC LIMIT 1""",
+        [ppn, nid, nid]
+    ).fetchone()
+
+
+def _send_nurse_ack_email(record):
+    to_email = (record.get('email') or '').strip()
+    if not to_email or not _is_valid_email_loose(to_email):
+        return False, 'missing_or_invalid_email'
     full_name = record.get('full_name', '')
     ref_id = record.get('reference_id', '')
     passport = record.get('passport_number', '')
+    base = _nurse_portal_public_base_url()
     body = (
         f"Dear {full_name or 'Applicant'},\n\n"
         f"Your Pakistan Nurses Registration has been received.\n\n"
@@ -3100,7 +3302,7 @@ def _send_nurse_ack_email(record):
         f"Reference ID: {ref_id}\n"
         f"Passport Number: {passport}\n"
         f"Registration Status: {record.get('registration_status', 'Pending Review')}\n\n"
-        f"Track your registration:\nhttps://cwakuwait.com/nurses/track\n\n"
+        f"Please log in to access your Nurse Portal:\n{base}/nurses/login\n\n"
         f"Community Welfare Wing Contact:\n"
         f"Email: parepkuwaitcwa37@gmail.com\n"
         f"Mobile: +965 5597 7292\n\n"
@@ -3108,31 +3310,12 @@ def _send_nurse_ack_email(record):
         f"NURSE DOCUMENTS - [{ref_id}] - [{full_name}] - [{passport}]\n\n"
         f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
     )
-    msg.set_content(body)
-    try:
-        if port == 465:
-            ctx = ssl.create_default_context()
-            with smtplib.SMTP_SSL(host, port, context=ctx, timeout=25) as server:
-                server.login(username, password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(host, port, timeout=25) as server:
-                server.ehlo()
-                try:
-                    server.starttls(context=ssl.create_default_context())
-                    server.ehlo()
-                except Exception:
-                    pass
-                server.login(username, password)
-                server.send_message(msg)
-        return True, 'sent'
-    except Exception as e:
-        return False, str(e)
+    return _nurse_send_email_smtp_env(to_email, 'Nurse Registration Acknowledgment', body)
 
 
 def api_nurse_register(data):
     full_name = (data.get('full_name') or '').strip()
-    passport = (data.get('passport_number') or '').strip().upper()
+    passport = _nurse_normalize_passport(data.get('passport_number') or '')
     cnic = (data.get('cnic') or '').strip()
     civil_id = (data.get('civil_id') or '').strip()
     mobile = (data.get('mobile') or '').strip()
@@ -3140,22 +3323,40 @@ def api_nurse_register(data):
     batch_number = (data.get('batch_number') or '').strip()
     hospital = (data.get('hospital') or '').strip()
     designation = (data.get('designation') or '').strip()
-    email = (data.get('email') or '').strip()
+    email = _nurse_normalize_email(data.get('email') or '')
+    password = data.get('password') or ''
+    confirm_password = data.get('confirm_password') or ''
     if not full_name or not passport or not mobile or not cnic or not arrival_date or not batch_number or not hospital or not designation:
-        return {'success': False, 'error': 'Please fill all required fields.'}
-    if email and not _is_valid_email_loose(email):
-        return {'success': False, 'error': 'Invalid email format.'}
+        return {'success': False, 'ok': False, 'error': 'Please fill all required fields.'}
+    if not email or not _is_valid_email_loose(email):
+        return {'success': False, 'ok': False, 'error': 'A valid email address is required for your nurse account.'}
+    ok_pw, pw_err = _nurse_validate_password_strength(password)
+    if not ok_pw:
+        return {'success': False, 'ok': False, 'error': pw_err}
+    if password != confirm_password:
+        return {'success': False, 'ok': False, 'error': 'Password and confirmation do not match.'}
+    cnic_key = _nurse_normalize_id_key(cnic) if cnic.strip() else ''
+    civil_key = _nurse_normalize_id_key(civil_id) if civil_id.strip() else ''
     db = get_db()
     try:
-        dup = db.execute("""SELECT id, reference_id FROM nurse_registrations
-                            WHERE UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
-                               OR TRIM(cnic) = TRIM(?)
-                            ORDER BY id DESC LIMIT 1""", [passport, cnic]).fetchone()
+        conds = ['UPPER(REPLACE(TRIM(COALESCE(passport_number,\'\')), \' \', \'\')) = ?']
+        vals = [passport]
+        if civil_key:
+            conds.append("REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(civil_id,''))), '-', ''), ' ', ''), '_', '') = ?")
+            vals.append(civil_key)
+        if cnic_key:
+            conds.append("REPLACE(REPLACE(REPLACE(UPPER(TRIM(COALESCE(cnic,''))), '-', ''), ' ', ''), '_', '') = ?")
+            vals.append(cnic_key)
+        conds.append("LOWER(TRIM(COALESCE(email,''))) = ?")
+        vals.append(email)
+        dup_sql = "SELECT id, reference_id FROM nurse_registrations WHERE (" + " OR ".join(conds) + ") ORDER BY id DESC LIMIT 1"
+        dup = db.execute(dup_sql, vals).fetchone()
         if dup:
-            return {'success': False, 'error': 'An active registration already exists with this Passport Number or CNIC.', 'duplicate': True, 'reference_id': dup['reference_id']}
+            return {'success': False, 'ok': False, 'error': NURSE_ACCOUNT_DUP_MSG, 'duplicate': True, 'reference_id': dup['reference_id']}
         ref = _next_nurse_reference(db)
         apply_acc = 'Yes' if str(data.get('applying_for_accommodation') or '').strip().lower() in ('yes', 'y', 'true', '1') else 'No'
         step_values = [_nurse_step_value(data.get(col, 0)) for col, _ in NURSE_PROCESS_STEPS]
+        ph, psalt = _nurse_hash_password_pbkdf2(password)
         db.execute("""INSERT INTO nurse_registrations
             (reference_id, full_name, passport_number, arrival_date, batch_number, cnic, civil_id, mobile, email,
              hospital, hospital_or_medical_center, designation, job_title_moh, degree_type, moh_offer_salary_kwd,
@@ -3164,15 +3365,17 @@ def api_nurse_register(data):
              step_documents_submitted_sdu_moh, step_fingerprint_scanning, step_civil_id_number_generation,
              step_medical_report_issuance, step_first_salary_cheque_locum, step_iqama_application_filed,
              step_civil_id_application_submitted, step_second_salary_cheque_locum_received, step_medical_license_application_filed,
-             step_committee_paper_received, step_barateen_paper_submission, step_salary_regular_disbursement)
+             step_committee_paper_received, step_barateen_paper_submission, step_salary_regular_disbursement,
+             password_hash, password_salt, password_updated_at, email_verified)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     ?, ?, CURRENT_TIMESTAMP, 0)""",
             [ref, full_name, passport, arrival_date, batch_number, cnic, civil_id, mobile, email,
              hospital, (data.get('hospital_or_medical_center') or hospital).strip(), designation, designation,
              (data.get('degree_type') or '').strip(), (data.get('moh_offer_salary_kwd') or '').strip(),
              (data.get('grading_letter_issued') or 'No').strip(), (data.get('current_accommodation') or '').strip(),
              (data.get('current_accommodation') or '').strip(), apply_acc, (data.get('remarks') or '').strip(),
-             (data.get('issue_notice') or '').strip(), *step_values])
+             (data.get('issue_notice') or '').strip(), *step_values, ph, psalt])
         _nurse_log(db, 'registration_submitted', ref, passport, 'public', {'full_name': full_name, 'batch_number': batch_number})
         db.commit()
         record = {'reference_id': ref, 'full_name': full_name, 'passport_number': passport, 'email': email, 'registration_status': 'Pending Review'}
@@ -3183,7 +3386,11 @@ def api_nurse_register(data):
             db2.commit()
         finally:
             db2.close()
-        return {'success': True, 'reference_id': ref, 'email_status': 'sent' if ok else 'not_sent'}
+        msg = 'Registration submitted successfully. Please login to access your Nurse Portal.'
+        return {
+            'success': True, 'ok': True, 'reference': ref, 'reference_id': ref,
+            'message': msg, 'email_status': 'sent' if ok else 'not_sent', 'email_detail': detail,
+        }
     finally:
         db.close()
 
@@ -3202,70 +3409,173 @@ def api_nurse_track(data):
         if not row:
             return {'success': False, 'error': 'No matching registration found. Please check your details.'}
         rec = dict(row)
-        acc = db.execute("""SELECT request_status, admin_remarks
-                            FROM nurse_accommodation_requests
-                            WHERE nurse_reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
-                            ORDER BY id DESC LIMIT 1""", [rec.get('reference_id', ''), rec.get('passport_number', '')]).fetchone()
-        steps = []
-        completed = 0
-        for col, label in NURSE_PROCESS_STEPS:
-            st = 1 if int(rec.get(col, 0) or 0) == 1 else 0
-            completed += st
-            steps.append({'key': col, 'label': label, 'status': 'Completed' if st else 'Not Completed', 'value': st})
-        total = len(NURSE_PROCESS_STEPS)
-        complaints_rows = db.execute("""SELECT complaint_id, subject, category, complaint_category, priority,
-                                               COALESCE(status, complaint_status) AS status,
-                                               created_at, updated_at, public_response
-                                        FROM nurse_complaints
-                                        WHERE nurse_reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
-                                        ORDER BY id DESC LIMIT 50""", [rec.get('reference_id', ''), rec.get('passport_number', '')]).fetchall()
-        complaints = []
-        for c in complaints_rows:
-            cd = dict(c)
-            actions = db.execute("""SELECT action_type, note, created_at
-                                    FROM nurse_complaint_actions
-                                    WHERE complaint_id = ? AND visible_to_nurse = 1
-                                    ORDER BY id DESC LIMIT 5""", [cd.get('complaint_id', '')]).fetchall()
-            complaints.append({
-                'complaint_id': cd.get('complaint_id', ''),
-                'subject': cd.get('subject', ''),
-                'category': cd.get('category', '') or cd.get('complaint_category', ''),
-                'priority': cd.get('priority', ''),
-                'status': cd.get('status', ''),
-                'submitted_date': cd.get('created_at', ''),
-                'last_update_date': cd.get('updated_at', ''),
-                'public_response': cd.get('public_response', ''),
-                'public_actions': [dict(a) for a in actions]
-            })
-        return {'success': True, 'data': {
-            'reference_id': rec.get('reference_id', ''),
-            'full_name': rec.get('full_name', ''),
-            'passport_number': rec.get('passport_number', ''),
-            'cnic': rec.get('cnic', ''),
-            'civil_id': rec.get('civil_id', ''),
-            'mobile': rec.get('mobile', ''),
-            'email': rec.get('email', ''),
-            'batch_number': rec.get('batch_number', ''),
-            'arrival_date': rec.get('arrival_date', ''),
-            'hospital': rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
-            'degree_type': rec.get('degree_type', ''),
-            'job_title_moh': rec.get('job_title_moh', '') or rec.get('designation', ''),
-            'moh_offer_salary_kwd': rec.get('moh_offer_salary_kwd', ''),
-            'grading_letter_issued': rec.get('grading_letter_issued', ''),
-            'registration_status': rec.get('registration_status', ''),
-            'documents_status': rec.get('documents_status', ''),
-            'accommodation_status': (acc['request_status'] if acc else rec.get('accommodation_status', '') or 'N/A'),
-            'remarks': rec.get('remarks', ''),
-            'issue_notice': rec.get('issue_notice', ''),
-            'latest_admin_remarks': rec.get('admin_remarks', ''),
-            'steps': steps,
-            'steps_completed': completed,
-            'steps_pending': total - completed,
-            'steps_total': total,
-            'progress_percent': int(round((completed * 100.0) / total)) if total else 0,
-            'process_last_updated_at': rec.get('updated_at', '') or rec.get('created_at', ''),
-            'complaints': complaints
-        }}
+        return {'success': True, 'data': _build_nurse_public_profile_bundle(db, rec)}
+    finally:
+        db.close()
+
+
+def api_nurse_login(data):
+    identity = (data.get('identity') or '').strip()
+    password = data.get('password') or ''
+    if not identity or not password:
+        return {'success': False, 'error': 'Invalid email, passport, Civil ID, or password.'}
+    db = get_db()
+    try:
+        row = _find_nurse_by_login_identity(db, identity)
+        if not row:
+            return {'success': False, 'error': 'Invalid email, passport, Civil ID, or password.'}
+        rec = dict(row)
+        ph = (rec.get('password_hash') or '').strip()
+        ps = (rec.get('password_salt') or '').strip()
+        if not ph or not ps or not _nurse_verify_password_pbkdf2(password, ps, ph):
+            return {'success': False, 'error': 'Invalid email, passport, Civil ID, or password.'}
+        db.execute("UPDATE nurse_registrations SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", [rec.get('id')])
+        db.commit()
+        rec['last_login_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        bundle = _build_nurse_public_profile_bundle(db, rec)
+        bundle['session_marker'] = secrets.token_hex(8)
+        return {'success': True, 'data': bundle}
+    finally:
+        db.close()
+
+
+def api_nurse_forgot_password(data):
+    identity = (data.get('identity') or data.get('email') or '').strip()
+    if not identity:
+        return {'ok': True, 'message': NURSE_GENERIC_RESET_MSG}
+    db = get_db()
+    try:
+        row = _find_nurse_by_login_identity(db, identity)
+        if not row:
+            return {'ok': True, 'message': NURSE_GENERIC_RESET_MSG}
+        rec = dict(row)
+        ph = (rec.get('password_hash') or '').strip()
+        to_email = (rec.get('email') or '').strip()
+        if not ph or not to_email or not _is_valid_email_loose(to_email):
+            return {'ok': True, 'message': NURSE_GENERIC_RESET_MSG}
+        token = secrets.token_urlsafe(32)
+        th = hashlib.sha256(token.encode('utf-8')).hexdigest()
+        exp = (datetime.now() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+        db.execute(
+            """UPDATE nurse_registrations SET reset_token_hash = ?, reset_token_expires_at = ?,
+               reset_token_used_at = NULL WHERE id = ?""",
+            [th, exp, rec.get('id')]
+        )
+        db.commit()
+        base = _nurse_portal_public_base_url()
+        link = f"{base}/nurses/reset-password?token={quote(token, safe='')}"
+        name = rec.get('full_name') or 'Applicant'
+        body = (
+            f"Dear {name},\n\n"
+            f"We received a request to reset your Nurse Portal password.\n\n"
+            f"Reset link (valid for a limited time):\n{link}\n\n"
+            f"If you did not request this reset, please ignore this email or contact the Embassy.\n\n"
+            f"Embassy of Pakistan Kuwait - Community Welfare Wing\n"
+        )
+        ok, _detail = _nurse_send_email_smtp_env(to_email, 'Nurse Portal — Password reset', body)
+        if not ok:
+            print('[NurseSMTP] forgot-password email not sent', flush=True)
+        return {'ok': True, 'message': NURSE_GENERIC_RESET_MSG}
+    finally:
+        db.close()
+
+
+def api_nurse_reset_password(data):
+    token = (data.get('token') or '').strip()
+    new_pw = data.get('new_password') or data.get('password') or ''
+    confirm = data.get('confirm_password') or ''
+    if not token:
+        return {'success': False, 'error': 'Invalid or expired reset link.'}
+    ok_pw, pw_err = _nurse_validate_password_strength(new_pw)
+    if not ok_pw:
+        return {'success': False, 'error': pw_err}
+    if new_pw != confirm:
+        return {'success': False, 'error': 'Password and confirmation do not match.'}
+    th = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT * FROM nurse_registrations WHERE reset_token_hash = ? ORDER BY id DESC LIMIT 1",
+            [th]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Invalid or expired reset link.'}
+        rec = dict(row)
+        if (rec.get('reset_token_used_at') or '').strip():
+            return {'success': False, 'error': 'This reset link has already been used.'}
+        exp_s = (rec.get('reset_token_expires_at') or '').strip()
+        if not exp_s:
+            return {'success': False, 'error': 'Invalid or expired reset link.'}
+        try:
+            exp_dt = datetime.strptime(exp_s[:19], '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return {'success': False, 'error': 'Invalid or expired reset link.'}
+        if datetime.now() > exp_dt:
+            return {'success': False, 'error': 'Invalid or expired reset link.'}
+        nh, ns = _nurse_hash_password_pbkdf2(new_pw)
+        db.execute(
+            """UPDATE nurse_registrations SET password_hash = ?, password_salt = ?, password_updated_at = CURRENT_TIMESTAMP,
+               reset_token_hash = NULL, reset_token_expires_at = NULL, reset_token_used_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [nh, ns, rec.get('id')]
+        )
+        db.commit()
+        to_email = (rec.get('email') or '').strip()
+        if to_email and _is_valid_email_loose(to_email):
+            body = (
+                f"Dear {rec.get('full_name') or 'Applicant'},\n\n"
+                f"Your Nurse Portal password was changed successfully.\n\n"
+                f"If you did not make this change, contact the Embassy immediately.\n\n"
+                f"Embassy of Pakistan Kuwait - Community Welfare Wing\n"
+            )
+            _nurse_send_email_smtp_env(to_email, 'Nurse Portal — Password changed', body)
+        return {'success': True, 'message': 'Your password has been updated. You can log in now.'}
+    finally:
+        db.close()
+
+
+def api_nurse_change_password(data):
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip().upper()
+    current = data.get('current_password') or ''
+    new_pw = data.get('new_password') or ''
+    confirm = data.get('confirm_password') or ''
+    if not ref or not current:
+        return {'success': False, 'error': 'Reference and current password are required.'}
+    ok_pw, pw_err = _nurse_validate_password_strength(new_pw)
+    if not ok_pw:
+        return {'success': False, 'error': pw_err}
+    if new_pw != confirm:
+        return {'success': False, 'error': 'Password and confirmation do not match.'}
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT * FROM nurse_registrations WHERE UPPER(TRIM(reference_id)) = ? ORDER BY id DESC LIMIT 1",
+            [ref]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Account not found.'}
+        rec = dict(row)
+        ph = (rec.get('password_hash') or '').strip()
+        ps = (rec.get('password_salt') or '').strip()
+        if not ph or not ps or not _nurse_verify_password_pbkdf2(current, ps, ph):
+            return {'success': False, 'error': 'Current password is incorrect.'}
+        nh, ns = _nurse_hash_password_pbkdf2(new_pw)
+        db.execute(
+            """UPDATE nurse_registrations SET password_hash = ?, password_salt = ?, password_updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [nh, ns, rec.get('id')]
+        )
+        db.commit()
+        to_email = (rec.get('email') or '').strip()
+        if to_email and _is_valid_email_loose(to_email):
+            body = (
+                f"Dear {rec.get('full_name') or 'Applicant'},\n\n"
+                f"Your Nurse Portal password was changed.\n\n"
+                f"If you did not make this change, contact the Embassy immediately.\n\n"
+                f"Embassy of Pakistan Kuwait - Community Welfare Wing\n"
+            )
+            _nurse_send_email_smtp_env(to_email, 'Nurse Portal — Password changed', body)
+        return {'success': True, 'message': 'Password updated.'}
     finally:
         db.close()
 
@@ -13354,6 +13664,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         'http://localhost:5173',
         'https://cwakuwait.com',
         'https://www.cwakuwait.com',
+        'https://portal.cwakuwait.com',
         'https://community-welfare-ui.onrender.com',
     }
 
@@ -16116,6 +16427,38 @@ function printBoth(){{
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_nurse_track(data)
             self.send_json(result, 200 if result.get('success') else 404)
+            return
+        elif path == '/api/nurses/login':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_login(data)
+            self.send_json(result, 200 if result.get('success') else 401)
+            return
+        elif path == '/api/nurses/forgot-password':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'ok': True, 'message': NURSE_GENERIC_RESET_MSG}, 200); return
+            result = api_nurse_forgot_password(data)
+            self.send_json(result, 200)
+            return
+        elif path == '/api/nurses/reset-password':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_reset_password(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/change-password':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_change_password(data)
+            self.send_json(result, 200 if result.get('success') else 400)
             return
         elif path == '/api/nurses/accommodation':
             try:
