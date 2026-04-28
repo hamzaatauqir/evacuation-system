@@ -36,7 +36,7 @@ export function CwaHomePage() {
     },
     {
       icon: "user-add",
-      title: "Pakistan Nurses Registration",
+      title: "Health Workers Registeration",
       desc: "For Grading Letters Issuance, resolution of Complaints and Settlement",
       cta: "Open Service",
       accent: T.green,
@@ -119,25 +119,6 @@ export function CwaHomePage() {
           }}
         >
           <div style={{ flex: "1 1 340px", maxWidth: 560 }}>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                background: "rgba(255,255,255,.1)",
-                border: "1px solid rgba(255,255,255,.18)",
-                borderRadius: 20,
-                padding: "5px 14px",
-                fontSize: 11,
-                fontWeight: 700,
-                color: "rgba(255,255,255,.88)",
-                marginBottom: 22,
-                letterSpacing: ".05em",
-              }}
-            >
-              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#6ee79a" }} />
-              OFFICIAL PORTAL — COMMUNITY WELFARE WING
-            </div>
             <h1
               style={{
                 fontSize: "clamp(24px,3.6vw,44px)",
@@ -148,9 +129,7 @@ export function CwaHomePage() {
                 maxWidth: 520,
               }}
             >
-              Community Welfare Wing
-              <br />
-              <span style={{ color: "#9cf987" }}>Digital Services</span> Portal
+              Community Welfare <span style={{ color: "#9cf987" }}>Digital Service</span>
             </h1>
             <p
               style={{

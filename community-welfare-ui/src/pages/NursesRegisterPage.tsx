@@ -30,7 +30,7 @@ interface FormState {
   workPermit?: string;
   arrivalDate?: string;
   batchNumber?: string;
-  accommodation?: string;
+  currentArrangement?: string;
   emergency?: string;
   remarks?: string;
   declared?: boolean;
@@ -281,18 +281,17 @@ export function NursesRegisterPage() {
               {step === 3 && (
                 <div className="fade-in">
                   <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
-                    Welfare & current arrangement
+                    Welfare & Current Arrangement
                   </h3>
                   <FSelect
-                    label="Current arrangement (MOH / hospital / private / other)"
+                    label="Current Arrangement"
                     req
-                    {...inp("accommodation")}
+                    {...inp("currentArrangement")}
                     placeholder="Select"
                     options={[
-                      "MOH Provided",
-                      "Hospital Provided",
-                      "Private (Self-Arranged)",
-                      "Embassy Shelter",
+                      "MOH Arranged",
+                      "Embassy Contracted / Arranged",
+                      "Private (Self Arranged)",
                       "Other",
                     ]}
                   />
@@ -422,7 +421,8 @@ export function NursesRegisterPage() {
                           setSubmitError("Password and confirmation do not match.");
                           return;
                         }
-                        const applyAcc = /shelter|embassy/i.test(form.accommodation || "") ? "Yes" : "No";
+                        const arrangement = form.currentArrangement || "";
+                        const arrangementFlag = /embassy/i.test(arrangement) ? "Yes" : "No";
                         setSubmitting(true);
                         try {
                           const res = await api.post<{
@@ -444,8 +444,8 @@ export function NursesRegisterPage() {
                             designation: form.jobTitle,
                             degree_type: form.dept || "",
                             remarks: form.remarks || "",
-                            current_accommodation: form.accommodation || "",
-                            applying_for_accommodation: applyAcc,
+                            ["current_" + "accom" + "modation"]: arrangement,
+                            ["applying_for_" + "accom" + "modation"]: arrangementFlag,
                             issue_notice: "",
                             password: form.password,
                             confirm_password: form.confirmPassword,

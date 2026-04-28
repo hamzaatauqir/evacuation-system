@@ -3816,6 +3816,46 @@ def api_admin_nurses_summary():
         db.close()
 
 
+NURSE_REGISTRATION_STATUSES = {
+    'Pending Review', 'Under Review', 'Approved', 'Rejected',
+    'Needs More Information', 'Closed', 'Pending'
+}
+
+
+def _nurse_registration_public_dict(row):
+    d = dict(row)
+    d['nurse_reference_id'] = d.get('reference_id') or ''
+    d['reference'] = d.get('reference_id') or ''
+    d['phone'] = d.get('mobile') or ''
+    d['workplace'] = d.get('hospital') or d.get('hospital_workplace') or d.get('hospital_or_medical_center') or ''
+    d['current_arrangement'] = d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
+    d['status'] = d.get('registration_status') or 'Pending Review'
+    return d
+
+
+def _nurse_registration_actions(db, reference_id):
+    rows = db.execute(
+        """SELECT id, activity_type AS action_type, actor AS actor_username, details, created_at
+           FROM nurse_activity_log
+           WHERE nurse_reference_id = ?
+           ORDER BY id DESC LIMIT 200""",
+        [reference_id]
+    ).fetchall()
+    actions = []
+    for row in rows:
+        d = dict(row)
+        note = ''
+        try:
+            details = json.loads(d.get('details') or '{}')
+            note = details.get('note') or details.get('message') or details.get('status') or ''
+            d['details_obj'] = details
+        except Exception:
+            note = d.get('details') or ''
+        d['note'] = note
+        actions.append(d)
+    return actions
+
+
 # ═══════════════════════════════════════════════════════════════
 # LEGAL CASE REQUESTS (Community Welfare Wing)
 # ═══════════════════════════════════════════════════════════════
@@ -14938,7 +14978,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             page_size = _nurse_int(params.get('page_size', 20), 20, 1, 200)
             offset = (page - 1) * page_size
             search = (params.get('search') or '').strip()
-            reg_status = (params.get('registration_status') or '').strip()
+            reg_status = (params.get('registration_status') or params.get('status') or '').strip()
             docs_status = (params.get('documents_status') or '').strip()
             grading_letter = (params.get('grading_letter_issued') or '').strip()
             batch_number = (params.get('batch_number') or '').strip()
@@ -14991,13 +15031,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   vals + [page_size, offset]).fetchall()
                 items = []
                 for r in rows:
-                    d = dict(r)
+                    d = _nurse_registration_public_dict(r)
                     completed = sum(int(d.get(col, 0) or 0) for col, _ in NURSE_PROCESS_STEPS)
                     d['progress_completed'] = completed
                     d['progress_total'] = len(NURSE_PROCESS_STEPS)
                     d['progress_label'] = f"{completed}/{len(NURSE_PROCESS_STEPS)}"
                     items.append(d)
                 self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': items})
+            finally:
+                db.close()
+        elif path in ('/api/admin/nurses/registration', '/api/admin/nurses/registration/detail'):
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            ident = (params.get('id') or params.get('nurse_reference_id') or params.get('reference_id') or '').strip()
+            if not ident:
+                self.send_json({'success': False, 'error': 'id required'}, 400); return
+            db = get_db()
+            try:
+                if ident.isdigit():
+                    row = db.execute("SELECT * FROM nurse_registrations WHERE id = ? ORDER BY id DESC LIMIT 1", [int(ident)]).fetchone()
+                else:
+                    row = db.execute("""SELECT * FROM nurse_registrations
+                                        WHERE UPPER(TRIM(reference_id)) = UPPER(TRIM(?))
+                                           OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+                                        ORDER BY id DESC LIMIT 1""", [ident, ident]).fetchone()
+                if not row:
+                    self.send_json({'success': False, 'error': 'Registration not found'}, 404); return
+                record = _nurse_registration_public_dict(row)
+                actions = _nurse_registration_actions(db, record.get('reference_id') or '')
+                self.send_json({'success': True, 'record': record, 'actions': actions})
             finally:
                 db.close()
         elif path == '/api/admin/nurses/accommodation':
@@ -17335,6 +17399,82 @@ function printBoth(){{
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_nurse_leave_notice_submit(data)
             self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/nurses/registration/status':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            rec_id = int(data.get('id', 0) or 0)
+            status = (data.get('status') or '').strip()
+            note = (data.get('note') or '').strip()
+            visible_to_nurse = bool(data.get('visible_to_nurse'))
+            if rec_id <= 0:
+                self.send_json({'success': False, 'error': 'Invalid id'}, 400); return
+            if status not in NURSE_REGISTRATION_STATUSES or status == 'Pending':
+                self.send_json({'success': False, 'error': 'Invalid status'}, 400); return
+            db = get_db()
+            try:
+                row = db.execute("SELECT id, reference_id, passport_number, registration_status FROM nurse_registrations WHERE id = ?", [rec_id]).fetchone()
+                if not row:
+                    self.send_json({'success': False, 'error': 'Record not found'}, 404); return
+                updates = ["registration_status = ?", "updated_at = CURRENT_TIMESTAMP", "updated_by = ?"]
+                vals = [status, user['user']]
+                if visible_to_nurse and note:
+                    updates.append("admin_remarks = ?")
+                    vals.append(note)
+                vals.append(rec_id)
+                db.execute("UPDATE nurse_registrations SET " + ", ".join(updates) + " WHERE id = ?", vals)
+                _nurse_log(db, 'admin_registration_status', row['reference_id'], row['passport_number'], user['user'], {
+                    'old_status': row['registration_status'],
+                    'status': status,
+                    'note': note,
+                    'visible_to_nurse': visible_to_nurse
+                })
+                db.commit()
+                self.send_json({'success': True})
+            finally:
+                db.close()
+            return
+        elif path == '/api/admin/nurses/registration/note':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            rec_id = int(data.get('id', 0) or 0)
+            note = (data.get('note') or '').strip()
+            visible_to_nurse = bool(data.get('visible_to_nurse'))
+            if rec_id <= 0 or not note:
+                self.send_json({'success': False, 'error': 'Record id and note are required'}, 400); return
+            db = get_db()
+            try:
+                row = db.execute("SELECT id, reference_id, passport_number FROM nurse_registrations WHERE id = ?", [rec_id]).fetchone()
+                if not row:
+                    self.send_json({'success': False, 'error': 'Record not found'}, 404); return
+                if visible_to_nurse:
+                    db.execute("""UPDATE nurse_registrations SET
+                                  admin_remarks = ?, updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                                  WHERE id = ?""", [note, user['user'], rec_id])
+                else:
+                    db.execute("""UPDATE nurse_registrations SET
+                                  updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                                  WHERE id = ?""", [user['user'], rec_id])
+                _nurse_log(db, 'admin_registration_note', row['reference_id'], row['passport_number'], user['user'], {
+                    'note': note,
+                    'visible_to_nurse': visible_to_nurse
+                })
+                db.commit()
+                self.send_json({'success': True})
+            finally:
+                db.close()
             return
         elif path == '/api/admin/nurses/registration/update':
             user = self.require_auth()
