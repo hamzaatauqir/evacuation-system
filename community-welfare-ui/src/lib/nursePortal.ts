@@ -28,8 +28,8 @@ export type NursePortalContext = {
     id?: number;
     roster_reference?: string;
     facility_name?: string;
-    vendor_name?: string;
     area?: string;
+    facility_area?: string;
     room_number?: string;
     bed_number?: string;
     date_shifted_to_facility?: string;
@@ -40,6 +40,7 @@ export type NursePortalContext = {
     confirmation_status?: string;
     last_confirmed_at?: string;
     notice_flag?: string;
+    approved_service_provider?: boolean;
     remarks?: string;
   } | null;
   /** Opaque marker from server after password login (not a secret session token). */

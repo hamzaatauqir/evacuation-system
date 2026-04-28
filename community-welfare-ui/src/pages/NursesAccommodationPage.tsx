@@ -4,5 +4,5 @@ import { hasNursePortal } from "../lib/nursePortal";
 
 export function NursesAccommodationPage() {
   if (!hasNursePortal()) return <LoginRequired next="accommodation" />;
-  return <Navigate to="/nurses/portal?tab=accommodation" replace />;
+  return <Navigate to="/nurses/portal?tab=stay" replace />;
 }

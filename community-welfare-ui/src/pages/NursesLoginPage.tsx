@@ -41,7 +41,7 @@ export function NursesLoginPage() {
       setNursePortal(ctx);
       const nextRoute =
         next === "accommodation"
-          ? "/nurses/portal?tab=accommodation"
+          ? "/nurses/portal?tab=stay"
           : next === "complaint"
             ? "/nurses/portal?tab=complaint"
             : next === "leaving" || next === "leaving-notice"

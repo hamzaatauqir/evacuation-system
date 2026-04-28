@@ -60,11 +60,15 @@
 
       <div class="cwa-admin-content cwa-fade-in">
         <div class="cwa-kpi-grid" id="kpiGrid">
-          <div class="cwa-kpi"><div><div class="cwa-kpi__label">Total Nurses</div><div class="cwa-kpi__value" id="kpiTotal">—</div></div><div class="cwa-kpi__icon">◉</div></div>
-          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending</div><div class="cwa-kpi__value" id="kpiPending">—</div></div><div class="cwa-kpi__icon">⏱</div></div>
-          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Facility Follow-up</div><div class="cwa-kpi__value" id="kpiAccom">—</div></div><div class="cwa-kpi__icon">⌂</div></div>
-          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Open Complaints</div><div class="cwa-kpi__value" id="kpiOpen">—</div></div><div class="cwa-kpi__icon">!</div></div>
-          <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">Resolved</div><div class="cwa-kpi__value" id="kpiResolved">—</div></div><div class="cwa-kpi__icon">✓</div></div>
+          <div class="cwa-kpi"><div><div class="cwa-kpi__label">Total Health Workers</div><div class="cwa-kpi__value" id="kpiTotal">—</div></div><div class="cwa-kpi__icon">◉</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Review</div><div class="cwa-kpi__value" id="kpiPending">—</div></div><div class="cwa-kpi__icon">⏱</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Embassy-Facilitated Residents</div><div class="cwa-kpi__value" id="kpiFacility">—</div></div><div class="cwa-kpi__icon">⌂</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">MOH Arranged</div><div class="cwa-kpi__value" id="kpiMoh">—</div></div><div class="cwa-kpi__icon">M</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Private Self Arranged</div><div class="cwa-kpi__value" id="kpiPrivate">—</div></div><div class="cwa-kpi__icon">P</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Stay Confirmation</div><div class="cwa-kpi__value" id="kpiStay">—</div></div><div class="cwa-kpi__icon">?</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Notice Period Due</div><div class="cwa-kpi__value" id="kpiNotice">—</div></div><div class="cwa-kpi__icon">N</div></div>
+          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Open Welfare Requests</div><div class="cwa-kpi__value" id="kpiOpen">—</div></div><div class="cwa-kpi__icon">!</div></div>
+          <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">My Assigned</div><div class="cwa-kpi__value" id="kpiMine">—</div></div><div class="cwa-kpi__icon">★</div></div>
         </div>
 
         <div class="cwa-tabs" id="tabBar"></div>
@@ -118,7 +122,7 @@
 const TABS = [
   { key: 'all',          label: 'All Health Workers', endpoint: 'registrations',  params: {} },
   { key: 'pending',      label: 'Pending Review',     endpoint: 'registrations',  params: { registration_status: 'Pending Review' } },
-  { key: 'embassy',      label: 'Embassy-arranged / Contracted Facility', endpoint: 'registrations', params: { current_arrangement: 'Embassy Contracted / Arranged' } },
+  { key: 'embassy',      label: 'Embassy-facilitated Facility', endpoint: 'registrations', params: { current_arrangement: 'Embassy Contracted / Arranged' } },
   { key: 'moh',          label: 'MOH Arranged',        endpoint: 'registrations',  params: { current_arrangement: 'MOH Arranged' } },
   { key: 'private',      label: 'Private Self Arranged', endpoint: 'registrations', params: { current_arrangement: 'Private (Self Arranged)' } },
   { key: 'pendingStay',  label: 'Pending Stay Confirmation', endpoint: 'registrations', params: { confirmation_status: 'Pending Nurse Confirmation' } },
@@ -161,7 +165,7 @@ function buildHeader(){
   const cols = activeTab==='leaving'
     ? ['Reference','Nurse','Passport','Reason','Status','Updated','Actions']
     : isRegistrationTab()
-    ? ['Reference','Name','Passport / Civil ID','Phone','Workplace','Current Stay Arrangement','Facility / Vendor','Shifted Date','Contract End Date','Notice Period Start','Confirmation Status','Status','Assigned Officer','Last Contact','Actions']
+    ? ['Reference','Name','Passport / Civil ID','Phone','Workplace','Current Stay Arrangement','Vendor','Facility / Area','Shifted Date','Contract End Date','Notice Period Start','Confirmation Status','Status','Assigned Officer','Last Contact','Actions']
     : ['Reference','Nurse','Passport / Civil ID','Email','Phone','Hospital','Type','Priority','Status','Assigned','Updated'];
   document.getElementById('theadRow').innerHTML=cols.map(c=>`<th>${esc(c)}</th>`).join('');
   return cols.length;
@@ -174,8 +178,8 @@ function rowHtml(r){
   if(isRegistrationTab()){
     const ref=r.nurse_reference_id||r.reference_id||r.reference||'';
     const status=r.registration_status||r.status||'Pending Review';
-    const facility=[r.facility_name,r.vendor_name].filter(Boolean).join(' / ')||'—';
-    return `<tr onclick="openRegDetail('${esc(ref)}')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.phone||r.mobile||'—')}</td><td><span style="font-size:12px">${esc(r.hospital||r.hospital_workplace||r.workplace||'—')}</span></td><td style="font-size:12px">${esc(r.current_arrangement||r.current_accommodation||'—')}</td><td style="font-size:12px">${esc(facility)}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.date_shifted_to_facility||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.contract_end_date||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.notice_period_start_date||r.notice_flag||'—')}</td><td><span class="cwa-badge" data-type="${statusType(r.confirmation_status)}">${esc(r.confirmation_status||'—')}</span></td><td><span class="cwa-badge" data-type="${statusType(status)}">${esc(status)}</span></td><td style="font-size:12px">${esc(r.assigned_to||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.last_contact||r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openRegDetail('${esc(ref)}')">View / Review</button></td></tr>`;
+    const facility=[r.facility_name,r.facility_area].filter(Boolean).join(' / ')||'—';
+    return `<tr onclick="openRegDetail('${esc(ref)}')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.phone||r.mobile||'—')}</td><td><span style="font-size:12px">${esc(r.hospital||r.hospital_workplace||r.workplace||'—')}</span></td><td style="font-size:12px">${esc(r.current_arrangement||r.current_accommodation||'—')}</td><td style="font-size:12px">${esc(r.vendor_name||'—')}</td><td style="font-size:12px">${esc(facility)}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.date_shifted_to_facility||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.contract_end_date||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.notice_period_start_date||r.notice_flag||'—')}</td><td><span class="cwa-badge" data-type="${statusType(r.confirmation_status)}">${esc(r.confirmation_status||'—')}</span></td><td><span class="cwa-badge" data-type="${statusType(status)}">${esc(status)}</span></td><td style="font-size:12px">${esc(r.assigned_to||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.last_contact||r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openRegDetail('${esc(ref)}')">View / Review</button></td></tr>`;
   }
   // complaints (default)
   const ref = r.complaint_id||r.reference_id||'';
@@ -198,15 +202,18 @@ async function loadSummary(){
     const t=summary.totals||{};
     document.getElementById('kpiTotal').textContent=(t.registrations||0).toLocaleString();
     document.getElementById('kpiPending').textContent=(t.pending_registrations||0).toLocaleString();
-    document.getElementById('kpiAccom').textContent=(t.facility_followup||0).toLocaleString();
-    document.getElementById('kpiOpen').textContent=(t.open_complaints||0).toLocaleString();
-    document.getElementById('kpiResolved').textContent=(t.resolved_complaints||0).toLocaleString();
+    document.getElementById('kpiFacility').textContent=(t.facility_embassy_arranged||0).toLocaleString();
+    document.getElementById('kpiMoh').textContent=(t.moh_arranged||0).toLocaleString();
+    document.getElementById('kpiPrivate').textContent=(t.private_self_arranged||0).toLocaleString();
+    document.getElementById('kpiStay').textContent=(t.facility_pending_confirmation||0).toLocaleString();
+    document.getElementById('kpiNotice').textContent=(t.facility_notice_due||0).toLocaleString();
+    document.getElementById('kpiOpen').textContent=(t.open_welfare_requests||t.facility_followup||0).toLocaleString();
+    document.getElementById('kpiMine').textContent=(t.facility_my_assigned||t.my_complaints||0).toLocaleString();
     document.getElementById('totalLine').textContent=(t.registrations||0)+' health workers · '+(t.facility_total||0)+' facility records';
     const counts={all:t.registrations,pending:t.pending_registrations,embassy:t.facility_embassy_arranged,
-      pendingStay:t.facility_pending_confirmation,noticeDue:t.facility_notice_due,leaving:t.facility_leaving,
-      welfare:t.facility_followup,mine:t.facility_my_assigned,resolved:t.resolved_complaints};
+      moh:t.moh_arranged,private:t.private_self_arranged,pendingStay:t.facility_pending_confirmation,noticeDue:t.facility_notice_due,leaving:t.facility_leaving,
+      welfare:t.open_welfare_requests||t.facility_followup,mine:t.facility_my_assigned,resolved:t.resolved_complaints};
     Object.entries(counts).forEach(([k,v])=>{const el=document.getElementById('tc-'+k);if(el)el.textContent=v||0;});
-    ['moh','private'].forEach(k=>{const el=document.getElementById('tc-'+k);if(el)el.textContent='—';});
   }catch(e){}
 }
 
@@ -256,8 +263,10 @@ function exportCsv(){
 async function openRegDetail(ref){
   if(!ref) return;
   const d=await api('/api/admin/nurses/registration/detail?id='+encodeURIComponent(ref))
-    .catch(()=>({success:false}));
-  const r=(d&&d.record)||{};
+    .catch(e=>({success:false,error:e.message}));
+  const fallback=activeRows.find(x=>(x.nurse_reference_id||x.reference_id||x.reference||'')===ref)||{};
+  const r=(d&&d.record&&Object.keys(d.record).length)?d.record:fallback;
+  const fallbackMessage=d&&d.success===false?'Unable to load full details. Basic row information is shown below.':'';
   showDrawer({
     kind: 'registration',
     recordId: r.id,
@@ -266,6 +275,7 @@ async function openRegDetail(ref){
     sub: 'Registration · '+(r.hospital||''),
     status: r.registration_status||'—',
     priority: '',
+    fallbackMessage,
     profile: [
       ['Passport', r.passport_number||''],
       ['Civil ID', r.civil_id||'—'],
@@ -273,12 +283,18 @@ async function openRegDetail(ref){
       ['Phone', r.phone||r.mobile||''],
       ['Hospital / Workplace', r.hospital||''],
       ['Department', r.department||r.dept||''],
-      ['Current Arrangement', r.current_arrangement||r.current_accommodation||'—'],
-      ['Facility / Vendor', [r.facility_name,r.vendor_name].filter(Boolean).join(' / ')||'—'],
+      ['Current Stay Arrangement', r.current_arrangement||r.current_accommodation||'—'],
+      ['Vendor', r.vendor_name||'—'],
+      ['Facility / Area', [r.facility_name,r.facility_area].filter(Boolean).join(' / ')||'—'],
+      ['Room / Bed', [r.room_number,r.bed_number].filter(Boolean).join(' / ')||'—'],
+      ['Contract Start Date', r.contract_start_date||'—'],
       ['Shifted Date', r.date_shifted_to_facility||'—'],
       ['Contract End Date', r.contract_end_date||'—'],
       ['Notice Period Start', r.notice_period_start_date||'—'],
       ['Confirmation Status', r.confirmation_status||'—'],
+      ['Facility Status', r.facility_current_status||'—'],
+      ['Reconciliation Status', r.reconciliation_status||'—'],
+      ['Action Required', r.action_required||'—'],
       ['Assigned Officer', r.assigned_to||'Unassigned'],
       ['Address', r.current_address||r.address||''],
     ],
@@ -362,6 +378,7 @@ function showDrawer(d){
       </div>
       <div class="cwa-drawer__accent"></div>
       <div class="cwa-drawer__body">
+        ${d.fallbackMessage?`<div class="cwa-empty" style="padding:10px;margin-bottom:12px;text-align:left">${esc(d.fallbackMessage)}</div>`:''}
         <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
           <span class="cwa-badge" data-type="${statusType(d.status)}">${esc(d.status||'—')}</span>
           ${d.priority?`<span class="cwa-badge" data-type="${priorityType(d.priority)}">${esc(d.priority)} Priority</span>`:''}
