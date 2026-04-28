@@ -16,7 +16,17 @@ export function NursesPortalPage() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
 
-  const [acc, setAcc] = useState({ current_accommodation_status: "", requested_facility: "", reason_remarks: "" });
+  const [facilityReq, setFacilityReq] = useState({ current_stay_arrangement: "", requested_facility: "", reason_remarks: "" });
+  const [stay, setStay] = useState(() => ({
+    confirmation_option: "",
+    current_facility_name: ctx?.facilityRoster?.facility_name || "",
+    area: ctx?.facilityRoster?.area || "",
+    room_number: ctx?.facilityRoster?.room_number || "",
+    bed_number: ctx?.facilityRoster?.bed_number || "",
+    current_phone: ctx?.mobile || "",
+    preferred_contact_method: "WhatsApp",
+    remarks: "",
+  }));
   const [complaint, setComplaint] = useState({ complaint_category: "", priority: "Normal", subject: "", description: "" });
   const [leaving, setLeaving] = useState({ current_facility: "", intended_leaving_date: "", reason: "" });
   const [curPwd, setCurPwd] = useState("");
@@ -30,7 +40,7 @@ export function NursesPortalPage() {
   }
 
   const tab = params.get("tab") || "overview";
-  const tabs = ["overview", "accommodation", "complaint", "leaving", "requests", "password"];
+  const tabs = ["overview", "stay", "complaint", "leaving", "requests", "password"];
   const activeTab = tabs.includes(tab) ? tab : "overview";
 
   const statusType = (ctx.registrationStatus || "").toLowerCase().includes("resolved")
@@ -39,23 +49,42 @@ export function NursesPortalPage() {
     ? "processing"
     : "pending";
 
-  async function submitAccommodation() {
+  async function submitFacilityRequest() {
     setBusy(true); setErr(""); setMsg("");
     try {
       await api.post("/api/nurses/accommodation", {
         nurse_reference_id: ctx.referenceId,
         passport_number: ctx.passportNumber,
         verifier: ctx.mobile || ctx.civilId || "",
-        current_accommodation_status: acc.current_accommodation_status,
-        requested_facility: acc.requested_facility,
-        reason_remarks: acc.reason_remarks,
+        current_accommodation_status: facilityReq.current_stay_arrangement,
+        requested_facility: facilityReq.requested_facility,
+        reason_remarks: facilityReq.reason_remarks,
       });
-      addLocalPortalRequest({ type: "Accommodation", summary: `Type: ${acc.requested_facility || "N/A"}` });
-      setMsg("Accommodation request submitted. Marked as pending official review.");
-      setAcc({ current_accommodation_status: "", requested_facility: "", reason_remarks: "" });
+      addLocalPortalRequest({ type: "Facility Assistance", summary: `Type: ${facilityReq.requested_facility || "N/A"}` });
+      setMsg("Facility assistance request submitted. Marked as pending official review.");
+      setFacilityReq({ current_stay_arrangement: "", requested_facility: "", reason_remarks: "" });
       setParams({ tab: "requests" });
     } catch (e) {
-      setErr((e as Error).message || "Could not submit accommodation request.");
+      setErr((e as Error).message || "Could not submit facility assistance request.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitStayConfirmation() {
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      await api.post("/api/nurses/stay-confirmation", {
+        nurse_reference_id: ctx.referenceId,
+        passport_number: ctx.passportNumber,
+        verifier: ctx.mobile || ctx.civilId || "",
+        ...stay,
+      });
+      addLocalPortalRequest({ type: "Stay Confirmation", summary: "Stay arrangement update submitted." });
+      setMsg("Stay arrangement confirmation submitted for Community Welfare Wing review.");
+      setParams({ tab: "requests" });
+    } catch (e) {
+      setErr((e as Error).message || "Could not submit stay arrangement confirmation.");
     } finally {
       setBusy(false);
     }
@@ -151,8 +180,8 @@ export function NursesPortalPage() {
             <Btn key={t} variant={activeTab === t ? "navy" : "light"} onClick={() => setParams({ tab: t })}>
               {t === "overview"
                 ? "Overview"
-                : t === "accommodation"
-                  ? "Accommodation"
+                : t === "stay"
+                  ? "Stay Arrangement"
                   : t === "complaint"
                     ? "Complaint"
                     : t === "leaving"
@@ -183,6 +212,8 @@ export function NursesPortalPage() {
                   <Field label="Civil ID (if any)" value={ctx.civilIdMasked || "—"} />
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
+                  <Field label="Current Stay Arrangement" value={ctx.facilityRoster?.current_status || "Not linked to a facility record"} />
+                  <Field label="Facility" value={ctx.facilityRoster?.facility_name || "—"} />
                 </div>
               </div>
               <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16 }}>
@@ -199,13 +230,65 @@ export function NursesPortalPage() {
           </>
         ) : null}
 
-        {activeTab === "accommodation" ? (
-          <FormCard title="Accommodation Request">
-            <label>Current Accommodation Status<input className="f-input" value={acc.current_accommodation_status} onChange={(e) => setAcc({ ...acc, current_accommodation_status: e.target.value })} /></label>
-            <label>Requested Facility<input className="f-input" value={acc.requested_facility} onChange={(e) => setAcc({ ...acc, requested_facility: e.target.value })} /></label>
-            <label>Reason / Remarks<textarea className="f-input" value={acc.reason_remarks} onChange={(e) => setAcc({ ...acc, reason_remarks: e.target.value })} /></label>
-            <Btn variant="primary" disabled={busy} onClick={submitAccommodation}>{busy ? "Submitting..." : "Submit Accommodation Request"}</Btn>
-          </FormCard>
+        {activeTab === "stay" ? (
+          <div style={{ display: "grid", gap: 14 }}>
+            {ctx.facilityRoster ? (
+              <FormCard title="Stay Arrangement Confirmation">
+                <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
+                  Our records show that you may be assigned to an Embassy-arranged or Embassy-contracted
+                  facility. Please confirm your current stay arrangement so the Community Welfare Wing can
+                  maintain accurate welfare records and provide timely assistance where required.
+                </p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 }}>
+                  <Field label="Roster Reference" value={ctx.facilityRoster.roster_reference || "-"} />
+                  <Field label="Facility" value={ctx.facilityRoster.facility_name || "-"} />
+                  <Field label="Vendor" value={ctx.facilityRoster.vendor_name || "-"} />
+                  <Field label="Notice Period Start" value={ctx.facilityRoster.notice_period_start_date || "-"} />
+                </div>
+                <label>
+                  Confirmation option
+                  <select className="f-input" value={stay.confirmation_option} onChange={(e) => setStay({ ...stay, confirmation_option: e.target.value })}>
+                    <option value="">Select</option>
+                    <option value="currently_staying">I am currently staying at this facility</option>
+                    <option value="shifted_from_facility">I have shifted from this facility</option>
+                    <option value="intends_to_leave">I intend to leave/change my stay arrangement</option>
+                    <option value="details_correction">My facility details require correction</option>
+                    <option value="assistance_requested">I need welfare assistance/follow-up</option>
+                  </select>
+                </label>
+                <label>Current facility name<input className="f-input" value={stay.current_facility_name} onChange={(e) => setStay({ ...stay, current_facility_name: e.target.value })} /></label>
+                <label>Area<input className="f-input" value={stay.area} onChange={(e) => setStay({ ...stay, area: e.target.value })} /></label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <label>Room<input className="f-input" value={stay.room_number} onChange={(e) => setStay({ ...stay, room_number: e.target.value })} /></label>
+                  <label>Bed<input className="f-input" value={stay.bed_number} onChange={(e) => setStay({ ...stay, bed_number: e.target.value })} /></label>
+                </div>
+                <label>Current phone / WhatsApp<input className="f-input" value={stay.current_phone} onChange={(e) => setStay({ ...stay, current_phone: e.target.value })} /></label>
+                <label>
+                  Preferred contact method
+                  <select className="f-input" value={stay.preferred_contact_method} onChange={(e) => setStay({ ...stay, preferred_contact_method: e.target.value })}>
+                    <option>WhatsApp</option>
+                    <option>Phone Call</option>
+                    <option>Email</option>
+                  </select>
+                </label>
+                <label>Remarks<textarea className="f-input" value={stay.remarks} onChange={(e) => setStay({ ...stay, remarks: e.target.value })} /></label>
+                <Btn variant="primary" disabled={busy || !stay.confirmation_option} onClick={submitStayConfirmation}>{busy ? "Submitting..." : "Submit Stay Confirmation"}</Btn>
+              </FormCard>
+            ) : (
+              <FormCard title="Stay Arrangement Confirmation">
+                <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
+                  No Embassy-arranged or Embassy-contracted facility record is currently linked to your profile.
+                  You may still submit a facility assistance request if you need Community Welfare Wing follow-up.
+                </p>
+              </FormCard>
+            )}
+            <FormCard title="Facility Assistance Request">
+              <label>Current Stay Arrangement<input className="f-input" value={facilityReq.current_stay_arrangement} onChange={(e) => setFacilityReq({ ...facilityReq, current_stay_arrangement: e.target.value })} /></label>
+              <label>Requested Facility Assistance<input className="f-input" value={facilityReq.requested_facility} onChange={(e) => setFacilityReq({ ...facilityReq, requested_facility: e.target.value })} /></label>
+              <label>Reason / Remarks<textarea className="f-input" value={facilityReq.reason_remarks} onChange={(e) => setFacilityReq({ ...facilityReq, reason_remarks: e.target.value })} /></label>
+              <Btn variant="primary" disabled={busy} onClick={submitFacilityRequest}>{busy ? "Submitting..." : "Submit Facility Assistance Request"}</Btn>
+            </FormCard>
+          </div>
         ) : null}
 
         {activeTab === "complaint" ? (

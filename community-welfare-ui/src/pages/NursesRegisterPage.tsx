@@ -31,6 +31,11 @@ interface FormState {
   arrivalDate?: string;
   batchNumber?: string;
   currentArrangement?: string;
+  facilityName?: string;
+  facilityArea?: string;
+  dateShiftedToFacility?: string;
+  contractStartDate?: string;
+  stayRemindersOptIn?: string;
   emergency?: string;
   remarks?: string;
   declared?: boolean;
@@ -148,10 +153,10 @@ export function NursesRegisterPage() {
             Back to Nurses Home
           </button>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "#fff", marginBottom: 4 }}>
-            Nurse Community Registration
+            Nurses / Health Workers Registration
           </h1>
           <p style={{ fontSize: 13, color: "rgba(255,255,255,.6)" }}>
-            Community Welfare Wing — Official Registration Portal for Nurses in Kuwait
+            Community Welfare Wing — Official Registration Portal for Pakistani nurses and health workers in Kuwait
           </p>
         </div>
       </div>
@@ -295,6 +300,33 @@ export function NursesRegisterPage() {
                       "Other",
                     ]}
                   />
+                  {form.currentArrangement === "Embassy Contracted / Arranged" ? (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 14,
+                        background: T.surfaceLow,
+                        border: `1px solid ${T.borderLt}`,
+                        borderRadius: 10,
+                      }}
+                    >
+                      <h4 style={{ fontSize: 13, color: T.navy, fontWeight: 800, marginBottom: 12 }}>
+                        Embassy-arranged facility details (if available)
+                      </h4>
+                      <Grid cols={2} gap={14}>
+                        <FInput label="Facility / Building Name" {...inp("facilityName")} placeholder="Building or facility name" />
+                        <FInput label="Area" {...inp("facilityArea")} placeholder="Area in Kuwait" />
+                        <FInput label="Date shifted to facility" {...inp("dateShiftedToFacility")} type="date" />
+                        <FInput label="Contract / stay period start date if available" {...inp("contractStartDate")} type="date" />
+                        <FSelect
+                          label="Do you wish to receive portal reminders about leaving notice timelines?"
+                          {...inp("stayRemindersOptIn")}
+                          placeholder="Select"
+                          options={["Yes", "No"]}
+                        />
+                      </Grid>
+                    </div>
+                  ) : null}
                   <FInput
                     label="Emergency Contact Number"
                     req
@@ -446,6 +478,11 @@ export function NursesRegisterPage() {
                             remarks: form.remarks || "",
                             ["current_" + "accom" + "modation"]: arrangement,
                             ["applying_for_" + "accom" + "modation"]: arrangementFlag,
+                            facility_name: form.facilityName || "",
+                            facility_area: form.facilityArea || "",
+                            date_shifted_to_facility: form.dateShiftedToFacility || "",
+                            contract_start_date: form.contractStartDate || "",
+                            stay_reminders_opt_in: form.stayRemindersOptIn || "",
                             issue_notice: "",
                             password: form.password,
                             confirm_password: form.confirmPassword,

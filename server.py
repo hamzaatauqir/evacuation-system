@@ -11,7 +11,7 @@ MOFA approval PDF parsing order: (1) pypdf text layer, (2) Poppler pdftotext CLI
 pip install pypdf. macOS: brew install poppler gives pdftotext without extra pip packages.
 """
 
-import http.server, sqlite3, json, hashlib, hmac, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback, gc
+import http.server, sqlite3, json, hashlib, hmac, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback, gc, calendar
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta, date
@@ -1163,6 +1163,125 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+    # ── Health Workers facility occupancy roster ─────────────────
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS facility_roster (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        roster_reference TEXT UNIQUE,
+        nurse_registration_id INTEGER,
+        full_name TEXT,
+        passport_number TEXT,
+        civil_id TEXT,
+        phone TEXT,
+        email TEXT,
+        facility_name TEXT,
+        vendor_name TEXT,
+        area TEXT,
+        room_number TEXT,
+        bed_number TEXT,
+        date_shifted_to_facility TEXT,
+        contract_start_date TEXT,
+        contract_end_date TEXT,
+        notice_period_months INTEGER DEFAULT 3,
+        notice_period_start_date TEXT,
+        current_status TEXT DEFAULT 'Assigned',
+        confirmation_status TEXT DEFAULT 'Pending Nurse Confirmation',
+        last_confirmed_at TIMESTAMP,
+        last_vendor_update_at TIMESTAMP,
+        last_embassy_verification_at TIMESTAMP,
+        assigned_to TEXT,
+        assigned_role TEXT,
+        due_date TEXT,
+        welfare_followup_required INTEGER DEFAULT 0,
+        reconciliation_status TEXT DEFAULT '',
+        notice_reminder_sent_at TIMESTAMP,
+        last_notice_reminder_at TIMESTAMP,
+        reminder_count INTEGER DEFAULT 0,
+        active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        remarks TEXT
+    );
+    CREATE TABLE IF NOT EXISTS facility_roster_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        roster_id INTEGER REFERENCES facility_roster(id),
+        actor_username TEXT,
+        action_type TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        note TEXT,
+        visible_to_nurse INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_reference ON facility_roster(roster_reference);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_nurse ON facility_roster(nurse_registration_id);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_passport ON facility_roster(passport_number);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_civil ON facility_roster(civil_id);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_phone ON facility_roster(phone);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_facility ON facility_roster(facility_name);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_vendor ON facility_roster(vendor_name);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_status ON facility_roster(current_status);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_confirmation ON facility_roster(confirmation_status);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_assigned ON facility_roster(assigned_to);
+    CREATE INDEX IF NOT EXISTS idx_facility_roster_actions_roster ON facility_roster_actions(roster_id);
+    """)
+    for col, coltype in [
+        ('roster_reference', 'TEXT'),
+        ('nurse_registration_id', 'INTEGER'),
+        ('full_name', 'TEXT'),
+        ('passport_number', 'TEXT'),
+        ('civil_id', 'TEXT'),
+        ('phone', 'TEXT'),
+        ('email', 'TEXT'),
+        ('facility_name', 'TEXT'),
+        ('vendor_name', 'TEXT'),
+        ('area', 'TEXT'),
+        ('room_number', 'TEXT'),
+        ('bed_number', 'TEXT'),
+        ('date_shifted_to_facility', 'TEXT'),
+        ('contract_start_date', 'TEXT'),
+        ('contract_end_date', 'TEXT'),
+        ('notice_period_months', 'INTEGER DEFAULT 3'),
+        ('notice_period_start_date', 'TEXT'),
+        ('current_status', "TEXT DEFAULT 'Assigned'"),
+        ('confirmation_status', "TEXT DEFAULT 'Pending Nurse Confirmation'"),
+        ('last_confirmed_at', 'TIMESTAMP'),
+        ('last_vendor_update_at', 'TIMESTAMP'),
+        ('last_embassy_verification_at', 'TIMESTAMP'),
+        ('assigned_to', 'TEXT'),
+        ('assigned_role', 'TEXT'),
+        ('due_date', 'TEXT'),
+        ('welfare_followup_required', 'INTEGER DEFAULT 0'),
+        ('reconciliation_status', "TEXT DEFAULT ''"),
+        ('notice_reminder_sent_at', 'TIMESTAMP'),
+        ('last_notice_reminder_at', 'TIMESTAMP'),
+        ('reminder_count', 'INTEGER DEFAULT 0'),
+        ('active', 'INTEGER DEFAULT 1'),
+        ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ('remarks', 'TEXT')
+    ]:
+        try:
+            db.execute(f"ALTER TABLE facility_roster ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    for col, coltype in [
+        ('roster_id', 'INTEGER'),
+        ('actor_username', 'TEXT'),
+        ('action_type', 'TEXT'),
+        ('old_value', 'TEXT'),
+        ('new_value', 'TEXT'),
+        ('note', 'TEXT'),
+        ('visible_to_nurse', 'INTEGER DEFAULT 0'),
+        ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+    ]:
+        try:
+            db.execute(f"ALTER TABLE facility_roster_actions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+
     # Default admin user
     pw_hash = hashlib.sha256('embassy2026'.encode()).hexdigest()
     try:
@@ -1235,6 +1354,11 @@ def init_db():
     # Migrate users table: add password_plain column
     try:
         db.execute("ALTER TABLE users ADD COLUMN password_plain TEXT DEFAULT ''")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
         db.commit()
     except sqlite3.OperationalError:
         pass
@@ -3309,6 +3433,435 @@ def _nurse_send_email_smtp_env(to_addr, subject, body_text):
         return False, str(e)
 
 
+FACILITY_ROSTER_STATUSES = {
+    'Assigned', 'Pending Nurse Confirmation', 'Confirmed Staying',
+    'Intends to Leave', 'Leaving Notice Submitted', 'Left Facility',
+    'Record Correction Needed', 'Reconciliation Required',
+    'Field Follow-up Required', 'Inactive'
+}
+FACILITY_CONFIRMATION_STATUSES = {
+    'Pending Nurse Confirmation', 'Stay Confirmed', 'Shifted from Facility',
+    'Intends to Leave', 'Correction Requested', 'Welfare Follow-up Requested',
+    'Reconciliation Required', 'Not Applicable'
+}
+FACILITY_STAFF_ROLES = {
+    'admin', 'operator', 'operator_special', 'welfare_officer',
+    'inspector_field', 'community_desk', 'senior_review', 'ambassador_review'
+}
+
+
+def _row_to_dict(row):
+    return dict(row) if row else {}
+
+
+def _parse_iso_date(value):
+    value = (value or '').strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except Exception:
+        return None
+
+
+def _date_add_months(value, months):
+    dt = _parse_iso_date(value)
+    if not dt:
+        return ''
+    month = dt.month - 1 + int(months or 0)
+    year = dt.year + month // 12
+    month = month % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day).isoformat()
+
+
+def _facility_notice_start(contract_end_date, notice_period_months=3):
+    if not contract_end_date:
+        return ''
+    return _date_add_months(contract_end_date, -abs(int(notice_period_months or 3)))
+
+
+def _facility_normalized_dates(data):
+    shifted = (data.get('date_shifted_to_facility') or data.get('date_shifted') or '').strip()
+    contract_start = (data.get('contract_start_date') or data.get('stay_period_start_date') or shifted or '').strip()
+    contract_end = (data.get('contract_end_date') or '').strip()
+    try:
+        notice_months = int(data.get('notice_period_months') or 3)
+    except Exception:
+        notice_months = 3
+    notice_months = max(1, min(12, notice_months))
+    if not contract_end and shifted:
+        contract_end = _date_add_months(shifted, 6)
+    notice_start = (data.get('notice_period_start_date') or '').strip()
+    if not notice_start and contract_end:
+        notice_start = _facility_notice_start(contract_end, notice_months)
+    return shifted, contract_start, contract_end, notice_months, notice_start
+
+
+def _facility_notice_flag(row_or_dict):
+    d = _row_to_dict(row_or_dict) if not isinstance(row_or_dict, dict) else row_or_dict
+    status = (d.get('current_status') or '').strip()
+    if status in ('Leaving Notice Submitted', 'Left Facility', 'Inactive'):
+        return ''
+    notice_start = _parse_iso_date(d.get('notice_period_start_date') or '')
+    if not notice_start:
+        return ''
+    today = date.today()
+    if today > notice_start:
+        return 'Notice Response Pending'
+    if today >= notice_start:
+        return 'Notice Period Active'
+    if today >= (notice_start - timedelta(days=14)):
+        return 'Reminder Upcoming'
+    return ''
+
+
+def _next_facility_roster_reference(db):
+    year = datetime.now().strftime('%Y')
+    base = f'FAC-{year}-'
+    row = db.execute(
+        "SELECT roster_reference FROM facility_roster WHERE roster_reference LIKE ? ORDER BY roster_reference DESC LIMIT 1",
+        [base + '%']
+    ).fetchone()
+    next_num = 1
+    if row and row['roster_reference']:
+        try:
+            next_num = int(str(row['roster_reference']).rsplit('-', 1)[-1]) + 1
+        except Exception:
+            next_num = 1
+    return f'{base}{next_num:04d}'
+
+
+def _facility_insert_action(db, roster_id, actor_username, action_type, old_value='', new_value='', note='', visible_to_nurse=False):
+    if not roster_id:
+        return
+    db.execute(
+        """INSERT INTO facility_roster_actions
+           (roster_id, actor_username, action_type, old_value, new_value, note, visible_to_nurse)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        [roster_id, actor_username or 'system', action_type or '', old_value or '', new_value or '', note or '', 1 if visible_to_nurse else 0]
+    )
+
+
+def _facility_roster_to_dict(row):
+    d = _row_to_dict(row)
+    if not d:
+        return {}
+    for key in (
+        'roster_reference', 'full_name', 'passport_number', 'civil_id', 'phone', 'email',
+        'facility_name', 'vendor_name', 'area', 'room_number', 'bed_number',
+        'date_shifted_to_facility', 'contract_start_date', 'contract_end_date',
+        'notice_period_start_date', 'current_status', 'confirmation_status',
+        'last_confirmed_at', 'last_vendor_update_at', 'last_embassy_verification_at',
+        'assigned_to', 'assigned_role', 'due_date', 'reconciliation_status',
+        'created_at', 'updated_at', 'remarks'
+    ):
+        d[key] = d.get(key) or ''
+    d['notice_period_months'] = int(d.get('notice_period_months') or 3)
+    d['welfare_followup_required'] = 1 if int(d.get('welfare_followup_required') or 0) else 0
+    d['active'] = 1 if int(d.get('active') if d.get('active') is not None else 1) else 0
+    d['notice_flag'] = _facility_notice_flag(d)
+    d['room_bed'] = ' / '.join([x for x in (d.get('room_number'), d.get('bed_number')) if x]) or ''
+    return d
+
+
+def _facility_portal_dict(row):
+    d = _facility_roster_to_dict(row)
+    if not d:
+        return None
+    return {
+        'id': d.get('id'),
+        'roster_reference': d.get('roster_reference', ''),
+        'facility_name': d.get('facility_name', ''),
+        'vendor_name': d.get('vendor_name', ''),
+        'area': d.get('area', ''),
+        'room_number': d.get('room_number', ''),
+        'bed_number': d.get('bed_number', ''),
+        'date_shifted_to_facility': d.get('date_shifted_to_facility', ''),
+        'contract_start_date': d.get('contract_start_date', ''),
+        'contract_end_date': d.get('contract_end_date', ''),
+        'notice_period_start_date': d.get('notice_period_start_date', ''),
+        'current_status': d.get('current_status', ''),
+        'confirmation_status': d.get('confirmation_status', ''),
+        'last_confirmed_at': d.get('last_confirmed_at', ''),
+        'notice_flag': d.get('notice_flag', ''),
+        'remarks': d.get('remarks', '')
+    }
+
+
+def _facility_find_candidates_for_registration(db, rec):
+    rec = rec or {}
+    matches = {}
+    passport = _nurse_normalize_passport(rec.get('passport_number') or '')
+    civil = _nurse_normalize_id_key(rec.get('civil_id') or '')
+    phone = _nurse_normalize_id_key(rec.get('mobile') or rec.get('phone') or '')
+    if passport:
+        rows = db.execute(
+            """SELECT * FROM facility_roster
+               WHERE active = 1
+                 AND UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = ?""",
+            [passport]
+        ).fetchall()
+        for row in rows:
+            matches[row['id']] = row
+    if civil:
+        rows = db.execute(
+            """SELECT * FROM facility_roster
+               WHERE active = 1 AND TRIM(COALESCE(civil_id,'')) != ''
+                 AND REPLACE(REPLACE(REPLACE(UPPER(TRIM(civil_id)), '-', ''), ' ', ''), '_', '') = ?""",
+            [civil]
+        ).fetchall()
+        for row in rows:
+            matches[row['id']] = row
+    if phone:
+        rows = db.execute(
+            """SELECT * FROM facility_roster
+               WHERE active = 1 AND TRIM(COALESCE(phone,'')) != ''
+                 AND REPLACE(REPLACE(REPLACE(UPPER(TRIM(phone)), '-', ''), ' ', ''), '_', '') = ?""",
+            [phone]
+        ).fetchall()
+        for row in rows:
+            matches[row['id']] = row
+    return list(matches.values())
+
+
+def _facility_find_linked_roster(db, rec):
+    rec = rec or {}
+    nurse_id = rec.get('id') or rec.get('nurse_db_id') or 0
+    if nurse_id:
+        row = db.execute(
+            "SELECT * FROM facility_roster WHERE nurse_registration_id = ? AND active = 1 ORDER BY id DESC LIMIT 1",
+            [nurse_id]
+        ).fetchone()
+        if row:
+            return row
+    candidates = _facility_find_candidates_for_registration(db, rec)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _facility_apply_registration_match(db, nurse_id, rec, actor='system'):
+    rec = rec or {}
+    candidates = _facility_find_candidates_for_registration(db, rec)
+    if not candidates:
+        return {'matched': False, 'reason': 'no_match'}
+    if len(candidates) > 1:
+        for row in candidates:
+            _facility_insert_action(
+                db, row['id'], actor, 'potential_match_review_required', '',
+                rec.get('reference_id') or str(nurse_id),
+                'Multiple possible nurse registration matches found; admin review required.',
+                False
+            )
+        return {'matched': False, 'reason': 'multiple_matches', 'count': len(candidates)}
+    row = candidates[0]
+    shifted, contract_start, contract_end, notice_months, notice_start = _facility_normalized_dates(dict(row))
+    current_status = row['current_status'] or 'Assigned'
+    if current_status == 'Assigned':
+        current_status = 'Pending Nurse Confirmation'
+    db.execute(
+        """UPDATE facility_roster
+           SET nurse_registration_id = ?,
+               full_name = COALESCE(NULLIF(full_name,''), ?),
+               phone = COALESCE(NULLIF(phone,''), ?),
+               email = COALESCE(NULLIF(email,''), ?),
+               current_status = ?,
+               confirmation_status = 'Pending Nurse Confirmation',
+               date_shifted_to_facility = COALESCE(NULLIF(date_shifted_to_facility,''), ?),
+               contract_start_date = COALESCE(NULLIF(contract_start_date,''), ?),
+               contract_end_date = COALESCE(NULLIF(contract_end_date,''), ?),
+               notice_period_months = ?,
+               notice_period_start_date = COALESCE(NULLIF(notice_period_start_date,''), ?),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        [
+            nurse_id,
+            rec.get('full_name') or '',
+            rec.get('mobile') or '',
+            rec.get('email') or '',
+            current_status,
+            shifted,
+            contract_start,
+            contract_end,
+            notice_months,
+            notice_start,
+            row['id']
+        ]
+    )
+    db.execute(
+        """UPDATE nurse_registrations
+           SET current_accommodation = 'Embassy Contracted / Arranged',
+               accommodation_status = 'Embassy Contracted / Arranged',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        [nurse_id]
+    )
+    _facility_insert_action(
+        db, row['id'], actor, 'auto_linked_registration', '',
+        rec.get('reference_id') or str(nurse_id),
+        'Nurse registration matched to Embassy-arranged or Embassy-contracted facility roster.',
+        True
+    )
+    return {'matched': True, 'roster_id': row['id'], 'roster_reference': row['roster_reference']}
+
+
+def send_welfare_notification(person, message_type, channel='portal_message'):
+    person = person or {}
+    name = person.get('full_name') or person.get('name') or 'Applicant'
+    reference = person.get('reference') or person.get('reference_id') or person.get('roster_reference') or ''
+    base = _nurse_portal_public_base_url()
+    messages = {
+        'stay_confirmation_request': (
+            f"Embassy of Pakistan, Kuwait - Community Welfare Wing\n\n"
+            f"Dear {name}, please log in to the Health Workers Portal to confirm/update your current stay arrangement and welfare record.\n\n"
+            f"Reference: {reference}\nPortal: {base}/nurses/login"
+        ),
+        'notice_period_reminder': (
+            f"Dear {name}, this is a reminder regarding your current Embassy-arranged stay record. "
+            f"If you intend to leave or change your stay arrangement, please submit a Leaving Notice through the portal for proper record and follow-up."
+        ),
+        'welfare_followup_assigned': (
+            f"A Community Welfare follow-up has been assigned for reference {reference}."
+        ),
+    }
+    body = messages.get(message_type) or messages['stay_confirmation_request']
+    channel = (channel or 'portal_message').strip().lower()
+    if channel == 'email':
+        ok, detail = _nurse_send_email_smtp_env(person.get('email') or '', 'Community Welfare Wing notification', body)
+        return {'ok': ok, 'detail': detail}
+    if channel == 'whatsapp':
+        if not (os.environ.get('WHATSAPP_API_URL') and os.environ.get('WHATSAPP_API_TOKEN')):
+            print('WhatsApp not configured; notification queued/logged only.', flush=True)
+            return {'ok': False, 'detail': 'whatsapp_not_configured', 'message': body}
+        print('WhatsApp API configured but direct integration is not enabled in this server build.', flush=True)
+        return {'ok': False, 'detail': 'whatsapp_integration_not_enabled', 'message': body}
+    print(f"[WelfareNotification] {message_type}: {reference}", flush=True)
+    return {'ok': True, 'detail': 'logged', 'message': body}
+
+
+def _facility_create_welfare_followup(db, roster, note):
+    roster = _facility_roster_to_dict(roster)
+    try:
+        reference = _welfare_next_reference(db, 'NUR')
+    except Exception:
+        reference = f"CWA-NUR-{datetime.now().strftime('%Y')}-{int(time.time()) % 10000:04d}"
+    cur = db.execute(
+        """INSERT INTO welfare_cases
+           (case_reference, case_type, category, requester_name, requester_phone, requester_email,
+            subject_name, subject_passport, subject_civil_id, subject_phone, subject_address,
+            concern_summary, details, priority, status, escalation_level)
+           VALUES (?, 'nurse', 'Facility Assistance Request', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Normal', 'New', 'normal')""",
+        [
+            reference,
+            roster.get('full_name', ''),
+            roster.get('phone', ''),
+            roster.get('email', ''),
+            roster.get('full_name', ''),
+            roster.get('passport_number', ''),
+            roster.get('civil_id', ''),
+            roster.get('phone', ''),
+            roster.get('facility_name', ''),
+            note or 'Welfare follow-up requested from stay confirmation workflow.',
+            json.dumps({
+                'source': 'facility_roster',
+                'roster_reference': roster.get('roster_reference', ''),
+                'facility_name': roster.get('facility_name', ''),
+                'vendor_name': roster.get('vendor_name', '')
+            })
+        ]
+    )
+    _welfare_insert_action(db, cur.lastrowid, 'system', 'created', '', 'New', 'Facility assistance follow-up created from stay confirmation', False)
+    return reference
+
+
+def api_nurse_stay_confirmation(data):
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip()
+    passport = _nurse_normalize_passport(data.get('passport_number') or '')
+    verifier = (data.get('verifier') or '').strip()
+    if not ref and not passport:
+        return {'success': False, 'error': 'Nurse reference or passport is required.'}
+    db = get_db()
+    try:
+        nurse = db.execute(
+            """SELECT * FROM nurse_registrations
+               WHERE (UPPER(TRIM(reference_id)) = UPPER(TRIM(?)) OR UPPER(REPLACE(TRIM(passport_number), ' ', '')) = ?)
+                 AND (TRIM(mobile) = TRIM(?) OR TRIM(civil_id) = TRIM(?) OR TRIM(cnic) = TRIM(?) OR ? = '')
+               ORDER BY id DESC LIMIT 1""",
+            [ref, passport, verifier, verifier, verifier, verifier]
+        ).fetchone()
+        if not nurse:
+            return {'success': False, 'error': 'Unable to verify nurse record.'}
+        nurse_d = dict(nurse)
+        roster = _facility_find_linked_roster(db, nurse_d)
+        if not roster:
+            return {'success': False, 'error': 'No linked facility occupancy record was found. Please contact the Community Welfare Wing.'}
+        roster_d = _facility_roster_to_dict(roster)
+        option = (data.get('confirmation_option') or data.get('status') or '').strip()
+        remarks = (data.get('remarks') or '').strip()
+        current_facility = (data.get('current_facility_name') or data.get('facility_name') or roster_d.get('facility_name') or '').strip()
+        area = (data.get('area') or roster_d.get('area') or '').strip()
+        room = (data.get('room_number') or roster_d.get('room_number') or '').strip()
+        bed = (data.get('bed_number') or roster_d.get('bed_number') or '').strip()
+        phone = (data.get('current_phone') or nurse_d.get('mobile') or roster_d.get('phone') or '').strip()
+        if not option:
+            return {'success': False, 'error': 'Please select your stay arrangement confirmation option.'}
+        current_status = roster_d.get('current_status') or 'Assigned'
+        confirmation_status = roster_d.get('confirmation_status') or 'Pending Nurse Confirmation'
+        welfare_followup = int(roster_d.get('welfare_followup_required') or 0)
+        visible_note = 'Stay arrangement confirmation submitted.'
+        if option == 'currently_staying':
+            current_status = 'Confirmed Staying'
+            confirmation_status = 'Stay Confirmed'
+        elif option == 'shifted_from_facility':
+            current_status = 'Left Facility'
+            confirmation_status = 'Shifted from Facility'
+            visible_note = 'Resident update submitted: shifted from facility.'
+        elif option == 'intends_to_leave':
+            current_status = 'Intends to Leave'
+            confirmation_status = 'Intends to Leave'
+            visible_note = 'Resident update submitted: intends to leave or change stay arrangement.'
+        elif option == 'details_correction':
+            current_status = 'Record Correction Needed'
+            confirmation_status = 'Correction Requested'
+            visible_note = 'Resident update submitted: facility details require correction.'
+        elif option == 'assistance_requested':
+            current_status = 'Field Follow-up Required'
+            confirmation_status = 'Welfare Follow-up Requested'
+            welfare_followup = 1
+            visible_note = 'Facility assistance request submitted.'
+        else:
+            return {'success': False, 'error': 'Invalid stay arrangement option.'}
+        db.execute(
+            """UPDATE facility_roster
+               SET facility_name = COALESCE(NULLIF(?, ''), facility_name),
+                   area = COALESCE(NULLIF(?, ''), area),
+                   room_number = COALESCE(NULLIF(?, ''), room_number),
+                   bed_number = COALESCE(NULLIF(?, ''), bed_number),
+                   phone = COALESCE(NULLIF(?, ''), phone),
+                   current_status = ?,
+                   confirmation_status = ?,
+                   welfare_followup_required = ?,
+                   last_confirmed_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [current_facility, area, room, bed, phone, current_status, confirmation_status, welfare_followup, roster_d['id']]
+        )
+        _facility_insert_action(
+            db, roster_d['id'], nurse_d.get('reference_id') or 'nurse', 'stay_confirmation',
+            roster_d.get('current_status', ''), current_status,
+            f"{visible_note} {remarks}".strip(), True
+        )
+        welfare_reference = ''
+        if option in ('shifted_from_facility', 'intends_to_leave', 'assistance_requested', 'details_correction'):
+            welfare_reference = _facility_create_welfare_followup(db, {**roster_d, 'facility_name': current_facility, 'phone': phone}, remarks or visible_note)
+        db.commit()
+        return {'success': True, 'message': 'Stay arrangement confirmation submitted.', 'welfare_reference': welfare_reference}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
 def _build_nurse_public_profile_bundle(db, rec):
     """Build portal-safe JSON for a nurse row (no password fields)."""
     acc = db.execute("""SELECT request_status, admin_remarks
@@ -3346,6 +3899,8 @@ def _build_nurse_public_profile_bundle(db, rec):
             'public_response': cd.get('public_response', ''),
             'public_actions': [dict(a) for a in actions]
         })
+    facility_row = _facility_find_linked_roster(db, rec)
+    facility_record = _facility_portal_dict(facility_row) if facility_row else None
     return {
         'nurse_db_id': int(rec.get('id') or 0),
         'reference_id': rec.get('reference_id', ''),
@@ -3375,6 +3930,7 @@ def _build_nurse_public_profile_bundle(db, rec):
         'progress_percent': int(round((completed * 100.0) / total)) if total else 0,
         'process_last_updated_at': rec.get('updated_at', '') or rec.get('created_at', ''),
         'complaints': complaints,
+        'facility_roster': facility_record,
         'login_at': rec.get('last_login_at', ''),
     }
 
@@ -3477,7 +4033,7 @@ def api_nurse_register(data):
         apply_acc = 'Yes' if str(data.get('applying_for_accommodation') or '').strip().lower() in ('yes', 'y', 'true', '1') else 'No'
         step_values = [_nurse_step_value(data.get(col, 0)) for col, _ in NURSE_PROCESS_STEPS]
         ph, psalt = _nurse_hash_password_pbkdf2(password)
-        db.execute("""INSERT INTO nurse_registrations
+        cur = db.execute("""INSERT INTO nurse_registrations
             (reference_id, full_name, passport_number, arrival_date, batch_number, cnic, civil_id, mobile, email,
              hospital, hospital_or_medical_center, designation, job_title_moh, degree_type, moh_offer_salary_kwd,
              grading_letter_issued, accommodation_status, current_accommodation, applying_for_accommodation, remarks, issue_notice,
@@ -3495,8 +4051,29 @@ def api_nurse_register(data):
              (data.get('degree_type') or '').strip(), (data.get('moh_offer_salary_kwd') or '').strip(),
              (data.get('grading_letter_issued') or 'No').strip(), (data.get('current_accommodation') or '').strip(),
              (data.get('current_accommodation') or '').strip(), apply_acc, (data.get('remarks') or '').strip(),
-             (data.get('issue_notice') or '').strip(), *step_values, ph, psalt])
+            (data.get('issue_notice') or '').strip(), *step_values, ph, psalt])
+        nurse_id = cur.lastrowid
+        facility_name = (data.get('facility_name') or data.get('facility_building_name') or '').strip()
+        room_bed = (data.get('room_bed') or data.get('room_number') or '').strip()
+        if facility_name or room_bed:
+            db.execute(
+                """UPDATE nurse_registrations
+                   SET current_hostel = COALESCE(NULLIF(?, ''), current_hostel),
+                       room_number = COALESCE(NULLIF(?, ''), room_number),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [facility_name, room_bed, nurse_id]
+            )
         _nurse_log(db, 'registration_submitted', ref, passport, 'public', {'full_name': full_name, 'batch_number': batch_number})
+        _facility_apply_registration_match(db, nurse_id, {
+            'id': nurse_id,
+            'reference_id': ref,
+            'full_name': full_name,
+            'passport_number': passport,
+            'civil_id': civil_id,
+            'mobile': mobile,
+            'email': email
+        }, actor='system')
         db.commit()
         record = {'reference_id': ref, 'full_name': full_name, 'passport_number': passport, 'email': email, 'registration_status': 'Pending Review'}
         ok, detail = _send_nurse_ack_email(record)
@@ -3793,24 +4370,59 @@ def api_nurse_leave_notice_submit(data):
         db.execute("""INSERT INTO nurse_activity_log (activity_type, nurse_reference_id, passport_number, actor, details)
                       VALUES ('leave_notice_submitted', ?, ?, 'public', ?)""",
                    [ref, passport, json.dumps({'intended_leaving_date': (data.get('intended_leaving_date') or '').strip()})])
+        nurse = db.execute("""SELECT * FROM nurse_registrations
+                              WHERE UPPER(TRIM(reference_id)) = UPPER(TRIM(?))
+                                 OR UPPER(REPLACE(TRIM(passport_number), ' ', '')) = ?
+                              ORDER BY id DESC LIMIT 1""",
+                           [ref, _nurse_normalize_passport(passport)]).fetchone()
+        if nurse:
+            roster = _facility_find_linked_roster(db, dict(nurse))
+            if roster:
+                db.execute("""UPDATE facility_roster
+                              SET current_status = 'Leaving Notice Submitted',
+                                  confirmation_status = 'Intends to Leave',
+                                  updated_at = CURRENT_TIMESTAMP
+                              WHERE id = ?""", [roster['id']])
+                _facility_insert_action(
+                    db, roster['id'], ref or 'nurse', 'leaving_notice_submitted',
+                    roster['current_status'] or '', 'Leaving Notice Submitted',
+                    (data.get('reason') or '').strip(), True
+                )
         db.commit()
         return {'success': True}
     finally:
         db.close()
 
 
-def api_admin_nurses_summary():
+def api_admin_nurses_summary(user=None):
     db = get_db()
     try:
-        def _count(sql):
-            return int((db.execute(sql).fetchone()['c']) or 0)
+        def _count(sql, vals=()):
+            try:
+                return int((db.execute(sql, vals).fetchone()['c']) or 0)
+            except Exception:
+                return 0
+        username = (user or {}).get('user', '') or ''
         return {'success': True, 'totals': {
             'registrations': _count("SELECT COUNT(*) c FROM nurse_registrations"),
             'pending_registrations': _count("SELECT COUNT(*) c FROM nurse_registrations WHERE registration_status IN ('Pending', 'Pending Review')"),
             'accommodation_requests': _count("SELECT COUNT(*) c FROM nurse_accommodation_requests"),
             'open_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE complaint_status IN ('Seen', 'In Progress')"),
+            'resolved_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE COALESCE(status, complaint_status) IN ('Resolved','Closed')"),
+            'welfare_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE COALESCE(category, complaint_category)='Welfare Assistance'"),
+            'my_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE assigned_to_username = ?", [username]) if username else 0,
             'leave_notices': _count("SELECT COUNT(*) c FROM nurse_leave_notices"),
-            'current_accommodation_related': _count("SELECT COUNT(*) c FROM nurse_accommodation_requests WHERE request_status IN ('Pending', 'In Review', 'In Progress')")
+            'current_accommodation_related': _count("SELECT COUNT(*) c FROM nurse_accommodation_requests WHERE request_status IN ('Pending', 'In Review', 'In Progress')"),
+            'facility_total': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1"),
+            'facility_embassy_arranged': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status NOT IN ('Inactive')"),
+            'facility_pending_confirmation': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND confirmation_status = 'Pending Nurse Confirmation'"),
+            'facility_notice_due': _count("""SELECT COUNT(*) c FROM facility_roster
+                                             WHERE active = 1 AND notice_period_start_date != ''
+                                               AND date(notice_period_start_date) <= date('now')
+                                               AND current_status NOT IN ('Leaving Notice Submitted','Left Facility','Inactive')"""),
+            'facility_leaving': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status IN ('Intends to Leave','Leaving Notice Submitted')"),
+            'facility_followup': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND welfare_followup_required = 1"),
+            'facility_my_assigned': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND assigned_to = ?", [username]) if username else 0,
         }}
     finally:
         db.close()
@@ -3829,6 +4441,18 @@ def _nurse_registration_public_dict(row):
     d['phone'] = d.get('mobile') or ''
     d['workplace'] = d.get('hospital') or d.get('hospital_workplace') or d.get('hospital_or_medical_center') or ''
     d['current_arrangement'] = d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
+    d['facility_name'] = d.get('facility_name') or d.get('current_hostel') or ''
+    d['vendor_name'] = d.get('vendor_name') or ''
+    d['facility_roster_id'] = d.get('facility_roster_id') or d.get('roster_id') or ''
+    d['roster_reference'] = d.get('roster_reference') or ''
+    d['date_shifted_to_facility'] = d.get('date_shifted_to_facility') or ''
+    d['contract_end_date'] = d.get('contract_end_date') or ''
+    d['notice_period_start_date'] = d.get('notice_period_start_date') or ''
+    d['confirmation_status'] = d.get('confirmation_status') or ''
+    d['facility_current_status'] = d.get('facility_current_status') or ''
+    d['assigned_to'] = d.get('assigned_to') or ''
+    d['last_contact'] = d.get('last_confirmed_at') or d.get('updated_at') or ''
+    d['notice_flag'] = _facility_notice_flag(d)
     d['status'] = d.get('registration_status') or 'Pending Review'
     return d
 
@@ -4491,6 +5115,481 @@ def api_admin_welfare_resolve(data, user):
     except Exception as e:
         db.rollback()
         return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def _facility_user_can_access(user):
+    return bool(user) and (user.get('role') or '') in FACILITY_STAFF_ROLES
+
+
+def _facility_entry_payload(data):
+    shifted, contract_start, contract_end, notice_months, notice_start = _facility_normalized_dates(data)
+    status = _clean_text(data.get('current_status'), 80) or 'Assigned'
+    if status not in FACILITY_ROSTER_STATUSES:
+        status = 'Assigned'
+    confirmation_status = _clean_text(data.get('confirmation_status'), 80) or 'Pending Nurse Confirmation'
+    if confirmation_status not in FACILITY_CONFIRMATION_STATUSES:
+        confirmation_status = 'Pending Nurse Confirmation'
+    return {
+        'full_name': _clean_text(data.get('full_name') or data.get('name'), 180),
+        'passport_number': _nurse_normalize_passport(data.get('passport_number') or data.get('passport') or ''),
+        'civil_id': _clean_text(data.get('civil_id'), 80),
+        'phone': _clean_text(data.get('phone') or data.get('mobile'), 80),
+        'email': _clean_text(data.get('email'), 180),
+        'facility_name': _clean_text(data.get('facility_name'), 220),
+        'vendor_name': _clean_text(data.get('vendor_name'), 220),
+        'area': _clean_text(data.get('area'), 160),
+        'room_number': _clean_text(data.get('room_number'), 80),
+        'bed_number': _clean_text(data.get('bed_number'), 80),
+        'date_shifted_to_facility': shifted,
+        'contract_start_date': contract_start,
+        'contract_end_date': contract_end,
+        'notice_period_months': notice_months,
+        'notice_period_start_date': notice_start,
+        'current_status': status,
+        'confirmation_status': confirmation_status,
+        'remarks': _clean_text(data.get('remarks'), 3000),
+        'active': 0 if str(data.get('active')).strip().lower() in ('0', 'false', 'no', 'inactive') else 1,
+    }
+
+
+def _facility_insert_or_update_entry(db, data, actor='system', entry_id=None):
+    payload = _facility_entry_payload(data)
+    nurse_registration_id = int(data.get('nurse_registration_id') or 0)
+    if not payload['full_name'] and not payload['passport_number']:
+        return None, 'Full name or passport number is required.'
+    if entry_id:
+        row = db.execute("SELECT * FROM facility_roster WHERE id = ?", [entry_id]).fetchone()
+        if not row:
+            return None, 'Roster entry not found.'
+        db.execute(
+            """UPDATE facility_roster
+               SET nurse_registration_id = COALESCE(NULLIF(?, 0), nurse_registration_id),
+                   full_name = ?, passport_number = ?, civil_id = ?, phone = ?, email = ?,
+                   facility_name = ?, vendor_name = ?, area = ?, room_number = ?, bed_number = ?,
+                   date_shifted_to_facility = ?, contract_start_date = ?, contract_end_date = ?,
+                   notice_period_months = ?, notice_period_start_date = ?, current_status = ?,
+                   confirmation_status = ?, active = ?, remarks = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [
+                nurse_registration_id, payload['full_name'], payload['passport_number'], payload['civil_id'],
+                payload['phone'], payload['email'], payload['facility_name'], payload['vendor_name'],
+                payload['area'], payload['room_number'], payload['bed_number'],
+                payload['date_shifted_to_facility'], payload['contract_start_date'],
+                payload['contract_end_date'], payload['notice_period_months'],
+                payload['notice_period_start_date'], payload['current_status'],
+                payload['confirmation_status'], payload['active'], payload['remarks'], entry_id
+            ]
+        )
+        _facility_insert_action(db, entry_id, actor, 'roster_updated', '', payload['current_status'], 'Facility occupancy record updated.', False)
+        return entry_id, ''
+    ref = _next_facility_roster_reference(db)
+    cur = db.execute(
+        """INSERT INTO facility_roster
+           (roster_reference, nurse_registration_id, full_name, passport_number, civil_id, phone, email,
+            facility_name, vendor_name, area, room_number, bed_number, date_shifted_to_facility,
+            contract_start_date, contract_end_date, notice_period_months, notice_period_start_date,
+            current_status, confirmation_status, active, remarks)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            ref, nurse_registration_id or None, payload['full_name'], payload['passport_number'],
+            payload['civil_id'], payload['phone'], payload['email'], payload['facility_name'],
+            payload['vendor_name'], payload['area'], payload['room_number'], payload['bed_number'],
+            payload['date_shifted_to_facility'], payload['contract_start_date'], payload['contract_end_date'],
+            payload['notice_period_months'], payload['notice_period_start_date'], payload['current_status'],
+            payload['confirmation_status'], payload['active'], payload['remarks']
+        ]
+    )
+    _facility_insert_action(db, cur.lastrowid, actor, 'roster_created', '', payload['current_status'], 'Facility occupancy record created.', False)
+    if nurse_registration_id:
+        nurse = db.execute("SELECT * FROM nurse_registrations WHERE id = ?", [nurse_registration_id]).fetchone()
+        if nurse:
+            _facility_apply_registration_match(db, nurse_registration_id, dict(nurse), actor=actor)
+    return cur.lastrowid, ''
+
+
+def api_admin_facility_roster(params, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        where = ["1=1"]
+        vals = []
+        for field in ('facility_name', 'vendor_name', 'current_status', 'confirmation_status', 'assigned_to'):
+            value = _clean_text(params.get(field), 160)
+            if value:
+                where.append(f"{field} = ?")
+                vals.append(value)
+        if _clean_text(params.get('active'), 20):
+            where.append("active = ?")
+            vals.append(1 if params.get('active') in ('1', 'true', 'yes') else 0)
+        q = _clean_text(params.get('q') or params.get('search'), 120)
+        if q:
+            sv = f"%{q}%"
+            where.append("""(
+                roster_reference LIKE ? OR full_name LIKE ? OR passport_number LIKE ?
+                OR civil_id LIKE ? OR phone LIKE ? OR facility_name LIKE ? OR vendor_name LIKE ?
+            )""")
+            vals.extend([sv] * 7)
+        sql = f"""SELECT * FROM facility_roster
+                  WHERE {' AND '.join(where)}
+                  ORDER BY active DESC, datetime(updated_at) DESC, id DESC
+                  LIMIT 1000"""
+        rows = [_facility_roster_to_dict(r) for r in db.execute(sql, vals).fetchall()]
+        return {'success': True, 'items': rows, 'total': len(rows)}
+    finally:
+        db.close()
+
+
+def api_admin_facility_roster_save(data, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        entry_id = int(data.get('id') or 0) or None
+        rid, err = _facility_insert_or_update_entry(db, data, actor=user.get('user'), entry_id=entry_id)
+        if err:
+            return {'success': False, 'error': err}
+        db.commit()
+        return {'success': True, 'id': rid}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_facility_roster_import_csv(data, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    text = data.get('csv_text') or data.get('content') or ''
+    if not text.strip():
+        return {'success': False, 'error': 'CSV content is required.'}
+    db = get_db()
+    imported = 0
+    errors = []
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        for idx, row in enumerate(reader, start=2):
+            normalized = {str(k or '').strip(): (v or '').strip() for k, v in row.items()}
+            rid, err = _facility_insert_or_update_entry(db, normalized, actor=user.get('user'))
+            if err:
+                errors.append({'line': idx, 'error': err})
+            else:
+                imported += 1
+        db.commit()
+        return {'success': True, 'imported': imported, 'errors': errors[:20]}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e), 'imported': imported, 'errors': errors[:20]}
+    finally:
+        db.close()
+
+
+def api_admin_facility_roster_export(user):
+    if not _facility_user_can_access(user):
+        return None, {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        rows = db.execute("""SELECT roster_reference, full_name, passport_number, civil_id, phone, email,
+                                    facility_name, vendor_name, area, room_number, bed_number,
+                                    date_shifted_to_facility, contract_start_date, contract_end_date,
+                                    notice_period_months, notice_period_start_date, current_status,
+                                    confirmation_status, assigned_to, last_confirmed_at, remarks
+                             FROM facility_roster ORDER BY facility_name, full_name""").fetchall()
+        out = io.StringIO()
+        writer = csv.writer(out)
+        headers = ['roster_reference','full_name','passport_number','civil_id','phone','email',
+                   'facility_name','vendor_name','area','room_number','bed_number',
+                   'date_shifted_to_facility','contract_start_date','contract_end_date',
+                   'notice_period_months','notice_period_start_date','current_status',
+                   'confirmation_status','assigned_to','last_confirmed_at','remarks']
+        writer.writerow(headers)
+        for row in rows:
+            d = dict(row)
+            writer.writerow([d.get(h, '') for h in headers])
+        return out.getvalue().encode('utf-8-sig'), None
+    finally:
+        db.close()
+
+
+def api_admin_facility_vendor_update(data, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    roster_id = int(data.get('roster_id') or data.get('id') or 0)
+    if roster_id <= 0:
+        return {'success': False, 'error': 'roster_id is required'}
+    reported_status = _clean_text(data.get('reported_status') or data.get('current_status'), 120)
+    note = _clean_text(data.get('note'), 2000)
+    room = _clean_text(data.get('room_number'), 80)
+    bed = _clean_text(data.get('bed_number'), 80)
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM facility_roster WHERE id = ?", [roster_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Roster entry not found'}
+        current = _facility_roster_to_dict(row)
+        new_status = current['current_status']
+        reconciliation = current.get('reconciliation_status', '')
+        if reported_status in ('person is currently staying', 'currently_staying', 'Confirmed Staying'):
+            vendor_status = 'Confirmed Staying'
+        elif reported_status in ('person has left', 'left', 'Left Facility'):
+            vendor_status = 'Left Facility'
+        elif reported_status in ('person changed room', 'changed_room'):
+            vendor_status = current['current_status']
+        elif reported_status in ('person not found in facility record', 'not_found'):
+            vendor_status = 'Record Correction Needed'
+        elif reported_status in ('new resident reported by vendor', 'new_resident'):
+            vendor_status = 'Record Correction Needed'
+        else:
+            vendor_status = reported_status or current['current_status']
+        if current.get('confirmation_status') == 'Stay Confirmed' and vendor_status != current['current_status'] and vendor_status != 'Confirmed Staying':
+            reconciliation = 'Reconciliation Required'
+            new_status = 'Reconciliation Required'
+        else:
+            new_status = vendor_status if vendor_status in FACILITY_ROSTER_STATUSES else current['current_status']
+        db.execute(
+            """UPDATE facility_roster
+               SET current_status = ?,
+                   reconciliation_status = ?,
+                   room_number = COALESCE(NULLIF(?, ''), room_number),
+                   bed_number = COALESCE(NULLIF(?, ''), bed_number),
+                   last_vendor_update_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [new_status, reconciliation, room, bed, roster_id]
+        )
+        _facility_insert_action(db, roster_id, user.get('user'), 'vendor_update', current['current_status'], new_status, note, False)
+        db.commit()
+        return {'success': True, 'status': new_status, 'reconciliation_status': reconciliation}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_facility_assign(data, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    roster_id = int(data.get('roster_id') or data.get('id') or 0)
+    assigned_to = _clean_text(data.get('assigned_to'), 120)
+    assigned_role = _clean_text(data.get('assigned_role'), 120)
+    due_date = _clean_text(data.get('due_date'), 40)
+    note = _clean_text(data.get('note'), 2000)
+    if roster_id <= 0 or not assigned_to:
+        return {'success': False, 'error': 'Roster id and assignee are required'}
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM facility_roster WHERE id = ?", [roster_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Roster entry not found'}
+        assignee = db.execute("SELECT username, full_name, role, email FROM users WHERE username = ?", [assigned_to]).fetchone()
+        if not assignee:
+            return {'success': False, 'error': 'Assignee not found'}
+        assigned_role = assigned_role or assignee['role'] or ''
+        old_assigned = row['assigned_to'] or ''
+        new_status = row['current_status'] or 'Assigned'
+        if new_status in ('Assigned', 'Pending Nurse Confirmation', 'Record Correction Needed', 'Reconciliation Required'):
+            new_status = 'Field Follow-up Required'
+        db.execute(
+            """UPDATE facility_roster
+               SET assigned_to = ?, assigned_role = ?, due_date = ?, current_status = ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [assigned_to, assigned_role, due_date, new_status, roster_id]
+        )
+        _facility_insert_action(db, roster_id, user.get('user'), 'assigned', old_assigned, assigned_to, note, False)
+        details_key = f'"roster_reference": "{row["roster_reference"]}"'
+        existing_case = db.execute(
+            "SELECT id FROM welfare_cases WHERE case_type='nurse' AND category='Facility Occupancy Record' AND details LIKE ? ORDER BY id DESC LIMIT 1",
+            [f'%{details_key}%']
+        ).fetchone()
+        if existing_case:
+            db.execute(
+                """UPDATE welfare_cases
+                   SET assigned_to = ?, assigned_role = ?, status = 'Field Verification Required',
+                       due_date = COALESCE(NULLIF(?, ''), due_date), updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [assigned_to, assigned_role, due_date, existing_case['id']]
+            )
+            _welfare_insert_action(db, existing_case['id'], user.get('user'), 'assigned', old_assigned, assigned_to, note, False)
+        else:
+            case_ref = _welfare_next_reference(db, 'FAC')
+            cur = db.execute(
+                """INSERT INTO welfare_cases
+                   (case_reference, case_type, category, requester_name, requester_phone, requester_email,
+                    subject_name, subject_passport, subject_civil_id, subject_phone, subject_address,
+                    concern_summary, details, priority, status, assigned_to, assigned_role, escalation_level, due_date)
+                   VALUES (?, 'nurse', 'Facility Occupancy Record', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Normal',
+                           'Field Verification Required', ?, ?, 'normal', ?)""",
+                [
+                    case_ref, row['full_name'] or '', row['phone'] or '', row['email'] or '',
+                    row['full_name'] or '', row['passport_number'] or '', row['civil_id'] or '', row['phone'] or '',
+                    row['facility_name'] or '',
+                    note or 'Facility occupancy welfare follow-up assigned.',
+                    json.dumps({'source': 'facility_roster', 'roster_reference': row['roster_reference'], 'facility_name': row['facility_name'], 'vendor_name': row['vendor_name']}),
+                    assigned_to, assigned_role, due_date
+                ]
+            )
+            _welfare_insert_action(db, cur.lastrowid, user.get('user'), 'assigned', '', assigned_to, note, False)
+        db.commit()
+        send_welfare_notification({
+            'email': assignee['email'] if 'email' in assignee.keys() else '',
+            'full_name': assignee['full_name'] or assignee['username'],
+            'reference': row['roster_reference']
+        }, 'welfare_followup_assigned', 'email')
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_facility_matches(user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        unmatched = [_facility_roster_to_dict(r) for r in db.execute(
+            """SELECT * FROM facility_roster
+               WHERE active = 1 AND (nurse_registration_id IS NULL OR nurse_registration_id = 0)
+               ORDER BY id DESC LIMIT 200"""
+        ).fetchall()]
+        linked = [_facility_roster_to_dict(r) for r in db.execute(
+            """SELECT * FROM facility_roster
+               WHERE active = 1 AND nurse_registration_id IS NOT NULL AND nurse_registration_id != 0
+               ORDER BY updated_at DESC LIMIT 200"""
+        ).fetchall()]
+        potential = []
+        for r in unmatched[:100]:
+            row = db.execute(
+                """SELECT id, reference_id, full_name, passport_number, civil_id, mobile
+                   FROM nurse_registrations
+                   WHERE (
+                     UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = UPPER(REPLACE(TRIM(?), ' ', ''))
+                     OR (TRIM(COALESCE(civil_id,'')) != '' AND TRIM(COALESCE(civil_id,'')) = TRIM(?))
+                     OR (TRIM(COALESCE(mobile,'')) != '' AND TRIM(COALESCE(mobile,'')) = TRIM(?))
+                   )
+                   ORDER BY id DESC LIMIT 3""",
+                [r.get('passport_number', ''), r.get('civil_id', ''), r.get('phone', '')]
+            ).fetchall()
+            if row:
+                potential.append({'roster': r, 'matches': [dict(x) for x in row]})
+        return {'success': True, 'unmatched': unmatched, 'potential_matches': potential, 'linked': linked}
+    finally:
+        db.close()
+
+
+def _facility_occupancy_kpis(db):
+    def count(sql, vals=()):
+        try:
+            return int(db.execute(sql, vals).fetchone()['c'] or 0)
+        except Exception:
+            return 0
+    return {
+        'total_assigned': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1"),
+        'confirmed_staying': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Confirmed Staying'"),
+        'pending_confirmation': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND confirmation_status = 'Pending Nurse Confirmation'"),
+        'intending_to_leave': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Intends to Leave'"),
+        'leaving_notice_submitted': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Leaving Notice Submitted'"),
+        'left_facility': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Left Facility'"),
+        'vendor_mismatch_records': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND reconciliation_status = 'Reconciliation Required'"),
+        'welfare_followup_required': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND welfare_followup_required = 1"),
+        'notice_period_due': 0,
+    }
+
+
+def api_admin_facility_occupancy(params, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        where = ["active = 1"]
+        vals = []
+        for param, col in (
+            ('facility', 'facility_name'), ('facility_name', 'facility_name'),
+            ('vendor', 'vendor_name'), ('vendor_name', 'vendor_name'),
+            ('status', 'current_status'), ('confirmation_status', 'confirmation_status'),
+            ('assigned_officer', 'assigned_to'), ('assigned_to', 'assigned_to')
+        ):
+            value = _clean_text(params.get(param), 160)
+            if value:
+                where.append(f"{col} = ?")
+                vals.append(value)
+        rows = [_facility_roster_to_dict(r) for r in db.execute(
+            f"SELECT * FROM facility_roster WHERE {' AND '.join(where)} ORDER BY facility_name, full_name",
+            vals
+        ).fetchall()]
+        kpis = _facility_occupancy_kpis(db)
+        kpis['notice_period_due'] = sum(1 for r in rows if r.get('notice_flag') in ('Notice Period Active', 'Notice Response Pending'))
+        grouped = {}
+        for r in rows:
+            key = (r.get('facility_name') or 'Unspecified Facility', r.get('vendor_name') or '')
+            g = grouped.setdefault(key, {
+                'facility_name': key[0],
+                'vendor_name': key[1],
+                'expected_residents': 0,
+                'confirmed_staying': 0,
+                'pending_confirmation': 0,
+                'leaving_notice_submitted': 0,
+                'left_facility': 0,
+                'open_welfare_requests': 0,
+                'last_vendor_update': '',
+                'last_embassy_verification': '',
+            })
+            g['expected_residents'] += 1
+            if r.get('current_status') == 'Confirmed Staying':
+                g['confirmed_staying'] += 1
+            if r.get('confirmation_status') == 'Pending Nurse Confirmation':
+                g['pending_confirmation'] += 1
+            if r.get('current_status') == 'Leaving Notice Submitted':
+                g['leaving_notice_submitted'] += 1
+            if r.get('current_status') == 'Left Facility':
+                g['left_facility'] += 1
+            if r.get('welfare_followup_required'):
+                g['open_welfare_requests'] += 1
+            g['last_vendor_update'] = max(g['last_vendor_update'], r.get('last_vendor_update_at') or '')
+            g['last_embassy_verification'] = max(g['last_embassy_verification'], r.get('last_embassy_verification_at') or r.get('last_confirmed_at') or '')
+        return {'success': True, 'kpis': kpis, 'facilities': list(grouped.values())}
+    finally:
+        db.close()
+
+
+def api_admin_facility_detail(params, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    facility = _clean_text(params.get('facility'), 220)
+    db = get_db()
+    try:
+        vals = []
+        where = ["active = 1"]
+        if facility:
+            where.append("facility_name = ?")
+            vals.append(facility)
+        rows = [_facility_roster_to_dict(r) for r in db.execute(
+            f"SELECT * FROM facility_roster WHERE {' AND '.join(where)} ORDER BY full_name",
+            vals
+        ).fetchall()]
+        actions = []
+        if rows:
+            ids = [str(int(r['id'])) for r in rows if r.get('id')]
+            if ids:
+                actions = [dict(a) for a in db.execute(
+                    f"""SELECT * FROM facility_roster_actions
+                        WHERE roster_id IN ({','.join(['?'] * len(ids))})
+                        ORDER BY id DESC LIMIT 100""",
+                    ids
+                ).fetchall()]
+        return {
+            'success': True,
+            'facility': facility or (rows[0].get('facility_name') if rows else ''),
+            'vendor_name': rows[0].get('vendor_name', '') if rows else '',
+            'items': rows,
+            'actions': actions
+        }
     finally:
         db.close()
 
@@ -14863,6 +15962,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('admin', 'operator'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_html(ADMIN_NURSES_PAGE)
+        elif path == '/admin/facility-roster':
+            user = self.require_auth()
+            if not user: return
+            if not _facility_user_can_access(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_html(
+                FACILITY_ROSTER_ADMIN_PAGE
+                .replace('__USER_NAME__', user['user'])
+                .replace('__USER_ROLE__', user['role'])
+            )
+        elif path in ('/admin/facility-occupancy', '/admin/facility-occupancy/detail'):
+            user = self.require_auth()
+            if not user: return
+            if not _facility_user_can_access(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_html(
+                FACILITY_OCCUPANCY_ADMIN_PAGE
+                .replace('__USER_NAME__', user['user'])
+                .replace('__USER_ROLE__', user['role'])
+            )
         elif path in ('/admin/legal-opf', '/admin/legal-cases'):
             user = self.require_auth()
             if not user: return
@@ -14963,12 +16082,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             self.send_json(api_admin_welfare_case_detail(params.get('id'), user))
+        elif path == '/api/admin/facility-roster':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_facility_roster(params, user))
+        elif path == '/api/admin/facility-roster/export':
+            user = self.require_auth()
+            if not user: return
+            body, err = api_admin_facility_roster_export(user)
+            if err:
+                self.send_json(err, 403); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="facility_roster_{datetime.now().strftime("%Y%m%d")}.csv"')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == '/api/admin/facility-roster/matches':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_facility_matches(user))
+        elif path == '/api/admin/facility-occupancy':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_facility_occupancy(params, user))
+        elif path == '/api/admin/facility-occupancy/detail':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_facility_detail(params, user))
         elif path == '/api/admin/nurses/summary':
             user = self.require_auth()
             if not user: return
             if user['role'] not in ('admin', 'operator'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_json(api_admin_nurses_summary())
+            self.send_json(api_admin_nurses_summary(user))
         elif path == '/api/admin/nurses/registrations':
             user = self.require_auth()
             if not user: return
@@ -14983,6 +16130,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             grading_letter = (params.get('grading_letter_issued') or '').strip()
             batch_number = (params.get('batch_number') or '').strip()
             hospital = (params.get('hospital') or '').strip()
+            current_arrangement = (params.get('current_arrangement') or '').strip()
+            confirmation_status = (params.get('confirmation_status') or '').strip()
+            facility_status = (params.get('facility_status') or '').strip()
+            assigned_to = (params.get('assigned_to') or '').strip()
+            scope = (params.get('scope') or '').strip().lower()
+            notice_due = (params.get('notice_due') or '').strip()
+            welfare_followup_required = (params.get('welfare_followup_required') or '').strip()
             progress_filter = (params.get('progress_filter') or '').strip()  # incomplete/completed
             db = get_db()
             try:
@@ -14990,34 +16144,63 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 vals = []
                 if search:
                     where.append("""(
-                        UPPER(COALESCE(reference_id,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(full_name,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(passport_number,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(cnic,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(civil_id,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(mobile,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(email,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(batch_number,'')) LIKE UPPER(?)
-                        OR UPPER(COALESCE(hospital,'')) LIKE UPPER(?)
+                        UPPER(COALESCE(n.reference_id,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.full_name,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.passport_number,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.cnic,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.civil_id,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.mobile,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.email,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.batch_number,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(n.hospital,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(f.facility_name,'')) LIKE UPPER(?)
+                        OR UPPER(COALESCE(f.vendor_name,'')) LIKE UPPER(?)
                     )""")
                     sv = f"%{search}%"
-                    vals.extend([sv] * 9)
+                    vals.extend([sv] * 11)
                 if reg_status:
-                    where.append("registration_status = ?")
+                    where.append("n.registration_status = ?")
                     vals.append(reg_status)
                 if docs_status:
-                    where.append("documents_status = ?")
+                    where.append("n.documents_status = ?")
                     vals.append(docs_status)
                 if grading_letter:
-                    where.append("grading_letter_issued = ?")
+                    where.append("n.grading_letter_issued = ?")
                     vals.append(grading_letter)
                 if batch_number:
-                    where.append("batch_number = ?")
+                    where.append("n.batch_number = ?")
                     vals.append(batch_number)
                 if hospital:
-                    where.append("UPPER(COALESCE(hospital,'')) = UPPER(?)")
+                    where.append("UPPER(COALESCE(n.hospital,'')) = UPPER(?)")
                     vals.append(hospital)
-                progress_expr = "(" + " + ".join([f"COALESCE({c},0)" for c, _ in NURSE_PROCESS_STEPS]) + ")"
+                if current_arrangement:
+                    if current_arrangement == 'Embassy Contracted / Arranged':
+                        where.append("(COALESCE(n.current_accommodation,'') = ? OR f.id IS NOT NULL)")
+                        vals.append(current_arrangement)
+                    else:
+                        where.append("COALESCE(n.current_accommodation,'') = ?")
+                        vals.append(current_arrangement)
+                if confirmation_status:
+                    where.append("COALESCE(f.confirmation_status,'') = ?")
+                    vals.append(confirmation_status)
+                if facility_status:
+                    where.append("COALESCE(f.current_status,'') = ?")
+                    vals.append(facility_status)
+                if assigned_to:
+                    where.append("COALESCE(f.assigned_to,'') = ?")
+                    vals.append(assigned_to)
+                if scope == 'my':
+                    where.append("COALESCE(f.assigned_to,'') = ?")
+                    vals.append(user['user'])
+                if welfare_followup_required:
+                    where.append("COALESCE(f.welfare_followup_required,0) = 1")
+                if notice_due:
+                    where.append("""(
+                        COALESCE(f.notice_period_start_date,'') != ''
+                        AND date(f.notice_period_start_date) <= date('now')
+                        AND COALESCE(f.current_status,'') NOT IN ('Leaving Notice Submitted','Left Facility','Inactive')
+                    )""")
+                progress_expr = "(" + " + ".join([f"COALESCE(n.{c},0)" for c, _ in NURSE_PROCESS_STEPS]) + ")"
                 if progress_filter == 'completed':
                     where.append(f"{progress_expr} = ?")
                     vals.append(len(NURSE_PROCESS_STEPS))
@@ -15026,8 +16209,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     vals.append(len(NURSE_PROCESS_STEPS))
 
                 where_sql = " AND ".join(where)
-                total = int(db.execute(f"SELECT COUNT(*) c FROM nurse_registrations WHERE {where_sql}", vals).fetchone()['c'] or 0)
-                rows = db.execute(f"SELECT * FROM nurse_registrations WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+                from_sql = """nurse_registrations n
+                              LEFT JOIN facility_roster f ON f.nurse_registration_id = n.id AND f.active = 1"""
+                total = int(db.execute(f"SELECT COUNT(DISTINCT n.id) c FROM {from_sql} WHERE {where_sql}", vals).fetchone()['c'] or 0)
+                rows = db.execute(f"""SELECT n.*,
+                                             f.id AS facility_roster_id,
+                                             f.roster_reference,
+                                             f.facility_name,
+                                             f.vendor_name,
+                                             f.area AS facility_area,
+                                             f.room_number AS facility_room_number,
+                                             f.bed_number AS facility_bed_number,
+                                             f.date_shifted_to_facility,
+                                             f.contract_end_date,
+                                             f.notice_period_start_date,
+                                             f.current_status AS facility_current_status,
+                                             f.confirmation_status,
+                                             f.assigned_to,
+                                             f.last_confirmed_at,
+                                             f.welfare_followup_required
+                                      FROM {from_sql}
+                                      WHERE {where_sql}
+                                      GROUP BY n.id
+                                      ORDER BY n.id DESC LIMIT ? OFFSET ?""",
                                   vals + [page_size, offset]).fetchall()
                 items = []
                 for r in rows:
@@ -15050,13 +16254,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'success': False, 'error': 'id required'}, 400); return
             db = get_db()
             try:
+                select_sql = """SELECT n.*,
+                                       f.id AS facility_roster_id,
+                                       f.roster_reference,
+                                       f.facility_name,
+                                       f.vendor_name,
+                                       f.area AS facility_area,
+                                       f.room_number AS facility_room_number,
+                                       f.bed_number AS facility_bed_number,
+                                       f.date_shifted_to_facility,
+                                       f.contract_end_date,
+                                       f.notice_period_start_date,
+                                       f.current_status AS facility_current_status,
+                                       f.confirmation_status,
+                                       f.assigned_to,
+                                       f.last_confirmed_at,
+                                       f.welfare_followup_required
+                                FROM nurse_registrations n
+                                LEFT JOIN facility_roster f ON f.nurse_registration_id = n.id AND f.active = 1"""
                 if ident.isdigit():
-                    row = db.execute("SELECT * FROM nurse_registrations WHERE id = ? ORDER BY id DESC LIMIT 1", [int(ident)]).fetchone()
+                    row = db.execute(select_sql + " WHERE n.id = ? ORDER BY n.id DESC LIMIT 1", [int(ident)]).fetchone()
                 else:
-                    row = db.execute("""SELECT * FROM nurse_registrations
-                                        WHERE UPPER(TRIM(reference_id)) = UPPER(TRIM(?))
-                                           OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
-                                        ORDER BY id DESC LIMIT 1""", [ident, ident]).fetchone()
+                    row = db.execute(select_sql + """ WHERE UPPER(TRIM(n.reference_id)) = UPPER(TRIM(?))
+                                           OR UPPER(TRIM(n.passport_number)) = UPPER(TRIM(?))
+                                        ORDER BY n.id DESC LIMIT 1""", [ident, ident]).fetchone()
                 if not row:
                     self.send_json({'success': False, 'error': 'Registration not found'}, 404); return
                 record = _nurse_registration_public_dict(row)
@@ -15203,7 +16424,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 rows = db.execute("""SELECT id, username, COALESCE(full_name, username) AS display_name, role
                                      FROM users
-                                     WHERE role IN ('admin','operator') ORDER BY username ASC""").fetchall()
+                                     WHERE role IN ('admin','operator','operator_special','welfare_officer','inspector_field','community_desk','senior_review','ambassador_review')
+                                     ORDER BY username ASC""").fetchall()
                 self.send_json({'success': True, 'items': [dict(r) for r in rows]})
             finally:
                 db.close()
@@ -17376,6 +18598,14 @@ function printBoth(){{
             result = api_nurse_change_password(data)
             self.send_json(result, 200 if result.get('success') else 400)
             return
+        elif path == '/api/nurses/stay-confirmation':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_stay_confirmation(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
         elif path == '/api/nurses/accommodation':
             try:
                 data = json.loads(body) if body else {}
@@ -17399,6 +18629,23 @@ function printBoth(){{
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_nurse_leave_notice_submit(data)
             self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path.startswith('/api/admin/facility-roster/'):
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            if path in ('/api/admin/facility-roster/add', '/api/admin/facility-roster/update', '/api/admin/facility-roster/save'):
+                self.send_json(api_admin_facility_roster_save(data, user)); return
+            if path == '/api/admin/facility-roster/import-csv':
+                self.send_json(api_admin_facility_roster_import_csv(data, user)); return
+            if path == '/api/admin/facility-roster/vendor-update':
+                self.send_json(api_admin_facility_vendor_update(data, user)); return
+            if path == '/api/admin/facility-roster/assign':
+                self.send_json(api_admin_facility_assign(data, user)); return
+            self.send_json({'success': False, 'error': 'Unknown facility roster action'}, 404)
             return
         elif path == '/api/admin/nurses/registration/status':
             user = self.require_auth()
@@ -19931,6 +21178,10 @@ COMMUNITY_FEEDBACK_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset=
 <div class="top"><div class="wrap"><a class="back" href="/">Back to Community Welfare Services</a><h1>Community Feedback / Recommendations / Complaints</h1><p>Submit community welfare feedback, recommendations, service-related complaints, or suggestions for improvement. The Community Welfare Wing will review submissions and route them to the relevant officer where appropriate.</p></div></div><div class="bar"></div>
 <main class="wrap"><form id="f" class="card"><div class="grid"><div class="field"><label>Full name *</label><input name="name" required></div><div class="field"><label>Phone/WhatsApp *</label><input name="phone" required></div><div class="field"><label>Email</label><input name="email" type="email"></div><div class="field"><label>Category *</label><select name="category" required><option value="">Select</option><option>Recommendation / Suggestion</option><option>Service Complaint</option><option>Welfare Concern</option><option>Employer / Workplace Concern</option><option>Consular Service Feedback</option><option>Other</option></select></div><div class="field"><label>Preferred contact method</label><select name="preferred_contact_method"><option>Phone/WhatsApp</option><option>Email</option><option>No response needed</option></select></div></div><div class="field"><label>Subject *</label><input name="subject" required></div><div class="field"><label>Details *</label><textarea name="details" required></textarea></div><label class="check"><input name="consent" type="checkbox" required><span>I consent to the Community Welfare Wing reviewing this submission and contacting me where appropriate.</span></label><button type="submit">Submit Feedback</button><div id="msg" class="msg"></div></form></main>
 <script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,msg=document.getElementById('msg');msg.textContent='Submitting...';msg.className='msg';const data=Object.fromEntries(new FormData(f).entries());try{const r=await fetch('/api/welfare/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw new Error(j.error||'Submission failed');msg.textContent='Submission received. Reference: '+j.reference;msg.className='msg ok';f.reset()}catch(err){msg.textContent=err.message;msg.className='msg err'}})</script></body></html>"""
+
+FACILITY_ROSTER_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Facility Roster - Community Welfare Wing</title><link rel="stylesheet" href="/static/css/cwa-admin.css"><style>.mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.mini-card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:14px}.mini-card b{display:block;color:#15324a;font-size:24px}.actionbar{display:flex;gap:8px;flex-wrap:wrap}.hidden{display:none}.small-note{font-size:12px;color:#6b7b88}.wide-modal{position:fixed;inset:0;background:rgba(15,35,52,.45);display:none;align-items:center;justify-content:center;z-index:30}.wide-modal.open{display:flex}.wide-modal>div{background:#fff;border-radius:10px;max-width:760px;width:calc(100% - 32px);max-height:90vh;overflow:auto;padding:18px}</style></head><body class="cwa-admin-body"><div class="cwa-admin"><header class="cwa-admin-header"><div class="cwa-admin-header__brand"><div class="cwa-admin-header__logo" aria-hidden="true"></div><div class="cwa-admin-header__titles"><div class="cwa-admin-header__gov">Government of Pakistan</div><div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div><div class="cwa-admin-header__wing">Facility Occupancy Records</div></div></div><div class="cwa-admin-header__actions"><a class="cwa-admin-header__logout" href="/admin/dashboard">Main Dashboard</a><a class="cwa-admin-header__logout" href="/logout">Logout</a></div></header><div class="cwa-admin-shell"><aside class="cwa-admin-sidebar"><div class="cwa-admin-sidebar__group"><div class="cwa-admin-sidebar__section-title">Community Welfare</div><a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">[]</span><span>CWA Overview</span></a><a href="/admin/nurses"><span class="cwa-admin-sidebar__icon">HW</span><span>Nurses</span></a><a href="/admin/legal-cases"><span class="cwa-admin-sidebar__icon">LC</span><span>Legal Cases</span></a><a href="/admin/death-cases"><span class="cwa-admin-sidebar__icon">DC</span><span>Death Cases</span></a><a href="/admin/facility-roster" class="is-active"><span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span></a><a href="/admin/facility-occupancy"><span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span></a><a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">WC</span><span>Welfare Cases</span></a><a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">ME</span><span>My Assigned Cases</span></a><a href="/admin/ambassador-review"><span class="cwa-admin-sidebar__icon">AR</span><span>Ambassador Review</span></a></div></aside><main class="cwa-admin-main"><div class="cwa-admin-subhead"><div><h1>Health Workers Facility Roster</h1><p>Maintain accurate welfare records for Embassy-arranged and Embassy-contracted facilities.</p></div><div class="actionbar"><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="openImport()">Bulk CSV Upload</button><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="location.href='/api/admin/facility-roster/export'">Export Roster</button></div></div><div class="cwa-admin-content cwa-fade-in"><div class="cwa-card"><h3 style="margin-bottom:12px;color:#15324a">Add / Edit Facility Occupancy Record</h3><input type="hidden" id="rid"><div class="mini-grid"><input class="cwa-input" id="full_name" placeholder="Full name"><input class="cwa-input" id="passport_number" placeholder="Passport number"><input class="cwa-input" id="civil_id" placeholder="Civil ID"><input class="cwa-input" id="phone" placeholder="Phone / WhatsApp"><input class="cwa-input" id="email" placeholder="Email"><input class="cwa-input" id="facility_name" placeholder="Facility / Building name"><input class="cwa-input" id="vendor_name" placeholder="Vendor name"><input class="cwa-input" id="area" placeholder="Area"><input class="cwa-input" id="room_number" placeholder="Room number"><input class="cwa-input" id="bed_number" placeholder="Bed number"><input class="cwa-input" id="date_shifted_to_facility" type="date" placeholder="Shifted date"><input class="cwa-input" id="contract_start_date" type="date" placeholder="Contract start"><input class="cwa-input" id="contract_end_date" type="date" placeholder="Contract end"><input class="cwa-input" id="notice_period_months" type="number" min="1" max="12" value="3" placeholder="Notice months"><select class="cwa-select" id="current_status"><option>Assigned</option><option>Pending Nurse Confirmation</option><option>Confirmed Staying</option><option>Intends to Leave</option><option>Leaving Notice Submitted</option><option>Left Facility</option><option>Record Correction Needed</option><option>Inactive</option></select><select class="cwa-select" id="active"><option value="1">Active</option><option value="0">Inactive</option></select></div><textarea class="cwa-textarea" id="remarks" placeholder="Remarks" style="margin-top:10px"></textarea><div class="actionbar" style="margin-top:10px"><button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="saveRoster()">Save Record</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="resetForm()">Clear</button><span class="small-note" id="msg"></span></div></div><div class="cwa-form-row"><input id="q" class="cwa-input" placeholder="Search roster, name, passport, facility, vendor" style="flex:1"><select id="statusFilter" class="cwa-select"><option value="">All Status</option><option>Assigned</option><option>Pending Nurse Confirmation</option><option>Confirmed Staying</option><option>Intends to Leave</option><option>Leaving Notice Submitted</option><option>Left Facility</option><option>Record Correction Needed</option><option>Reconciliation Required</option><option>Inactive</option></select><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="loadRoster()">Search</button></div><div class="cwa-card cwa-card--p0"><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Reference</th><th>Name</th><th>Passport / Civil ID</th><th>Phone</th><th>Facility / Vendor</th><th>Room / Bed</th><th>Contract End</th><th>Notice</th><th>Status</th><th>Assigned</th><th>Actions</th></tr></thead><tbody id="rows"><tr><td colspan="11" class="cwa-empty">Loading...</td></tr></tbody></table></div></div></div></main></div></div><div id="importModal" class="wide-modal"><div><h3>Bulk CSV Upload</h3><p class="small-note">Expected headers: full_name, passport_number, civil_id, phone, email, facility_name, vendor_name, room_number, bed_number, date_shifted_to_facility, contract_start_date, contract_end_date, notice_period_months, current_status, remarks.</p><textarea id="csvText" class="cwa-textarea" rows="12" placeholder="Paste CSV content here"></textarea><div class="actionbar" style="margin-top:10px"><button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="importCsv()">Import</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="closeImport()">Cancel</button></div></div></div><script>const USER='__USER_NAME__';function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function badge(s){return '<span class="cwa-badge" data-type="'+(String(s||'').toLowerCase().includes('confirmed')?'resolved':String(s||'').toLowerCase().includes('required')?'urgent':'processing')+'">'+esc(s||'-')+'</span>'}function val(id){return document.getElementById(id).value}function setv(id,v){document.getElementById(id).value=v||''}function resetForm(){['rid','full_name','passport_number','civil_id','phone','email','facility_name','vendor_name','area','room_number','bed_number','date_shifted_to_facility','contract_start_date','contract_end_date','remarks'].forEach(id=>setv(id,''));setv('notice_period_months','3');setv('current_status','Assigned');setv('active','1')}async function loadRoster(){const p=new URLSearchParams();if(val('q'))p.set('q',val('q'));if(val('statusFilter'))p.set('current_status',val('statusFilter'));try{const d=await jget('/api/admin/facility-roster?'+p.toString());document.getElementById('rows').innerHTML=(d.items||[]).map(r=>'<tr><td><b>'+esc(r.roster_reference)+'</b></td><td>'+esc(r.full_name)+'</td><td>'+esc(r.passport_number)+'<br><small>'+esc(r.civil_id||'-')+'</small></td><td>'+esc(r.phone||'-')+'</td><td>'+esc(r.facility_name||'-')+'<br><small>'+esc(r.vendor_name||'-')+'</small></td><td>'+esc(r.room_bed||'-')+'</td><td>'+esc(r.contract_end_date||'-')+'</td><td>'+esc(r.notice_flag||r.notice_period_start_date||'-')+'</td><td>'+badge(r.current_status)+'</td><td>'+esc(r.assigned_to||'Unassigned')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="editRow('+r.id+')">Edit</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="assignRow('+r.id+')">Assign</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="vendorUpdate('+r.id+')">Vendor</button></td></tr>').join('')||'<tr><td colspan="11" class="cwa-empty">No roster records found.</td></tr>';window.roster=d.items||[]}catch(e){document.getElementById('rows').innerHTML='<tr><td colspan="11" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}function payload(){return {id:val('rid'),full_name:val('full_name'),passport_number:val('passport_number'),civil_id:val('civil_id'),phone:val('phone'),email:val('email'),facility_name:val('facility_name'),vendor_name:val('vendor_name'),area:val('area'),room_number:val('room_number'),bed_number:val('bed_number'),date_shifted_to_facility:val('date_shifted_to_facility'),contract_start_date:val('contract_start_date'),contract_end_date:val('contract_end_date'),notice_period_months:val('notice_period_months'),current_status:val('current_status'),active:val('active'),remarks:val('remarks')}}async function saveRoster(){try{await jpost('/api/admin/facility-roster/save',payload());document.getElementById('msg').textContent='Saved.';resetForm();loadRoster()}catch(e){document.getElementById('msg').textContent=e.message}}function editRow(id){const r=(window.roster||[]).find(x=>x.id===id);if(!r)return;['id','full_name','passport_number','civil_id','phone','email','facility_name','vendor_name','area','room_number','bed_number','date_shifted_to_facility','contract_start_date','contract_end_date','notice_period_months','current_status','active','remarks'].forEach(k=>setv(k==='id'?'rid':k,r[k]));scrollTo({top:0,behavior:'smooth'})}async function assignRow(id){const assigned_to=prompt('Assign follow-up to username');if(!assigned_to)return;const due_date=prompt('Due date (YYYY-MM-DD), optional')||'';await jpost('/api/admin/facility-roster/assign',{roster_id:id,assigned_to,due_date,note:'Assigned from facility roster'});loadRoster()}async function vendorUpdate(id){const reported_status=prompt('Vendor update: currently_staying, left, changed_room, not_found, new_resident');if(!reported_status)return;const note=prompt('Note')||'';await jpost('/api/admin/facility-roster/vendor-update',{roster_id:id,reported_status,note});loadRoster()}function openImport(){document.getElementById('importModal').classList.add('open')}function closeImport(){document.getElementById('importModal').classList.remove('open')}async function importCsv(){try{const d=await jpost('/api/admin/facility-roster/import-csv',{csv_text:val('csvText')});alert('Imported '+d.imported+' records');closeImport();loadRoster()}catch(e){alert(e.message)}}loadRoster();</script></body></html>"""
+
+FACILITY_OCCUPANCY_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Facility Occupancy - Community Welfare Wing</title><link rel="stylesheet" href="/static/css/cwa-admin.css"><style>.mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.mini-card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:14px}.mini-card b{display:block;color:#15324a;font-size:24px}.actionbar{display:flex;gap:8px;flex-wrap:wrap}.small-note{font-size:12px;color:#6b7b88}</style></head><body class="cwa-admin-body"><div class="cwa-admin"><header class="cwa-admin-header"><div class="cwa-admin-header__brand"><div class="cwa-admin-header__logo" aria-hidden="true"></div><div class="cwa-admin-header__titles"><div class="cwa-admin-header__gov">Government of Pakistan</div><div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div><div class="cwa-admin-header__wing">Health Workers Facility Occupancy</div></div></div><div class="cwa-admin-header__actions"><a class="cwa-admin-header__logout" href="/admin/dashboard">Main Dashboard</a><a class="cwa-admin-header__logout" href="/logout">Logout</a></div></header><div class="cwa-admin-shell"><aside class="cwa-admin-sidebar"><div class="cwa-admin-sidebar__group"><div class="cwa-admin-sidebar__section-title">Community Welfare</div><a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">[]</span><span>CWA Overview</span></a><a href="/admin/nurses"><span class="cwa-admin-sidebar__icon">HW</span><span>Nurses</span></a><a href="/admin/legal-cases"><span class="cwa-admin-sidebar__icon">LC</span><span>Legal Cases</span></a><a href="/admin/death-cases"><span class="cwa-admin-sidebar__icon">DC</span><span>Death Cases</span></a><a href="/admin/facility-roster"><span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span></a><a href="/admin/facility-occupancy" class="is-active"><span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span></a><a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">WC</span><span>Welfare Cases</span></a><a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">ME</span><span>My Assigned Cases</span></a><a href="/admin/ambassador-review"><span class="cwa-admin-sidebar__icon">AR</span><span>Ambassador Review</span></a></div></aside><main class="cwa-admin-main"><div class="cwa-admin-subhead"><div><h1>Facility Occupancy & Welfare Follow-up</h1><p>To maintain accurate welfare records, support Pakistani health workers, and coordinate timely assistance where required.</p></div><div class="actionbar"><a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/facility-roster">Manage Roster</a><a class="cwa-btn cwa-btn--navy cwa-btn--sm" href="/api/admin/facility-roster/export">Export List</a></div></div><div class="cwa-admin-content cwa-fade-in"><div class="mini-grid" id="kpis"></div><div class="cwa-card cwa-card--p0" style="margin-top:14px"><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Facility</th><th>Vendor</th><th>Expected</th><th>Confirmed</th><th>Pending</th><th>Leaving Notice</th><th>Left</th><th>Open Welfare</th><th>Last Vendor Update</th><th>Last Embassy Verification</th><th>Actions</th></tr></thead><tbody id="facRows"><tr><td colspan="11" class="cwa-empty">Loading...</td></tr></tbody></table></div></div><div id="detailWrap" class="cwa-card cwa-card--p0" style="margin-top:14px;display:none"><div style="padding:16px"><h3 id="detailTitle" style="color:#15324a"></h3><p class="small-note">Facility Occupancy Record detail</p></div><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Reference</th><th>Name</th><th>Passport</th><th>Civil ID</th><th>Phone</th><th>Room / Bed</th><th>Shifted</th><th>Contract End</th><th>Notice Start</th><th>Status</th><th>Confirmation</th><th>Assigned</th><th>Actions</th></tr></thead><tbody id="detailRows"></tbody></table></div></div></div></main></div></div><script>function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function badge(s){let x=String(s||'').toLowerCase();return '<span class="cwa-badge" data-type="'+(x.includes('confirmed')?'resolved':x.includes('left')?'rejected':x.includes('required')?'urgent':'processing')+'">'+esc(s||'-')+'</span>'}async function loadOccupancy(){try{const d=await jget('/api/admin/facility-occupancy');const k=d.kpis||{};document.getElementById('kpis').innerHTML=[['Total assigned',k.total_assigned],['Confirmed currently staying',k.confirmed_staying],['Pending nurse confirmation',k.pending_confirmation],['Intending to leave',k.intending_to_leave],['Leaving notice submitted',k.leaving_notice_submitted],['Left facility',k.left_facility],['Notice period due',k.notice_period_due],['Vendor mismatch records',k.vendor_mismatch_records],['Welfare follow-up required',k.welfare_followup_required]].map(x=>'<div class="mini-card"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');document.getElementById('facRows').innerHTML=(d.facilities||[]).map(f=>'<tr><td><b>'+esc(f.facility_name)+'</b></td><td>'+esc(f.vendor_name||'-')+'</td><td>'+f.expected_residents+'</td><td>'+f.confirmed_staying+'</td><td>'+f.pending_confirmation+'</td><td>'+f.leaving_notice_submitted+'</td><td>'+f.left_facility+'</td><td>'+f.open_welfare_requests+'</td><td>'+esc(String(f.last_vendor_update||'').slice(0,16)||'-')+'</td><td>'+esc(String(f.last_embassy_verification||'').slice(0,16)||'-')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" data-facility="'+esc(f.facility_name||'')+'" onclick="loadDetail(this.dataset.facility)">View facility roster</button></td></tr>').join('')||'<tr><td colspan="11" class="cwa-empty">No facility records found.</td></tr>';const p=new URLSearchParams(location.search);if(p.get('facility'))loadDetail(p.get('facility'))}catch(e){document.getElementById('facRows').innerHTML='<tr><td colspan="11" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}async function loadDetail(facility){const d=await jget('/api/admin/facility-occupancy/detail?facility='+encodeURIComponent(facility));document.getElementById('detailWrap').style.display='block';document.getElementById('detailTitle').textContent=d.facility||facility;document.getElementById('detailRows').innerHTML=(d.items||[]).map(r=>'<tr><td><b>'+esc(r.roster_reference)+'</b></td><td>'+esc(r.full_name)+'</td><td>'+esc(r.passport_number||'-')+'</td><td>'+esc(r.civil_id||'-')+'</td><td>'+esc(r.phone||'-')+'</td><td>'+esc(r.room_bed||'-')+'</td><td>'+esc(r.date_shifted_to_facility||'-')+'</td><td>'+esc(r.contract_end_date||'-')+'</td><td>'+esc(r.notice_period_start_date||'-')+'</td><td>'+badge(r.current_status)+'</td><td>'+badge(r.confirmation_status)+'</td><td>'+esc(r.assigned_to||'Unassigned')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="assignRow('+r.id+')">Assign</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="vendorUpdate('+r.id+')">Vendor</button></td></tr>').join('')||'<tr><td colspan="13" class="cwa-empty">No residents found.</td></tr>';document.getElementById('detailWrap').scrollIntoView({behavior:'smooth'})}async function assignRow(id){const assigned_to=prompt('Assign follow-up to username');if(!assigned_to)return;const due_date=prompt('Due date (YYYY-MM-DD), optional')||'';await jpost('/api/admin/facility-roster/assign',{roster_id:id,assigned_to,due_date,note:'Assigned from facility occupancy dashboard'});loadOccupancy()}async function vendorUpdate(id){const reported_status=prompt('Vendor update: currently_staying, left, changed_room, not_found, new_resident');if(!reported_status)return;const note=prompt('Note')||'';await jpost('/api/admin/facility-roster/vendor-update',{roster_id:id,reported_status,note});loadOccupancy()}loadOccupancy();</script></body></html>"""
 
 WELFARE_CASES_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PAGE_TITLE__</title>
 <style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f2f7fa;color:#172033}.top{height:58px;background:white;border-bottom:1px solid #dbe5ea;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.shell{display:flex}.side{width:230px;min-height:calc(100vh - 58px);background:#10253f;color:white;padding:18px 10px}.side h3{font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em;text-transform:uppercase;padding:0 10px}.side a{display:block;color:rgba(255,255,255,.68);text-decoration:none;font-weight:700;font-size:13px;padding:10px 12px;border-radius:8px;margin:2px}.side a.active,.side a:hover{background:rgba(255,255,255,.1);color:white}.main{flex:1;min-width:0}.head{background:white;border-bottom:1px solid #dbe5ea;padding:18px 24px}.head h1{font-size:22px;margin:0;color:#10253f}.head p{font-size:12px;color:#64748b;margin:4px 0 0}.content{padding:20px 24px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:white;border:1px solid #dbe5ea;border-radius:8px;padding:14px}.kpi b{display:block;font-size:24px;color:#10253f}.kpi span{font-size:11px;color:#64748b;font-weight:800;text-transform:uppercase}.panel{background:white;border:1px solid #dbe5ea;border-radius:8px;overflow:hidden}.filters{display:flex;gap:10px;flex-wrap:wrap;padding:14px;border-bottom:1px solid #e2e8f0}input,select,textarea{border:1px solid #cbd5e1;border-radius:7px;padding:9px 10px;font:inherit;font-size:13px}button{border:0;border-radius:7px;background:#2f7d4e;color:white;padding:9px 12px;font-weight:800;cursor:pointer}.btn2{background:#e2e8f0;color:#10253f}.btn3{background:#2d4a6b}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;background:#f8fafc;color:#64748b;font-size:11px;text-transform:uppercase;padding:10px;border-bottom:1px solid #e2e8f0}td{padding:11px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#e2e8f0;color:#334155}.New{background:#eff6ff;color:#1d4ed8}.Assigned{background:#ecfdf5;color:#047857}.High,.Urgent{background:#fef2f2;color:#b91c1c}.Resolved{background:#f0fdf4;color:#166534}.drawer{position:fixed;right:0;top:0;width:min(560px,100%);height:100vh;background:white;box-shadow:-24px 0 60px rgba(15,23,42,.2);display:none;z-index:5;overflow:auto}.drawer.open{display:block}.drawerHead{background:#2d4a6b;color:white;padding:20px}.drawerBody{padding:18px}.row{display:grid;grid-template-columns:150px 1fr;gap:8px;margin-bottom:8px;font-size:13px}.row span{color:#64748b}.timeline{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}.act{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px}.err{color:#b91c1c;font-weight:800;margin:10px 0}</style></head><body>

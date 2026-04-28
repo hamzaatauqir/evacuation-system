@@ -29,16 +29,17 @@ export function NursesHomePage() {
           <div style={{ flex: "1 1 340px", maxWidth: 540 }}>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,.1)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 20, padding: "5px 14px", fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,.88)", marginBottom: 22, letterSpacing: ".05em" }}>
               <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#6ee79a" }} />
-              NURSES PORTAL
+              HEALTH WORKERS PORTAL
             </div>
             <h1 style={{ fontSize: "clamp(24px,3.5vw,44px)", fontWeight: 800, color: "#fff", lineHeight: 1.2, marginBottom: 14 }}>
-              Pakistan Nurses
+              Pakistan Nurses / Health Workers
               <br />
               <span style={{ color: "#9cf987" }}>Registration Portal</span>
             </h1>
             <p style={{ fontSize: 14, color: "rgba(255,255,255,.68)", maxWidth: 460, lineHeight: 1.75, marginBottom: 22 }}>
-              Register first, then log in or track your registration to use your personal nurse portal for
-              Community Welfare Wing services and updates.
+              A dedicated portal for the Pakistani nursing and health worker community in Kuwait has been
+              established for registration, welfare assistance, facility follow-up, and communication with
+              the Community Welfare Wing.
             </p>
             <NoticeCard type="info">
               <strong>Important:</strong> After you register and verify your login, requests, welfare matters, and
@@ -53,17 +54,17 @@ export function NursesHomePage() {
 
       <main style={{ flex: 1 }}>
         <Section bg={T.bg}>
-          <SecTitle title="Nurses Public Access" sub="Start from registration or login/track to continue into your nurse portal." center />
+          <SecTitle title="Nurses / Health Workers Public Access" sub="Start from registration or login/track to continue into your health workers portal." center />
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(255px,1fr))', gap: 18 }}>
-            <ServiceCard icon="user-add" title="New Nurses Registration" desc="Initial registration for newly arrived Pakistani nursing staff in Kuwait." cta="Register Now" ctaVariant="primary" accent={T.green} onClick={() => navigate('/nurses/register')} />
-            <ServiceCard icon="user" title="Existing Nurse Login / Track Registration" desc="Login and open your nurse portal dashboard for requests and tracking." cta="Open Nurse Portal" ctaVariant="navy" accent={T.navy} onClick={() => navigate('/nurses/login')} />
+            <ServiceCard icon="user-add" title="Nurses / Health Workers Registration" desc="Registration for Pakistani nursing and health worker community members in Kuwait." cta="Register Now" ctaVariant="primary" accent={T.green} onClick={() => navigate('/nurses/register')} />
+            <ServiceCard icon="user" title="Existing Health Worker Login / Track Registration" desc="Login and open your portal dashboard for welfare assistance, facility follow-up, and tracking." cta="Open Portal" ctaVariant="navy" accent={T.navy} onClick={() => navigate('/nurses/login')} />
           </div>
         </Section>
 
         <Section bg={T.surfaceLow}>
           <SecTitle
-            title="Services available inside Nurse Portal"
-            sub="After registration/login, nurses can submit requests, view Embassy messages, and track updates from one secure portal."
+            title="Services available inside Health Workers Portal"
+            sub="After registration/login, nurses and health workers can submit requests, confirm stay arrangements, view Embassy messages, and track updates from one secure portal."
             center
           />
           <div style={{ maxWidth: 640, margin: "0 auto", textAlign: "center" }}>

@@ -24,13 +24,31 @@ export type NursePortalContext = {
   lastUpdated: string;
   remarks: string;
   complaints: NurseComplaintItem[];
+  facilityRoster?: {
+    id?: number;
+    roster_reference?: string;
+    facility_name?: string;
+    vendor_name?: string;
+    area?: string;
+    room_number?: string;
+    bed_number?: string;
+    date_shifted_to_facility?: string;
+    contract_start_date?: string;
+    contract_end_date?: string;
+    notice_period_start_date?: string;
+    current_status?: string;
+    confirmation_status?: string;
+    last_confirmed_at?: string;
+    notice_flag?: string;
+    remarks?: string;
+  } | null;
   /** Opaque marker from server after password login (not a secret session token). */
   sessionMarker?: string;
 };
 
 export type LocalPortalRequest = {
   id: string;
-  type: 'Accommodation' | 'Complaint' | 'Leaving Notice';
+  type: 'Facility Assistance' | 'Stay Confirmation' | 'Complaint' | 'Leaving Notice';
   status: 'Submitted';
   submittedAt: string;
   summary: string;
@@ -101,6 +119,7 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     lastUpdated: (data?.process_last_updated_at || '').toString(),
     remarks: (data?.latest_admin_remarks || data?.remarks || '').toString(),
     complaints: Array.isArray(data?.complaints) ? data.complaints : [],
+    facilityRoster: data?.facility_roster || null,
     sessionMarker: (data?.session_marker || "").toString() || undefined,
   };
 }
