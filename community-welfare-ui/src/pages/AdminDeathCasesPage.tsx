@@ -202,6 +202,7 @@ export function AdminDeathCasesPage() {
                 <div style={{ background: T.surfaceLow, borderRadius: 10, padding: 14, marginBottom: 16 }}>
                   {([
                     ["Documentation", selected.docStatus],
+                    ["Email Status", selected.emailStatus || "Unverified"],
                     ["Assigned To", selected.assigned],
                     ["Last Updated", selected.updated],
                   ] as [string, string][]).map(([l, v]) => (

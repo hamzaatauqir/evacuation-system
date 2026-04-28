@@ -168,7 +168,7 @@ export function LegalOpfPage() {
               </div>
               <Card>
                 {submitted ? (
-                  <SuccessState message="Your legal/welfare request has been registered. The Community Welfare Wing will review and contact you within 2–3 working days." />
+                  <SuccessState message="Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Email verification pending." />
                 ) : (
                   <>
                     <Grid cols={2} gap={14}>

@@ -120,7 +120,7 @@ export function SuccessState({ message }: SuccessStateProps) {
         }}
       >
         {message ||
-          "Your request has been submitted. The Community Welfare Wing will review and contact you."}
+          "Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates."}
       </p>
       <NoticeCard type="info">
         Staff may contact you via WhatsApp for verification. No document upload was required at this stage.

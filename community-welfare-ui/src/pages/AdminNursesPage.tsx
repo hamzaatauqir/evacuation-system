@@ -26,6 +26,7 @@ type NurseComplaint = {
   updated_at?: string;
   subject?: string;
   description?: string;
+  email_status?: string;
 };
 type SummaryTotals = {
   registrations?: number;
@@ -411,6 +412,7 @@ export function AdminNursesPage() {
                       ["Passport", selected.passport_number || "-"],
                       ["Reference", selected.nurse_reference_id || "-"],
                       ["Category", selected.category || selected.complaint_category || "-"],
+                      ["Email Status", selected.email_status || "Unverified"],
                       ["Priority", selected.priority || "-"],
                       ["Description", selected.description || "-"],
                     ] as [string, string][]).map(([l, v]) => (

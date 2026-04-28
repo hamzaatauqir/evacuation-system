@@ -53,7 +53,7 @@ export function CommunityFeedbackPage() {
     >
       <Card>
         {reference ? (
-          <SuccessState message={`Submission received. Reference: ${reference}`} />
+          <SuccessState message={`Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Reference: ${reference}`} />
         ) : (
           <>
             <Grid cols={2} gap={14}>

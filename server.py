@@ -736,6 +736,10 @@ def init_db():
         ('password_salt', "TEXT"),
         ('password_updated_at', "TEXT"),
         ('email_verified', "INTEGER DEFAULT 0"),
+        ('email_verified_at', "TEXT"),
+        ('email_verification_token', "TEXT"),
+        ('email_verification_sent_at', "TEXT"),
+        ('email_last_status', "TEXT"),
         ('reset_token_hash', "TEXT"),
         ('reset_token_expires_at', "TEXT"),
         ('reset_token_used_at', "TEXT"),
@@ -746,6 +750,7 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass
+    db.execute("CREATE INDEX IF NOT EXISTS idx_nurse_email_verification_token ON nurse_registrations(email_verification_token)")
     for col, coltype in [
         ('complaint_id', "TEXT DEFAULT ''"),
         ('subject', "TEXT DEFAULT ''"),
@@ -1148,13 +1153,19 @@ def init_db():
         ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
         ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
         ('resolved_at', 'TIMESTAMP'),
-        ('closed_at', 'TIMESTAMP')
+        ('closed_at', 'TIMESTAMP'),
+        ('email_verified', 'INTEGER DEFAULT 0'),
+        ('email_verified_at', 'TEXT'),
+        ('email_verification_token', 'TEXT'),
+        ('email_verification_sent_at', 'TEXT'),
+        ('email_last_status', 'TEXT')
     ]:
         try:
             db.execute(f"ALTER TABLE welfare_cases ADD COLUMN {col} {coltype}")
             db.commit()
         except sqlite3.OperationalError:
             pass
+    db.execute("CREATE INDEX IF NOT EXISTS idx_welfare_email_verification_token ON welfare_cases(email_verification_token)")
     for col, coltype in [
         ('case_id', 'INTEGER'),
         ('actor_username', 'TEXT'),
@@ -1846,6 +1857,22 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_death_case_actions_ref ON death_case_actions(reference_id);
     CREATE INDEX IF NOT EXISTS idx_death_case_actions_created ON death_case_actions(created_at);
     """)
+
+    email_verification_columns = [
+        ('email_verified', 'INTEGER DEFAULT 0'),
+        ('email_verified_at', 'TEXT'),
+        ('email_verification_token', 'TEXT'),
+        ('email_verification_sent_at', 'TEXT'),
+        ('email_last_status', 'TEXT'),
+    ]
+    for table_name in ('legal_case_requests', 'death_case_requests'):
+        for col, coltype in email_verification_columns:
+            try:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
+                db.commit()
+            except sqlite3.OperationalError:
+                pass
+        db.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_email_verification_token ON {table_name}(email_verification_token)")
 
     db.commit()
     db.close()
@@ -4080,6 +4107,237 @@ def _insert_notification_log(case_type, case_reference, recipient_type, recipien
         print(f"[NotificationLog] write skipped: {exc}", flush=True)
 
 
+EMAIL_VERIFICATION_BASE_URL = os.environ.get('EMAIL_VERIFICATION_BASE_URL', 'https://portal.cwakuwait.com').strip().rstrip('/') or 'https://portal.cwakuwait.com'
+EMAIL_VERIFICATION_MAX_AGE_DAYS = int(os.environ.get('EMAIL_VERIFICATION_MAX_AGE_DAYS', '30') or '30')
+EMAIL_VERIFICATION_SUBJECT = 'Community Welfare Wing – Verify Your Email Address'
+EMAIL_VERIFICATION_TABLES = {
+    'nurse_registrations': {'id': 'id', 'reference': 'reference_id', 'name': 'full_name', 'email': 'email'},
+    'welfare_cases': {'id': 'id', 'reference': 'case_reference', 'name': 'requester_name', 'email': 'requester_email'},
+    'legal_case_requests': {'id': 'id', 'reference': 'reference_id', 'name': 'full_name', 'email': 'email'},
+    'death_case_requests': {'id': 'id', 'reference': 'reference_id', 'name': 'reporter_name', 'email': 'reporter_email'},
+}
+EMAIL_VERIFICATION_FAILURE_STATUSES = {'failed', 'invalid_email', 'skipped_smtp_missing'}
+
+
+def _email_verification_link(token):
+    return f"{EMAIL_VERIFICATION_BASE_URL}/verify-email?token={quote(token or '')}"
+
+
+def _email_verification_body(name, verification_link, reference):
+    return (
+        f"Dear {name or 'Applicant'},\n\n"
+        f"Thank you for submitting your request to the Community Welfare Wing, Embassy of Pakistan, Kuwait.\n\n"
+        f"Please verify your email address by opening the link below:\n\n"
+        f"{verification_link}\n\n"
+        f"Reference Number: {reference or 'N/A'}\n\n"
+        f"If you did not submit this request, you may ignore this email.\n\n"
+        f"Regards,\n"
+        f"Community Welfare Wing\n"
+        f"Embassy of Pakistan, Kuwait"
+    )
+
+
+def _email_verification_log(case_type, reference, name, email, subject, body, status, error=''):
+    _insert_notification_log(
+        case_type or '',
+        reference or '',
+        'applicant',
+        name or 'Applicant',
+        email or '',
+        '',
+        'email',
+        'email_verification_sent',
+        subject or EMAIL_VERIFICATION_SUBJECT,
+        body or '',
+        status or '',
+        error or ''
+    )
+
+
+def _email_verification_status_from_reason(reason):
+    reason = (reason or '').strip()
+    if reason in ('smtp_not_configured', 'smtp_env_not_configured', 'SMTP not configured', 'SMTP disabled'):
+        return 'skipped_smtp_missing'
+    if reason == 'invalid_recipient':
+        return 'invalid_email'
+    return 'failed'
+
+
+def _email_status_label(record):
+    d = _row_to_dict(record)
+    try:
+        verified = int(d.get('email_verified') or 0)
+    except Exception:
+        verified = 0
+    if verified == 1:
+        return 'Verified'
+    if (d.get('email_last_status') or '').strip() in EMAIL_VERIFICATION_FAILURE_STATUSES:
+        return 'Delivery Failed'
+    return 'Unverified'
+
+
+def _attach_email_status(record):
+    d = _row_to_dict(record)
+    d['email_status'] = _email_status_label(d)
+    return d
+
+
+def _send_email_verification_for_record(table_name, row_id, reference, applicant_name, email, case_type):
+    """Create and send a verification link without blocking the saved request."""
+    if table_name not in EMAIL_VERIFICATION_TABLES:
+        return {'status': 'failed', 'error': 'unsupported_table'}
+    email = (email or '').strip()
+    reference = (reference or '').strip()
+    applicant_name = (applicant_name or 'Applicant').strip()
+    if not email:
+        return {'status': 'skipped_no_email'}
+
+    db = get_db()
+    token = ''
+    sent_at = datetime.utcnow().isoformat(timespec='seconds')
+    try:
+        if not _is_valid_email_loose(email):
+            db.execute(
+                f"""UPDATE {table_name}
+                    SET email_verified = 0,
+                        email_last_status = ?
+                    WHERE id = ?""",
+                ['invalid_email', row_id]
+            )
+            db.commit()
+            _email_verification_log(
+                case_type, reference, applicant_name, email, EMAIL_VERIFICATION_SUBJECT,
+                'Verification email skipped: invalid email address.',
+                'invalid_email', 'invalid_email'
+            )
+            return {'status': 'invalid_email', 'error': 'invalid_email'}
+
+        token = secrets.token_urlsafe(32)
+        link = _email_verification_link(token)
+        body = _email_verification_body(applicant_name, link, reference)
+        db.execute(
+            f"""UPDATE {table_name}
+                SET email_verified = 0,
+                    email_verified_at = NULL,
+                    email_verification_token = ?,
+                    email_verification_sent_at = ?,
+                    email_last_status = ?
+                WHERE id = ?""",
+            [token, sent_at, 'pending', row_id]
+        )
+        db.commit()
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[EmailVerification] token preparation failed: {exc}", flush=True)
+        return {'status': 'failed', 'error': str(exc)}
+    finally:
+        db.close()
+
+    status = 'failed'
+    error = ''
+    try:
+        send_res = send_notification_email(email, EMAIL_VERIFICATION_SUBJECT, body)
+        if send_res.get('ok'):
+            status = 'sent'
+        else:
+            error = send_res.get('reason') or 'send_failed'
+            status = _email_verification_status_from_reason(error)
+    except Exception as exc:
+        error = str(exc)
+        status = 'failed'
+
+    db2 = get_db()
+    try:
+        db2.execute(f"UPDATE {table_name} SET email_last_status = ? WHERE id = ?", [status, row_id])
+        db2.commit()
+    except Exception as exc:
+        try:
+            db2.rollback()
+        except Exception:
+            pass
+        print(f"[EmailVerification] status update failed: {exc}", flush=True)
+    finally:
+        db2.close()
+
+    _email_verification_log(case_type, reference, applicant_name, email, EMAIL_VERIFICATION_SUBJECT, body, status, error)
+    return {'status': status, 'token': token if status != 'invalid_email' else '', 'error': error}
+
+
+def _parse_email_verification_timestamp(value):
+    text = (value or '').strip()
+    if not text:
+        return None
+    text = text.replace('Z', '')
+    for candidate in (text, text.replace(' ', 'T')):
+        try:
+            return datetime.fromisoformat(candidate)
+        except Exception:
+            pass
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            pass
+    return None
+
+
+def _email_verification_token_expired(sent_at):
+    if EMAIL_VERIFICATION_MAX_AGE_DAYS <= 0:
+        return False
+    sent_dt = _parse_email_verification_timestamp(sent_at)
+    if not sent_dt:
+        return True
+    return sent_dt < (datetime.utcnow() - timedelta(days=EMAIL_VERIFICATION_MAX_AGE_DAYS))
+
+
+def api_verify_email_token(token):
+    token = (token or '').strip()
+    if not token:
+        return {'success': False}
+    db = get_db()
+    try:
+        for table_name, cfg in EMAIL_VERIFICATION_TABLES.items():
+            id_col = cfg['id']
+            row = db.execute(
+                f"""SELECT {id_col} AS record_id, email_verification_sent_at
+                    FROM {table_name}
+                    WHERE email_verification_token = ?
+                    ORDER BY {id_col} DESC LIMIT 1""",
+                [token]
+            ).fetchone()
+            if not row:
+                continue
+            if _email_verification_token_expired(row['email_verification_sent_at']):
+                return {'success': False}
+            db.execute(
+                f"""UPDATE {table_name}
+                    SET email_verified = 1,
+                        email_verified_at = CURRENT_TIMESTAMP,
+                        email_verification_token = '',
+                        email_last_status = COALESCE(NULLIF(email_last_status, ''), 'sent')
+                    WHERE {id_col} = ?""",
+                [row['record_id']]
+            )
+            db.commit()
+            return {'success': True, 'table': table_name, 'id': row['record_id']}
+        return {'success': False}
+    except Exception as exc:
+        print(f"[EmailVerification] verify failed: {exc}", flush=True)
+        return {'success': False}
+    finally:
+        db.close()
+
+
+def email_verification_result_html(success):
+    message = 'Your email address has been verified successfully.' if success else 'This verification link is invalid or has expired.'
+    title = 'Email Verified' if success else 'Verification Link Invalid'
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>
+<style>body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f6f9ff;color:#15324a;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}}.box{{max-width:560px;background:#fff;border:1px solid #e3ebf0;border-radius:10px;padding:28px;text-align:center;box-shadow:0 10px 26px rgba(15,35,52,.08)}}h1{{font-size:24px;margin:0 0 12px}}p{{font-size:16px;line-height:1.6;margin:0;color:#334155}}</style></head><body><main class="box"><h1>{esc(title)}</h1><p>{esc(message)}</p></main></body></html>"""
+
+
 def _safe_status_label(status):
     return (status or 'Under Review').strip()
 
@@ -4497,6 +4755,7 @@ def _build_nurse_public_profile_bundle(db, rec):
         'civil_id': rec.get('civil_id', ''),
         'mobile': rec.get('mobile', ''),
         'email': rec.get('email', ''),
+        'email_status': _email_status_label(rec),
         'batch_number': rec.get('batch_number', ''),
         'arrival_date': rec.get('arrival_date', ''),
         'hospital': rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
@@ -4555,21 +4814,19 @@ def _send_nurse_ack_email(record):
         return False, 'missing_or_invalid_email'
     full_name = record.get('full_name', '')
     ref_id = record.get('reference_id', '')
-    passport = record.get('passport_number', '')
     base = _nurse_portal_public_base_url()
     body = (
         f"Dear {full_name or 'Applicant'},\n\n"
         f"Your Pakistan Nurses Registration has been received.\n\n"
         f"Full Name: {full_name}\n"
         f"Reference ID: {ref_id}\n"
-        f"Passport Number: {passport}\n"
         f"Registration Status: {record.get('registration_status', 'Pending Review')}\n\n"
         f"Please log in to access your Nurse Portal:\n{base}/nurses/login\n\n"
         f"Community Welfare Wing Contact:\n"
         f"Email: parepkuwaitcwa37@gmail.com\n"
         f"Mobile: +965 5597 7292\n\n"
         f"Please send supporting documents, if requested, by email to parepkuwaitcwa37@gmail.com using this subject format:\n"
-        f"NURSE DOCUMENTS - [{ref_id}] - [{full_name}] - [{passport}]\n\n"
+        f"NURSE DOCUMENTS - [{ref_id}] - [{full_name}]\n\n"
         f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
     )
     return _nurse_send_email_smtp_env(to_email, 'Nurse Registration Acknowledgment', body)
@@ -4726,6 +4983,9 @@ def api_nurse_register(data):
             if not roster_id:
                 _nurse_log(db, 'facility_roster_link_skipped', ref, passport, 'system', {'error': roster_err})
         db.commit()
+        verification = _send_email_verification_for_record(
+            'nurse_registrations', nurse_id, ref, full_name, email, 'nurse_registration'
+        )
         record = {'reference_id': ref, 'full_name': full_name, 'passport_number': passport, 'email': email, 'registration_status': 'Pending Review'}
         ok, detail = _send_nurse_ack_email(record)
         db2 = get_db()
@@ -4734,7 +4994,7 @@ def api_nurse_register(data):
             db2.commit()
         finally:
             db2.close()
-        msg = 'Registration submitted successfully. Please login to access your Nurse Portal.'
+        msg = 'Registration submitted successfully. Email verification pending. Please check your inbox to verify your email address before future updates.'
         notify_case_event(
             case_type='nurse_registration',
             case_reference=ref,
@@ -4746,7 +5006,10 @@ def api_nurse_register(data):
         )
         return {
             'success': True, 'ok': True, 'reference': ref, 'reference_id': ref,
-            'message': msg, 'email_status': 'sent' if ok else 'not_sent', 'email_detail': detail,
+            'message': msg,
+            'email_status': verification.get('status') or ('sent' if ok else 'not_sent'),
+            'email_detail': detail,
+            'email_verification_status': verification.get('status'),
         }
     finally:
         db.close()
@@ -5287,6 +5550,7 @@ def _nurse_registration_public_dict(row):
     d['last_contact'] = d.get('last_confirmed_at') or d.get('updated_at') or ''
     d['notice_flag'] = _facility_notice_flag(d)
     d['status'] = d.get('registration_status') or 'Pending Review'
+    d['email_status'] = _email_status_label(d)
     return d
 
 
@@ -5385,7 +5649,7 @@ def api_legal_case_intake(data):
     db = get_db()
     try:
         ref = _next_legal_case_reference(db)
-        db.execute("""INSERT INTO legal_case_requests
+        cur = db.execute("""INSERT INTO legal_case_requests
             (reference_id, full_name, passport_number, cnic, civil_id, mobile, email, current_address,
              case_type, priority, subject, description, opposing_party, kuwaiti_court_case_no, next_hearing_date,
              status, last_action_at)
@@ -5399,6 +5663,9 @@ def api_legal_case_intake(data):
         _add_legal_case_action(db, ref, 'Submitted', 'public', 'public',
                                note=description, new_status='Submitted', visible_to_applicant=1)
         db.commit()
+        verification = _send_email_verification_for_record(
+            'legal_case_requests', cur.lastrowid, ref, full_name, email, 'legal'
+        )
         if email and _is_valid_email_loose(email):
             _enqueue_email_job({
                 'type': 'nurse_request_submitted',  # reuse existing email worker template
@@ -5417,7 +5684,12 @@ def api_legal_case_intake(data):
             status='Submitted',
             tracking_link='https://cwakuwait.com/legal-cases/track'
         )
-        return {'success': True, 'reference_id': ref}
+        return {
+            'success': True,
+            'reference_id': ref,
+            'message': 'Your request has been received. Email verification pending.',
+            'email_verification_status': verification.get('status'),
+        }
     finally:
         db.close()
 
@@ -5446,7 +5718,7 @@ def api_death_case_intake(data):
     db = get_db()
     try:
         ref = _next_death_case_reference(db)
-        db.execute("""INSERT INTO death_case_requests
+        cur = db.execute("""INSERT INTO death_case_requests
             (reference_id, deceased_name, deceased_passport, deceased_cnic, deceased_civil_id,
              deceased_dob, deceased_gender, date_of_death, place_of_death, cause_of_death, hospital_or_authority,
              repatriation_required, burial_preference,
@@ -5475,6 +5747,9 @@ def api_death_case_intake(data):
         _add_death_case_action(db, ref, 'Submitted', 'public', 'public',
                                note=description, new_status='Submitted', visible_to_reporter=1)
         db.commit()
+        verification = _send_email_verification_for_record(
+            'death_case_requests', cur.lastrowid, ref, reporter_name, reporter_email, 'death'
+        )
         if reporter_email and _is_valid_email_loose(reporter_email):
             _enqueue_email_job({
                 'type': 'nurse_request_submitted',
@@ -5493,7 +5768,12 @@ def api_death_case_intake(data):
             status='Submitted',
             tracking_link='https://cwakuwait.com/death-cases/track'
         )
-        return {'success': True, 'reference_id': ref}
+        return {
+            'success': True,
+            'reference_id': ref,
+            'message': 'Your request has been received. Email verification pending.',
+            'email_verification_status': verification.get('status'),
+        }
     finally:
         db.close()
 
@@ -5593,6 +5873,7 @@ def _welfare_case_to_dict(row):
         'resolved_at', 'closed_at'
     ):
         d[key] = d.get(key) or ''
+    d['email_status'] = _email_status_label(d)
     return d
 
 
@@ -5667,6 +5948,14 @@ def api_welfare_locating_assistance(data):
         )
         _welfare_insert_action(db, cur.lastrowid, 'public', 'created', '', 'New', 'Public locating/contacting assistance request submitted', False)
         db.commit()
+        verification = _send_email_verification_for_record(
+            'welfare_cases',
+            cur.lastrowid,
+            reference,
+            requester_name,
+            _clean_text(data.get('requester_email'), 180),
+            'locating_assistance'
+        )
         notify_case_event(
             case_type='locating_assistance',
             case_reference=reference,
@@ -5676,7 +5965,13 @@ def api_welfare_locating_assistance(data):
             status='New',
             tracking_link='https://cwakuwait.com'
         )
-        return {'ok': True, 'success': True, 'reference': reference}
+        return {
+            'ok': True,
+            'success': True,
+            'reference': reference,
+            'message': 'Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates.',
+            'email_verification_status': verification.get('status'),
+        }
     except Exception as e:
         db.rollback()
         return {'ok': False, 'success': False, 'error': str(e)}
@@ -5735,6 +6030,9 @@ def api_welfare_feedback(data):
         )
         _welfare_insert_action(db, cur.lastrowid, 'public', 'created', '', 'New', 'Public community feedback submitted', False)
         db.commit()
+        verification = _send_email_verification_for_record(
+            'welfare_cases', cur.lastrowid, reference, requester_name, requester_email, 'community_feedback'
+        )
         notify_case_event(
             case_type='community_feedback',
             case_reference=reference,
@@ -5744,7 +6042,13 @@ def api_welfare_feedback(data):
             status='New',
             tracking_link='https://cwakuwait.com'
         )
-        return {'ok': True, 'success': True, 'reference': reference, 'message': 'Your feedback has been received.'}
+        return {
+            'ok': True,
+            'success': True,
+            'reference': reference,
+            'message': 'Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates.',
+            'email_verification_status': verification.get('status'),
+        }
     except sqlite3.IntegrityError:
         db.rollback()
         return {'ok': False, 'success': False, 'error': 'Unable to create feedback case at the moment. Please try again.'}
@@ -17074,6 +17378,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path == '/verify-email':
+            result = api_verify_email_token(params.get('token', ''))
+            self.send_html(email_verification_result_html(bool(result.get('success'))), 200 if result.get('success') else 400)
+            return
+
         if path.startswith('/static/'):
             static_root = (Path(__file__).resolve().parent / 'static').resolve()
             rel_path = path[len('/static/'):].lstrip('/')
@@ -17791,7 +18100,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                       WHERE {where_sql}
                                       ORDER BY id DESC LIMIT ? OFFSET ?""",
                                   vals + [page_size, offset]).fetchall()
-                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [dict(r) for r in rows]})
+                items = []
+                for r in rows:
+                    d = dict(r)
+                    nurse_status = db.execute(
+                        """SELECT email_verified, email_last_status FROM nurse_registrations
+                           WHERE reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+                           ORDER BY id DESC LIMIT 1""",
+                        [d.get('nurse_reference_id', ''), d.get('passport_number', '')]
+                    ).fetchone()
+                    d['email_status'] = _email_status_label(nurse_status) if nurse_status else 'Unverified'
+                    items.append(d)
+                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': items})
             finally:
                 db.close()
         elif path == '/api/admin/nurses/my-complaints':
@@ -17808,7 +18128,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rows = db.execute("""SELECT * FROM nurse_complaints
                                      WHERE assigned_to_username = ?
                                      ORDER BY id DESC LIMIT ? OFFSET ?""", [user['user'], page_size, offset]).fetchall()
-                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [dict(r) for r in rows]})
+                items = []
+                for r in rows:
+                    d = dict(r)
+                    nurse_status = db.execute(
+                        """SELECT email_verified, email_last_status FROM nurse_registrations
+                           WHERE reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+                           ORDER BY id DESC LIMIT 1""",
+                        [d.get('nurse_reference_id', ''), d.get('passport_number', '')]
+                    ).fetchone()
+                    d['email_status'] = _email_status_label(nurse_status) if nurse_status else 'Unverified'
+                    items.append(d)
+                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': items})
             finally:
                 db.close()
         elif path == '/api/admin/nurses/complaint':
@@ -17827,7 +18158,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 comp = dict(row)
                 if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
-                nurse = db.execute("""SELECT reference_id, full_name, passport_number, mobile, email, hospital, accommodation_status
+                nurse = db.execute("""SELECT reference_id, full_name, passport_number, mobile, email, hospital, accommodation_status,
+                                             email_verified, email_last_status
                                       FROM nurse_registrations
                                       WHERE reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
                                       ORDER BY id DESC LIMIT 1""",
@@ -17847,7 +18179,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _add_nurse_complaint_action(db, complaint_id, 'Seen', user['user'], user['role'],
                                                 old_status='Submitted', new_status='Seen by Admin', visible_to_nurse=0)
                     db.commit()
-                self.send_json({'success': True, 'complaint': comp, 'nurse': dict(nurse) if nurse else None, 'actions': [dict(a) for a in actions]})
+                comp['email_status'] = _email_status_label(nurse) if nurse else 'Unverified'
+                self.send_json({'success': True, 'complaint': comp, 'nurse': _attach_email_status(nurse) if nurse else None, 'actions': [dict(a) for a in actions]})
             finally:
                 db.close()
         elif path == '/api/admin/nurses/complaint-assignees':
@@ -17965,7 +18298,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 total = int(db.execute(f"SELECT COUNT(*) c FROM legal_case_requests WHERE {where_sql}", vals).fetchone()['c'] or 0)
                 rows = db.execute(f"SELECT * FROM legal_case_requests WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
                                   vals + [page_size, offset]).fetchall()
-                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [dict(r) for r in rows]})
+                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [_attach_email_status(r) for r in rows]})
             finally:
                 db.close()
         elif path == '/api/admin/legal-cases/detail':
@@ -17981,7 +18314,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 row = db.execute("SELECT * FROM legal_case_requests WHERE reference_id = ? ORDER BY id DESC LIMIT 1", [ref]).fetchone()
                 if not row:
                     self.send_json({'success': False, 'error': 'Not found'}, 404); return
-                rec = dict(row)
+                rec = _attach_email_status(row)
                 if user['role'] != 'admin' and rec.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 actions = db.execute("SELECT * FROM legal_case_actions WHERE reference_id = ? ORDER BY id DESC LIMIT 200", [ref]).fetchall()
@@ -18062,7 +18395,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 total = int(db.execute(f"SELECT COUNT(*) c FROM death_case_requests WHERE {where_sql}", vals).fetchone()['c'] or 0)
                 rows = db.execute(f"SELECT * FROM death_case_requests WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
                                   vals + [page_size, offset]).fetchall()
-                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [dict(r) for r in rows]})
+                self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [_attach_email_status(r) for r in rows]})
             finally:
                 db.close()
         elif path == '/api/admin/death-cases/detail':
@@ -18078,7 +18411,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 row = db.execute("SELECT * FROM death_case_requests WHERE reference_id = ? ORDER BY id DESC LIMIT 1", [ref]).fetchone()
                 if not row:
                     self.send_json({'success': False, 'error': 'Not found'}, 404); return
-                rec = dict(row)
+                rec = _attach_email_status(row)
                 if user['role'] != 'admin' and rec.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 actions = db.execute("SELECT * FROM death_case_actions WHERE reference_id = ? ORDER BY id DESC LIMIT 200", [ref]).fetchall()
@@ -22910,14 +23243,14 @@ LOCATING_ASSISTANCE_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset
 <h2>Person Concerned</h2><div class="grid"><div class="field"><label>Full name of Pakistani national *</label><input name="subject_name" required></div><div class="field"><label>Passport number if available</label><input name="subject_passport"></div><div class="field"><label>CNIC if available</label><input name="subject_cnic"></div><div class="field"><label>Civil ID if available</label><input name="subject_civil_id"></div><div class="field"><label>Last known phone number</label><input name="subject_phone"></div><div class="field"><label>Last date of contact</label><input name="last_contact_date" type="date"></div></div>
 <div class="field"><label>Last known address in Kuwait</label><input name="subject_address"></div><div class="field"><label>Last known workplace/employer</label><input name="subject_workplace"></div><div class="field"><label>Brief reason for concern *</label><textarea name="concern_summary" required></textarea></div><div class="field"><label>Any police report/reference if available</label><input name="police_reference"></div><div class="field"><label>Supporting details</label><textarea name="details"></textarea></div>
 <label class="check"><input name="declaration" type="checkbox" required><span>I confirm that the information provided is true to the best of my knowledge and I understand that the Embassy may contact me for verification.</span></label><button type="submit">Submit Request</button><div id="msg" class="msg"></div></form></main>
-<script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,msg=document.getElementById('msg');msg.textContent='Submitting...';msg.className='msg';const data=Object.fromEntries(new FormData(f).entries());try{const r=await fetch('/api/welfare/locating-assistance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw new Error(j.error||'Submission failed');msg.textContent='Request submitted. Reference: '+j.reference;msg.className='msg ok';f.reset()}catch(err){msg.textContent=err.message;msg.className='msg err'}})</script></body></html>"""
+<script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,msg=document.getElementById('msg');msg.textContent='Submitting...';msg.className='msg';const data=Object.fromEntries(new FormData(f).entries());try{const r=await fetch('/api/welfare/locating-assistance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw new Error(j.error||'Submission failed');msg.textContent='Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Reference: '+j.reference;msg.className='msg ok';f.reset()}catch(err){msg.textContent=err.message;msg.className='msg err'}})</script></body></html>"""
 
 COMMUNITY_FEEDBACK_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Feedback / Recommendations / Complaints</title>
 <style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f4f7f8;color:#172033}.top{background:#2d4a6b;color:white;padding:34px 24px}.wrap{max-width:900px;margin:0 auto}.back{color:#d8e6ef;text-decoration:none;font-size:13px;font-weight:700}.top h1{margin:16px 0 8px;font-size:30px;line-height:1.18}.top p{max-width:760px;color:#d8e6ef;line-height:1.7}.bar{height:4px;background:#2f7d4e}.card{background:white;border:1px solid #dbe5ea;border-radius:10px;padding:22px;margin:24px 0;box-shadow:0 10px 30px rgba(15,23,42,.06)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}label{font-size:12px;font-weight:800;color:#334155}input,textarea,select{border:1px solid #cbd5e1;border-radius:8px;padding:11px 12px;font:inherit;font-size:14px}textarea{min-height:130px}.check{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5}.check input{margin-top:2px}button{background:#2f7d4e;color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:800;cursor:pointer}.msg{font-weight:800;margin-top:14px}.ok{color:#166534}.err{color:#b91c1c}</style></head><body>
 <div class="top"><div class="wrap"><a class="back" href="/">Back to Community Welfare Services</a><h1>Community Feedback / Recommendations / Complaints</h1><p>Submit community welfare feedback, recommendations, service-related complaints, or suggestions for improvement. The Community Welfare Wing will review submissions and route them to the relevant officer where appropriate.</p></div></div><div class="bar"></div>
 <main class="wrap"><form id="f" class="card"><div class="grid"><div class="field"><label>Full name *</label><input name="name" required></div><div class="field"><label>Phone/WhatsApp *</label><input name="phone" required></div><div class="field"><label>Email</label><input name="email" type="email"></div><div class="field"><label>Category *</label><select name="category" required><option value="">Select</option><option>Recommendation / Suggestion</option><option>Service Complaint</option><option>Welfare Concern</option><option>Employer / Workplace Concern</option><option>Consular Service Feedback</option><option>Other</option></select></div><div class="field"><label>Preferred contact method</label><select name="preferred_contact_method"><option>Phone/WhatsApp</option><option>Email</option><option>No response needed</option></select></div></div><div class="field"><label>Subject *</label><input name="subject" required></div><div class="field"><label>Details *</label><textarea name="details" required></textarea></div><label class="check"><input name="consent" type="checkbox" required><span>I consent to the Community Welfare Wing reviewing this submission and contacting me where appropriate.</span></label><button type="submit">Submit Feedback</button><div id="msg" class="msg"></div></form></main>
-<script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,msg=document.getElementById('msg');msg.textContent='Submitting...';msg.className='msg';const data=Object.fromEntries(new FormData(f).entries());try{const r=await fetch('/api/welfare/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw new Error(j.error||'Submission failed');msg.textContent='Submission received. Reference: '+j.reference;msg.className='msg ok';f.reset()}catch(err){msg.textContent=err.message;msg.className='msg err'}})</script></body></html>"""
+<script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,msg=document.getElementById('msg');msg.textContent='Submitting...';msg.className='msg';const data=Object.fromEntries(new FormData(f).entries());try{const r=await fetch('/api/welfare/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw new Error(j.error||'Submission failed');msg.textContent='Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Reference: '+j.reference;msg.className='msg ok';f.reset()}catch(err){msg.textContent=err.message;msg.className='msg err'}})</script></body></html>"""
 
 FACILITY_ROSTER_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Facility Roster - Community Welfare Wing</title><link rel="stylesheet" href="/static/css/cwa-admin.css"><style>.mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.mini-card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:14px}.mini-card b{display:block;color:#15324a;font-size:24px}.actionbar{display:flex;gap:8px;flex-wrap:wrap}.hidden{display:none}.small-note{font-size:12px;color:#6b7b88}.wide-modal{position:fixed;inset:0;background:rgba(15,35,52,.45);display:none;align-items:center;justify-content:center;z-index:30}.wide-modal.open{display:flex}.wide-modal>div{background:#fff;border-radius:10px;max-width:760px;width:calc(100% - 32px);max-height:90vh;overflow:auto;padding:18px}</style></head><body class="cwa-admin-body"><div class="cwa-admin"><header class="cwa-admin-header"><div class="cwa-admin-header__brand"><div class="cwa-admin-header__logo" aria-hidden="true"></div><div class="cwa-admin-header__titles"><div class="cwa-admin-header__gov">Government of Pakistan</div><div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div><div class="cwa-admin-header__wing">Facility Occupancy Records</div></div></div><div class="cwa-admin-header__actions"><a class="cwa-admin-header__logout" href="/admin/dashboard">Main Dashboard</a><a class="cwa-admin-header__logout" href="/logout">Logout</a></div></header><div class="cwa-admin-shell"><aside class="cwa-admin-sidebar"><div class="cwa-admin-sidebar__group"><div class="cwa-admin-sidebar__section-title">Community Welfare</div><a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">[]</span><span>CWA Overview</span><span class="badge-count hidden" data-badge="community_welfare"></span></a><a href="/admin/nurses"><span class="cwa-admin-sidebar__icon">HW</span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span></a><a href="/admin/legal-cases"><span class="cwa-admin-sidebar__icon">LC</span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></a><a href="/admin/death-cases"><span class="cwa-admin-sidebar__icon">DC</span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></a><a href="/admin/facility-roster" class="is-active"><span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span><span class="badge-count hidden" data-badge="facility_roster"></span></a><a href="/admin/facility-occupancy"><span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span><span class="badge-count hidden" data-badge="facility_occupancy"></span></a><a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">WC</span><span>Welfare Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span></a><a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">ME</span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span></a><a href="/admin/ambassador-review"><span class="cwa-admin-sidebar__icon">AR</span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></a></div></aside><main class="cwa-admin-main"><div class="cwa-admin-subhead"><div><h1>Health Workers Facility Roster</h1><p>Maintain accurate welfare records for Embassy-arranged and Embassy-contracted facilities.</p></div><div class="actionbar"><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="openImport()">Bulk CSV Upload</button><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="location.href='/api/admin/facility-roster/export'">Export Roster</button></div></div><div class="cwa-admin-content cwa-fade-in"><div class="cwa-card"><h3 style="margin-bottom:12px;color:#15324a">Add / Edit Facility Occupancy Record</h3><input type="hidden" id="rid"><div class="mini-grid"><input class="cwa-input" id="full_name" placeholder="Full name"><input class="cwa-input" id="passport_number" placeholder="Passport number"><input class="cwa-input" id="civil_id" placeholder="Civil ID"><input class="cwa-input" id="phone" placeholder="Phone / WhatsApp"><input class="cwa-input" id="email" placeholder="Email"><input class="cwa-input" id="facility_name" placeholder="Facility / Building name"><input class="cwa-input" id="vendor_name" placeholder="Vendor name"><input class="cwa-input" id="area" placeholder="Area"><input class="cwa-input" id="room_number" placeholder="Room number"><input class="cwa-input" id="bed_number" placeholder="Bed number"><input class="cwa-input" id="date_shifted_to_facility" type="date" placeholder="Shifted date"><input class="cwa-input" id="contract_start_date" type="date" placeholder="Contract start"><input class="cwa-input" id="contract_end_date" type="date" placeholder="Contract end"><input class="cwa-input" id="notice_period_months" type="number" min="1" max="12" value="3" placeholder="Notice months"><select class="cwa-select" id="current_status"><option>Assigned</option><option>Pending Nurse Confirmation</option><option>Confirmed Staying</option><option>Intends to Leave</option><option>Leaving Notice Submitted</option><option>Left Facility</option><option>Record Correction Needed</option><option>Inactive</option></select><select class="cwa-select" id="active"><option value="1">Active</option><option value="0">Inactive</option></select></div><textarea class="cwa-textarea" id="remarks" placeholder="Remarks" style="margin-top:10px"></textarea><div class="actionbar" style="margin-top:10px"><button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="saveRoster()">Save Record</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="resetForm()">Clear</button><span class="small-note" id="msg"></span></div></div><div class="cwa-form-row"><input id="q" class="cwa-input" placeholder="Search roster, name, passport, facility, vendor" style="flex:1"><select id="statusFilter" class="cwa-select"><option value="">All Status</option><option>Assigned</option><option>Pending Nurse Confirmation</option><option>Confirmed Staying</option><option>Intends to Leave</option><option>Leaving Notice Submitted</option><option>Left Facility</option><option>Record Correction Needed</option><option>Reconciliation Required</option><option>Inactive</option></select><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="loadRoster()">Search</button></div><div class="cwa-card cwa-card--p0"><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Reference</th><th>Name</th><th>Passport / Civil ID</th><th>Phone</th><th>Facility / Vendor</th><th>Room / Bed</th><th>Contract End</th><th>Notice</th><th>Status</th><th>Assigned</th><th>Actions</th></tr></thead><tbody id="rows"><tr><td colspan="11" class="cwa-empty">Loading...</td></tr></tbody></table></div></div></div></main></div></div><div id="importModal" class="wide-modal"><div><h3>Bulk CSV Upload</h3><p class="small-note">Expected headers: full_name, passport_number, civil_id, phone, email, facility_name, vendor_name, room_number, bed_number, date_shifted_to_facility, contract_start_date, contract_end_date, notice_period_months, current_status, remarks.</p><textarea id="csvText" class="cwa-textarea" rows="12" placeholder="Paste CSV content here"></textarea><div class="actionbar" style="margin-top:10px"><button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="importCsv()">Import</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="closeImport()">Cancel</button></div></div></div><script>const USER='__USER_NAME__';function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function badge(s){return '<span class="cwa-badge" data-type="'+(String(s||'').toLowerCase().includes('confirmed')?'resolved':String(s||'').toLowerCase().includes('required')?'urgent':'processing')+'">'+esc(s||'-')+'</span>'}function val(id){return document.getElementById(id).value}function setv(id,v){document.getElementById(id).value=v||''}function resetForm(){['rid','full_name','passport_number','civil_id','phone','email','facility_name','vendor_name','area','room_number','bed_number','date_shifted_to_facility','contract_start_date','contract_end_date','remarks'].forEach(id=>setv(id,''));setv('notice_period_months','3');setv('current_status','Assigned');setv('active','1')}async function loadRoster(){const p=new URLSearchParams();if(val('q'))p.set('q',val('q'));if(val('statusFilter'))p.set('current_status',val('statusFilter'));try{const d=await jget('/api/admin/facility-roster?'+p.toString());document.getElementById('rows').innerHTML=(d.items||[]).map(r=>'<tr><td><b>'+esc(r.roster_reference)+'</b></td><td>'+esc(r.full_name)+'</td><td>'+esc(r.passport_number)+'<br><small>'+esc(r.civil_id||'-')+'</small></td><td>'+esc(r.phone||'-')+'</td><td>'+esc(r.facility_name||'-')+'<br><small>'+esc(r.vendor_name||'-')+'</small></td><td>'+esc(r.room_bed||'-')+'</td><td>'+esc(r.contract_end_date||'-')+'</td><td>'+esc(r.notice_flag||r.notice_period_start_date||'-')+'</td><td>'+badge(r.current_status)+'</td><td>'+esc(r.assigned_to||'Unassigned')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="editRow('+r.id+')">Edit</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="assignRow('+r.id+')">Assign</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="vendorUpdate('+r.id+')">Vendor</button></td></tr>').join('')||'<tr><td colspan="11" class="cwa-empty">No roster records found.</td></tr>';window.roster=d.items||[]}catch(e){document.getElementById('rows').innerHTML='<tr><td colspan="11" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}function payload(){return {id:val('rid'),full_name:val('full_name'),passport_number:val('passport_number'),civil_id:val('civil_id'),phone:val('phone'),email:val('email'),facility_name:val('facility_name'),vendor_name:val('vendor_name'),area:val('area'),room_number:val('room_number'),bed_number:val('bed_number'),date_shifted_to_facility:val('date_shifted_to_facility'),contract_start_date:val('contract_start_date'),contract_end_date:val('contract_end_date'),notice_period_months:val('notice_period_months'),current_status:val('current_status'),active:val('active'),remarks:val('remarks')}}async function saveRoster(){try{await jpost('/api/admin/facility-roster/save',payload());document.getElementById('msg').textContent='Saved.';resetForm();loadRoster()}catch(e){document.getElementById('msg').textContent=e.message}}function editRow(id){const r=(window.roster||[]).find(x=>x.id===id);if(!r)return;['id','full_name','passport_number','civil_id','phone','email','facility_name','vendor_name','area','room_number','bed_number','date_shifted_to_facility','contract_start_date','contract_end_date','notice_period_months','current_status','active','remarks'].forEach(k=>setv(k==='id'?'rid':k,r[k]));scrollTo({top:0,behavior:'smooth'})}async function assignRow(id){const assigned_to=prompt('Assign follow-up to username');if(!assigned_to)return;const due_date=prompt('Due date (YYYY-MM-DD), optional')||'';await jpost('/api/admin/facility-roster/assign',{roster_id:id,assigned_to,due_date,note:'Assigned from facility roster'});loadRoster()}async function vendorUpdate(id){const reported_status=prompt('Vendor update: currently_staying, left, changed_room, not_found, new_resident');if(!reported_status)return;const note=prompt('Note')||'';await jpost('/api/admin/facility-roster/vendor-update',{roster_id:id,reported_status,note});loadRoster()}function openImport(){document.getElementById('importModal').classList.add('open')}function closeImport(){document.getElementById('importModal').classList.remove('open')}async function importCsv(){try{const d=await jpost('/api/admin/facility-roster/import-csv',{csv_text:val('csvText')});alert('Imported '+d.imported+' records');closeImport();loadRoster()}catch(e){alert(e.message)}}loadRoster();</script></body></html>"""
 
@@ -23747,7 +24080,7 @@ const aOpts='<option value="">— Select staff —</option>'+state.assignees.map
 const sOpts=STATUSES.map(s=>'<option>'+esc(s)+'</option>').join('');
 const tl=acts.map(a=>'<div class="ev"><strong>'+esc(a.action_type)+'</strong> · '+esc(a.actor_username||'system')+' ('+esc(a.actor_role||'')+')<br>'+(a.old_status||a.new_status?'<span class="muted">'+esc(a.old_status||'—')+' &rarr; '+esc(a.new_status||'—')+'</span><br>':'')+(a.note?esc(a.note):'')+'<small>'+esc(a.created_at||'')+'</small></div>').join('') || '<div class="muted">No actions yet.</div>';
 document.getElementById('modalBox').innerHTML='<div class="flex"><h3 style="margin:0">'+esc(r.reference_id)+' — '+esc(r.subject||'')+'</h3><span class="spacer"></span>'+badge(r.status)+' '+pBadge(r.priority)+' <button class="ghost" onclick="closeModal()">Close ✕</button></div>'
-+'<div class="row" style="margin-top:10px"><div><div class="hint">Applicant</div><div><strong>'+esc(r.full_name)+'</strong></div><div class="muted">'+esc(r.mobile||'')+' · '+esc(r.email||'')+'</div><div class="muted">Passport: '+esc(r.passport_number||'—')+' · CNIC: '+esc(r.cnic||'—')+'</div><div class="muted">Address: '+esc(r.current_address||'')+'</div></div>'
++'<div class="row" style="margin-top:10px"><div><div class="hint">Applicant</div><div><strong>'+esc(r.full_name)+'</strong></div><div class="muted">'+esc(r.mobile||'')+' · '+esc(r.email||'')+'</div><div class="muted">Email Status: '+esc(r.email_status||'Unverified')+'</div><div class="muted">Passport: '+esc(r.passport_number||'—')+' · CNIC: '+esc(r.cnic||'—')+'</div><div class="muted">Address: '+esc(r.current_address||'')+'</div></div>'
 +'<div><div class="hint">Case</div><div>Type: <strong>'+esc(r.case_type)+'</strong></div><div class="muted">Opposing party: '+esc(r.opposing_party||'—')+'</div><div class="muted">Court Case No: '+esc(r.kuwaiti_court_case_no||'—')+'</div><div class="muted">Next hearing: '+esc(r.next_hearing_date||'—')+'</div></div></div>'
 +'<div class="card" style="margin-top:10px"><h3>Description</h3><div>'+esc(r.description||'')+'</div></div>'
 +'<div class="card"><h3>Assignment</h3><div class="row"><select id="m_assign">'+aOpts+'</select><input id="m_assign_note" placeholder="Assignment note (optional)"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'assign\\',\\''+esc(r.reference_id)+'\\')">Assign / Reassign</button><span class="muted">Currently assigned to: <strong>'+esc(r.assigned_to_name||r.assigned_to_username||'—')+'</strong></span></div></div>'
@@ -23821,7 +24154,7 @@ const sOpts=STATUSES.map(s=>'<option>'+esc(s)+'</option>').join('');
 const tl=acts.map(a=>'<div class="ev"><strong>'+esc(a.action_type)+'</strong> · '+esc(a.actor_username||'system')+' ('+esc(a.actor_role||'')+')<br>'+(a.old_status||a.new_status?'<span class="muted">'+esc(a.old_status||'—')+' &rarr; '+esc(a.new_status||'—')+'</span><br>':'')+(a.note?esc(a.note):'')+'<small>'+esc(a.created_at||'')+'</small></div>').join('') || '<div class="muted">No actions yet.</div>';
 document.getElementById('modalBox').innerHTML='<div class="flex"><h3 style="margin:0">'+esc(r.reference_id)+' — '+esc(r.deceased_name||'')+'</h3><span class="spacer"></span>'+badge(r.status)+' '+pBadge(r.priority)+' <button class="ghost" onclick="closeModal()">Close ✕</button></div>'
 +'<div class="row" style="margin-top:10px"><div><div class="hint">Deceased</div><div><strong>'+esc(r.deceased_name)+'</strong></div><div class="muted">Passport: '+esc(r.deceased_passport||'—')+' · CNIC: '+esc(r.deceased_cnic||'—')+' · Civil ID: '+esc(r.deceased_civil_id||'—')+'</div><div class="muted">DOB: '+esc(r.deceased_dob||'—')+' · Gender: '+esc(r.deceased_gender||'—')+'</div><div class="muted">Date of death: '+esc(r.date_of_death||'—')+' · Place: '+esc(r.place_of_death||'—')+'</div><div class="muted">Cause: '+esc(r.cause_of_death||'—')+' · Hospital/Auth: '+esc(r.hospital_or_authority||'—')+'</div></div>'
-+'<div><div class="hint">Reporter / Next of Kin</div><div><strong>'+esc(r.reporter_name||'')+'</strong> ('+esc(r.reporter_relation||'')+')</div><div class="muted">'+esc(r.reporter_mobile||'')+' · '+esc(r.reporter_email||'')+'</div><div class="muted">NOK: '+esc(r.next_of_kin_name||'—')+' ('+esc(r.next_of_kin_relation||'')+') '+esc(r.next_of_kin_mobile||'')+' '+esc(r.next_of_kin_email||'')+'</div><div class="muted">Repatriation: '+esc(r.repatriation_required||'')+' · Burial pref: '+esc(r.burial_preference||'')+'</div></div></div>'
++'<div><div class="hint">Reporter / Next of Kin</div><div><strong>'+esc(r.reporter_name||'')+'</strong> ('+esc(r.reporter_relation||'')+')</div><div class="muted">'+esc(r.reporter_mobile||'')+' · '+esc(r.reporter_email||'')+'</div><div class="muted">Email Status: '+esc(r.email_status||'Unverified')+'</div><div class="muted">NOK: '+esc(r.next_of_kin_name||'—')+' ('+esc(r.next_of_kin_relation||'')+') '+esc(r.next_of_kin_mobile||'')+' '+esc(r.next_of_kin_email||'')+'</div><div class="muted">Repatriation: '+esc(r.repatriation_required||'')+' · Burial pref: '+esc(r.burial_preference||'')+'</div></div></div>'
 +'<div class="card" style="margin-top:10px"><h3>Description</h3><div>'+esc(r.description||'')+'</div></div>'
 +'<div class="card"><h3>Assignment</h3><div class="row"><select id="m_assign">'+aOpts+'</select><input id="m_assign_note" placeholder="Assignment note (optional)"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'assign\\',\\''+esc(r.reference_id)+'\\')">Assign / Reassign</button><span class="muted">Currently assigned to: <strong>'+esc(r.assigned_to_name||r.assigned_to_username||'—')+'</strong></span></div></div>'
 +'<div class="card"><h3>Update Status</h3><div class="row"><select id="m_status">'+sOpts+'</select><input id="m_status_note" placeholder="Status note (optional)"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'status\\',\\''+esc(r.reference_id)+'\\')">Update Status</button></div></div>'
@@ -23882,7 +24215,7 @@ subject:subject.value,description:description.value,opposing_party:opposing_part
 kuwaiti_court_case_no:kuwaiti_court_case_no.value,next_hearing_date:next_hearing_date.value,consent:consent.checked};
 const r=await fetch('/api/legal-cases/intake',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
 const d=await r.json();
-msg.textContent=d.success?('Submitted. Reference ID: '+d.reference_id+' (please save it for tracking).'):(d.error||'Submission failed');
+msg.textContent=d.success?('Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Email verification pending. Reference ID: '+d.reference_id):(d.error||'Submission failed');
 if(d.success){lf.reset();}
 return false;}
 </script>
@@ -23943,7 +24276,7 @@ const ids=['deceased_name','deceased_passport','deceased_cnic','deceased_civil_i
 const p={};ids.forEach(k=>p[k]=document.getElementById(k).value);p.consent=document.getElementById('consent').checked;
 const r=await fetch('/api/death-cases/intake',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
 const d=await r.json();
-msg.textContent=d.success?('Submitted. Reference ID: '+d.reference_id+' (please save it for tracking).'):(d.error||'Submission failed');
+msg.textContent=d.success?('Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Email verification pending. Reference ID: '+d.reference_id):(d.error||'Submission failed');
 if(d.success){df.reset();}
 return false;}
 </script>

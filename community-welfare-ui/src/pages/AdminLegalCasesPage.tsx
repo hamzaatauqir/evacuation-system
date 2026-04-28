@@ -183,6 +183,7 @@ export function AdminLegalCasesPage() {
                   </div>
                   {([
                     ["Case Type", selected.type],
+                    ["Email Status", selected.emailStatus || "Unverified"],
                     ["Assigned To", selected.assigned],
                     ["Last Updated", selected.updated],
                   ] as [string, string][]).map(([l, v]) => (

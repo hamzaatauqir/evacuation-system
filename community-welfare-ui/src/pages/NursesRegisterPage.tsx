@@ -16,7 +16,7 @@ const PROFESSIONAL_CATEGORIES = ["Nurse", "Other Health Worker", "Doctor"];
 const VENDOR_ELIGIBLE_CATEGORIES = ["Nurse", "Other Health Worker"];
 const CURRENT_ARRANGEMENTS = [
   "MOH Arranged",
-  { value: "Embassy Contracted / Arranged", label: "AJA Care Vendor Embassy Contracted" },
+  "Embassy Contracted / Arranged",
   "Private (Self Arranged)",
   "Other",
 ];
@@ -129,7 +129,10 @@ export function NursesRegisterPage() {
               Registration Submitted
             </h2>
             <p style={{ fontSize: 14, color: T.muted, lineHeight: 1.7, marginBottom: 12 }}>
-              Registration submitted successfully. Please log in to access your Nurse Portal.
+              Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates.
+            </p>
+            <p style={{ fontSize: 13, color: T.warningFg, fontWeight: 700, marginBottom: 12 }}>
+              Email verification pending.
             </p>
             {submittedRef ? (
               <p style={{ fontSize: 14, color: T.navy, fontWeight: 700, marginBottom: 24 }}>

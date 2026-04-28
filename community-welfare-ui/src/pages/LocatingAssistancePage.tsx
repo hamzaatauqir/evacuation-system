@@ -49,7 +49,7 @@ export function LocatingAssistancePage() {
       </Card>
       <Card>
         {reference ? (
-          <SuccessState message={`Request submitted. Reference: ${reference}`} />
+          <SuccessState message={`Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Reference: ${reference}`} />
         ) : (
           <>
             <h2 style={{ fontSize: 16, fontWeight: 800, color: T.navy, marginBottom: 14 }}>Requester Details</h2>

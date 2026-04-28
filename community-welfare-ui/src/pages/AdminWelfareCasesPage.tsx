@@ -17,6 +17,7 @@ interface WelfareCase {
   requester_name: string;
   requester_phone: string;
   requester_email: string;
+  email_status?: string;
   requester_location: string;
   subject_name: string;
   concern_summary: string;
@@ -162,6 +163,8 @@ export function AdminWelfareCasesPage() {
                 <div style={{ marginTop: 18, display: "grid", gap: 10, fontSize: 13 }}>
                   <b>Requester</b>
                   <span>{selected.requester_name} · {selected.requester_phone}</span>
+                  <b>Email Status</b>
+                  <span>{selected.email_status || "Unverified"}</span>
                   <b>Person Concerned / Subject</b>
                   <span>{selected.subject_name || selected.category}</span>
                   <b>Concern / Feedback</b>

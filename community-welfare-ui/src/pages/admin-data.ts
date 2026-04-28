@@ -40,6 +40,7 @@ export interface LegalCase {
   priority: "low" | "medium" | "high" | "urgent";
   assigned: string;
   updated: string;
+  emailStatus?: "Verified" | "Unverified" | "Delivery Failed";
 }
 
 export const LEGAL_CASES: LegalCase[] = [
@@ -59,6 +60,7 @@ export interface DeathCase {
   priority: "low" | "medium" | "high" | "urgent";
   assigned: string;
   updated: string;
+  emailStatus?: "Verified" | "Unverified" | "Delivery Failed";
 }
 
 export const DEATH_CASES: DeathCase[] = [

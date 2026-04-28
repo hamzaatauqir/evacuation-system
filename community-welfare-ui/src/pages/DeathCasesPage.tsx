@@ -126,7 +126,7 @@ export function DeathCasesPage() {
               </div>
               <Card>
                 {submitted ? (
-                  <SuccessState message="The case details have been submitted. The Community Welfare Wing will respond urgently." />
+                  <SuccessState message="Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates. Email verification pending." />
                 ) : (
                   <>
                     <h3 style={{ fontSize: 15, fontWeight: 700, color: T.navy, marginBottom: 16 }}>

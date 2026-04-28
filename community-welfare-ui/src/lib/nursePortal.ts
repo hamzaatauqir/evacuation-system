@@ -15,6 +15,7 @@ export type NursePortalContext = {
   fullName: string;
   professionalCategory?: string;
   email: string;
+  emailStatus?: string;
   passportMasked: string;
   civilIdMasked: string;
   passportNumber: string;
@@ -115,6 +116,7 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     fullName: (data?.full_name || '').toString(),
     professionalCategory: (data?.professional_category || '').toString(),
     email: (data?.email || '').toString(),
+    emailStatus: (data?.email_status || '').toString(),
     passportMasked: maskPassport(passport),
     civilIdMasked: maskCivilId(civil),
     passportNumber: passport,
