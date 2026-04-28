@@ -45,8 +45,8 @@ export function PublicHeader() {
             <div className="cwa-public-header__logo-fallback" aria-hidden="true" />
           ) : (
             <img
-              src="/images/embassy-of-pakistan-logo.png"
-              alt="Embassy of Pakistan logo"
+              src="/images/pakistan-emblem.png"
+              alt="Government of Pakistan emblem"
               className="cwa-public-header__logo"
               onError={() => setLogoError(true)}
             />

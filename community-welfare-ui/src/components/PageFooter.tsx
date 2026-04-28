@@ -28,9 +28,9 @@ export function PageFooter() {
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {!logoError ? (
             <img
-              src="/images/embassy-of-pakistan-logo.png"
-              alt="Embassy of Pakistan logo"
-              style={{ height: 40, width: "auto", objectFit: "contain", flexShrink: 0 }}
+              src="/images/pakistan-emblem.png"
+              alt="Government of Pakistan emblem"
+              className="cwa-public-footer__logo"
               onError={() => setLogoError(true)}
             />
           ) : (

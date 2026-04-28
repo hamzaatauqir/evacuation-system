@@ -164,19 +164,17 @@ textarea.f-input { resize: vertical; min-height: 90px; }
   color: inherit;
 }
 .cwa-public-header__logo {
-  width: auto;
+  width: 64px;
+  height: 64px;
   object-fit: contain;
   flex-shrink: 0;
   display: block;
-}
-@media (min-width: 769px) {
-  .cwa-public-header__logo {
-    height: clamp(56px, 4.5vw, 70px);
-  }
+  background: transparent;
 }
 @media (max-width: 768px) {
   .cwa-public-header__logo {
-    height: clamp(44px, 11vw, 52px);
+    width: 48px;
+    height: 48px;
   }
 }
 .cwa-public-header__logo-fallback {
@@ -187,14 +185,14 @@ textarea.f-input { resize: vertical; min-height: 90px; }
 }
 @media (min-width: 769px) {
   .cwa-public-header__logo-fallback {
-    width: 56px;
-    height: 56px;
+    width: 64px;
+    height: 64px;
   }
 }
 @media (max-width: 768px) {
   .cwa-public-header__logo-fallback {
-    width: 44px;
-    height: 44px;
+    width: 48px;
+    height: 48px;
   }
 }
 .cwa-public-header__titles {
@@ -296,6 +294,21 @@ textarea.f-input { resize: vertical; min-height: 90px; }
 .cwa-public-header__drawer-link.is-active {
   background: #e8edf4;
   color: var(--navy-dark);
+}
+
+.cwa-public-footer__logo {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+  background: transparent;
+}
+@media (max-width: 768px) {
+  .cwa-public-footer__logo {
+    width: 42px;
+    height: 42px;
+  }
 }
 
 /* Admin top bar — same white treatment for embassy logo clarity */
