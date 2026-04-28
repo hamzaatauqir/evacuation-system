@@ -16,7 +16,7 @@ const PROFESSIONAL_CATEGORIES = ["Nurse", "Other Health Worker", "Doctor"];
 const VENDOR_ELIGIBLE_CATEGORIES = ["Nurse", "Other Health Worker"];
 const CURRENT_ARRANGEMENTS = [
   "MOH Arranged",
-  "Embassy Contracted / Arranged",
+  { value: "Embassy Contracted / Arranged", label: "AJA Care Vendor Embassy Contracted" },
   "Private (Self Arranged)",
   "Other",
 ];
