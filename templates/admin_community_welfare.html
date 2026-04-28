@@ -37,25 +37,34 @@
       <div class="cwa-admin-sidebar__group">
         <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
         <a href="/admin/community-welfare" class="is-active">
-          <span class="cwa-admin-sidebar__icon">▢</span><span>Overview</span>
+          <span class="cwa-admin-sidebar__icon">▢</span><span>Overview</span><span class="badge-count hidden" data-badge="community_welfare"></span>
         </a>
         <a href="/admin/nurses">
-          <span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span>
+          <span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span>
         </a>
         <a href="/admin/legal-cases">
-          <span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span>
+          <span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span>
         </a>
         <a href="/admin/death-cases">
-          <span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span>
+          <span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span>
         </a>
         <a href="/admin/welfare-cases">
-          <span class="cwa-admin-sidebar__icon">▣</span><span>Welfare Cases</span>
+          <span class="cwa-admin-sidebar__icon">▣</span><span>Welfare Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span>
         </a>
         <a href="/admin/my-cases">
-          <span class="cwa-admin-sidebar__icon">★</span><span>My Assigned Cases</span>
+          <span class="cwa-admin-sidebar__icon">★</span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span>
         </a>
         <a href="/admin/ambassador-review">
-          <span class="cwa-admin-sidebar__icon">◆</span><span>Ambassador Review</span>
+          <span class="cwa-admin-sidebar__icon">◆</span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span>
+        </a>
+        <a href="/admin/facility-occupancy">
+          <span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span><span class="badge-count hidden" data-badge="facility_occupancy"></span>
+        </a>
+        <a href="/admin/facility-roster">
+          <span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span><span class="badge-count hidden" data-badge="facility_roster"></span>
+        </a>
+        <a href="/admin/alternative-facilities">
+          <span class="cwa-admin-sidebar__icon">AF</span><span>Alternative Facilities</span><span class="badge-count hidden" data-badge="alternative_facilities"></span>
         </a>
       </div>
       <div class="cwa-admin-sidebar__divider"></div>
@@ -210,6 +219,37 @@ async function loadAll(){
 
 loadAll();
 setInterval(loadAll, 60000);
+
+async function refreshNotificationBadges(){
+  try{
+    const r = await fetch('/api/admin/notification-counts', {credentials:'include'});
+    if(!r.ok) return;
+    const d = await r.json();
+    const counts = (d && d.counts) || {};
+    let total = 0;
+    document.querySelectorAll('[data-badge]').forEach(el=>{
+      const key = el.dataset.badge;
+      const raw = Number(counts[key] || 0);
+      const val = Number.isFinite(raw) ? raw : 0;
+      if (key !== 'community_welfare') total += val;
+      if (val > 0) {
+        el.textContent = val > 99 ? '99+' : String(val);
+        el.classList.remove('hidden');
+      } else {
+        el.textContent = '';
+        el.classList.add('hidden');
+      }
+    });
+    const kpiPending = document.getElementById('kpiPending');
+    if (kpiPending && total > 0) {
+      kpiPending.textContent = total > 99 ? '99+' : String(total);
+    }
+  }catch(_e){}
+}
+
+refreshNotificationBadges();
+setInterval(refreshNotificationBadges, 60000);
+window.addEventListener('focus', refreshNotificationBadges);
 </script>
 </body>
 </html>

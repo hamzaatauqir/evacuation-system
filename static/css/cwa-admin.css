@@ -140,6 +140,25 @@ body.cwa-admin-body, .cwa-admin-body * { box-sizing: border-box; }
   color: inherit;
 }
 
+.badge-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  margin-left: auto;
+}
+
+.badge-count.hidden {
+  display: none;
+}
+
 /* ── Main content area ──────────────────────────────────────────────── */
 .cwa-admin-main {
   flex: 1; min-width: 0;
