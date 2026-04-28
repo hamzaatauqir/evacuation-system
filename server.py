@@ -14228,6 +14228,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_html(DEATH_CASE_PUBLIC_PAGE)
         elif path == '/death-cases/track':
             self.send_html(DEATH_CASE_TRACK_PAGE)
+        elif path == '/admin/dashboard':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
+            self.send_html(app_html)
         elif path == '/dashboard':
             user = self.require_auth()
             if not user: return
@@ -19811,7 +19818,7 @@ tbody tr:hover{{background:#f8fafc}}
 </style></head><body>
 <div class="app">
 <div class="app-head">
-<div><h1>{esc(title)}</h1><div class="crumbs"><a href="/">&larr; Main Dashboard</a></div></div>
+<div><h1>{esc(title)}</h1><div class="crumbs"><a href="/admin/dashboard">&larr; Main Dashboard</a></div></div>
 <div class="flex"><a class="badge" href="/admin/nurses" style="text-decoration:none">Nurses</a> <a class="badge" href="/admin/legal-cases" style="text-decoration:none">Legal Cases</a> <a class="badge" href="/admin/death-cases" style="text-decoration:none">Death Cases</a></div>
 </div>
 {body_html}
