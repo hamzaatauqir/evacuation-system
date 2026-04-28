@@ -4084,6 +4084,17 @@ def _safe_status_label(status):
     return (status or 'Under Review').strip()
 
 
+def _should_notify_applicant_status(status, public_note='', visible_to_applicant=False, safe_statuses=None):
+    safe = set(safe_statuses or [])
+    status_text = (status or '').strip()
+    note_text = (public_note or '').strip()
+    if visible_to_applicant:
+        return True
+    if note_text:
+        return True
+    return status_text in safe
+
+
 def _tracking_link_for_case(case_type, tracking_link=''):
     if tracking_link:
         return tracking_link
@@ -5817,6 +5828,11 @@ def api_admin_notifications(params, user):
     db = None
     try:
         db = get_db()
+        table_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notification_log' LIMIT 1"
+        ).fetchone()
+        if not table_exists:
+            return {'success': True, 'notifications': [], 'items': [], 'total': 0}
         where = ['1=1']
         vals = []
         for field in ('status', 'event_type', 'case_type'):
@@ -5833,8 +5849,8 @@ def api_admin_notifications(params, user):
             where.append("date(created_at) <= date(?)")
             vals.append(date_to)
         rows = [dict(r) for r in db.execute(
-            f"""SELECT id, created_at, channel, event_type, case_type, case_reference,
-                       recipient_name, recipient_email, status, error, sent_at
+            f"""SELECT id, created_at, sent_at, channel, event_type, case_type, case_reference,
+                       recipient_type, recipient_name, recipient_email, subject, status, error
                 FROM notification_log
                 WHERE {' AND '.join(where)}
                 ORDER BY datetime(created_at) DESC, id DESC
@@ -5843,6 +5859,8 @@ def api_admin_notifications(params, user):
         ).fetchall()]
         return {'success': True, 'notifications': rows, 'items': rows, 'total': len(rows)}
     except Exception as exc:
+        if 'no such table' in str(exc).lower():
+            return {'success': True, 'notifications': [], 'items': [], 'total': 0}
         return {'success': False, 'notifications': [], 'items': [], 'error': str(exc)}
     finally:
         if db:
@@ -5946,7 +5964,14 @@ def api_admin_welfare_status(data, user):
         _welfare_insert_action(db, row['id'], user.get('user'), 'status_changed', row['status'] or '', status, note, bool(data.get('visible_to_requester')))
         db.commit()
         row_d = dict(row)
-        if bool(data.get('visible_to_requester')) or note:
+        note_for_applicant = note if bool(data.get('visible_to_requester')) else ''
+        should_notify = _should_notify_applicant_status(
+            status=status,
+            public_note=note_for_applicant,
+            visible_to_applicant=bool(data.get('visible_to_requester')),
+            safe_statuses={'Awaiting Requester Response', 'Resolved', 'Closed', 'Reopened'}
+        )
+        if should_notify:
             notify_case_event(
                 case_type=row_d.get('case_type') or 'welfare',
                 case_reference=row_d.get('case_reference') or '',
@@ -5954,7 +5979,7 @@ def api_admin_welfare_status(data, user):
                 applicant_email=row_d.get('requester_email') or '',
                 applicant_name=row_d.get('requester_name') or 'Applicant',
                 status=status,
-                public_note=note,
+                public_note=note_for_applicant,
                 tracking_link='https://cwakuwait.com'
             )
         return {'success': True}
@@ -20096,7 +20121,14 @@ function printBoth(){{
                     'visible_to_nurse': visible_to_nurse
                 })
                 db.commit()
-                if row['email']:
+                note_for_nurse = note if visible_to_nurse else ''
+                should_notify = _should_notify_applicant_status(
+                    status=status,
+                    public_note=note_for_nurse,
+                    visible_to_applicant=visible_to_nurse,
+                    safe_statuses={'Needs More Information', 'Approved', 'Resolved', 'Closed', 'Rejected'}
+                )
+                if row['email'] and should_notify:
                     notify_case_event(
                         case_type='nurse_registration',
                         case_reference=row['reference_id'],
@@ -20104,7 +20136,7 @@ function printBoth(){{
                         applicant_email=row['email'],
                         applicant_name=row['full_name'] or 'Applicant',
                         status=status,
-                        public_note=note if visible_to_nurse else '',
+                        public_note=note_for_nurse,
                         tracking_link='https://cwakuwait.com/nurses/login'
                     )
                 self.send_json({'success': True})
@@ -20281,7 +20313,13 @@ function printBoth(){{
                     status=new_status,
                     priority=(comp.get('priority') or 'Normal')
                 )
-                if nurse and nurse.get('email'):
+                should_notify = _should_notify_applicant_status(
+                    status=new_status,
+                    public_note='',
+                    visible_to_applicant=False,
+                    safe_statuses={'Awaiting Nurse Response', 'Resolved', 'Closed', 'Reopened'}
+                )
+                if nurse and nurse.get('email') and should_notify:
                     notify_case_event(
                         case_type='nurse',
                         case_reference=complaint_id,
@@ -20666,7 +20704,15 @@ function printBoth(){{
                         )
                 elif path in ('/api/admin/legal-cases/status', '/api/legal-cases/status'):
                     ev = 'more_information_requested' if new_status == 'Awaiting Applicant Response' else ('resolved' if new_status == 'Resolved' else ('closed' if new_status == 'Closed' else 'status_updated'))
-                    if rec.get('email'):
+                    status_visible = new_status in ('Awaiting Applicant Response', 'Resolved', 'Closed', 'Reopened')
+                    note_for_applicant = note if status_visible else ''
+                    should_notify = _should_notify_applicant_status(
+                        status=new_status,
+                        public_note=note_for_applicant,
+                        visible_to_applicant=status_visible,
+                        safe_statuses={'Awaiting Applicant Response', 'Resolved', 'Closed', 'Reopened'}
+                    )
+                    if rec.get('email') and should_notify:
                         notify_case_event(
                             case_type='legal',
                             case_reference=ref,
@@ -20674,7 +20720,7 @@ function printBoth(){{
                             applicant_email=rec.get('email') or '',
                             applicant_name=rec.get('full_name') or 'Applicant',
                             status=new_status,
-                            public_note=note,
+                            public_note=note_for_applicant,
                             tracking_link='https://cwakuwait.com/legal-cases/track'
                         )
                 elif path in ('/api/admin/legal-cases/note', '/api/legal-cases/note'):
@@ -20878,7 +20924,15 @@ function printBoth(){{
                         )
                 elif path in ('/api/admin/death-cases/status', '/api/death-cases/status'):
                     ev = 'more_information_requested' if new_status == 'Awaiting Family Response' else ('resolved' if new_status == 'Resolved' else ('closed' if new_status == 'Closed' else 'status_updated'))
-                    if applicant_email:
+                    status_visible = new_status in ('Awaiting Family Response', 'Resolved', 'Closed', 'Reopened')
+                    note_for_applicant = note if status_visible else ''
+                    should_notify = _should_notify_applicant_status(
+                        status=new_status,
+                        public_note=note_for_applicant,
+                        visible_to_applicant=status_visible,
+                        safe_statuses={'Awaiting Family Response', 'Resolved', 'Closed', 'Reopened'}
+                    )
+                    if applicant_email and should_notify:
                         notify_case_event(
                             case_type='death',
                             case_reference=ref,
@@ -20886,7 +20940,7 @@ function printBoth(){{
                             applicant_email=applicant_email,
                             applicant_name=applicant_name,
                             status=new_status,
-                            public_note=note,
+                            public_note=note_for_applicant,
                             tracking_link='https://cwakuwait.com/death-cases/track'
                         )
                 elif path in ('/api/admin/death-cases/note', '/api/death-cases/note'):
