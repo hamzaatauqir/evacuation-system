@@ -11,10 +11,13 @@ import { NursesComplaintPage } from "./pages/NursesComplaintPage";
 import { NursesLeavingNoticePage } from "./pages/NursesLeavingNoticePage";
 import { LegalOpfPage } from "./pages/LegalOpfPage";
 import { DeathCasesPage } from "./pages/DeathCasesPage";
+import { LocatingAssistancePage } from "./pages/LocatingAssistancePage";
+import { CommunityFeedbackPage } from "./pages/CommunityFeedbackPage";
 import { AdminCwaDashboard } from "./pages/AdminCwaDashboard";
 import { AdminNursesPage } from "./pages/AdminNursesPage";
 import { AdminLegalCasesPage } from "./pages/AdminLegalCasesPage";
 import { AdminDeathCasesPage } from "./pages/AdminDeathCasesPage";
+import { AdminWelfareCasesPage } from "./pages/AdminWelfareCasesPage";
 
 export default function App() {
   return (
@@ -31,11 +34,16 @@ export default function App() {
       <Route path="/nurses/leaving-notice" element={<NursesLeavingNoticePage />} />
       <Route path="/legal-opf" element={<LegalOpfPage />} />
       <Route path="/death-cases" element={<DeathCasesPage />} />
+      <Route path="/locating-assistance" element={<LocatingAssistancePage />} />
+      <Route path="/community-feedback" element={<CommunityFeedbackPage />} />
       <Route path="/admin" element={<Navigate to="/admin/community-welfare" replace />} />
       <Route path="/admin/community-welfare" element={<AdminCwaDashboard />} />
       <Route path="/admin/nurses" element={<AdminNursesPage />} />
       <Route path="/admin/legal-cases" element={<AdminLegalCasesPage />} />
       <Route path="/admin/death-cases" element={<AdminDeathCasesPage />} />
+      <Route path="/admin/welfare-cases" element={<AdminWelfareCasesPage />} />
+      <Route path="/admin/my-cases" element={<AdminWelfareCasesPage />} />
+      <Route path="/admin/ambassador-review" element={<AdminWelfareCasesPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

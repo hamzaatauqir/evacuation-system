@@ -8,6 +8,9 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/admin/nurses", label: "Nurses", icon: "users" },
   { to: "/admin/legal-cases", label: "Legal Cases", icon: "scale" },
   { to: "/admin/death-cases", label: "Death Cases", icon: "heart" },
+  { to: "/admin/welfare-cases", label: "Welfare Cases", icon: "note" },
+  { to: "/admin/my-cases", label: "My Assigned Cases", icon: "star" },
+  { to: "/admin/ambassador-review", label: "Ambassador Review", icon: "flag" },
 ];
 
 function AdminHeader() {

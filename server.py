@@ -1058,6 +1058,111 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_cargo_person ON cargo_interest(person_id);
     """)
 
+    # ── Community Welfare unified case management tables ───────────
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS welfare_cases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_reference TEXT UNIQUE,
+        case_type TEXT,
+        category TEXT,
+        requester_name TEXT,
+        requester_relationship TEXT,
+        requester_phone TEXT,
+        requester_email TEXT,
+        requester_location TEXT,
+        subject_name TEXT,
+        subject_passport TEXT,
+        subject_cnic TEXT,
+        subject_civil_id TEXT,
+        subject_phone TEXT,
+        subject_address TEXT,
+        subject_workplace TEXT,
+        last_contact_date TEXT,
+        concern_summary TEXT,
+        police_reference TEXT,
+        details TEXT,
+        priority TEXT DEFAULT 'Normal',
+        status TEXT DEFAULT 'New',
+        assigned_to TEXT,
+        assigned_role TEXT,
+        escalation_level TEXT DEFAULT 'normal',
+        due_date TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TIMESTAMP,
+        closed_at TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS welfare_case_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER NOT NULL REFERENCES welfare_cases(id),
+        actor_username TEXT,
+        action_type TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        note TEXT,
+        visible_to_requester INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_welfare_cases_reference ON welfare_cases(case_reference);
+    CREATE INDEX IF NOT EXISTS idx_welfare_cases_type ON welfare_cases(case_type);
+    CREATE INDEX IF NOT EXISTS idx_welfare_cases_status ON welfare_cases(status);
+    CREATE INDEX IF NOT EXISTS idx_welfare_cases_priority ON welfare_cases(priority);
+    CREATE INDEX IF NOT EXISTS idx_welfare_cases_assigned ON welfare_cases(assigned_to);
+    CREATE INDEX IF NOT EXISTS idx_welfare_cases_escalation ON welfare_cases(escalation_level);
+    CREATE INDEX IF NOT EXISTS idx_welfare_actions_case ON welfare_case_actions(case_id);
+    """)
+    for col, coltype in [
+        ('case_reference', 'TEXT'),
+        ('case_type', 'TEXT'),
+        ('category', 'TEXT'),
+        ('requester_name', 'TEXT'),
+        ('requester_relationship', 'TEXT'),
+        ('requester_phone', 'TEXT'),
+        ('requester_email', 'TEXT'),
+        ('requester_location', 'TEXT'),
+        ('subject_name', 'TEXT'),
+        ('subject_passport', 'TEXT'),
+        ('subject_cnic', 'TEXT'),
+        ('subject_civil_id', 'TEXT'),
+        ('subject_phone', 'TEXT'),
+        ('subject_address', 'TEXT'),
+        ('subject_workplace', 'TEXT'),
+        ('last_contact_date', 'TEXT'),
+        ('concern_summary', 'TEXT'),
+        ('police_reference', 'TEXT'),
+        ('details', 'TEXT'),
+        ('priority', "TEXT DEFAULT 'Normal'"),
+        ('status', "TEXT DEFAULT 'New'"),
+        ('assigned_to', 'TEXT'),
+        ('assigned_role', 'TEXT'),
+        ('escalation_level', "TEXT DEFAULT 'normal'"),
+        ('due_date', 'TEXT'),
+        ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ('resolved_at', 'TIMESTAMP'),
+        ('closed_at', 'TIMESTAMP')
+    ]:
+        try:
+            db.execute(f"ALTER TABLE welfare_cases ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    for col, coltype in [
+        ('case_id', 'INTEGER'),
+        ('actor_username', 'TEXT'),
+        ('action_type', 'TEXT'),
+        ('old_value', 'TEXT'),
+        ('new_value', 'TEXT'),
+        ('note', 'TEXT'),
+        ('visible_to_requester', 'INTEGER DEFAULT 0'),
+        ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+    ]:
+        try:
+            db.execute(f"ALTER TABLE welfare_case_actions ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+
     # Default admin user
     pw_hash = hashlib.sha256('embassy2026'.encode()).hexdigest()
     try:
@@ -2980,6 +3085,15 @@ def _email_worker_loop():
                            [job.get('changed_by', 'system'), json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'type': job.get('type'), 'complaint_id': job.get('complaint_id')})])
                 db.commit()
                 db.close()
+            elif job.get('type') == 'welfare_case_assigned':
+                subject = f"Community Welfare case assigned: {job.get('reference', '')}"
+                body = "A Community Welfare case has been assigned to you for action."
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute("INSERT INTO audit_log (action, user, details) VALUES ('email_welfare_case_assigned', ?, ?)",
+                           [job.get('changed_by', 'system'), json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'reference': job.get('reference')})])
+                db.commit()
+                db.close()
         except Exception as _ew_exc:
             # Never crash worker loop, but make failures visible.
             try:
@@ -3900,6 +4014,443 @@ def api_admin_death_summary():
             'closed': _count("SELECT COUNT(*) c FROM death_case_requests WHERE status='Closed'"),
             'urgent': _count("SELECT COUNT(*) c FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
         }}
+    finally:
+        db.close()
+
+
+WELFARE_CASE_TYPES = {'locating_assistance', 'community_feedback', 'nurse', 'legal', 'death', 'general_welfare'}
+WELFARE_STATUSES = {
+    'New', 'Assigned', 'In Progress', 'Field Verification Required',
+    'Awaiting Requester Response', 'Resolved', 'Closed'
+}
+WELFARE_PRIORITIES = {'Normal', 'High', 'Urgent'}
+WELFARE_ESCALATION_LEVELS = {'normal', 'senior_review', 'ambassador_review'}
+WELFARE_ADMIN_ROLES = {'admin', 'operator'}
+WELFARE_CASE_ACCESS_ROLES = {
+    'admin', 'operator', 'welfare_officer', 'inspector_field', 'legal_officer',
+    'death_case_officer', 'community_desk', 'senior_review', 'ambassador_review'
+}
+WELFARE_ASSIGNABLE_ROLES = tuple(sorted(WELFARE_CASE_ACCESS_ROLES))
+
+
+def _clean_text(value, max_len=2000):
+    if value is None:
+        return ''
+    return str(value).strip()[:max_len]
+
+
+def _welfare_next_reference(db, prefix):
+    year = datetime.now().strftime('%Y')
+    base = f'CWA-{prefix}-{year}-'
+    row = db.execute(
+        "SELECT case_reference FROM welfare_cases WHERE case_reference LIKE ? ORDER BY case_reference DESC LIMIT 1",
+        [base + '%']
+    ).fetchone()
+    next_num = 1
+    if row and row['case_reference']:
+        try:
+            next_num = int(str(row['case_reference']).rsplit('-', 1)[-1]) + 1
+        except Exception:
+            next_num = 1
+    return f'{base}{next_num:04d}'
+
+
+def _welfare_insert_action(db, case_id, actor_username, action_type, old_value='', new_value='', note='', visible_to_requester=False):
+    db.execute(
+        """INSERT INTO welfare_case_actions
+           (case_id, actor_username, action_type, old_value, new_value, note, visible_to_requester)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        [case_id, actor_username or 'system', action_type, old_value or '', new_value or '', note or '', 1 if visible_to_requester else 0]
+    )
+
+
+def _welfare_case_to_dict(row):
+    if not row:
+        return None
+    d = dict(row)
+    for key in (
+        'case_reference', 'case_type', 'category', 'requester_name', 'requester_relationship',
+        'requester_phone', 'requester_email', 'requester_location', 'subject_name',
+        'subject_passport', 'subject_cnic', 'subject_civil_id', 'subject_phone',
+        'subject_address', 'subject_workplace', 'last_contact_date', 'concern_summary',
+        'police_reference', 'details', 'priority', 'status', 'assigned_to',
+        'assigned_role', 'escalation_level', 'due_date', 'created_at', 'updated_at',
+        'resolved_at', 'closed_at'
+    ):
+        d[key] = d.get(key) or ''
+    return d
+
+
+def _welfare_user_can_access_case(user, case_row):
+    if not user or not case_row:
+        return False
+    if user.get('role') in WELFARE_ADMIN_ROLES:
+        return True
+    return user.get('role') in WELFARE_CASE_ACCESS_ROLES and (case_row['assigned_to'] or '') == user.get('user')
+
+
+def _welfare_load_case_for_action(db, case_id, user, admin_only=False):
+    try:
+        cid = int(case_id)
+    except Exception:
+        return None, {'success': False, 'error': 'Invalid case id'}
+    row = db.execute("SELECT * FROM welfare_cases WHERE id = ?", [cid]).fetchone()
+    if not row:
+        return None, {'success': False, 'error': 'Case not found'}
+    if admin_only and user.get('role') not in WELFARE_ADMIN_ROLES:
+        return None, {'success': False, 'error': 'Unauthorized'}
+    if not admin_only and not _welfare_user_can_access_case(user, row):
+        return None, {'success': False, 'error': 'Unauthorized'}
+    return row, None
+
+
+def _welfare_priority_from_text(*parts):
+    text = ' '.join([str(p or '') for p in parts]).lower()
+    high_terms = ('urgent', 'emergency', 'police', 'hospital', 'detained', 'arrest', 'violence', 'threat', 'danger')
+    return 'High' if any(term in text for term in high_terms) else 'Normal'
+
+
+def api_welfare_locating_assistance(data):
+    requester_name = _clean_text(data.get('requester_name') or data.get('full_name'), 180)
+    requester_phone = _clean_text(data.get('requester_phone') or data.get('phone'), 80)
+    subject_name = _clean_text(data.get('subject_name') or data.get('person_name'), 180)
+    concern_summary = _clean_text(data.get('concern_summary') or data.get('brief_reason') or data.get('reason'), 2000)
+    if not requester_name or not requester_phone or not subject_name or not concern_summary:
+        return {'ok': False, 'success': False, 'error': 'Requester name, requester phone, person concerned, and brief reason for concern are required'}
+    db = get_db()
+    try:
+        reference = _welfare_next_reference(db, 'LOC')
+        priority = _welfare_priority_from_text(concern_summary, data.get('police_reference'), data.get('details'))
+        cur = db.execute(
+            """INSERT INTO welfare_cases
+               (case_reference, case_type, category, requester_name, requester_relationship, requester_phone,
+                requester_email, requester_location, subject_name, subject_passport, subject_cnic,
+                subject_civil_id, subject_phone, subject_address, subject_workplace, last_contact_date,
+                concern_summary, police_reference, details, priority, status, escalation_level)
+               VALUES (?, 'locating_assistance', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New', 'normal')""",
+            [
+                reference,
+                'Request for Welfare Assistance in Locating / Contacting a Pakistani National in Kuwait',
+                requester_name,
+                _clean_text(data.get('requester_relationship'), 120),
+                requester_phone,
+                _clean_text(data.get('requester_email'), 180),
+                _clean_text(data.get('requester_location'), 180),
+                subject_name,
+                _clean_text(data.get('subject_passport'), 80),
+                _clean_text(data.get('subject_cnic'), 80),
+                _clean_text(data.get('subject_civil_id'), 80),
+                _clean_text(data.get('subject_phone'), 80),
+                _clean_text(data.get('subject_address'), 500),
+                _clean_text(data.get('subject_workplace'), 240),
+                _clean_text(data.get('last_contact_date'), 80),
+                concern_summary,
+                _clean_text(data.get('police_reference'), 300),
+                _clean_text(data.get('details'), 4000),
+                priority
+            ]
+        )
+        _welfare_insert_action(db, cur.lastrowid, 'public', 'created', '', 'New', 'Public locating/contacting assistance request submitted', False)
+        db.commit()
+        return {'ok': True, 'success': True, 'reference': reference}
+    except Exception as e:
+        db.rollback()
+        return {'ok': False, 'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_welfare_feedback(data):
+    requester_name = _clean_text(data.get('name') or data.get('requester_name'), 180)
+    requester_phone = _clean_text(data.get('phone') or data.get('requester_phone'), 80)
+    category = _clean_text(data.get('category'), 160)
+    subject = _clean_text(data.get('subject'), 240)
+    details = _clean_text(data.get('details'), 4000)
+    if not requester_name or not requester_phone or not category or not subject or not details:
+        return {'ok': False, 'success': False, 'error': 'Full name, phone, category, subject, and details are required'}
+    db = get_db()
+    try:
+        reference = _welfare_next_reference(db, 'FBK')
+        cur = db.execute(
+            """INSERT INTO welfare_cases
+               (case_reference, case_type, category, requester_name, requester_phone, requester_email,
+                requester_location, subject_name, concern_summary, details, priority, status, escalation_level)
+               VALUES (?, 'community_feedback', ?, ?, ?, ?, ?, ?, ?, ?, 'Normal', 'New', 'normal')""",
+            [
+                reference,
+                category,
+                requester_name,
+                requester_phone,
+                _clean_text(data.get('email'), 180),
+                _clean_text(data.get('preferred_contact_method'), 120),
+                subject,
+                subject,
+                details
+            ]
+        )
+        _welfare_insert_action(db, cur.lastrowid, 'public', 'created', '', 'New', 'Public community feedback submitted', False)
+        db.commit()
+        return {'ok': True, 'success': True, 'reference': reference}
+    except Exception as e:
+        db.rollback()
+        return {'ok': False, 'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def _welfare_case_kpis(db, username=None):
+    def _count(sql, vals=()):
+        try:
+            row = db.execute(sql, vals).fetchone()
+            return int((row['c'] if row else 0) or 0)
+        except Exception:
+            return 0
+    this_week = "date(IFNULL(resolved_at, updated_at)) >= date('now','-7 days')"
+    kpis = {
+        'total': _count("SELECT COUNT(*) c FROM welfare_cases"),
+        'new': _count("SELECT COUNT(*) c FROM welfare_cases WHERE status='New'"),
+        'assigned': _count("SELECT COUNT(*) c FROM welfare_cases WHERE status='Assigned'"),
+        'field_verification_required': _count("SELECT COUNT(*) c FROM welfare_cases WHERE status='Field Verification Required'"),
+        'ambassador_review': _count("SELECT COUNT(*) c FROM welfare_cases WHERE escalation_level='ambassador_review'"),
+        'resolved_this_week': _count(f"SELECT COUNT(*) c FROM welfare_cases WHERE status='Resolved' AND {this_week}"),
+        'assigned_to_me': 0
+    }
+    if username:
+        kpis['assigned_to_me'] = _count(
+            "SELECT COUNT(*) c FROM welfare_cases WHERE assigned_to = ? AND status NOT IN ('Resolved','Closed')",
+            [username]
+        )
+    return kpis
+
+
+def api_admin_welfare_cases(params, user):
+    if user.get('role') not in WELFARE_CASE_ACCESS_ROLES:
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        where = ["1=1"]
+        vals = []
+        force_my_cases = params.get('scope') == 'my' or user.get('role') not in WELFARE_ADMIN_ROLES
+        if force_my_cases:
+            where.append("assigned_to = ?")
+            vals.append(user.get('user'))
+        for field in ('case_type', 'status', 'priority', 'assigned_to', 'escalation_level'):
+            value = _clean_text(params.get(field), 120)
+            if value:
+                where.append(f"{field} = ?")
+                vals.append(value)
+        q = _clean_text(params.get('q'), 120)
+        if q:
+            sv = f"%{q}%"
+            where.append("""(
+                case_reference LIKE ? OR requester_name LIKE ? OR requester_phone LIKE ?
+                OR subject_name LIKE ? OR category LIKE ? OR concern_summary LIKE ?
+            )""")
+            vals.extend([sv, sv, sv, sv, sv, sv])
+        sql = f"""SELECT * FROM welfare_cases
+                  WHERE {' AND '.join(where)}
+                  ORDER BY datetime(created_at) DESC, id DESC
+                  LIMIT 500"""
+        rows = [_welfare_case_to_dict(r) for r in db.execute(sql, vals).fetchall()]
+        return {'success': True, 'items': rows, 'total': len(rows), 'kpis': _welfare_case_kpis(db, user.get('user'))}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_case_detail(case_id, user):
+    db = get_db()
+    try:
+        row, err = _welfare_load_case_for_action(db, case_id, user)
+        if err:
+            return err
+        case = _welfare_case_to_dict(row)
+        actions = [dict(r) for r in db.execute(
+            """SELECT id, actor_username, action_type, old_value, new_value, note,
+                      visible_to_requester, created_at
+               FROM welfare_case_actions WHERE case_id = ?
+               ORDER BY datetime(created_at) DESC, id DESC""",
+            [case['id']]
+        ).fetchall()]
+        return {'success': True, 'case': case, 'actions': actions}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_users():
+    db = get_db()
+    try:
+        placeholders = ','.join(['?'] * len(WELFARE_ASSIGNABLE_ROLES))
+        rows = [dict(r) for r in db.execute(
+            f"SELECT username, full_name, role FROM users WHERE role IN ({placeholders}) ORDER BY role, username",
+            list(WELFARE_ASSIGNABLE_ROLES)
+        ).fetchall()]
+        return {'success': True, 'users': rows}
+    finally:
+        db.close()
+
+
+def _queue_welfare_assignment_email(db, assignee_row, case_reference):
+    cfg = _load_email_config(db)
+    if not cfg.get('enabled') or not cfg.get('from_email') or not cfg.get('app_password_enc'):
+        print('SMTP not configured; assignment email not sent.', flush=True)
+        return
+    assignee = dict(assignee_row or {})
+    to_email = (assignee.get('email') or '').strip()
+    if not to_email:
+        print('No assignee email; assignment email not sent.', flush=True)
+        return
+    _enqueue_email_job({
+        'type': 'welfare_case_assigned',
+        'to': to_email,
+        'reference': case_reference,
+        'changed_by': 'system'
+    })
+
+
+def api_admin_welfare_assign(data, user):
+    db = get_db()
+    try:
+        row, err = _welfare_load_case_for_action(db, data.get('case_id'), user, admin_only=True)
+        if err:
+            return err
+        assigned_to = _clean_text(data.get('assigned_to'), 120)
+        assigned_role = _clean_text(data.get('assigned_role'), 120)
+        note = _clean_text(data.get('note'), 2000)
+        if not assigned_to:
+            return {'success': False, 'error': 'Assignee is required'}
+        assignee = db.execute("SELECT username, full_name, role FROM users WHERE username = ?", [assigned_to]).fetchone()
+        if not assignee:
+            return {'success': False, 'error': 'Assignee not found'}
+        assigned_role = assigned_role or assignee['role'] or ''
+        old_assignee = row['assigned_to'] or ''
+        new_status = 'Assigned' if (row['status'] or '') == 'New' else row['status']
+        db.execute(
+            """UPDATE welfare_cases
+               SET assigned_to = ?, assigned_role = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [assigned_to, assigned_role, new_status, row['id']]
+        )
+        _welfare_insert_action(db, row['id'], user.get('user'), 'assigned', old_assignee, assigned_to, note, False)
+        db.commit()
+        _queue_welfare_assignment_email(db, assignee, row['case_reference'])
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_status(data, user):
+    db = get_db()
+    try:
+        row, err = _welfare_load_case_for_action(db, data.get('case_id'), user)
+        if err:
+            return err
+        status = _clean_text(data.get('status'), 80)
+        if status not in WELFARE_STATUSES:
+            return {'success': False, 'error': 'Invalid status'}
+        note = _clean_text(data.get('note'), 2000)
+        resolved_at = 'CURRENT_TIMESTAMP' if status == 'Resolved' else 'resolved_at'
+        closed_at = 'CURRENT_TIMESTAMP' if status == 'Closed' else 'closed_at'
+        db.execute(
+            f"""UPDATE welfare_cases
+                SET status = ?, updated_at = CURRENT_TIMESTAMP,
+                    resolved_at = {resolved_at},
+                    closed_at = {closed_at}
+                WHERE id = ?""",
+            [status, row['id']]
+        )
+        _welfare_insert_action(db, row['id'], user.get('user'), 'status_changed', row['status'] or '', status, note, bool(data.get('visible_to_requester')))
+        db.commit()
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_priority(data, user):
+    db = get_db()
+    try:
+        row, err = _welfare_load_case_for_action(db, data.get('case_id'), user, admin_only=True)
+        if err:
+            return err
+        priority = _clean_text(data.get('priority'), 80)
+        if priority not in WELFARE_PRIORITIES:
+            return {'success': False, 'error': 'Invalid priority'}
+        db.execute("UPDATE welfare_cases SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [priority, row['id']])
+        _welfare_insert_action(db, row['id'], user.get('user'), 'priority_changed', row['priority'] or '', priority, '', False)
+        db.commit()
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_escalate(data, user):
+    db = get_db()
+    try:
+        row, err = _welfare_load_case_for_action(db, data.get('case_id'), user, admin_only=True)
+        if err:
+            return err
+        level = _clean_text(data.get('escalation_level'), 80)
+        if level not in WELFARE_ESCALATION_LEVELS:
+            return {'success': False, 'error': 'Invalid escalation level'}
+        note = _clean_text(data.get('note'), 2000)
+        db.execute("UPDATE welfare_cases SET escalation_level = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [level, row['id']])
+        _welfare_insert_action(db, row['id'], user.get('user'), 'escalated', row['escalation_level'] or 'normal', level, note, False)
+        db.commit()
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_note(data, user):
+    db = get_db()
+    try:
+        row, err = _welfare_load_case_for_action(db, data.get('case_id'), user)
+        if err:
+            return err
+        note = _clean_text(data.get('note'), 4000)
+        if not note:
+            return {'success': False, 'error': 'Note is required'}
+        _welfare_insert_action(db, row['id'], user.get('user'), 'note', '', '', note, bool(data.get('visible_to_requester')))
+        db.execute("UPDATE welfare_cases SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [row['id']])
+        db.commit()
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_resolve(data, user):
+    db = get_db()
+    try:
+        row, err = _welfare_load_case_for_action(db, data.get('case_id'), user)
+        if err:
+            return err
+        note = _clean_text(data.get('resolution_note'), 4000)
+        db.execute(
+            """UPDATE welfare_cases
+               SET status = 'Resolved', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [row['id']]
+        )
+        _welfare_insert_action(db, row['id'], user.get('user'), 'resolved', row['status'] or '', 'Resolved', note, True)
+        db.commit()
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
     finally:
         db.close()
 
@@ -14228,6 +14779,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_html(DEATH_CASE_PUBLIC_PAGE)
         elif path == '/death-cases/track':
             self.send_html(DEATH_CASE_TRACK_PAGE)
+        elif path == '/locating-assistance':
+            self.send_html(LOCATING_ASSISTANCE_PAGE)
+        elif path == '/community-feedback':
+            self.send_html(COMMUNITY_FEEDBACK_PAGE)
         elif path == '/admin/dashboard':
             user = self.require_auth()
             if not user: return
@@ -14282,6 +14837,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             if not self.render_template('admin_death_cases.html'):
                 self.send_html(ADMIN_DEATH_CASES_COMING_SOON_PAGE)
+        elif path in ('/admin/welfare-cases', '/admin/my-cases', '/admin/ambassador-review'):
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in WELFARE_CASE_ACCESS_ROLES:
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            mode = 'all'
+            title = 'Unified Community Welfare Case Management'
+            if path == '/admin/my-cases':
+                mode = 'my'
+                title = 'My Assigned Cases'
+            elif path == '/admin/ambassador-review':
+                mode = 'ambassador'
+                title = 'Ambassador Review Queue'
+            self.send_html(
+                WELFARE_CASES_ADMIN_PAGE
+                .replace('__PAGE_MODE__', mode)
+                .replace('__PAGE_TITLE__', title)
+                .replace('__USER_NAME__', user['user'])
+                .replace('__USER_ROLE__', user['role'])
+            )
         elif path == '/fee-collection':
             user = self.require_auth()
             if not user: return
@@ -14334,6 +14909,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 limit = 10
             self.send_json(api_admin_community_welfare_recent(limit=limit))
+        elif path == '/api/admin/welfare-users':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in WELFARE_ADMIN_ROLES:
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_admin_welfare_users())
+        elif path == '/api/admin/welfare-cases':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_welfare_cases(params, user))
+        elif path == '/api/admin/welfare-cases/detail':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_welfare_case_detail(params.get('id'), user))
         elif path == '/api/admin/nurses/summary':
             user = self.require_auth()
             if not user: return
@@ -16453,6 +17042,49 @@ function printBoth(){{
                 return
             result = api_public_travel_details_submit(data, self.client_address[0])
             self.send_json(result, 200 if result.get('success') or result.get('locked') else 400)
+            return
+
+        if path == '/api/welfare/locating-assistance':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'ok': False, 'success': False, 'error': 'Invalid request'}, 400)
+                return
+            result = api_welfare_locating_assistance(data)
+            self.send_json(result, 200 if result.get('ok') else 400)
+            return
+
+        if path == '/api/welfare/feedback':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'ok': False, 'success': False, 'error': 'Invalid request'}, 400)
+                return
+            result = api_welfare_feedback(data)
+            self.send_json(result, 200 if result.get('ok') else 400)
+            return
+
+        if path.startswith('/api/admin/welfare-cases/'):
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            if path == '/api/admin/welfare-cases/assign':
+                self.send_json(api_admin_welfare_assign(data, user)); return
+            if path == '/api/admin/welfare-cases/status':
+                self.send_json(api_admin_welfare_status(data, user)); return
+            if path == '/api/admin/welfare-cases/priority':
+                self.send_json(api_admin_welfare_priority(data, user)); return
+            if path == '/api/admin/welfare-cases/escalate':
+                self.send_json(api_admin_welfare_escalate(data, user)); return
+            if path == '/api/admin/welfare-cases/note':
+                self.send_json(api_admin_welfare_note(data, user)); return
+            if path == '/api/admin/welfare-cases/resolve':
+                self.send_json(api_admin_welfare_resolve(data, user)); return
+            self.send_json({'success': False, 'error': 'Unknown welfare case action'}, 404)
             return
 
         if path == '/api/public-register':
@@ -19141,6 +19773,32 @@ document.getElementById('oeDate').value=new Date().toISOString().slice(0,10);
 renderOfficeAccessState();
 loadSettlement();
 </script></body></html>"""
+
+LOCATING_ASSISTANCE_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Request for Welfare Assistance in Locating / Contacting a Pakistani National in Kuwait</title>
+<style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f4f7f8;color:#172033}.top{background:#2d4a6b;color:white;padding:34px 24px}.wrap{max-width:980px;margin:0 auto}.back{color:#d8e6ef;text-decoration:none;font-size:13px;font-weight:700}.top h1{max-width:820px;margin:16px 0 8px;font-size:30px;line-height:1.18}.top p{max-width:820px;color:#d8e6ef;line-height:1.7}.bar{height:4px;background:#2f7d4e}.card{background:white;border:1px solid #dbe5ea;border-radius:10px;padding:22px;margin:24px 0;box-shadow:0 10px 30px rgba(15,23,42,.06)}h2{font-size:18px;color:#2d4a6b;margin:0 0 14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}label{font-size:12px;font-weight:800;color:#334155}input,textarea,select{border:1px solid #cbd5e1;border-radius:8px;padding:11px 12px;font:inherit;font-size:14px}textarea{min-height:110px}.note{background:#fff7ed;border:1px solid #fed7aa;color:#7c2d12;border-radius:8px;padding:14px;line-height:1.55;font-size:13px}.check{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5}.check input{margin-top:2px}button{background:#2f7d4e;color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:800;cursor:pointer}.msg{font-weight:800;margin-top:14px}.ok{color:#166534}.err{color:#b91c1c}</style></head><body>
+<div class="top"><div class="wrap"><a class="back" href="/">Back to Community Welfare Services</a><h1>Request for Welfare Assistance in Locating / Contacting a Pakistani National in Kuwait</h1><p>Submit a welfare assistance request when a family member or concerned person is unable to contact a Pakistani national believed to be in Kuwait. The Embassy may review the information and, where appropriate, guide the applicant regarding available welfare and consular channels.</p></div></div><div class="bar"></div>
+<main class="wrap"><div class="card"><div class="note">This form is for welfare assistance and preliminary information sharing. In emergencies or suspected criminal matters, the requester should also contact the relevant local authorities. Submission of this form does not replace any legal or police reporting requirement.</div></div>
+<form id="f" class="card"><h2>Requester Details</h2><div class="grid"><div class="field"><label>Requester full name *</label><input name="requester_name" required></div><div class="field"><label>Relationship to person</label><input name="requester_relationship"></div><div class="field"><label>Requester phone/WhatsApp *</label><input name="requester_phone" required></div><div class="field"><label>Requester email</label><input name="requester_email" type="email"></div><div class="field"><label>Requester country/location</label><input name="requester_location"></div></div>
+<h2>Person Concerned</h2><div class="grid"><div class="field"><label>Full name of Pakistani national *</label><input name="subject_name" required></div><div class="field"><label>Passport number if available</label><input name="subject_passport"></div><div class="field"><label>CNIC if available</label><input name="subject_cnic"></div><div class="field"><label>Civil ID if available</label><input name="subject_civil_id"></div><div class="field"><label>Last known phone number</label><input name="subject_phone"></div><div class="field"><label>Last date of contact</label><input name="last_contact_date" type="date"></div></div>
+<div class="field"><label>Last known address in Kuwait</label><input name="subject_address"></div><div class="field"><label>Last known workplace/employer</label><input name="subject_workplace"></div><div class="field"><label>Brief reason for concern *</label><textarea name="concern_summary" required></textarea></div><div class="field"><label>Any police report/reference if available</label><input name="police_reference"></div><div class="field"><label>Supporting details</label><textarea name="details"></textarea></div>
+<label class="check"><input name="declaration" type="checkbox" required><span>I confirm that the information provided is true to the best of my knowledge and I understand that the Embassy may contact me for verification.</span></label><button type="submit">Submit Request</button><div id="msg" class="msg"></div></form></main>
+<script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,msg=document.getElementById('msg');msg.textContent='Submitting...';msg.className='msg';const data=Object.fromEntries(new FormData(f).entries());try{const r=await fetch('/api/welfare/locating-assistance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw new Error(j.error||'Submission failed');msg.textContent='Request submitted. Reference: '+j.reference;msg.className='msg ok';f.reset()}catch(err){msg.textContent=err.message;msg.className='msg err'}})</script></body></html>"""
+
+COMMUNITY_FEEDBACK_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Community Feedback / Recommendations / Complaints</title>
+<style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f4f7f8;color:#172033}.top{background:#2d4a6b;color:white;padding:34px 24px}.wrap{max-width:900px;margin:0 auto}.back{color:#d8e6ef;text-decoration:none;font-size:13px;font-weight:700}.top h1{margin:16px 0 8px;font-size:30px;line-height:1.18}.top p{max-width:760px;color:#d8e6ef;line-height:1.7}.bar{height:4px;background:#2f7d4e}.card{background:white;border:1px solid #dbe5ea;border-radius:10px;padding:22px;margin:24px 0;box-shadow:0 10px 30px rgba(15,23,42,.06)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}label{font-size:12px;font-weight:800;color:#334155}input,textarea,select{border:1px solid #cbd5e1;border-radius:8px;padding:11px 12px;font:inherit;font-size:14px}textarea{min-height:130px}.check{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5}.check input{margin-top:2px}button{background:#2f7d4e;color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:800;cursor:pointer}.msg{font-weight:800;margin-top:14px}.ok{color:#166534}.err{color:#b91c1c}</style></head><body>
+<div class="top"><div class="wrap"><a class="back" href="/">Back to Community Welfare Services</a><h1>Community Feedback / Recommendations / Complaints</h1><p>Submit community welfare feedback, recommendations, service-related complaints, or suggestions for improvement. The Community Welfare Wing will review submissions and route them to the relevant officer where appropriate.</p></div></div><div class="bar"></div>
+<main class="wrap"><form id="f" class="card"><div class="grid"><div class="field"><label>Full name *</label><input name="name" required></div><div class="field"><label>Phone/WhatsApp *</label><input name="phone" required></div><div class="field"><label>Email</label><input name="email" type="email"></div><div class="field"><label>Category *</label><select name="category" required><option value="">Select</option><option>Recommendation / Suggestion</option><option>Service Complaint</option><option>Welfare Concern</option><option>Employer / Workplace Concern</option><option>Consular Service Feedback</option><option>Other</option></select></div><div class="field"><label>Preferred contact method</label><select name="preferred_contact_method"><option>Phone/WhatsApp</option><option>Email</option><option>No response needed</option></select></div></div><div class="field"><label>Subject *</label><input name="subject" required></div><div class="field"><label>Details *</label><textarea name="details" required></textarea></div><label class="check"><input name="consent" type="checkbox" required><span>I consent to the Community Welfare Wing reviewing this submission and contacting me where appropriate.</span></label><button type="submit">Submit Feedback</button><div id="msg" class="msg"></div></form></main>
+<script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget,msg=document.getElementById('msg');msg.textContent='Submitting...';msg.className='msg';const data=Object.fromEntries(new FormData(f).entries());try{const r=await fetch('/api/welfare/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw new Error(j.error||'Submission failed');msg.textContent='Submission received. Reference: '+j.reference;msg.className='msg ok';f.reset()}catch(err){msg.textContent=err.message;msg.className='msg err'}})</script></body></html>"""
+
+WELFARE_CASES_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PAGE_TITLE__</title>
+<style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f2f7fa;color:#172033}.top{height:58px;background:white;border-bottom:1px solid #dbe5ea;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.shell{display:flex}.side{width:230px;min-height:calc(100vh - 58px);background:#10253f;color:white;padding:18px 10px}.side h3{font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em;text-transform:uppercase;padding:0 10px}.side a{display:block;color:rgba(255,255,255,.68);text-decoration:none;font-weight:700;font-size:13px;padding:10px 12px;border-radius:8px;margin:2px}.side a.active,.side a:hover{background:rgba(255,255,255,.1);color:white}.main{flex:1;min-width:0}.head{background:white;border-bottom:1px solid #dbe5ea;padding:18px 24px}.head h1{font-size:22px;margin:0;color:#10253f}.head p{font-size:12px;color:#64748b;margin:4px 0 0}.content{padding:20px 24px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:white;border:1px solid #dbe5ea;border-radius:8px;padding:14px}.kpi b{display:block;font-size:24px;color:#10253f}.kpi span{font-size:11px;color:#64748b;font-weight:800;text-transform:uppercase}.panel{background:white;border:1px solid #dbe5ea;border-radius:8px;overflow:hidden}.filters{display:flex;gap:10px;flex-wrap:wrap;padding:14px;border-bottom:1px solid #e2e8f0}input,select,textarea{border:1px solid #cbd5e1;border-radius:7px;padding:9px 10px;font:inherit;font-size:13px}button{border:0;border-radius:7px;background:#2f7d4e;color:white;padding:9px 12px;font-weight:800;cursor:pointer}.btn2{background:#e2e8f0;color:#10253f}.btn3{background:#2d4a6b}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;background:#f8fafc;color:#64748b;font-size:11px;text-transform:uppercase;padding:10px;border-bottom:1px solid #e2e8f0}td{padding:11px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#e2e8f0;color:#334155}.New{background:#eff6ff;color:#1d4ed8}.Assigned{background:#ecfdf5;color:#047857}.High,.Urgent{background:#fef2f2;color:#b91c1c}.Resolved{background:#f0fdf4;color:#166534}.drawer{position:fixed;right:0;top:0;width:min(560px,100%);height:100vh;background:white;box-shadow:-24px 0 60px rgba(15,23,42,.2);display:none;z-index:5;overflow:auto}.drawer.open{display:block}.drawerHead{background:#2d4a6b;color:white;padding:20px}.drawerBody{padding:18px}.row{display:grid;grid-template-columns:150px 1fr;gap:8px;margin-bottom:8px;font-size:13px}.row span{color:#64748b}.timeline{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}.act{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px}.err{color:#b91c1c;font-weight:800;margin:10px 0}</style></head><body>
+<div class="top"><div><b>Embassy of Pakistan, Kuwait</b><div style="font-size:11px;color:#64748b">Community Welfare Wing</div></div><div style="font-size:12px;color:#64748b">__USER_NAME__ · __USER_ROLE__</div></div>
+<div class="shell"><aside class="side"><h3>Main Dashboard</h3><a href="/admin/dashboard">Dashboard</a><h3>Community Welfare</h3><a href="/admin/community-welfare">CWA Overview</a><a href="/admin/nurses">Nurses</a><a href="/admin/legal-cases">Legal Cases</a><a href="/admin/death-cases">Death Cases</a><a href="/admin/welfare-cases" data-nav="all">Welfare Cases</a><a href="/admin/my-cases" data-nav="my">My Assigned Cases</a><a href="/admin/ambassador-review" data-nav="ambassador">Ambassador Review</a></aside>
+<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div></div></main></div>
+<div class="drawer" id="drawer"><div class="drawerHead"><button class="btn2" style="float:right" onclick="closeDrawer()">Close</button><h2 id="dRef"></h2><div id="dType"></div></div><div class="drawerBody"><div id="details"></div><h3>Assignment</h3><select id="assignee"></select><input id="assignNote" placeholder="Assignment note"><button onclick="assignCase()">Assign</button><h3>Status</h3><select id="newStatus"><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><input id="statusNote" placeholder="Status note"><button class="btn3" onclick="statusCase()">Update Status</button><h3>Escalation</h3><select id="escLevel"><option value="normal">Normal</option><option value="senior_review">Senior Review</option><option value="ambassador_review">Ambassador Review</option></select><input id="escNote" placeholder="Escalation note"><button class="btn3" onclick="escalateCase()">Escalate</button><h3>Notes</h3><textarea id="noteText" placeholder="Internal note or requester-visible message"></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="visibleNote" type="checkbox"> Visible to requester</label><button onclick="addNote()">Add Note</button><button class="btn3" onclick="resolveCase()">Mark Resolved</button><div class="timeline" id="timeline"></div></div></div>
+<script>const PAGE_MODE='__PAGE_MODE__';let current=null,users=[];document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}async function loadCases(){try{document.getElementById('err').textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};document.getElementById('kpis').innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');document.getElementById('rows').innerHTML=(data.items||[]).map(c=>'<tr><td><b>'+c.case_reference+'</b></td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>'}catch(e){document.getElementById('err').textContent=e.message}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;document.getElementById('details').innerHTML=rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}async function statusCase(){await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:document.getElementById('newStatus').value,note:document.getElementById('statusNote').value});await refresh()}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:document.getElementById('noteText').value});await refresh()}loadUsers();loadCases();</script></body></html>"""
 
 PUBLIC_HOME_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Welfare Wing Digital Services</title>
@@ -23013,6 +23671,9 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <button data-cwa-nav onclick="window.location.href='/admin/nurses'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurses</span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/legal-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Legal Cases</span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/death-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Death Cases</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/welfare-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Welfare Cases</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/my-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>My Assigned Cases</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/ambassador-review'"><span class="side-nav-icon" aria-hidden="true"></span><span>Ambassador Review</span></button>
 <button data-cwa-nav onclick="window.open('/','_blank')"><span class="side-nav-icon" aria-hidden="true"></span><span>Public Portal ↗</span></button>
 </div>
 <div class="portal-sidebar-user"><div class="portal-avatar" aria-hidden="true"></div><div><strong>__USER_NAME__</strong><span>__USER_ROLE__</span></div></div>
@@ -23679,7 +24340,7 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Username</label><input id="nu_user"></div>
 <div class="fgp"><label>Password</label><input id="nu_pass" type="password"></div>
 <div class="fgp"><label>Full Name</label><input id="nu_name"></div>
-<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>operator_special</option><option>admin</option><option>fee_collector</option><option>viewer</option><option>iraq_cwa</option><option>other</option></select></div>
+<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>operator_special</option><option>admin</option><option>fee_collector</option><option>viewer</option><option>iraq_cwa</option><option>welfare_officer</option><option>inspector_field</option><option>legal_officer</option><option>death_case_officer</option><option>community_desk</option><option>senior_review</option><option>ambassador_review</option><option>other</option></select></div>
 </div>
 <button class="btn btn-p" onclick="createUser()">Create User</button>
 <div style="margin-top:14px"><table id="usersTbl"></table></div>
@@ -25286,7 +25947,7 @@ if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</t
 u.forEach(x=>{
 h+=`<tr><td><strong>${x.username}</strong></td><td>${x.full_name||'-'}</td>
 <td><select onchange="updateUserRole(${x.id},this.value)" style="padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:.85em">
-<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='operator_special'?' selected':''}>operator_special</option><option${x.role==='fee_collector'?' selected':''}>fee_collector</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='other'?' selected':''}>other</option></select></td>
+<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='operator_special'?' selected':''}>operator_special</option><option${x.role==='fee_collector'?' selected':''}>fee_collector</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='welfare_officer'?' selected':''}>welfare_officer</option><option${x.role==='inspector_field'?' selected':''}>inspector_field</option><option${x.role==='legal_officer'?' selected':''}>legal_officer</option><option${x.role==='death_case_officer'?' selected':''}>death_case_officer</option><option${x.role==='community_desk'?' selected':''}>community_desk</option><option${x.role==='senior_review'?' selected':''}>senior_review</option><option${x.role==='ambassador_review'?' selected':''}>ambassador_review</option><option${x.role==='other'?' selected':''}>other</option></select></td>
 <td style="font-size:.8em">${x.created_at}</td>
 <td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminResetPw(${x.id},'${x.username}')">Reset PW</button><button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="adminDeleteUser(${x.id},'${x.username}')">Delete</button></td></tr>`});
 h+='</tbody>';document.getElementById('usersTbl').innerHTML=h}

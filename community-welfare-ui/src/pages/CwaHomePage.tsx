@@ -61,6 +61,24 @@ export function CwaHomePage() {
       ctaVariant: "secondary",
       onClick: () => navigate("/death-cases"),
     },
+    {
+      icon: "search",
+      title: "Assistance in Locating / Contacting a Pakistani National",
+      desc: "Request welfare assistance when a concerned person is unable to establish contact with a Pakistani national believed to be in Kuwait.",
+      cta: "Open Service",
+      accent: "#0f766e",
+      ctaVariant: "secondary",
+      onClick: () => navigate("/locating-assistance"),
+    },
+    {
+      icon: "mail",
+      title: "Community Feedback / Recommendations / Complaints",
+      desc: "Submit community welfare feedback, recommendations, service-related complaints, or suggestions for improvement.",
+      cta: "Open Service",
+      accent: "#9333ea",
+      ctaVariant: "secondary",
+      onClick: () => navigate("/community-feedback"),
+    },
   ];
 
   return (

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Death Cases — Embassy of Pakistan, Kuwait</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+</head>
+<body class="cwa-admin-body">
+<div class="cwa-admin">
+  <header class="cwa-admin-header">
+    <div class="cwa-admin-header__brand">
+      <div class="cwa-admin-header__logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="26" height="26"><path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#fff"/><polygon points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5" fill="#fff"/></svg>
+      </div>
+      <div class="cwa-admin-header__titles">
+        <div class="cwa-admin-header__gov">Government of Pakistan</div>
+        <div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div>
+        <div class="cwa-admin-header__wing">Admin — Community Welfare Wing</div>
+      </div>
+    </div>
+    <div class="cwa-admin-header__actions">
+      <a class="cwa-admin-header__logout" href="/admin/dashboard">Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/logout">Logout</a>
+    </div>
+  </header>
+
+  <div class="cwa-admin-shell">
+    <aside class="cwa-admin-sidebar">
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
+        <a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">▢</span><span>Overview</span></a>
+        <a href="/admin/nurses"><span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span></a>
+        <a href="/admin/legal-cases"><span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span></a>
+        <a href="/admin/death-cases" class="is-active"><span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span></a>
+        <a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">▣</span><span>Welfare Cases</span></a>
+        <a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">★</span><span>My Assigned Cases</span></a>
+        <a href="/admin/ambassador-review"><span class="cwa-admin-sidebar__icon">◆</span><span>Ambassador Review</span></a>
+      </div>
+      <div class="cwa-admin-sidebar__divider"></div>
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Quick Access</div>
+        <a href="/admin/dashboard"><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
+        <a href="/" target="_blank"><span class="cwa-admin-sidebar__icon">↗</span><span>Public Portal</span></a>
+      </div>
+    </aside>
+
+    <main class="cwa-admin-main">
+      <div class="cwa-admin-subhead">
+        <div>
+          <h1>Death Cases</h1>
+          <p id="totalLine">Handled with sensitivity and urgency.</p>
+        </div>
+        <div style="display:flex;gap:10px">
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="exportCsv()">⤓ Export</button>
+        </div>
+      </div>
+
+      <div class="cwa-admin-content cwa-fade-in">
+        <div class="cwa-notice" data-type="warning">
+          <strong>Sensitive Cases —</strong>&nbsp;Please respond promptly and respectfully. Coordinate with family contacts and authorities as soon as records are received.
+        </div>
+
+        <div class="cwa-kpi-grid">
+          <div class="cwa-kpi" data-accent="purple"><div><div class="cwa-kpi__label">Total Cases</div><div class="cwa-kpi__value" id="k_total">—</div></div><div class="cwa-kpi__icon">♥</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Submitted</div><div class="cwa-kpi__value" id="k_submitted">—</div></div><div class="cwa-kpi__icon">⏱</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">In Progress</div><div class="cwa-kpi__value" id="k_in_progress">—</div></div><div class="cwa-kpi__icon">⟳</div></div>
+          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Urgent</div><div class="cwa-kpi__value" id="k_urgent">—</div></div><div class="cwa-kpi__icon">!</div></div>
+          <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">Resolved</div><div class="cwa-kpi__value" id="k_resolved">—</div></div><div class="cwa-kpi__icon">✓</div></div>
+        </div>
+
+        <div class="cwa-form-row">
+          <div style="flex:1 1 240px;position:relative">
+            <input id="search" class="cwa-input" placeholder="Search reference, deceased name, passport, CNIC, reporter…" style="padding-left:34px">
+            <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--cwa-muted-lt)">⌕</span>
+          </div>
+          <select id="filterStatus" class="cwa-select" style="width:200px">
+            <option value="">All Status</option>
+            <option>Submitted</option><option>Seen by Admin</option><option>Assigned</option><option>In Progress</option>
+            <option>Awaiting Family Response</option><option>Resolved</option><option>Closed</option><option>Reopened</option>
+          </select>
+          <select id="filterPriority" class="cwa-select" style="width:140px">
+            <option value="">All Priority</option><option>Urgent</option><option>Important</option><option>Normal</option>
+          </select>
+          <select id="filterAssigned" class="cwa-select" style="width:200px"><option value="">All Assigned Staff</option></select>
+          <button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="loadList()">Search</button>
+        </div>
+
+        <div class="cwa-card cwa-card--p0">
+          <div class="cwa-table-wrap">
+            <table class="cwa-table">
+              <thead><tr>
+                <th>Case Reference</th><th>Deceased</th><th>Passport / CNIC</th><th>Family Contact</th><th>Phone</th>
+                <th>Hospital / Location</th><th>Priority</th><th>Status</th><th>Assigned</th><th>Updated</th>
+              </tr></thead>
+              <tbody id="rows"><tr><td colspan="10" class="cwa-empty">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div id="drawerHost"></div>
+<div id="toastHost"></div>
+
+<script>
+let assignees=[];
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function statusType(s){const x=(s||'').toLowerCase();if(x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('assign'))return 'assigned';if(x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await'))return 'awaiting';return 'pending';}
+function priorityType(p){const x=(p||'').toLowerCase();if(x.includes('urgent'))return 'urgent';if(x.includes('important')||x.includes('high'))return 'high';if(x.includes('low'))return 'low';return 'medium';}
+function fmtTime(s){if(!s)return '—';return String(s).slice(0,16).replace('T',' ');}
+async function api(url,opts){
+  const r=await fetch(url,Object.assign({credentials:'include'},opts||{}));
+  let d={};
+  try{d=await r.json();}catch(e){}
+  if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
+  return d;
+}
+function toast(msg,type){const el=document.createElement('div');el.className='cwa-toast';if(type)el.dataset.type=type;el.textContent=msg;document.getElementById('toastHost').appendChild(el);setTimeout(()=>el.remove(),3000);}
+
+async function loadAssignees(){
+  try{const d=await api('/api/admin/nurses/complaint-assignees');assignees=d.items||[];const sel=document.getElementById('filterAssigned');sel.innerHTML='<option value="">All Assigned Staff</option>'+assignees.map(a=>`<option value="${esc(a.username)}">${esc(a.display_name||a.username)}</option>`).join('');}catch(e){}
+}
+async function loadKpi(){
+  try{const s=await api('/api/admin/death-cases/summary');const t=s.totals||{};
+    document.getElementById('k_total').textContent=(t.total||0).toLocaleString();
+    document.getElementById('k_submitted').textContent=(t.submitted||0).toLocaleString();
+    document.getElementById('k_in_progress').textContent=(t.in_progress||0).toLocaleString();
+    document.getElementById('k_urgent').textContent=(t.urgent||0).toLocaleString();
+    document.getElementById('k_resolved').textContent=(t.resolved||0).toLocaleString();
+    document.getElementById('totalLine').textContent=(t.total||0)+' cases · '+(t.submitted||0)+' awaiting review';
+  }catch(e){}
+}
+async function loadList(){
+  document.getElementById('rows').innerHTML='<tr><td colspan="10" class="cwa-empty">Loading…</td></tr>';
+  const params=new URLSearchParams({page:'1',page_size:'100'});
+  const v=id=>document.getElementById(id).value.trim();
+  if(v('search')) params.set('search',v('search'));
+  if(v('filterStatus')) params.set('status',v('filterStatus'));
+  if(v('filterPriority')) params.set('priority',v('filterPriority'));
+  if(v('filterAssigned')) params.set('assigned_to',v('filterAssigned'));
+  try{
+    const d=await api('/api/admin/death-cases?'+params.toString());
+    const items=d.items||[];
+    if(!items.length){document.getElementById('rows').innerHTML='<tr><td colspan="10" class="cwa-empty">No death cases match the current filters.</td></tr>';return;}
+    document.getElementById('rows').innerHTML=items.map(r=>`<tr onclick="openDetail('${esc(r.reference_id)}')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-purple)">${esc(r.reference_id||'—')}</span></td><td style="font-weight:600">${esc(r.deceased_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.deceased_passport||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.deceased_cnic||'')}</div></div></td><td style="font-size:12px">${esc(r.reporter_name||'—')}<div style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.reporter_relation||'')}</div></td><td style="font-size:12px">${esc(r.reporter_mobile||'')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc((r.hospital_or_authority||r.place_of_death||'').slice(0,40))}</td><td><span class="cwa-badge" data-type="${priorityType(r.priority)}">${esc(r.priority||'Normal')}</span></td><td><span class="cwa-badge" data-type="${statusType(r.status)}">${esc(r.status||'—')}</span></td><td style="font-size:12px;color:${r.assigned_to_username?'var(--cwa-text)':'var(--cwa-muted-lt)'};font-style:${r.assigned_to_username?'normal':'italic'}">${esc(r.assigned_to_username||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td></tr>`).join('');
+  }catch(e){document.getElementById('rows').innerHTML='<tr><td colspan="10" class="cwa-empty">Could not load list.</td></tr>';}
+}
+function exportCsv(){
+  const params=new URLSearchParams();
+  const v=id=>document.getElementById(id).value.trim();
+  if(v('search')) params.set('search',v('search'));
+  if(v('filterStatus')) params.set('status',v('filterStatus'));
+  if(v('filterPriority')) params.set('priority',v('filterPriority'));
+  if(v('filterAssigned')) params.set('assigned_to',v('filterAssigned'));
+  window.location='/api/admin/death-cases/export?'+params.toString();
+}
+async function openDetail(ref){
+  let d={};
+  try{d=await api('/api/admin/death-cases/detail?reference_id='+encodeURIComponent(ref));}
+  catch(e){toast('Could not load case','error');return;}
+  if(!d.success){toast(d.error||'Could not load case','error');return;}
+  const r=d.record||{}; const acts=d.actions||[];
+  showDrawer({ref:r.reference_id,title:r.deceased_name||'Deceased',sub:'Family contact: '+(r.reporter_name||'—'),status:r.status,priority:r.priority,
+    profile:[
+      ['Passport',r.deceased_passport||'—'],['CNIC',r.deceased_cnic||'—'],
+      ['Date of Death',r.date_of_death||'—'],['Place of Death',r.place_of_death||'—'],
+      ['Hospital / Authority',r.hospital_or_authority||'—'],
+      ['Family Contact',r.reporter_name||'—'],['Relation',r.reporter_relation||'—'],
+      ['Phone',r.reporter_mobile||'—'],['Email',r.reporter_email||'—'],
+      ['Repatriation Required',r.repatriation_required||'—'],
+      ['Description',r.description||'—'],
+      ['Created',fmtTime(r.created_at)],['Last Action',fmtTime(r.last_action_at||r.updated_at)],
+    ],
+    refId:r.reference_id,currentAssign:r.assigned_to_username||'',timeline:acts,
+    visibilityHelp:'Family-visible messages may appear in the public tracker for the family contact.'});
+}
+function showDrawer(d){
+  const host=document.getElementById('drawerHost');
+  const profileHtml=(d.profile||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
+  const tlHtml=(d.timeline||[]).slice(0,12).map(a=>`<div class="cwa-drawer__timeline-item"><div class="cwa-drawer__timeline-dot"></div><div class="cwa-drawer__timeline-body"><div class="cwa-drawer__timeline-title">${esc(a.action_type||'Action')}: ${esc(a.new_status||'')}</div><div class="cwa-drawer__timeline-sub">${esc(a.note||'')} ${a.actor_username?('· by '+esc(a.actor_username)):''}${a.visible_to_reporter==1?' · 👁 visible to family':''}</div></div><div class="cwa-drawer__timeline-time">${esc(fmtTime(a.created_at))}</div></div>`).join('') || '<div class="cwa-empty" style="padding:14px 0">No actions yet.</div>';
+  const assignSel=(assignees||[]).length?`<select id="dwAssign" class="cwa-select">${assignees.map(a=>`<option value="${esc(a.username)}" ${a.username===d.currentAssign?'selected':''}>${esc(a.display_name||a.username)}</option>`).join('')}</select>`:`<input id="dwAssign" class="cwa-input" placeholder="Username">`;
+  const statusOpts=['Submitted','Seen by Admin','Assigned','In Progress','Awaiting Family Response','Resolved','Closed','Reopened'].map(s=>`<option value="${esc(s)}" ${s===d.status?'selected':''}>${esc(s)}</option>`).join('');
+  host.innerHTML=`<div class="cwa-drawer-overlay" onclick="closeDrawer()"></div><aside class="cwa-drawer"><div class="cwa-drawer__head"><div><div class="cwa-drawer__ref">${esc(d.ref)}</div><div class="cwa-drawer__title">${esc(d.title)}</div><div class="cwa-drawer__sub">${esc(d.sub||'')}</div></div><button class="cwa-drawer__close" onclick="closeDrawer()">×</button></div><div class="cwa-drawer__accent"></div><div class="cwa-drawer__body"><div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap"><span class="cwa-badge" data-type="${statusType(d.status)}">${esc(d.status||'—')}</span>${d.priority?`<span class="cwa-badge" data-type="${priorityType(d.priority)}">${esc(d.priority)} Priority</span>`:''}</div><div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Case & Family Details</div><dl class="cwa-drawer__profile">${profileHtml}</dl></div><div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Assign to Staff</div><div style="display:flex;gap:8px">${assignSel}<button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="doAssign('${esc(d.refId)}')">Assign</button></div></div><div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Update Status</div><div style="display:flex;gap:8px"><select id="dwStatus" class="cwa-select">${statusOpts}</select><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="doStatus('${esc(d.refId)}')">Save</button></div></div><div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Add Note / Message</div><textarea id="dwNote" class="cwa-textarea" placeholder="Note text…"></textarea><div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><select id="dwNoteType" class="cwa-select" style="width:220px"><option value="internal">Internal Note</option><option value="public">Family-Visible Message</option></select><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doNote('${esc(d.refId)}')">Add Note</button></div>${d.visibilityHelp?`<div style="font-size:11px;color:var(--cwa-muted);margin-top:6px">${esc(d.visibilityHelp)}</div>`:''}</div><div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Resolve / Close</div><textarea id="dwResolveNote" class="cwa-textarea" placeholder="Resolution note…" rows="2"></textarea><div style="display:flex;gap:8px;margin-top:8px"><button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="doResolve('${esc(d.refId)}')">✓ Mark Resolved</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doClose('${esc(d.refId)}')">Close</button></div></div><div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Activity Timeline</div><div class="cwa-drawer__timeline">${tlHtml}</div></div></div></aside>`;
+}
+function closeDrawer(){document.getElementById('drawerHost').innerHTML='';}
+async function postAction(url, body, okMsg){try{const r=await fetch(url,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(d.success){toast(okMsg,'success');closeDrawer();loadList();loadKpi();}else toast(d.error||'Action failed','error');}catch(e){toast('Network error','error');}}
+function doAssign(ref){const a=document.getElementById('dwAssign').value;postAction('/api/admin/death-cases/assign',{reference_id:ref,assigned_to_username:a},'Assigned');}
+function doStatus(ref){const s=document.getElementById('dwStatus').value;postAction('/api/admin/death-cases/status',{reference_id:ref,status:s},'Status updated');}
+function doNote(ref){const n=document.getElementById('dwNote').value;const t=document.getElementById('dwNoteType').value;postAction('/api/admin/death-cases/note',{reference_id:ref,note:n,note_type:t,visible_to_reporter:t==='public'?1:0},'Note added');}
+function doResolve(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/death-cases/resolve',{reference_id:ref,resolution_note:n},'Resolved');}
+function doClose(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/death-cases/close',{reference_id:ref,note:n},'Closed');}
+
+loadAssignees().then(()=>{loadKpi();loadList();});
+</script>
+</body>
+</html>
