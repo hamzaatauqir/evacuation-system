@@ -152,10 +152,10 @@ export function NursesRegisterPage() {
               Registration Submitted
             </h2>
             <p style={{ fontSize: 14, color: T.muted, lineHeight: 1.7, marginBottom: 12 }}>
-              Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates.
+              Your registration has been received. Please check your email inbox and verify your email address using the verification link sent to you. Once your email is verified, your portal account will be activated.
             </p>
             <p style={{ fontSize: 13, color: T.warningFg, fontWeight: 700, marginBottom: 12 }}>
-              Email verification pending.
+              Email verification pending. Please verify your email address to activate your portal account and receive official updates.
             </p>
             {submittedRef ? (
               <p style={{ fontSize: 14, color: T.navy, fontWeight: 700, marginBottom: 24 }}>

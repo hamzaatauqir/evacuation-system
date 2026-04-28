@@ -16,6 +16,8 @@ export function NursesPortalPage() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [qualificationInfo, setQualificationInfo] = useState({ degree: "", other: "" });
+  const [currentEmail, setCurrentEmail] = useState(ctx?.email || "");
+  const [currentEmailStatus, setCurrentEmailStatus] = useState(ctx?.emailStatus || "");
 
   const [facilityReq, setFacilityReq] = useState({
     category: "",
@@ -49,6 +51,9 @@ export function NursesPortalPage() {
   const [newPwd, setNewPwd] = useState("");
   const [confirmNew, setConfirmNew] = useState("");
   const [showPw, setShowPw] = useState(false);
+  const [showEmailEditor, setShowEmailEditor] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [confirmNewEmail, setConfirmNewEmail] = useState("");
 
   if (!ctx) {
     navigate("/nurses/login", { replace: true });
@@ -78,6 +83,12 @@ export function NursesPortalPage() {
     ? (qualificationInfo.other || "—")
     : (qualificationInfo.degree || "—");
   const stayArrangementText = `Your current stay arrangement is recorded as Embassy Contracted / Arranged with ${approvedVendorLabel}.`;
+  const emailStatus = (currentEmailStatus || "").trim();
+  const emailStatusText = emailStatus.toLowerCase() === "verified"
+    ? "Email verified. Your portal account is active."
+    : emailStatus.toLowerCase().includes("failed")
+      ? "Delivery Failed"
+      : "Email verification pending. Please verify your email address to activate your portal account and receive official updates.";
 
   useEffect(() => {
     let live = true;
@@ -221,6 +232,57 @@ export function NursesPortalPage() {
     }
   }
 
+  async function submitEmailUpdate() {
+    setBusy(true);
+    setErr("");
+    setMsg("");
+    try {
+      const email = newEmail.trim().toLowerCase();
+      const email2 = confirmNewEmail.trim().toLowerCase();
+      const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!email || !re.test(email)) throw new Error("Please enter a valid email address.");
+      if (email !== email2) throw new Error("New email and confirmation email do not match.");
+      const res = await api.post<{ success?: boolean; message?: string; warning?: string; error?: string }>("/api/nurses/update-email", {
+        nurse_reference_id: ctx.referenceId,
+        session_marker: ctx.sessionMarker || "",
+        email,
+      });
+      setCurrentEmail(email);
+      setCurrentEmailStatus("Verification Pending");
+      setMsg(
+        (res.message || "Your email address has been updated. Please check your new inbox and verify your email address.") +
+        " Please check your spam/junk folder if you do not see the verification email."
+      );
+      if (res.warning) setErr(res.warning);
+      setShowEmailEditor(false);
+      setNewEmail("");
+      setConfirmNewEmail("");
+    } catch (e) {
+      setErr((e as Error).message || "Could not update email.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendEmailVerification() {
+    setBusy(true);
+    setErr("");
+    setMsg("");
+    try {
+      const res = await api.post<{ success?: boolean; message?: string; warning?: string }>(
+        "/api/nurses/resend-email-verification",
+        { nurse_reference_id: ctx.referenceId, session_marker: ctx.sessionMarker || "" }
+      );
+      setCurrentEmailStatus("Verification Pending");
+      setMsg((res.message || "Verification email sent.") + " Please check your spam/junk folder if you do not see the verification email.");
+      if (res.warning) setErr(res.warning);
+    } catch (e) {
+      setErr((e as Error).message || "Could not resend verification email.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="fade-in" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <PublicHeader />
@@ -300,6 +362,26 @@ export function NursesPortalPage() {
             <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16 }}>
               <h3 style={{ marginBottom: 8, color: "#2D4A6B" }}>Embassy Messages</h3>
               <p style={{ color: "#5B6773" }}>{ctx.remarks || "Embassy messages and remarks will appear here after review."}</p>
+            </div>
+            <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16, marginTop: 14 }}>
+              <h3 style={{ marginBottom: 8, color: "#2D4A6B" }}>Contact Details</h3>
+              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Current Email Address:</strong> {currentEmail || "—"}</p>
+              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Email Status:</strong> {emailStatusText}</p>
+              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Primary Mobile Number:</strong> {ctx.mobileFull || ctx.mobile || "—"}</p>
+              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>WhatsApp Number:</strong> {ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "—"}</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                <Btn variant="light" onClick={() => setShowEmailEditor((s) => !s)}>Change Email Address</Btn>
+                {(emailStatus || "").toLowerCase() !== "verified" ? (
+                  <Btn variant="light" onClick={resendEmailVerification} disabled={busy}>Resend Verification Email</Btn>
+                ) : null}
+              </div>
+              {showEmailEditor ? (
+                <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                  <label>New Email Address<input className="f-input" type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} /></label>
+                  <label>Confirm New Email Address<input className="f-input" type="email" value={confirmNewEmail} onChange={(e) => setConfirmNewEmail(e.target.value)} /></label>
+                  <Btn variant="primary" onClick={submitEmailUpdate} disabled={busy}>Save & Send Verification Email</Btn>
+                </div>
+              ) : null}
             </div>
           </>
         ) : null}

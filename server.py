@@ -744,6 +744,8 @@ def init_db():
         ('reset_token_expires_at', "TEXT"),
         ('reset_token_used_at', "TEXT"),
         ('last_login_at', "TEXT"),
+        ('session_marker', "TEXT DEFAULT ''"),
+        ('session_expires_at', "TEXT DEFAULT ''"),
         ('mobile_country_code', "TEXT DEFAULT '+965'"),
         ('mobile_number', "TEXT DEFAULT ''"),
         ('mobile_full', "TEXT DEFAULT ''"),
@@ -4182,7 +4184,7 @@ def _email_status_label(record):
         return 'Verified'
     if (d.get('email_last_status') or '').strip() in EMAIL_VERIFICATION_FAILURE_STATUSES:
         return 'Delivery Failed'
-    return 'Unverified'
+    return 'Verification Pending'
 
 
 def _attach_email_status(record):
@@ -4321,12 +4323,15 @@ def api_verify_email_token(token):
                 continue
             if _email_verification_token_expired(row['email_verification_sent_at']):
                 return {'success': False}
+            cols = {c['name'] if isinstance(c, sqlite3.Row) else c[1] for c in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
+            account_active_sql = ", account_active = 1" if 'account_active' in cols else ""
             db.execute(
                 f"""UPDATE {table_name}
                     SET email_verified = 1,
                         email_verified_at = CURRENT_TIMESTAMP,
                         email_verification_token = '',
                         email_last_status = COALESCE(NULLIF(email_last_status, ''), 'sent')
+                        {account_active_sql}
                     WHERE {id_col} = ?""",
                 [row['record_id']]
             )
@@ -4341,7 +4346,7 @@ def api_verify_email_token(token):
 
 
 def email_verification_result_html(success):
-    message = 'Your email address has been verified successfully.' if success else 'This verification link is invalid or has expired.'
+    message = 'Your email address has been verified successfully. Your portal account is now active.' if success else 'This verification link is invalid or has expired.'
     title = 'Email Verified' if success else 'Verification Link Invalid'
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>
 <style>body{{font-family:Inter,Arial,sans-serif;margin:0;background:#f6f9ff;color:#15324a;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}}.box{{max-width:560px;background:#fff;border:1px solid #e3ebf0;border-radius:10px;padding:28px;text-align:center;box-shadow:0 10px 26px rgba(15,35,52,.08)}}h1{{font-size:24px;margin:0 0 12px}}p{{font-size:16px;line-height:1.6;margin:0;color:#334155}}</style></head><body><main class="box"><h1>{esc(title)}</h1><p>{esc(message)}</p></main></body></html>"""
@@ -4369,6 +4374,34 @@ def _compose_phone(code, number):
     cc = _normalize_country_code(code)
     num = _phone_digits(number)
     return f"{cc}{num}" if num else ''
+
+
+def _nurse_session_valid(expires_at):
+    try:
+        dt = _parse_email_verification_timestamp(expires_at)
+        return bool(dt and dt > datetime.utcnow())
+    except Exception:
+        return False
+
+
+def _nurse_session_lookup(db, nurse_reference_id, session_marker):
+    ref = (nurse_reference_id or '').strip().upper()
+    marker = (session_marker or '').strip()
+    if not ref or not marker:
+        return None
+    row = db.execute(
+        """SELECT * FROM nurse_registrations
+           WHERE UPPER(TRIM(reference_id)) = UPPER(TRIM(?))
+             AND TRIM(COALESCE(session_marker,'')) = TRIM(?)
+           ORDER BY id DESC LIMIT 1""",
+        [ref, marker]
+    ).fetchone()
+    if not row:
+        return None
+    rec = dict(row)
+    if not _nurse_session_valid(rec.get('session_expires_at') or ''):
+        return None
+    return rec
 
 
 def _should_notify_applicant_status(status, public_note='', visible_to_applicant=False, safe_statuses=None):
@@ -4794,6 +4827,7 @@ def _build_nurse_public_profile_bundle(db, rec):
         'emergency_contact_full': rec.get('emergency_contact_full', '') or rec.get('emergency_contact', ''),
         'email': rec.get('email', ''),
         'email_status': _email_status_label(rec),
+        'email_verification_sent_at': rec.get('email_verification_sent_at', ''),
         'batch_number': rec.get('batch_number', ''),
         'arrival_date': rec.get('arrival_date', ''),
         'hospital': rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
@@ -5058,7 +5092,7 @@ def api_nurse_register(data):
             db2.commit()
         finally:
             db2.close()
-        msg = 'Registration submitted successfully. Email verification pending. Please check your inbox to verify your email address before future updates.'
+        msg = 'Your registration has been received. Please check your email inbox and verify your email address using the verification link sent to you. Once your email is verified, your portal account will be activated.'
         notify_case_event(
             case_type='nurse_registration',
             case_reference=ref,
@@ -5113,11 +5147,16 @@ def api_nurse_login(data):
         ps = (rec.get('password_salt') or '').strip()
         if not ph or not ps or not _nurse_verify_password_pbkdf2(password, ps, ph):
             return {'success': False, 'error': 'Invalid email, passport, Civil ID, or password.'}
-        db.execute("UPDATE nurse_registrations SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", [rec.get('id')])
+        session_marker = secrets.token_hex(24)
+        session_expires_at = (datetime.utcnow() + timedelta(days=1)).isoformat(timespec='seconds')
+        db.execute(
+            "UPDATE nurse_registrations SET last_login_at = CURRENT_TIMESTAMP, session_marker = ?, session_expires_at = ? WHERE id = ?",
+            [session_marker, session_expires_at, rec.get('id')]
+        )
         db.commit()
         rec['last_login_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
         bundle = _build_nurse_public_profile_bundle(db, rec)
-        bundle['session_marker'] = secrets.token_hex(8)
+        bundle['session_marker'] = session_marker
         return {'success': True, 'data': bundle}
     finally:
         db.close()
@@ -5260,6 +5299,114 @@ def api_nurse_change_password(data):
             )
             _nurse_send_email_smtp_env(to_email, 'Nurse Portal — Password changed', body)
         return {'success': True, 'message': 'Password updated.'}
+    finally:
+        db.close()
+
+
+def api_nurse_update_email(data):
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip().upper()
+    session_marker = (data.get('session_marker') or '').strip()
+    new_email = _nurse_normalize_email(data.get('email') or '')
+    if not ref or not session_marker:
+        return {'success': False, 'error': 'Session required. Please sign in again.'}
+    if not new_email or not _is_valid_email_loose(new_email):
+        return {'success': False, 'error': 'Please enter a valid email address.'}
+    db = get_db()
+    try:
+        rec = _nurse_session_lookup(db, ref, session_marker)
+        if not rec:
+            return {'success': False, 'error': 'Session expired. Please sign in again.'}
+        if _nurse_normalize_email(rec.get('email') or '') == new_email and int(rec.get('email_verified') or 0) == 1:
+            return {'success': True, 'message': 'Email verified. Your portal account is active.'}
+        dup = db.execute(
+            "SELECT id FROM nurse_registrations WHERE LOWER(TRIM(COALESCE(email,''))) = ? AND id != ? LIMIT 1",
+            [new_email, rec.get('id')]
+        ).fetchone()
+        if dup:
+            return {'success': False, 'error': 'This email is already used by another nurse account.'}
+        db.execute(
+            """UPDATE nurse_registrations
+               SET email = ?, email_verified = 0, email_verified_at = NULL, email_verification_token = '',
+                   email_last_status = 'pending', updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [new_email, rec.get('id')]
+        )
+        _nurse_log(
+            db, 'contact_email_updated', rec.get('reference_id', ''), rec.get('passport_number', ''), 'nurse_portal',
+            {'old_email': rec.get('email', ''), 'new_email': new_email}
+        )
+        db.commit()
+        send_result = _send_email_verification_for_record(
+            'nurse_registrations',
+            rec.get('id'),
+            rec.get('reference_id', ''),
+            rec.get('full_name', ''),
+            new_email,
+            'nurse_registration'
+        )
+        _nurse_log(
+            db, 'email_verification_sent', rec.get('reference_id', ''), rec.get('passport_number', ''), 'system',
+            {'status': send_result.get('status', ''), 'email': new_email}
+        )
+        db.commit()
+        if send_result.get('status') == 'sent':
+            return {'success': True, 'message': 'Email updated. Verification email sent.'}
+        return {
+            'success': True,
+            'message': 'Email updated. Please verify your new email address.',
+            'warning': 'Verification email could not be sent at this time.'
+        }
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {'success': False, 'error': str(exc)}
+    finally:
+        db.close()
+
+
+def api_nurse_resend_email_verification(data):
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip().upper()
+    session_marker = (data.get('session_marker') or '').strip()
+    if not ref or not session_marker:
+        return {'success': False, 'error': 'Session required. Please sign in again.'}
+    db = get_db()
+    try:
+        rec = _nurse_session_lookup(db, ref, session_marker)
+        if not rec:
+            return {'success': False, 'error': 'Session expired. Please sign in again.'}
+        if int(rec.get('email_verified') or 0) == 1:
+            return {'success': False, 'error': 'Email already verified.'}
+        sent_at = _parse_email_verification_timestamp(rec.get('email_verification_sent_at') or '')
+        if sent_at and sent_at > (datetime.utcnow() - timedelta(minutes=10)):
+            return {'success': False, 'error': 'Please wait 10 minutes before requesting another verification email.'}
+        send_result = _send_email_verification_for_record(
+            'nurse_registrations',
+            rec.get('id'),
+            rec.get('reference_id', ''),
+            rec.get('full_name', ''),
+            rec.get('email', ''),
+            'nurse_registration'
+        )
+        _nurse_log(
+            db, 'email_verification_sent', rec.get('reference_id', ''), rec.get('passport_number', ''), 'system',
+            {'status': send_result.get('status', ''), 'email': rec.get('email', '')}
+        )
+        db.commit()
+        if send_result.get('status') == 'sent':
+            return {'success': True, 'message': 'Verification email sent.'}
+        return {
+            'success': True,
+            'message': 'Email verification pending. Please verify your email address to activate your portal account and receive official updates.',
+            'warning': 'Verification email could not be sent at this time.'
+        }
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {'success': False, 'error': str(exc)}
     finally:
         db.close()
 
@@ -20535,6 +20682,22 @@ function printBoth(){{
             except json.JSONDecodeError:
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_nurse_change_password(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/update-email':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_update_email(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/resend-email-verification':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_resend_email_verification(data)
             self.send_json(result, 200 if result.get('success') else 400)
             return
         elif path == '/api/nurses/stay-confirmation':
