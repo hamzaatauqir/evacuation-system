@@ -1310,12 +1310,16 @@ def init_db():
     db.executescript("""
     CREATE TABLE IF NOT EXISTS notification_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_type TEXT DEFAULT '',
+        case_reference TEXT DEFAULT '',
         recipient_type TEXT DEFAULT '',
+        recipient_user_id TEXT DEFAULT '',
         recipient_reference TEXT DEFAULT '',
         recipient_name TEXT DEFAULT '',
         recipient_phone TEXT DEFAULT '',
         recipient_email TEXT DEFAULT '',
         channel TEXT DEFAULT '',
+        event_type TEXT DEFAULT '',
         message_type TEXT DEFAULT '',
         subject TEXT DEFAULT '',
         message_body TEXT DEFAULT '',
@@ -1326,6 +1330,8 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_notification_log_reference ON notification_log(recipient_reference);
     CREATE INDEX IF NOT EXISTS idx_notification_log_type ON notification_log(message_type);
+    CREATE INDEX IF NOT EXISTS idx_notification_log_case_reference ON notification_log(case_reference);
+    CREATE INDEX IF NOT EXISTS idx_notification_log_event_type ON notification_log(event_type);
     CREATE TABLE IF NOT EXISTS alternative_facilities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         vendor_name TEXT DEFAULT '',
@@ -1347,6 +1353,17 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_alternative_facilities_active ON alternative_facilities(active);
     CREATE INDEX IF NOT EXISTS idx_alternative_facilities_vendor ON alternative_facilities(vendor_name);
     """)
+    for col, coltype in [
+        ('case_type', "TEXT DEFAULT ''"),
+        ('case_reference', "TEXT DEFAULT ''"),
+        ('recipient_user_id', "TEXT DEFAULT ''"),
+        ('event_type', "TEXT DEFAULT ''"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE notification_log ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
     for col, coltype in [
         ('vendor_name', "TEXT DEFAULT ''"),
         ('facility_name', "TEXT DEFAULT ''"),
@@ -3930,16 +3947,21 @@ def _log_welfare_notification(person, message_type, channel, subject, body, stat
         try:
             db.execute(
                 """INSERT INTO notification_log
-                   (recipient_type, recipient_reference, recipient_name, recipient_phone, recipient_email,
-                    channel, message_type, subject, message_body, status, error, sent_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)""",
+                   (case_type, case_reference, recipient_type, recipient_user_id, recipient_reference,
+                    recipient_name, recipient_phone, recipient_email, channel, event_type, message_type,
+                    subject, message_body, status, error, sent_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)""",
                 [
+                    person.get('case_type') or 'welfare',
+                    person.get('case_reference') or person.get('reference') or person.get('reference_id') or person.get('roster_reference') or '',
                     person.get('recipient_type') or person.get('type') or 'health_worker',
+                    person.get('recipient_user_id') or '',
                     person.get('reference') or person.get('reference_id') or person.get('roster_reference') or '',
                     person.get('full_name') or person.get('name') or '',
                     person.get('phone') or person.get('mobile') or '',
                     person.get('email') or '',
                     channel or 'portal_message',
+                    message_type or '',
                     message_type or '',
                     subject or '',
                     body or '',
@@ -3953,6 +3975,232 @@ def _log_welfare_notification(person, message_type, channel, subject, body, stat
             db.close()
     except Exception as exc:
         print(f'[WelfareNotification] log failed: {exc}', flush=True)
+
+
+def send_notification_email(to_email, subject, body_text, body_html=None):
+    to_email = (to_email or '').strip()
+    if not _is_valid_email_loose(to_email):
+        return {'ok': False, 'reason': 'invalid_recipient'}
+    cfg = _nurse_smtp_env_config()
+    if not cfg.get('ok'):
+        print('SMTP not configured; notification email not sent.', flush=True)
+        return {'ok': False, 'reason': 'smtp_not_configured'}
+    msg = EmailMessage()
+    msg['From'] = f"{cfg['from_name']} <{cfg['from_email']}>"
+    msg['To'] = to_email
+    msg['Subject'] = subject or 'Community Welfare Wing Notification'
+    msg.set_content(body_text or '')
+    if body_html:
+        msg.add_alternative(body_html, subtype='html')
+    try:
+        if cfg['port'] == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(cfg['host'], cfg['port'], context=ctx, timeout=25) as server:
+                server.login(cfg['user'], cfg['password'])
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(cfg['host'], cfg['port'], timeout=25) as server:
+                server.ehlo()
+                if cfg['use_tls'] and cfg['port'] != 465:
+                    try:
+                        server.starttls(context=ssl.create_default_context())
+                        server.ehlo()
+                    except Exception:
+                        pass
+                server.login(cfg['user'], cfg['password'])
+                server.send_message(msg)
+        return {'ok': True}
+    except Exception as exc:
+        print(f'[NotificationEmail] send failed: {exc}', flush=True)
+        return {'ok': False, 'reason': 'send_failed'}
+
+
+def _insert_notification_log(case_type, case_reference, recipient_type, recipient_name, recipient_email,
+                             recipient_user_id, channel, event_type, subject, message_body,
+                             status, error=''):
+    db = get_db()
+    try:
+        db.execute(
+            """INSERT INTO notification_log
+               (case_type, case_reference, recipient_type, recipient_name, recipient_email, recipient_user_id,
+                recipient_reference, channel, event_type, message_type, subject, message_body, status, error, sent_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)""",
+            [
+                case_type or '',
+                case_reference or '',
+                recipient_type or '',
+                recipient_name or '',
+                recipient_email or '',
+                recipient_user_id or '',
+                case_reference or '',
+                channel or 'email',
+                event_type or '',
+                event_type or '',
+                subject or '',
+                message_body or '',
+                status or '',
+                error or '',
+                status or '',
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _safe_status_label(status):
+    return (status or 'Under Review').strip()
+
+
+def _tracking_link_for_case(case_type, tracking_link=''):
+    if tracking_link:
+        return tracking_link
+    case_type = (case_type or '').strip().lower()
+    if case_type in ('nurse', 'nurse_registration', 'nurse_complaint', 'facility', 'stay_arrangement'):
+        return 'https://cwakuwait.com/nurses/login'
+    if case_type == 'legal':
+        return 'https://cwakuwait.com/legal-cases/track'
+    if case_type == 'death':
+        return 'https://cwakuwait.com/death-cases/track'
+    if case_type in ('welfare', 'locating_assistance', 'community_feedback'):
+        return 'https://cwakuwait.com'
+    return 'https://cwakuwait.com'
+
+
+def _staff_admin_link(admin_link=''):
+    return admin_link or 'https://portal.cwakuwait.com/admin/my-cases'
+
+
+def _notification_staff_lookup(username):
+    uname = (username or '').strip()
+    if not uname:
+        return None
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id, username, COALESCE(full_name, username) AS display_name, COALESCE(email,'') AS email FROM users WHERE username = ? LIMIT 1",
+            [uname]
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        db.close()
+
+
+def notify_case_event(case_type, case_reference, event_type, applicant_email=None, applicant_name=None,
+                      staff_username=None, staff_email=None, status=None, public_note=None,
+                      priority=None, due_date=None, tracking_link=None, admin_link=None):
+    case_type = (case_type or '').strip()
+    case_reference = (case_reference or '').strip()
+    event_type = (event_type or '').strip()
+    applicant_name = (applicant_name or 'Applicant').strip()
+    status = _safe_status_label(status)
+    tracking_link = _tracking_link_for_case(case_type, tracking_link or '')
+    admin_link = _staff_admin_link(admin_link or '')
+    public_note = (public_note or '').strip()
+    applicant_events = {
+        'request_received', 'status_updated', 'assigned_for_followup', 'applicant_note_added',
+        'more_information_requested', 'resolved', 'closed', 'stay_confirmation_requested',
+        'leaving_notice_received', 'notice_period_reminder'
+    }
+    staff_events = {'case_assigned_to_staff', 'case_due_soon', 'case_overdue', 'case_escalated', 'new_applicant_reply', 'ambassador_review_required'}
+
+    def _applicant_payload():
+        if event_type == 'request_received':
+            subject = f'Community Welfare Wing – Request Received: {case_reference}'
+            body = (
+                f"Dear {applicant_name},\n\n"
+                f"Your request has been received by the Community Welfare Wing, Embassy of Pakistan, Kuwait.\n\n"
+                f"Reference Number: {case_reference}\n"
+                f"Request Type: {case_type or 'Community Welfare'}\n"
+                f"Current Status: {status}\n\n"
+                f"Please keep this reference number for follow-up.\n\n"
+                f"You may track or update your request through the official portal:\n"
+                f"{tracking_link}\n\n"
+                f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+            )
+            return subject, body
+        if event_type == 'more_information_requested':
+            subject = f'Community Welfare Wing – Further Information Required: {case_reference}'
+            body = (
+                f"Dear {applicant_name},\n\n"
+                f"The Community Welfare Wing requires further information to continue processing your request.\n\n"
+                f"Reference Number: {case_reference}\n\n"
+                f"{public_note or 'Please review the portal for the requested information.'}\n\n"
+                f"Please provide the requested information through the portal or contact the Embassy as instructed.\n\n"
+                f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+            )
+            return subject, body
+        if event_type in ('resolved', 'closed'):
+            subject = f'Community Welfare Wing – Request Update: {case_reference}'
+            body = (
+                f"Dear {applicant_name},\n\n"
+                f"Your request has been updated.\n\n"
+                f"Reference Number: {case_reference}\n"
+                f"Status: {status}\n\n"
+                f"Action / Remarks:\n{public_note or 'Please log in or track your request for details.'}\n\n"
+                f"If you require further assistance, you may submit a new request through the official portal.\n\n"
+                f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+            )
+            return subject, body
+        subject = f'Community Welfare Wing – Status Update: {case_reference}'
+        body = (
+            f"Dear {applicant_name},\n\n"
+            f"There is an update regarding your request.\n\n"
+            f"Reference Number: {case_reference}\n"
+            f"Updated Status: {status}\n\n"
+            f"{public_note + chr(10) + chr(10) if public_note else ''}"
+            f"Please log in or track your request through the official portal for further details:\n"
+            f"{tracking_link}\n\n"
+            f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+        )
+        return subject, body
+
+    if event_type in applicant_events:
+        to_email = (applicant_email or '').strip()
+        subject, body = _applicant_payload()
+        if not to_email:
+            _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, '', '', 'email', event_type, subject, body, 'skipped_no_email', 'missing_applicant_email')
+        else:
+            send_res = send_notification_email(to_email, subject, body)
+            if send_res.get('ok'):
+                _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, 'sent', '')
+            else:
+                reason = send_res.get('reason') or 'send_failed'
+                status_key = 'skipped_smtp_missing' if reason == 'smtp_not_configured' else 'failed'
+                _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, status_key, reason)
+
+    if event_type in staff_events:
+        staff = _notification_staff_lookup(staff_username) if staff_username else None
+        s_email = (staff_email or '').strip() or ((staff or {}).get('email') or '').strip()
+        s_name = ((staff or {}).get('display_name') or staff_username or 'Officer').strip()
+        s_id = str((staff or {}).get('id') or '')
+        subject = 'Community Welfare Case Assigned: ' + case_reference if event_type == 'case_assigned_to_staff' else f'Community Welfare Case Submitted for Senior Review: {case_reference}'
+        if event_type == 'case_assigned_to_staff':
+            body = (
+                f"Dear {s_name},\n\nA Community Welfare case has been assigned to you for follow-up.\n\n"
+                f"Reference: {case_reference}\nCase Type: {case_type or 'Community Welfare'}\n"
+                f"Priority: {priority or 'Normal'}\nDue Date: {due_date or '—'}\nApplicant/Subject: {applicant_name}\n\n"
+                f"Please log in to the admin portal:\n{admin_link}\n\nRegards,\nCommunity Welfare Wing Portal"
+            )
+        else:
+            body = (
+                f"Dear {s_name},\n\nA case has been submitted for senior review.\n\n"
+                f"Reference: {case_reference}\nCase Type: {case_type or 'Community Welfare'}\n"
+                f"Priority: {priority or 'Normal'}\n\nPlease log in to the admin portal for details.\n\n"
+                f"Regards,\nCommunity Welfare Wing Portal"
+            )
+        if not s_email:
+            _insert_notification_log(case_type, case_reference, 'staff', s_name, '', s_id, 'email', event_type, subject, body, 'skipped_no_email', 'missing_staff_email')
+        else:
+            send_res = send_notification_email(s_email, subject, body)
+            if send_res.get('ok'):
+                _insert_notification_log(case_type, case_reference, 'staff', s_name, s_email, s_id, 'email', event_type, subject, body, 'sent', '')
+            else:
+                reason = send_res.get('reason') or 'send_failed'
+                status_key = 'skipped_smtp_missing' if reason == 'smtp_not_configured' else 'failed'
+                _insert_notification_log(case_type, case_reference, 'staff', s_name, s_email, s_id, 'email', event_type, subject, body, status_key, reason)
+
+    return {'ok': True}
 
 
 def send_welfare_notification(person, message_type, channel='portal_message'):
@@ -4430,6 +4678,15 @@ def api_nurse_register(data):
         finally:
             db2.close()
         msg = 'Registration submitted successfully. Please login to access your Nurse Portal.'
+        notify_case_event(
+            case_type='nurse_registration',
+            case_reference=ref,
+            event_type='request_received',
+            applicant_email=email,
+            applicant_name=full_name,
+            status='Submitted',
+            tracking_link='https://cwakuwait.com/nurses/login'
+        )
         return {
             'success': True, 'ok': True, 'reference': ref, 'reference_id': ref,
             'message': msg, 'email_status': 'sent' if ok else 'not_sent', 'email_detail': detail,
@@ -4738,6 +4995,15 @@ def api_nurse_facility_assistance(data):
             'phone': n.get('mobile', ''),
             'reference': complaint_id
         }, 'facility_assistance_request_received', 'portal_message')
+        notify_case_event(
+            case_type='nurse',
+            case_reference=complaint_id,
+            event_type='request_received',
+            applicant_email=n.get('email', ''),
+            applicant_name=n.get('full_name', ''),
+            status='Submitted',
+            tracking_link='https://cwakuwait.com/nurses/login'
+        )
         return {'success': True, 'complaint_id': complaint_id}
     except Exception as e:
         db.rollback()
@@ -4798,6 +5064,15 @@ def api_nurse_complaint_submit(data):
                 'status': 'Submitted',
                 'changed_by': 'system'
             })
+        notify_case_event(
+            case_type='nurse',
+            case_reference=complaint_id,
+            event_type='request_received',
+            applicant_email=email,
+            applicant_name=n.get('full_name', ''),
+            status='Submitted',
+            tracking_link='https://cwakuwait.com/nurses/login'
+        )
         return {'success': True, 'complaint_id': complaint_id}
     finally:
         db.close()
@@ -4862,6 +5137,15 @@ def api_nurse_leave_notice_submit(data):
             'phone': nurse_d.get('mobile', ''),
             'reference': nurse_d.get('reference_id', ref)
         }, 'leaving_notice_received', 'portal_message')
+        notify_case_event(
+            case_type='stay_arrangement',
+            case_reference=nurse_d.get('reference_id', ref),
+            event_type='leaving_notice_received',
+            applicant_email=nurse_d.get('email', ''),
+            applicant_name=nurse_d.get('full_name', ''),
+            status='Submitted',
+            tracking_link='https://cwakuwait.com/nurses/login'
+        )
         return {'success': True}
     finally:
         db.close()
@@ -5065,6 +5349,15 @@ def api_legal_case_intake(data):
                 'status': 'Submitted',
                 'changed_by': 'system'
             })
+        notify_case_event(
+            case_type='legal',
+            case_reference=ref,
+            event_type='request_received',
+            applicant_email=email,
+            applicant_name=full_name,
+            status='Submitted',
+            tracking_link='https://cwakuwait.com/legal-cases/track'
+        )
         return {'success': True, 'reference_id': ref}
     finally:
         db.close()
@@ -5132,6 +5425,15 @@ def api_death_case_intake(data):
                 'status': 'Submitted',
                 'changed_by': 'system'
             })
+        notify_case_event(
+            case_type='death',
+            case_reference=ref,
+            event_type='request_received',
+            applicant_email=reporter_email,
+            applicant_name=reporter_name,
+            status='Submitted',
+            tracking_link='https://cwakuwait.com/death-cases/track'
+        )
         return {'success': True, 'reference_id': ref}
     finally:
         db.close()
@@ -5306,6 +5608,15 @@ def api_welfare_locating_assistance(data):
         )
         _welfare_insert_action(db, cur.lastrowid, 'public', 'created', '', 'New', 'Public locating/contacting assistance request submitted', False)
         db.commit()
+        notify_case_event(
+            case_type='locating_assistance',
+            case_reference=reference,
+            event_type='request_received',
+            applicant_email=_clean_text(data.get('requester_email'), 180),
+            applicant_name=requester_name,
+            status='New',
+            tracking_link='https://cwakuwait.com'
+        )
         return {'ok': True, 'success': True, 'reference': reference}
     except Exception as e:
         db.rollback()
@@ -5344,6 +5655,15 @@ def api_welfare_feedback(data):
         )
         _welfare_insert_action(db, cur.lastrowid, 'public', 'created', '', 'New', 'Public community feedback submitted', False)
         db.commit()
+        notify_case_event(
+            case_type='community_feedback',
+            case_reference=reference,
+            event_type='request_received',
+            applicant_email=_clean_text(data.get('email'), 180),
+            applicant_name=requester_name,
+            status='New',
+            tracking_link='https://cwakuwait.com'
+        )
         return {'ok': True, 'success': True, 'reference': reference}
     except Exception as e:
         db.rollback()
@@ -5443,6 +5763,40 @@ def api_admin_welfare_users():
         db.close()
 
 
+def api_admin_notifications(params, user):
+    if (user or {}).get('role') not in ('admin', 'operator', 'operator_special', 'welfare'):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        where = ['1=1']
+        vals = []
+        for field in ('status', 'event_type', 'case_type'):
+            value = _clean_text((params or {}).get(field), 120)
+            if value:
+                where.append(f"{field} = ?")
+                vals.append(value)
+        date_from = _clean_text((params or {}).get('date_from'), 40)
+        date_to = _clean_text((params or {}).get('date_to'), 40)
+        if date_from:
+            where.append("date(created_at) >= date(?)")
+            vals.append(date_from)
+        if date_to:
+            where.append("date(created_at) <= date(?)")
+            vals.append(date_to)
+        rows = [dict(r) for r in db.execute(
+            f"""SELECT id, created_at, channel, event_type, case_type, case_reference,
+                       recipient_name, recipient_email, status, error, sent_at
+                FROM notification_log
+                WHERE {' AND '.join(where)}
+                ORDER BY datetime(created_at) DESC, id DESC
+                LIMIT 500""",
+            vals
+        ).fetchall()]
+        return {'success': True, 'items': rows, 'total': len(rows)}
+    finally:
+        db.close()
+
+
 def _queue_welfare_assignment_email(db, assignee_row, case_reference):
     cfg = _load_email_config(db)
     if not cfg.get('enabled') or not cfg.get('from_email') or not cfg.get('app_password_enc'):
@@ -5486,7 +5840,29 @@ def api_admin_welfare_assign(data, user):
         )
         _welfare_insert_action(db, row['id'], user.get('user'), 'assigned', old_assignee, assigned_to, note, False)
         db.commit()
+        row_d = dict(row)
+        assignee_d = dict(assignee)
         _queue_welfare_assignment_email(db, assignee, row['case_reference'])
+        notify_case_event(
+            case_type=row_d.get('case_type') or 'welfare',
+            case_reference=row_d.get('case_reference') or '',
+            event_type='case_assigned_to_staff',
+            applicant_name=row_d.get('requester_name') or row_d.get('subject_name') or 'Applicant',
+            staff_username=assigned_to,
+            staff_email=assignee_d.get('email') or '',
+            priority=row_d.get('priority') or 'Normal',
+            due_date=row_d.get('due_date') or ''
+        )
+        if row_d.get('requester_email'):
+            notify_case_event(
+                case_type=row_d.get('case_type') or 'welfare',
+                case_reference=row_d.get('case_reference') or '',
+                event_type='assigned_for_followup',
+                applicant_email=row_d.get('requester_email') or '',
+                applicant_name=row_d.get('requester_name') or 'Applicant',
+                status=new_status,
+                tracking_link='https://cwakuwait.com'
+            )
         return {'success': True}
     except Exception as e:
         db.rollback()
@@ -5517,6 +5893,18 @@ def api_admin_welfare_status(data, user):
         )
         _welfare_insert_action(db, row['id'], user.get('user'), 'status_changed', row['status'] or '', status, note, bool(data.get('visible_to_requester')))
         db.commit()
+        row_d = dict(row)
+        if bool(data.get('visible_to_requester')) or note:
+            notify_case_event(
+                case_type=row_d.get('case_type') or 'welfare',
+                case_reference=row_d.get('case_reference') or '',
+                event_type='more_information_requested' if status == 'Awaiting Requester Response' else ('resolved' if status == 'Resolved' else ('closed' if status == 'Closed' else 'status_updated')),
+                applicant_email=row_d.get('requester_email') or '',
+                applicant_name=row_d.get('requester_name') or 'Applicant',
+                status=status,
+                public_note=note,
+                tracking_link='https://cwakuwait.com'
+            )
         return {'success': True}
     except Exception as e:
         db.rollback()
@@ -5578,6 +5966,18 @@ def api_admin_welfare_note(data, user):
         _welfare_insert_action(db, row['id'], user.get('user'), 'note', '', '', note, bool(data.get('visible_to_requester')))
         db.execute("UPDATE welfare_cases SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [row['id']])
         db.commit()
+        row_d = dict(row)
+        if bool(data.get('visible_to_requester')):
+            notify_case_event(
+                case_type=row_d.get('case_type') or 'welfare',
+                case_reference=row_d.get('case_reference') or '',
+                event_type='applicant_note_added',
+                applicant_email=row_d.get('requester_email') or '',
+                applicant_name=row_d.get('requester_name') or 'Applicant',
+                status=row_d.get('status') or 'Under Review',
+                public_note=note,
+                tracking_link='https://cwakuwait.com'
+            )
         return {'success': True}
     except Exception as e:
         db.rollback()
@@ -5601,6 +6001,17 @@ def api_admin_welfare_resolve(data, user):
         )
         _welfare_insert_action(db, row['id'], user.get('user'), 'resolved', row['status'] or '', 'Resolved', note, True)
         db.commit()
+        row_d = dict(row)
+        notify_case_event(
+            case_type=row_d.get('case_type') or 'welfare',
+            case_reference=row_d.get('case_reference') or '',
+            event_type='resolved',
+            applicant_email=row_d.get('requester_email') or '',
+            applicant_name=row_d.get('requester_name') or 'Applicant',
+            status='Resolved',
+            public_note=note,
+            tracking_link='https://cwakuwait.com'
+        )
         return {'success': True}
     except Exception as e:
         db.rollback()
@@ -5994,6 +6405,27 @@ def api_admin_facility_assign(data, user):
             'full_name': assignee['full_name'] or assignee['username'],
             'reference': row['roster_reference']
         }, 'welfare_followup_assigned', 'email')
+        row_d = dict(row)
+        notify_case_event(
+            case_type='facility',
+            case_reference=row_d.get('roster_reference') or '',
+            event_type='case_assigned_to_staff',
+            applicant_name=row_d.get('full_name') or 'Applicant',
+            staff_username=assigned_to,
+            staff_email=(assignee['email'] if 'email' in assignee.keys() else ''),
+            priority='Normal',
+            due_date=due_date
+        )
+        if row_d.get('email'):
+            notify_case_event(
+                case_type='facility',
+                case_reference=row_d.get('roster_reference') or '',
+                event_type='assigned_for_followup',
+                applicant_email=row_d.get('email') or '',
+                applicant_name=row_d.get('full_name') or 'Applicant',
+                status=new_status,
+                tracking_link='https://cwakuwait.com/nurses/login'
+            )
         return {'success': True}
     except Exception as e:
         db.rollback()
@@ -6017,6 +6449,20 @@ def api_admin_facility_note(data, user):
             return {'success': False, 'error': 'Roster entry not found'}
         _facility_insert_action(db, roster_id, user.get('user'), 'nurse_visible_message' if visible else 'internal_note', '', '', note, visible)
         db.commit()
+        if visible:
+            roster_row = db.execute("SELECT full_name, email, roster_reference, current_status FROM facility_roster WHERE id = ?", [roster_id]).fetchone()
+            if roster_row:
+                rr = dict(roster_row)
+                notify_case_event(
+                    case_type='facility',
+                    case_reference=rr.get('roster_reference') or '',
+                    event_type='applicant_note_added',
+                    applicant_email=rr.get('email') or '',
+                    applicant_name=rr.get('full_name') or 'Applicant',
+                    status=rr.get('current_status') or 'Under Review',
+                    public_note=note,
+                    tracking_link='https://cwakuwait.com/nurses/login'
+                )
         return {'success': True}
     except Exception as e:
         db.rollback()
@@ -16932,6 +17378,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user.get('role') not in ('admin', 'operator', 'operator_special', 'welfare'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_notification_counts(user))
+        elif path == '/api/admin/notifications':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_notifications(params, user))
         elif path == '/api/admin/welfare-users':
             user = self.require_auth()
             if not user: return
@@ -19577,7 +20027,7 @@ function printBoth(){{
                 self.send_json({'success': False, 'error': 'Invalid status'}, 400); return
             db = get_db()
             try:
-                row = db.execute("SELECT id, reference_id, passport_number, registration_status FROM nurse_registrations WHERE id = ?", [rec_id]).fetchone()
+                row = db.execute("SELECT id, reference_id, passport_number, registration_status, full_name, email FROM nurse_registrations WHERE id = ?", [rec_id]).fetchone()
                 if not row:
                     self.send_json({'success': False, 'error': 'Record not found'}, 404); return
                 updates = ["registration_status = ?", "updated_at = CURRENT_TIMESTAMP", "updated_by = ?"]
@@ -19594,6 +20044,17 @@ function printBoth(){{
                     'visible_to_nurse': visible_to_nurse
                 })
                 db.commit()
+                if row['email']:
+                    notify_case_event(
+                        case_type='nurse_registration',
+                        case_reference=row['reference_id'],
+                        event_type='more_information_requested' if status == 'Needs More Information' else ('resolved' if status == 'Approved' else 'status_updated'),
+                        applicant_email=row['email'],
+                        applicant_name=row['full_name'] or 'Applicant',
+                        status=status,
+                        public_note=note if visible_to_nurse else '',
+                        tracking_link='https://cwakuwait.com/nurses/login'
+                    )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -19614,7 +20075,7 @@ function printBoth(){{
                 self.send_json({'success': False, 'error': 'Record id and note are required'}, 400); return
             db = get_db()
             try:
-                row = db.execute("SELECT id, reference_id, passport_number FROM nurse_registrations WHERE id = ?", [rec_id]).fetchone()
+                row = db.execute("SELECT id, reference_id, passport_number, full_name, email, registration_status FROM nurse_registrations WHERE id = ?", [rec_id]).fetchone()
                 if not row:
                     self.send_json({'success': False, 'error': 'Record not found'}, 404); return
                 if visible_to_nurse:
@@ -19630,6 +20091,17 @@ function printBoth(){{
                     'visible_to_nurse': visible_to_nurse
                 })
                 db.commit()
+                if visible_to_nurse and row['email']:
+                    notify_case_event(
+                        case_type='nurse_registration',
+                        case_reference=row['reference_id'],
+                        event_type='applicant_note_added',
+                        applicant_email=row['email'],
+                        applicant_name=row['full_name'] or 'Applicant',
+                        status=row['registration_status'] or 'Under Review',
+                        public_note=note,
+                        tracking_link='https://cwakuwait.com/nurses/login'
+                    )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -19747,6 +20219,26 @@ function printBoth(){{
                     _enqueue_email_job({'type': 'nurse_request_updated', 'to': nurse.get('email'), 'complaint_id': complaint_id, 'name': nurse.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
                 if assignee_user and assignee_user.get('email') and _is_valid_email_loose(assignee_user.get('email')):
                     _enqueue_email_job({'type': 'nurse_request_assigned', 'to': assignee_user.get('email'), 'complaint_id': complaint_id, 'name': assignee_user.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
+                notify_case_event(
+                    case_type='nurse',
+                    case_reference=complaint_id,
+                    event_type='case_assigned_to_staff',
+                    applicant_name=(comp.get('nurse_full_name') or 'Applicant'),
+                    staff_username=assignee_username,
+                    staff_email=(assignee_user.get('email') if assignee_user else ''),
+                    status=new_status,
+                    priority=(comp.get('priority') or 'Normal')
+                )
+                if nurse and nurse.get('email'):
+                    notify_case_event(
+                        case_type='nurse',
+                        case_reference=complaint_id,
+                        event_type='assigned_for_followup',
+                        applicant_email=nurse.get('email') or '',
+                        applicant_name=nurse.get('full_name') or 'Applicant',
+                        status=new_status,
+                        tracking_link='https://cwakuwait.com/nurses/login'
+                    )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -19789,6 +20281,17 @@ function printBoth(){{
                 db.commit()
                 if nurse and nurse.get('email') and _is_valid_email_loose(nurse.get('email')) and new_status in ('Awaiting Nurse Response', 'Resolved', 'Closed', 'Reopened'):
                     _enqueue_email_job({'type': 'nurse_request_updated', 'to': nurse.get('email'), 'complaint_id': complaint_id, 'name': nurse.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
+                if nurse and nurse.get('email'):
+                    notify_case_event(
+                        case_type='nurse',
+                        case_reference=complaint_id,
+                        event_type='more_information_requested' if new_status == 'Awaiting Nurse Response' else ('resolved' if new_status == 'Resolved' else ('closed' if new_status == 'Closed' else 'status_updated')),
+                        applicant_email=nurse.get('email') or '',
+                        applicant_name=nurse.get('full_name') or 'Applicant',
+                        status=new_status,
+                        public_note=note,
+                        tracking_link='https://cwakuwait.com/nurses/login'
+                    )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -19822,6 +20325,20 @@ function printBoth(){{
                 _add_nurse_complaint_action(db, complaint_id, 'Public Reply' if note_type == 'public' else 'Internal Note',
                                             user['user'], user['role'], note=note, visible_to_nurse=1 if note_type == 'public' else 0)
                 db.commit()
+                if note_type == 'public':
+                    nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
+                                       [comp.get('nurse_reference_id', '')]).fetchone()
+                    if nurse and nurse.get('email'):
+                        notify_case_event(
+                            case_type='nurse',
+                            case_reference=complaint_id,
+                            event_type='applicant_note_added',
+                            applicant_email=nurse.get('email') or '',
+                            applicant_name=nurse.get('full_name') or 'Applicant',
+                            status=comp.get('status') or comp.get('complaint_status') or 'Under Review',
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/nurses/login'
+                        )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -19858,6 +20375,17 @@ function printBoth(){{
                 db.commit()
                 if nurse and nurse.get('email') and _is_valid_email_loose(nurse.get('email')):
                     _enqueue_email_job({'type': 'nurse_request_resolved', 'to': nurse.get('email'), 'complaint_id': complaint_id, 'name': nurse.get('full_name',''), 'status': 'Resolved', 'changed_by': user['user']})
+                if nurse and nurse.get('email'):
+                    notify_case_event(
+                        case_type='nurse',
+                        case_reference=complaint_id,
+                        event_type='resolved',
+                        applicant_email=nurse.get('email') or '',
+                        applicant_name=nurse.get('full_name') or 'Applicant',
+                        status='Resolved',
+                        public_note=resolution_note,
+                        tracking_link='https://cwakuwait.com/nurses/login'
+                    )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -19887,6 +20415,19 @@ function printBoth(){{
                 _add_nurse_complaint_action(db, complaint_id, 'Closed', user['user'], user['role'],
                                             note=note, old_status=old_status, new_status='Closed', visible_to_nurse=1)
                 db.commit()
+                nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
+                                   [comp.get('nurse_reference_id', '')]).fetchone()
+                if nurse and nurse.get('email'):
+                    notify_case_event(
+                        case_type='nurse',
+                        case_reference=complaint_id,
+                        event_type='closed',
+                        applicant_email=nurse.get('email') or '',
+                        applicant_name=nurse.get('full_name') or 'Applicant',
+                        status='Closed',
+                        public_note=note,
+                        tracking_link='https://cwakuwait.com/nurses/login'
+                    )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -20051,6 +20592,75 @@ function printBoth(){{
                                            note=note, old_status=old_status, new_status='Closed',
                                            visible_to_applicant=1)
                 db.commit()
+                if path in ('/api/admin/legal-cases/assign', '/api/legal-cases/assign'):
+                    notify_case_event(
+                        case_type='legal',
+                        case_reference=ref,
+                        event_type='case_assigned_to_staff',
+                        applicant_name=rec.get('full_name') or 'Applicant',
+                        staff_username=(data.get('assigned_to_username') or '').strip(),
+                        status='Assigned',
+                        priority=rec.get('priority') or 'Normal'
+                    )
+                    if rec.get('email'):
+                        notify_case_event(
+                            case_type='legal',
+                            case_reference=ref,
+                            event_type='assigned_for_followup',
+                            applicant_email=rec.get('email') or '',
+                            applicant_name=rec.get('full_name') or 'Applicant',
+                            status='Assigned',
+                            tracking_link='https://cwakuwait.com/legal-cases/track'
+                        )
+                elif path in ('/api/admin/legal-cases/status', '/api/legal-cases/status'):
+                    ev = 'more_information_requested' if new_status == 'Awaiting Applicant Response' else ('resolved' if new_status == 'Resolved' else ('closed' if new_status == 'Closed' else 'status_updated'))
+                    if rec.get('email'):
+                        notify_case_event(
+                            case_type='legal',
+                            case_reference=ref,
+                            event_type=ev,
+                            applicant_email=rec.get('email') or '',
+                            applicant_name=rec.get('full_name') or 'Applicant',
+                            status=new_status,
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/legal-cases/track'
+                        )
+                elif path in ('/api/admin/legal-cases/note', '/api/legal-cases/note'):
+                    if note_type == 'public' and rec.get('email'):
+                        notify_case_event(
+                            case_type='legal',
+                            case_reference=ref,
+                            event_type='applicant_note_added',
+                            applicant_email=rec.get('email') or '',
+                            applicant_name=rec.get('full_name') or 'Applicant',
+                            status=rec.get('status') or 'Under Review',
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/legal-cases/track'
+                        )
+                elif path == '/api/admin/legal-cases/resolve':
+                    if rec.get('email'):
+                        notify_case_event(
+                            case_type='legal',
+                            case_reference=ref,
+                            event_type='resolved',
+                            applicant_email=rec.get('email') or '',
+                            applicant_name=rec.get('full_name') or 'Applicant',
+                            status='Resolved',
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/legal-cases/track'
+                        )
+                elif path == '/api/admin/legal-cases/close':
+                    if rec.get('email'):
+                        notify_case_event(
+                            case_type='legal',
+                            case_reference=ref,
+                            event_type='closed',
+                            applicant_email=rec.get('email') or '',
+                            applicant_name=rec.get('full_name') or 'Applicant',
+                            status='Closed',
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/legal-cases/track'
+                        )
                 self.send_json({'ok': True, 'success': True})
             finally:
                 db.close()
@@ -20192,6 +20802,77 @@ function printBoth(){{
                                            note=note, old_status=old_status, new_status='Closed',
                                            visible_to_reporter=1)
                 db.commit()
+                applicant_email = (rec.get('reporter_email') or rec.get('next_of_kin_email') or '').strip()
+                applicant_name = rec.get('reporter_name') or rec.get('next_of_kin_name') or 'Family Representative'
+                if path in ('/api/admin/death-cases/assign', '/api/death-cases/assign'):
+                    notify_case_event(
+                        case_type='death',
+                        case_reference=ref,
+                        event_type='case_assigned_to_staff',
+                        applicant_name=applicant_name,
+                        staff_username=(data.get('assigned_to_username') or '').strip(),
+                        status='Assigned',
+                        priority=rec.get('priority') or 'Normal'
+                    )
+                    if applicant_email:
+                        notify_case_event(
+                            case_type='death',
+                            case_reference=ref,
+                            event_type='assigned_for_followup',
+                            applicant_email=applicant_email,
+                            applicant_name=applicant_name,
+                            status='Assigned',
+                            tracking_link='https://cwakuwait.com/death-cases/track'
+                        )
+                elif path in ('/api/admin/death-cases/status', '/api/death-cases/status'):
+                    ev = 'more_information_requested' if new_status == 'Awaiting Family Response' else ('resolved' if new_status == 'Resolved' else ('closed' if new_status == 'Closed' else 'status_updated'))
+                    if applicant_email:
+                        notify_case_event(
+                            case_type='death',
+                            case_reference=ref,
+                            event_type=ev,
+                            applicant_email=applicant_email,
+                            applicant_name=applicant_name,
+                            status=new_status,
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/death-cases/track'
+                        )
+                elif path in ('/api/admin/death-cases/note', '/api/death-cases/note'):
+                    if note_type == 'public' and applicant_email:
+                        notify_case_event(
+                            case_type='death',
+                            case_reference=ref,
+                            event_type='applicant_note_added',
+                            applicant_email=applicant_email,
+                            applicant_name=applicant_name,
+                            status=rec.get('status') or 'Under Review',
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/death-cases/track'
+                        )
+                elif path == '/api/admin/death-cases/resolve':
+                    if applicant_email:
+                        notify_case_event(
+                            case_type='death',
+                            case_reference=ref,
+                            event_type='resolved',
+                            applicant_email=applicant_email,
+                            applicant_name=applicant_name,
+                            status='Resolved',
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/death-cases/track'
+                        )
+                elif path == '/api/admin/death-cases/close':
+                    if applicant_email:
+                        notify_case_event(
+                            case_type='death',
+                            case_reference=ref,
+                            event_type='closed',
+                            applicant_email=applicant_email,
+                            applicant_name=applicant_name,
+                            status='Closed',
+                            public_note=note,
+                            tracking_link='https://cwakuwait.com/death-cases/track'
+                        )
                 self.send_json({'ok': True, 'success': True})
             finally:
                 db.close()
