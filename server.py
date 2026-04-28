@@ -3764,10 +3764,13 @@ def _nurse_registration_facility_portal_dict(rec):
     professional_category = _nurse_professional_category(rec.get('professional_category'), rec.get('designation') or rec.get('job_title_moh') or '')
     if professional_category == 'Doctor' or professional_category not in NURSE_VENDOR_ELIGIBLE_CATEGORIES:
         return None
-    if current_arrangement != 'Embassy Contracted / Arranged':
+    if not current_arrangement:
         return None
     vendor_name = (rec.get('vendor_name') or '').strip()
+    if current_arrangement == 'Embassy Contracted / Arranged' and not vendor_name:
+        vendor_name = FACILITY_VENDOR_DEFAULT
     approved_vendor_label = f'Approved Vendor: {vendor_name}' if vendor_name else 'Approved Vendor: To be confirmed'
+    stay_reminders_opt_in = (rec.get('stay_reminders_opt_in') or rec.get('receive_notice_reminders') or '').strip()
     return {
         'id': None,
         'roster_reference': '',
@@ -3788,6 +3791,8 @@ def _nurse_registration_facility_portal_dict(rec):
         'last_confirmed_at': '',
         'notice_flag': '',
         'approved_service_provider': bool(vendor_name),
+        'stay_reminders_opt_in': stay_reminders_opt_in,
+        'receive_notice_reminders': stay_reminders_opt_in,
         'remarks': rec.get('remarks') or '',
     }
 
@@ -4288,6 +4293,8 @@ def api_nurse_register(data):
     if professional_category == 'Doctor':
         current_arrangement = ''
     eligible_vendor_category = professional_category in NURSE_VENDOR_ELIGIBLE_CATEGORIES
+    if eligible_vendor_category and not current_arrangement:
+        return {'success': False, 'ok': False, 'error': 'Current Stay Arrangement is required for Nurse / Other Health Worker.'}
     embassy_arranged = eligible_vendor_category and current_arrangement == 'Embassy Contracted / Arranged'
     vendor_name = ''
     facility_name = ''
@@ -4303,7 +4310,7 @@ def api_nurse_register(data):
         facility_area = (data.get('facility_area') or data.get('area') or '').strip()
         date_shifted_to_facility = (data.get('date_shifted_to_facility') or '').strip()
         contract_start_date = (data.get('contract_start_date') or data.get('stay_period_start_date') or '').strip()
-        stay_reminders_opt_in = (data.get('stay_reminders_opt_in') or '').strip()
+        stay_reminders_opt_in = (data.get('stay_reminders_opt_in') or data.get('receive_notice_reminders') or '').strip() or 'Yes'
     email = _nurse_normalize_email(data.get('email') or '')
     password = data.get('password') or ''
     confirm_password = data.get('confirm_password') or ''
@@ -4923,6 +4930,8 @@ def _nurse_registration_public_dict(row):
     d['roster_reference'] = d.get('roster_reference') or ''
     d['date_shifted_to_facility'] = d.get('linked_date_shifted_to_facility') or d.get('date_shifted_to_facility') or ''
     d['contract_start_date'] = d.get('linked_contract_start_date') or d.get('contract_start_date') or ''
+    d['stay_period_start_date'] = d.get('contract_start_date') or ''
+    d['receive_notice_reminders'] = d.get('stay_reminders_opt_in') or d.get('receive_notice_reminders') or ''
     d['contract_end_date'] = d.get('linked_contract_end_date') or d.get('contract_end_date') or ''
     d['notice_period_start_date'] = d.get('linked_notice_period_start_date') or d.get('notice_period_start_date') or ''
     d['confirmation_status'] = d.get('confirmation_status') or ''

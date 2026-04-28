@@ -80,6 +80,9 @@ export function NursesRegisterPage() {
   });
   const isVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(form.professionalCategory || "");
   const isEmbassyArranged = form.currentArrangement === "Embassy Contracted / Arranged";
+  const showAreaField =
+    isVendorEligible &&
+    ["Embassy Contracted / Arranged", "Private (Self Arranged)", "MOH Arranged"].includes(form.currentArrangement || "");
   const showStayArrangementWorkflow = isVendorEligible;
   const showVendorSelection = isVendorEligible && isEmbassyArranged;
 
@@ -295,7 +298,7 @@ export function NursesRegisterPage() {
                               facilityArea: "",
                               dateShiftedToFacility: "",
                               contractStartDate: "",
-                              stayRemindersOptIn: "",
+                              stayRemindersOptIn: "Yes",
                             }),
                       }));
                     }}
@@ -326,11 +329,11 @@ export function NursesRegisterPage() {
               {step === 3 && (
                 <div className="fade-in">
                   <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
-                    Welfare & Current Arrangement
+                    Welfare & Current Stay Arrangement
                   </h3>
                   {showStayArrangementWorkflow ? (
                     <FSelect
-                      label="Current Arrangement"
+                      label="Current Stay Arrangement"
                       req
                       value={form.currentArrangement || ""}
                       onChange={(e) => {
@@ -343,10 +346,9 @@ export function NursesRegisterPage() {
                             : {
                                 vendorName: "",
                                 facilityName: "",
-                                facilityArea: "",
                                 dateShiftedToFacility: "",
                                 contractStartDate: "",
-                                stayRemindersOptIn: "",
+                                stayRemindersOptIn: "Yes",
                               }),
                         }));
                       }}
@@ -365,7 +367,7 @@ export function NursesRegisterPage() {
                       }}
                     >
                       <h4 style={{ fontSize: 13, color: T.navy, fontWeight: 800, marginBottom: 12 }}>
-                        Embassy-arranged facility details (if available)
+                        Current Stay Arrangement Details
                       </h4>
                       <Grid cols={2} gap={14}>
                         <FSelect
@@ -375,17 +377,19 @@ export function NursesRegisterPage() {
                           options={APPROVED_VENDOR_OPTIONS}
                         />
                         <FInput label="Facility / Building Name" {...inp("facilityName")} placeholder="Building or facility name" />
-                        <FInput label="Area" {...inp("facilityArea")} placeholder="Area in Kuwait" />
                         <FInput label="Date shifted to facility" {...inp("dateShiftedToFacility")} type="date" />
-                        <FInput label="Contract / stay period start date if available" {...inp("contractStartDate")} type="date" />
+                        <FInput label="Contract / stay period start date" {...inp("contractStartDate")} type="date" />
                         <FSelect
                           label="Receive reminders about leaving notice timelines?"
-                          {...inp("stayRemindersOptIn")}
-                          placeholder="Select"
+                          value={form.stayRemindersOptIn || "Yes"}
+                          onChange={(e) => set("stayRemindersOptIn", e.target.value)}
                           options={["Yes", "No"]}
                         />
                       </Grid>
                     </div>
+                  ) : null}
+                  {showAreaField ? (
+                    <FInput label="Area" {...inp("facilityArea")} placeholder="Area in Kuwait" />
                   ) : null}
                   <FInput
                     label="Emergency Contact Number"
@@ -515,6 +519,10 @@ export function NursesRegisterPage() {
                         }
                         const professionalCategory = form.professionalCategory || "";
                         const categoryVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory);
+                        if (categoryVendorEligible && !(form.currentArrangement || "").trim()) {
+                          setSubmitError("Current Stay Arrangement is required for Nurse / Other Health Worker.");
+                          return;
+                        }
                         const arrangement = categoryVendorEligible ? form.currentArrangement || "" : "";
                         const arrangementFlag = categoryVendorEligible && /embassy/i.test(arrangement) ? "Yes" : "No";
                         const includeFacilityWorkflow = categoryVendorEligible && arrangement === "Embassy Contracted / Arranged";
@@ -538,20 +546,19 @@ export function NursesRegisterPage() {
                             hospital: form.hospital,
                             designation: form.jobTitle,
                             professional_category: professionalCategory,
+                            current_arrangement: arrangement,
                             degree_type: form.dept || "",
                             remarks: form.remarks || "",
                             ["current_" + "accom" + "modation"]: arrangement,
                             ["applying_for_" + "accom" + "modation"]: arrangementFlag,
-                            ...(includeFacilityWorkflow
-                              ? {
-                                  vendor_name: form.vendorName || "AJA Care",
-                                  facility_name: form.facilityName || "",
-                                  facility_area: form.facilityArea || "",
-                                  date_shifted_to_facility: form.dateShiftedToFacility || "",
-                                  contract_start_date: form.contractStartDate || "",
-                                  stay_reminders_opt_in: form.stayRemindersOptIn || "",
-                                }
-                              : {}),
+                            vendor_name: includeFacilityWorkflow ? (form.vendorName || "AJA Care") : "",
+                            facility_name: includeFacilityWorkflow ? (form.facilityName || "") : "",
+                            facility_area: categoryVendorEligible ? (form.facilityArea || "") : "",
+                            date_shifted_to_facility: includeFacilityWorkflow ? (form.dateShiftedToFacility || "") : "",
+                            contract_start_date: includeFacilityWorkflow ? (form.contractStartDate || "") : "",
+                            stay_period_start_date: includeFacilityWorkflow ? (form.contractStartDate || "") : "",
+                            stay_reminders_opt_in: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
+                            receive_notice_reminders: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
                             issue_notice: "",
                             password: form.password,
                             confirm_password: form.confirmPassword,

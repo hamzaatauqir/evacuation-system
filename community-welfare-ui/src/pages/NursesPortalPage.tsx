@@ -54,8 +54,11 @@ export function NursesPortalPage() {
     return null;
   }
 
+  const isDoctor = (ctx.professionalCategory || "").toLowerCase() === "doctor";
   const tab = params.get("tab") || "overview";
-  const tabs = ["overview", "stay", "complaint", "leaving", "requests", "password"];
+  const tabs = isDoctor
+    ? ["overview", "complaint", "requests", "password"]
+    : ["overview", "stay", "complaint", "leaving", "requests", "password"];
   const activeTab = tabs.includes(tab) ? tab : "overview";
 
   const statusType = (ctx.registrationStatus || "").toLowerCase().includes("resolved")
@@ -63,10 +66,13 @@ export function NursesPortalPage() {
     : (ctx.registrationStatus || "").toLowerCase().includes("progress")
     ? "processing"
     : "pending";
-  const isDoctor = (ctx.professionalCategory || "").toLowerCase() === "doctor";
   const vendorName = ctx.facilityRoster?.vendor_name?.trim() || "";
   const approvedVendorLabel = ctx.facilityRoster?.approved_vendor_label || (vendorName ? `Approved Vendor: ${vendorName}` : "Approved Vendor: To be confirmed");
-  const hasEmbassyArrangement = !isDoctor && !!ctx.facilityRoster && (ctx.facilityRoster.current_arrangement || "Embassy Contracted / Arranged") === "Embassy Contracted / Arranged";
+  const currentArrangement = (ctx.facilityRoster?.current_arrangement || "").trim();
+  const hasEmbassyArrangement = !isDoctor && currentArrangement === "Embassy Contracted / Arranged";
+  const showStaySummary = !isDoctor && !!currentArrangement;
+  const stayArea = ctx.facilityRoster?.facility_area || ctx.facilityRoster?.area || "";
+  const stayReminderPref = (ctx.facilityRoster as any)?.receive_notice_reminders || (ctx.facilityRoster as any)?.stay_reminders_opt_in || "";
   const stayArrangementText = `Your current stay arrangement is recorded as Embassy Contracted / Arranged with ${approvedVendorLabel}.`;
 
   async function submitFacilityRequest() {
@@ -239,10 +245,16 @@ export function NursesPortalPage() {
                   <Field label="Civil ID (if any)" value={ctx.civilIdMasked || "—"} />
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
-                  <Field label="Current Stay Arrangement" value={ctx.facilityRoster?.current_status || "Not linked to a facility record"} />
-                  {hasEmbassyArrangement ? <Field label="Approved Vendor" value={approvedVendorLabel.replace("Approved Vendor: ", "")} /> : null}
-                  <Field label="Facility" value={ctx.facilityRoster?.facility_name || "—"} />
-                  <Field label="Area" value={ctx.facilityRoster?.facility_area || ctx.facilityRoster?.area || "—"} />
+                  {showStaySummary ? <Field label="Current Stay Arrangement" value={currentArrangement} /> : null}
+                  {hasEmbassyArrangement ? <Field label="Approved Vendor / Service Provider" value={approvedVendorLabel.replace("Approved Vendor: ", "")} /> : null}
+                  {hasEmbassyArrangement ? <Field label="Facility / Building" value={ctx.facilityRoster?.facility_name || "—"} /> : null}
+                  {showStaySummary && stayArea ? <Field label="Area" value={stayArea} /> : null}
+                  {hasEmbassyArrangement && ctx.facilityRoster?.date_shifted_to_facility ? (
+                    <Field label="Date shifted to facility" value={ctx.facilityRoster.date_shifted_to_facility} />
+                  ) : null}
+                  {hasEmbassyArrangement && stayReminderPref ? (
+                    <Field label="Notice reminders" value={stayReminderPref} />
+                  ) : null}
                 </div>
               </div>
               <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16 }}>
