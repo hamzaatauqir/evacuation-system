@@ -1330,10 +1330,6 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         sent_at TIMESTAMP
     );
-    CREATE INDEX IF NOT EXISTS idx_notification_log_reference ON notification_log(recipient_reference);
-    CREATE INDEX IF NOT EXISTS idx_notification_log_type ON notification_log(message_type);
-    CREATE INDEX IF NOT EXISTS idx_notification_log_case_reference ON notification_log(case_reference);
-    CREATE INDEX IF NOT EXISTS idx_notification_log_event_type ON notification_log(event_type);
     CREATE TABLE IF NOT EXISTS alternative_facilities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         vendor_name TEXT DEFAULT '',
@@ -1375,6 +1371,28 @@ def init_db():
                 print(f"[init_db] notification_log migration skipped for {col}: {migration_err}", flush=True)
     except Exception as pragma_err:
         print(f"[init_db] notification_log schema check warning: {pragma_err}", flush=True)
+    try:
+        notification_cols = set()
+        for col_row in db.execute("PRAGMA table_info(notification_log)").fetchall():
+            col_name = (col_row['name'] if isinstance(col_row, sqlite3.Row) else col_row[1]) or ''
+            notification_cols.add(str(col_name))
+        for col_name, idx_sql in [
+            ('recipient_reference', "CREATE INDEX IF NOT EXISTS idx_notification_log_reference ON notification_log(recipient_reference)"),
+            ('message_type', "CREATE INDEX IF NOT EXISTS idx_notification_log_type ON notification_log(message_type)"),
+            ('case_reference', "CREATE INDEX IF NOT EXISTS idx_notification_log_case_reference ON notification_log(case_reference)"),
+            ('event_type', "CREATE INDEX IF NOT EXISTS idx_notification_log_event_type ON notification_log(event_type)"),
+            ('case_type', "CREATE INDEX IF NOT EXISTS idx_notification_log_case_type ON notification_log(case_type)"),
+            ('recipient_user_id', "CREATE INDEX IF NOT EXISTS idx_notification_log_recipient_user_id ON notification_log(recipient_user_id)"),
+        ]:
+            if col_name not in notification_cols:
+                continue
+            try:
+                db.execute(idx_sql)
+                db.commit()
+            except Exception as idx_err:
+                print(f"[init_db] notification_log index skipped for {col_name}: {idx_err}", flush=True)
+    except Exception as idx_outer_err:
+        print(f"[init_db] notification_log index preparation warning: {idx_outer_err}", flush=True)
     for col, coltype in [
         ('vendor_name', "TEXT DEFAULT ''"),
         ('facility_name', "TEXT DEFAULT ''"),
