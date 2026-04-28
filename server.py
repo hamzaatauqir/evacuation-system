@@ -1355,17 +1355,26 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_alternative_facilities_active ON alternative_facilities(active);
     CREATE INDEX IF NOT EXISTS idx_alternative_facilities_vendor ON alternative_facilities(vendor_name);
     """)
-    for col, coltype in [
-        ('case_type', "TEXT DEFAULT ''"),
-        ('case_reference', "TEXT DEFAULT ''"),
-        ('recipient_user_id', "TEXT DEFAULT ''"),
-        ('event_type', "TEXT DEFAULT ''"),
-    ]:
-        try:
-            db.execute(f"ALTER TABLE notification_log ADD COLUMN {col} {coltype}")
-            db.commit()
-        except sqlite3.OperationalError:
-            pass
+    try:
+        existing_notification_cols = set()
+        for col_row in db.execute("PRAGMA table_info(notification_log)").fetchall():
+            col_name = (col_row['name'] if isinstance(col_row, sqlite3.Row) else col_row[1]) or ''
+            existing_notification_cols.add(str(col_name))
+        for col, coltype in [
+            ('case_type', "TEXT DEFAULT ''"),
+            ('case_reference', "TEXT DEFAULT ''"),
+            ('recipient_user_id', "TEXT DEFAULT ''"),
+            ('event_type', "TEXT DEFAULT ''"),
+        ]:
+            if col in existing_notification_cols:
+                continue
+            try:
+                db.execute(f"ALTER TABLE notification_log ADD COLUMN {col} {coltype}")
+                db.commit()
+            except Exception as migration_err:
+                print(f"[init_db] notification_log migration skipped for {col}: {migration_err}", flush=True)
+    except Exception as pragma_err:
+        print(f"[init_db] notification_log schema check warning: {pragma_err}", flush=True)
     for col, coltype in [
         ('vendor_name', "TEXT DEFAULT ''"),
         ('facility_name', "TEXT DEFAULT ''"),
@@ -4020,34 +4029,37 @@ def send_notification_email(to_email, subject, body_text, body_html=None):
 def _insert_notification_log(case_type, case_reference, recipient_type, recipient_name, recipient_email,
                              recipient_user_id, channel, event_type, subject, message_body,
                              status, error=''):
-    db = get_db()
     try:
-        db.execute(
-            """INSERT INTO notification_log
-               (case_type, case_reference, recipient_type, recipient_name, recipient_email, recipient_user_id,
-                recipient_reference, channel, event_type, message_type, subject, message_body, status, error, sent_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)""",
-            [
-                case_type or '',
-                case_reference or '',
-                recipient_type or '',
-                recipient_name or '',
-                recipient_email or '',
-                recipient_user_id or '',
-                case_reference or '',
-                channel or 'email',
-                event_type or '',
-                event_type or '',
-                subject or '',
-                message_body or '',
-                status or '',
-                error or '',
-                status or '',
-            ]
-        )
-        db.commit()
-    finally:
-        db.close()
+        db = get_db()
+        try:
+            db.execute(
+                """INSERT INTO notification_log
+                   (case_type, case_reference, recipient_type, recipient_name, recipient_email, recipient_user_id,
+                    recipient_reference, channel, event_type, message_type, subject, message_body, status, error, sent_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)""",
+                [
+                    case_type or '',
+                    case_reference or '',
+                    recipient_type or '',
+                    recipient_name or '',
+                    recipient_email or '',
+                    recipient_user_id or '',
+                    case_reference or '',
+                    channel or 'email',
+                    event_type or '',
+                    event_type or '',
+                    subject or '',
+                    message_body or '',
+                    status or '',
+                    error or '',
+                    status or '',
+                ]
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
+        print(f"[NotificationLog] write skipped: {exc}", flush=True)
 
 
 def _safe_status_label(status):
@@ -4091,118 +4103,122 @@ def _notification_staff_lookup(username):
 def notify_case_event(case_type, case_reference, event_type, applicant_email=None, applicant_name=None,
                       staff_username=None, staff_email=None, status=None, public_note=None,
                       priority=None, due_date=None, tracking_link=None, admin_link=None):
-    case_type = (case_type or '').strip()
-    case_reference = (case_reference or '').strip()
-    event_type = (event_type or '').strip()
-    applicant_name = (applicant_name or 'Applicant').strip()
-    status = _safe_status_label(status)
-    tracking_link = _tracking_link_for_case(case_type, tracking_link or '')
-    admin_link = _staff_admin_link(admin_link or '')
-    public_note = (public_note or '').strip()
-    applicant_events = {
-        'request_received', 'status_updated', 'assigned_for_followup', 'applicant_note_added',
-        'more_information_requested', 'resolved', 'closed', 'stay_confirmation_requested',
-        'leaving_notice_received', 'notice_period_reminder'
-    }
-    staff_events = {'case_assigned_to_staff', 'case_due_soon', 'case_overdue', 'case_escalated', 'new_applicant_reply', 'ambassador_review_required'}
+    try:
+        case_type = (case_type or '').strip()
+        case_reference = (case_reference or '').strip()
+        event_type = (event_type or '').strip()
+        applicant_name = (applicant_name or 'Applicant').strip()
+        status = _safe_status_label(status)
+        tracking_link = _tracking_link_for_case(case_type, tracking_link or '')
+        admin_link = _staff_admin_link(admin_link or '')
+        public_note = (public_note or '').strip()
+        applicant_events = {
+            'request_received', 'status_updated', 'assigned_for_followup', 'applicant_note_added',
+            'more_information_requested', 'resolved', 'closed', 'stay_confirmation_requested',
+            'leaving_notice_received', 'notice_period_reminder'
+        }
+        staff_events = {'case_assigned_to_staff', 'case_due_soon', 'case_overdue', 'case_escalated', 'new_applicant_reply', 'ambassador_review_required'}
 
-    def _applicant_payload():
-        if event_type == 'request_received':
-            subject = f'Community Welfare Wing – Request Received: {case_reference}'
+        def _applicant_payload():
+            if event_type == 'request_received':
+                subject = f'Community Welfare Wing – Request Received: {case_reference}'
+                body = (
+                    f"Dear {applicant_name},\n\n"
+                    f"Your request has been received by the Community Welfare Wing, Embassy of Pakistan, Kuwait.\n\n"
+                    f"Reference Number: {case_reference}\n"
+                    f"Request Type: {case_type or 'Community Welfare'}\n"
+                    f"Current Status: {status}\n\n"
+                    f"Please keep this reference number for follow-up.\n\n"
+                    f"You may track or update your request through the official portal:\n"
+                    f"{tracking_link}\n\n"
+                    f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+                )
+                return subject, body
+            if event_type == 'more_information_requested':
+                subject = f'Community Welfare Wing – Further Information Required: {case_reference}'
+                body = (
+                    f"Dear {applicant_name},\n\n"
+                    f"The Community Welfare Wing requires further information to continue processing your request.\n\n"
+                    f"Reference Number: {case_reference}\n\n"
+                    f"{public_note or 'Please review the portal for the requested information.'}\n\n"
+                    f"Please provide the requested information through the portal or contact the Embassy as instructed.\n\n"
+                    f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+                )
+                return subject, body
+            if event_type in ('resolved', 'closed'):
+                subject = f'Community Welfare Wing – Request Update: {case_reference}'
+                body = (
+                    f"Dear {applicant_name},\n\n"
+                    f"Your request has been updated.\n\n"
+                    f"Reference Number: {case_reference}\n"
+                    f"Status: {status}\n\n"
+                    f"Action / Remarks:\n{public_note or 'Please log in or track your request for details.'}\n\n"
+                    f"If you require further assistance, you may submit a new request through the official portal.\n\n"
+                    f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+                )
+                return subject, body
+            subject = f'Community Welfare Wing – Status Update: {case_reference}'
             body = (
                 f"Dear {applicant_name},\n\n"
-                f"Your request has been received by the Community Welfare Wing, Embassy of Pakistan, Kuwait.\n\n"
+                f"There is an update regarding your request.\n\n"
                 f"Reference Number: {case_reference}\n"
-                f"Request Type: {case_type or 'Community Welfare'}\n"
-                f"Current Status: {status}\n\n"
-                f"Please keep this reference number for follow-up.\n\n"
-                f"You may track or update your request through the official portal:\n"
+                f"Updated Status: {status}\n\n"
+                f"{public_note + chr(10) + chr(10) if public_note else ''}"
+                f"Please log in or track your request through the official portal for further details:\n"
                 f"{tracking_link}\n\n"
                 f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
             )
             return subject, body
-        if event_type == 'more_information_requested':
-            subject = f'Community Welfare Wing – Further Information Required: {case_reference}'
-            body = (
-                f"Dear {applicant_name},\n\n"
-                f"The Community Welfare Wing requires further information to continue processing your request.\n\n"
-                f"Reference Number: {case_reference}\n\n"
-                f"{public_note or 'Please review the portal for the requested information.'}\n\n"
-                f"Please provide the requested information through the portal or contact the Embassy as instructed.\n\n"
-                f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
-            )
-            return subject, body
-        if event_type in ('resolved', 'closed'):
-            subject = f'Community Welfare Wing – Request Update: {case_reference}'
-            body = (
-                f"Dear {applicant_name},\n\n"
-                f"Your request has been updated.\n\n"
-                f"Reference Number: {case_reference}\n"
-                f"Status: {status}\n\n"
-                f"Action / Remarks:\n{public_note or 'Please log in or track your request for details.'}\n\n"
-                f"If you require further assistance, you may submit a new request through the official portal.\n\n"
-                f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
-            )
-            return subject, body
-        subject = f'Community Welfare Wing – Status Update: {case_reference}'
-        body = (
-            f"Dear {applicant_name},\n\n"
-            f"There is an update regarding your request.\n\n"
-            f"Reference Number: {case_reference}\n"
-            f"Updated Status: {status}\n\n"
-            f"{public_note + chr(10) + chr(10) if public_note else ''}"
-            f"Please log in or track your request through the official portal for further details:\n"
-            f"{tracking_link}\n\n"
-            f"Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
-        )
-        return subject, body
 
-    if event_type in applicant_events:
-        to_email = (applicant_email or '').strip()
-        subject, body = _applicant_payload()
-        if not to_email:
-            _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, '', '', 'email', event_type, subject, body, 'skipped_no_email', 'missing_applicant_email')
-        else:
-            send_res = send_notification_email(to_email, subject, body)
-            if send_res.get('ok'):
-                _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, 'sent', '')
+        if event_type in applicant_events:
+            to_email = (applicant_email or '').strip()
+            subject, body = _applicant_payload()
+            if not to_email:
+                _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, '', '', 'email', event_type, subject, body, 'skipped_no_email', 'missing_applicant_email')
             else:
-                reason = send_res.get('reason') or 'send_failed'
-                status_key = 'skipped_smtp_missing' if reason == 'smtp_not_configured' else 'failed'
-                _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, status_key, reason)
+                send_res = send_notification_email(to_email, subject, body)
+                if send_res.get('ok'):
+                    _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, 'sent', '')
+                else:
+                    reason = send_res.get('reason') or 'send_failed'
+                    status_key = 'skipped_smtp_missing' if reason == 'smtp_not_configured' else 'failed'
+                    _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, status_key, reason)
 
-    if event_type in staff_events:
-        staff = _notification_staff_lookup(staff_username) if staff_username else None
-        s_email = (staff_email or '').strip() or ((staff or {}).get('email') or '').strip()
-        s_name = ((staff or {}).get('display_name') or staff_username or 'Officer').strip()
-        s_id = str((staff or {}).get('id') or '')
-        subject = 'Community Welfare Case Assigned: ' + case_reference if event_type == 'case_assigned_to_staff' else f'Community Welfare Case Submitted for Senior Review: {case_reference}'
-        if event_type == 'case_assigned_to_staff':
-            body = (
-                f"Dear {s_name},\n\nA Community Welfare case has been assigned to you for follow-up.\n\n"
-                f"Reference: {case_reference}\nCase Type: {case_type or 'Community Welfare'}\n"
-                f"Priority: {priority or 'Normal'}\nDue Date: {due_date or '—'}\nApplicant/Subject: {applicant_name}\n\n"
-                f"Please log in to the admin portal:\n{admin_link}\n\nRegards,\nCommunity Welfare Wing Portal"
-            )
-        else:
-            body = (
-                f"Dear {s_name},\n\nA case has been submitted for senior review.\n\n"
-                f"Reference: {case_reference}\nCase Type: {case_type or 'Community Welfare'}\n"
-                f"Priority: {priority or 'Normal'}\n\nPlease log in to the admin portal for details.\n\n"
-                f"Regards,\nCommunity Welfare Wing Portal"
-            )
-        if not s_email:
-            _insert_notification_log(case_type, case_reference, 'staff', s_name, '', s_id, 'email', event_type, subject, body, 'skipped_no_email', 'missing_staff_email')
-        else:
-            send_res = send_notification_email(s_email, subject, body)
-            if send_res.get('ok'):
-                _insert_notification_log(case_type, case_reference, 'staff', s_name, s_email, s_id, 'email', event_type, subject, body, 'sent', '')
+        if event_type in staff_events:
+            staff = _notification_staff_lookup(staff_username) if staff_username else None
+            s_email = (staff_email or '').strip() or ((staff or {}).get('email') or '').strip()
+            s_name = ((staff or {}).get('display_name') or staff_username or 'Officer').strip()
+            s_id = str((staff or {}).get('id') or '')
+            subject = 'Community Welfare Case Assigned: ' + case_reference if event_type == 'case_assigned_to_staff' else f'Community Welfare Case Submitted for Senior Review: {case_reference}'
+            if event_type == 'case_assigned_to_staff':
+                body = (
+                    f"Dear {s_name},\n\nA Community Welfare case has been assigned to you for follow-up.\n\n"
+                    f"Reference: {case_reference}\nCase Type: {case_type or 'Community Welfare'}\n"
+                    f"Priority: {priority or 'Normal'}\nDue Date: {due_date or '—'}\nApplicant/Subject: {applicant_name}\n\n"
+                    f"Please log in to the admin portal:\n{admin_link}\n\nRegards,\nCommunity Welfare Wing Portal"
+                )
             else:
-                reason = send_res.get('reason') or 'send_failed'
-                status_key = 'skipped_smtp_missing' if reason == 'smtp_not_configured' else 'failed'
-                _insert_notification_log(case_type, case_reference, 'staff', s_name, s_email, s_id, 'email', event_type, subject, body, status_key, reason)
+                body = (
+                    f"Dear {s_name},\n\nA case has been submitted for senior review.\n\n"
+                    f"Reference: {case_reference}\nCase Type: {case_type or 'Community Welfare'}\n"
+                    f"Priority: {priority or 'Normal'}\n\nPlease log in to the admin portal for details.\n\n"
+                    f"Regards,\nCommunity Welfare Wing Portal"
+                )
+            if not s_email:
+                _insert_notification_log(case_type, case_reference, 'staff', s_name, '', s_id, 'email', event_type, subject, body, 'skipped_no_email', 'missing_staff_email')
+            else:
+                send_res = send_notification_email(s_email, subject, body)
+                if send_res.get('ok'):
+                    _insert_notification_log(case_type, case_reference, 'staff', s_name, s_email, s_id, 'email', event_type, subject, body, 'sent', '')
+                else:
+                    reason = send_res.get('reason') or 'send_failed'
+                    status_key = 'skipped_smtp_missing' if reason == 'smtp_not_configured' else 'failed'
+                    _insert_notification_log(case_type, case_reference, 'staff', s_name, s_email, s_id, 'email', event_type, subject, body, status_key, reason)
 
-    return {'ok': True}
+        return {'ok': True}
+    except Exception as exc:
+        print(f"[notify_case_event] suppressed error: {exc}", flush=True)
+        return {'ok': False, 'reason': 'suppressed_error'}
 
 
 def send_welfare_notification(person, message_type, channel='portal_message'):
@@ -5779,9 +5795,10 @@ def api_admin_welfare_users():
 
 def api_admin_notifications(params, user):
     if (user or {}).get('role') not in ('admin', 'operator', 'operator_special', 'welfare'):
-        return {'success': False, 'error': 'Unauthorized'}
-    db = get_db()
+        return {'success': False, 'notifications': [], 'items': [], 'error': 'Unauthorized'}
+    db = None
     try:
+        db = get_db()
         where = ['1=1']
         vals = []
         for field in ('status', 'event_type', 'case_type'):
@@ -5806,9 +5823,12 @@ def api_admin_notifications(params, user):
                 LIMIT 500""",
             vals
         ).fetchall()]
-        return {'success': True, 'items': rows, 'total': len(rows)}
+        return {'success': True, 'notifications': rows, 'items': rows, 'total': len(rows)}
+    except Exception as exc:
+        return {'success': False, 'notifications': [], 'items': [], 'error': str(exc)}
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def _queue_welfare_assignment_email(db, assignee_row, case_reference):
