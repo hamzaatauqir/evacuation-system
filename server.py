@@ -15609,6 +15609,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._security_headers()
         self.end_headers()
 
+    def send_redirect(self, location, status=302):
+        self.send_response(status)
+        self.send_header('Location', location)
+        self.send_header('Content-Length', '0')
+        self._security_headers()
+        self.end_headers()
+
+    def backend_root_redirect_location(self):
+        user = self.get_user()
+        if not user:
+            return 'https://cwakuwait.com'
+        role = user.get('role') or ''
+        if role == 'fee_collector':
+            return '/fee-collection'
+        if role == 'iraq_cwa':
+            return '/dashboard'
+        return '/admin/dashboard'
+
     def render_template(self, template_name: str):
         template_path = Path(__file__).resolve().parent / 'templates' / template_name
         try:
@@ -15647,7 +15665,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         path = urlparse(self.path).path
-        if path in ('/', '/login'):
+        if path == '/':
+            self.send_redirect(self.backend_root_redirect_location())
+            return
+        if path == '/login':
             self.send_headers_only(200, 'text/html; charset=utf-8', 0)
             return
         if path == '/health':
@@ -15884,8 +15905,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
         elif path == '/':
-            if not self.render_template('cwa_home.html'):
-                self.send_html(PUBLIC_HOME_PAGE)
+            self.send_redirect(self.backend_root_redirect_location())
         elif path == '/transit':
             self.send_html(TRANSIT_GATEWAY_PAGE)
         elif path == '/nurses':
@@ -15925,7 +15945,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/admin/dashboard':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] in ('fee_collector', 'iraq_cwa'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
             self.send_html(app_html)
@@ -19301,7 +19321,8 @@ function printBoth(){{
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Set-Cookie', f'session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400')
-                resp = json.dumps({'success': True, 'user': user['username'], 'role': user['role']}).encode()
+                redirect_url = '/dashboard' if user['role'] in ('fee_collector', 'iraq_cwa') else '/admin/dashboard'
+                resp = json.dumps({'success': True, 'user': user['username'], 'role': user['role'], 'redirect_url': redirect_url}).encode()
                 self.send_header('Content-Length', len(resp))
                 self.end_headers()
                 self.wfile.write(resp)
@@ -22193,7 +22214,7 @@ e.preventDefault();
 const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({username:document.getElementById('username').value,password:document.getElementById('password').value})});
 const d=await r.json();
-if(d.success){window.location='/dashboard'}
+if(d.success){window.location=d.redirect_url||'/admin/dashboard'}
 else{const el=document.getElementById('error');el.textContent=d.error||'Login failed';el.style.display='block'}
 return false}
 </script></body></html>"""
