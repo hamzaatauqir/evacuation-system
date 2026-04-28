@@ -21,6 +21,11 @@ const CURRENT_ARRANGEMENTS = [
   "Other",
 ];
 const APPROVED_VENDOR_OPTIONS = ["AJA Care", "Other / Not Sure"];
+const QUALIFICATION_OPTIONS_BY_CATEGORY: Record<string, string[]> = {
+  Nurse: ["Diploma Nurse", "BSN Nursing", "Other"],
+  Doctor: ["Doctor MBBS", "Doctor BDS", "Other"],
+  "Other Health Worker": ["Diploma Nurse", "BSN Nursing", "Doctor MBBS", "Doctor BDS", "Other"],
+};
 
 interface FormState {
   fullName?: string;
@@ -35,6 +40,8 @@ interface FormState {
   hospital?: string;
   jobTitle?: string;
   professionalCategory?: string;
+  qualificationDegree?: string;
+  qualificationDegreeOther?: string;
   dept?: string;
   empType?: string;
   workPermit?: string;
@@ -85,6 +92,8 @@ export function NursesRegisterPage() {
     ["Embassy Contracted / Arranged", "Private (Self Arranged)", "MOH Arranged"].includes(form.currentArrangement || "");
   const showStayArrangementWorkflow = isVendorEligible;
   const showVendorSelection = isVendorEligible && isEmbassyArranged;
+  const qualificationOptions = QUALIFICATION_OPTIONS_BY_CATEGORY[form.professionalCategory || ""] || [];
+  const showQualificationOther = form.qualificationDegree === "Other";
 
   if (done) {
     return (
@@ -289,6 +298,8 @@ export function NursesRegisterPage() {
                       setForm((prev) => ({
                         ...prev,
                         professionalCategory,
+                        qualificationDegree: "",
+                        qualificationDegreeOther: "",
                         ...(VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory)
                           ? {}
                           : {
@@ -305,6 +316,29 @@ export function NursesRegisterPage() {
                     placeholder="Select category"
                     options={PROFESSIONAL_CATEGORIES}
                   />
+                  <FSelect
+                    label="Qualification / Degree"
+                    req
+                    value={form.qualificationDegree || ""}
+                    onChange={(e) => {
+                      const qualificationDegree = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        qualificationDegree,
+                        qualificationDegreeOther: qualificationDegree === "Other" ? prev.qualificationDegreeOther || "" : "",
+                      }));
+                    }}
+                    placeholder="Select qualification"
+                    options={qualificationOptions}
+                  />
+                  {showQualificationOther ? (
+                    <FInput
+                      label="Other Qualification / Degree"
+                      req
+                      {...inp("qualificationDegreeOther")}
+                      placeholder="Enter qualification / degree"
+                    />
+                  ) : null}
                   <Grid cols={2} gap={14}>
                     <FInput label="Department" {...inp("dept")} placeholder="e.g. Cardiology" />
                     <FSelect
@@ -518,7 +552,17 @@ export function NursesRegisterPage() {
                           return;
                         }
                         const professionalCategory = form.professionalCategory || "";
+                        const qualificationDegree = form.qualificationDegree || "";
+                        const qualificationDegreeOther = (form.qualificationDegreeOther || "").trim();
                         const categoryVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory);
+                        if (!qualificationDegree) {
+                          setSubmitError("Qualification / Degree is required.");
+                          return;
+                        }
+                        if (qualificationDegree === "Other" && !qualificationDegreeOther) {
+                          setSubmitError("Other Qualification / Degree is required when Qualification / Degree is Other.");
+                          return;
+                        }
                         if (categoryVendorEligible && !(form.currentArrangement || "").trim()) {
                           setSubmitError("Current Stay Arrangement is required for Nurse / Other Health Worker.");
                           return;
@@ -546,6 +590,8 @@ export function NursesRegisterPage() {
                             hospital: form.hospital,
                             designation: form.jobTitle,
                             professional_category: professionalCategory,
+                            qualification_degree: qualificationDegree,
+                            qualification_degree_other: qualificationDegree === "Other" ? qualificationDegreeOther : "",
                             current_arrangement: arrangement,
                             degree_type: form.dept || "",
                             remarks: form.remarks || "",

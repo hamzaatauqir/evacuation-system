@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
@@ -15,6 +15,7 @@ export function NursesPortalPage() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [qualificationInfo, setQualificationInfo] = useState({ degree: "", other: "" });
 
   const [facilityReq, setFacilityReq] = useState({
     category: "",
@@ -73,7 +74,35 @@ export function NursesPortalPage() {
   const showStaySummary = !isDoctor && !!currentArrangement;
   const stayArea = ctx.facilityRoster?.facility_area || ctx.facilityRoster?.area || "";
   const stayReminderPref = (ctx.facilityRoster as any)?.receive_notice_reminders || (ctx.facilityRoster as any)?.stay_reminders_opt_in || "";
+  const qualificationDisplay = qualificationInfo.degree === "Other"
+    ? (qualificationInfo.other || "—")
+    : (qualificationInfo.degree || "—");
   const stayArrangementText = `Your current stay arrangement is recorded as Embassy Contracted / Arranged with ${approvedVendorLabel}.`;
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const res = await api.post<{ success?: boolean; data?: { qualification_degree?: string; qualification_degree_other?: string } }>(
+          "/api/nurses/track",
+          {
+            identity: ctx.referenceId || ctx.passportNumber,
+            verifier: ctx.mobile || ctx.civilId || "",
+          }
+        );
+        if (!live || !res?.success) return;
+        setQualificationInfo({
+          degree: (res.data?.qualification_degree || "").toString(),
+          other: (res.data?.qualification_degree_other || "").toString(),
+        });
+      } catch {
+        if (!live) return;
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [ctx.referenceId, ctx.passportNumber, ctx.mobile, ctx.civilId]);
 
   async function submitFacilityRequest() {
     setBusy(true); setErr(""); setMsg("");
@@ -243,6 +272,7 @@ export function NursesPortalPage() {
                   <Field label="Email" value={ctx.email || "-"} />
                   <Field label="Passport" value={ctx.passportMasked || "-"} />
                   <Field label="Civil ID (if any)" value={ctx.civilIdMasked || "—"} />
+                  <Field label="Qualification / Degree" value={qualificationDisplay} />
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
                   {showStaySummary ? <Field label="Current Stay Arrangement" value={currentArrangement} /> : null}

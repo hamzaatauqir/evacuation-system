@@ -697,6 +697,8 @@ def init_db():
         ('hospital_or_medical_center', "TEXT DEFAULT ''"),
         ('current_accommodation', "TEXT DEFAULT ''"),
         ('degree_type', "TEXT DEFAULT ''"),
+        ('qualification_degree', "TEXT DEFAULT ''"),
+        ('qualification_degree_other', "TEXT DEFAULT ''"),
         ('job_title_moh', "TEXT DEFAULT ''"),
         ('moh_offer_salary_kwd', "TEXT DEFAULT ''"),
         ('grading_letter_issued', "TEXT DEFAULT ''"),
@@ -4453,6 +4455,8 @@ def _build_nurse_public_profile_bundle(db, rec):
         'batch_number': rec.get('batch_number', ''),
         'arrival_date': rec.get('arrival_date', ''),
         'hospital': rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
+        'qualification_degree': rec.get('qualification_degree', ''),
+        'qualification_degree_other': rec.get('qualification_degree_other', ''),
         'degree_type': rec.get('degree_type', ''),
         'job_title_moh': rec.get('job_title_moh', '') or rec.get('designation', ''),
         'moh_offer_salary_kwd': rec.get('moh_offer_salary_kwd', ''),
@@ -4537,6 +4541,8 @@ def api_nurse_register(data):
     hospital = (data.get('hospital') or '').strip()
     designation = (data.get('designation') or '').strip()
     professional_category = _nurse_professional_category(data.get('professional_category'), designation)
+    qualification_degree = (data.get('qualification_degree') or '').strip()
+    qualification_degree_other = (data.get('qualification_degree_other') or '').strip()
     current_arrangement = (data.get('current_arrangement') or data.get('current_accommodation') or '').strip()
     if professional_category == 'Doctor':
         current_arrangement = ''
@@ -4564,6 +4570,10 @@ def api_nurse_register(data):
     confirm_password = data.get('confirm_password') or ''
     if not full_name or not passport or not mobile or not cnic or not arrival_date or not batch_number or not hospital or not designation:
         return {'success': False, 'ok': False, 'error': 'Please fill all required fields.'}
+    if not qualification_degree:
+        return {'success': False, 'ok': False, 'error': 'Qualification / Degree is required.'}
+    if qualification_degree == 'Other' and not qualification_degree_other:
+        return {'success': False, 'ok': False, 'error': 'Other Qualification / Degree is required.'}
     if not email or not _is_valid_email_loose(email):
         return {'success': False, 'ok': False, 'error': 'A valid email address is required for your nurse account.'}
     ok_pw, pw_err = _nurse_validate_password_strength(password)
@@ -4600,6 +4610,7 @@ def api_nurse_register(data):
             'reference_id', 'full_name', 'passport_number', 'arrival_date', 'batch_number',
             'cnic', 'civil_id', 'mobile', 'email', 'hospital', 'hospital_or_medical_center',
             'designation', 'job_title_moh', 'professional_category', 'degree_type',
+            'qualification_degree', 'qualification_degree_other',
             'moh_offer_salary_kwd', 'grading_letter_issued', 'accommodation_status',
             'current_accommodation', 'applying_for_accommodation', 'vendor_name',
             'current_hostel', 'facility_area', 'date_shifted_to_facility',
@@ -4611,6 +4622,7 @@ def api_nurse_register(data):
             ref, full_name, passport, arrival_date, batch_number, cnic, civil_id, mobile, email,
             hospital, (data.get('hospital_or_medical_center') or hospital).strip(), designation, designation,
             professional_category, (data.get('degree_type') or '').strip(),
+            qualification_degree, qualification_degree_other if qualification_degree == 'Other' else '',
             (data.get('moh_offer_salary_kwd') or '').strip(), (data.get('grading_letter_issued') or 'No').strip(),
             current_arrangement, current_arrangement, apply_acc, vendor_name, facility_name,
             facility_area, date_shifted_to_facility, contract_start_date, stay_reminders_opt_in,
@@ -5216,6 +5228,8 @@ def _nurse_registration_public_dict(row):
     d['contract_start_date'] = d.get('linked_contract_start_date') or d.get('contract_start_date') or ''
     d['stay_period_start_date'] = d.get('contract_start_date') or ''
     d['receive_notice_reminders'] = d.get('stay_reminders_opt_in') or d.get('receive_notice_reminders') or ''
+    d['qualification_degree'] = d.get('qualification_degree') or ''
+    d['qualification_degree_other'] = d.get('qualification_degree_other') or ''
     d['contract_end_date'] = d.get('linked_contract_end_date') or d.get('contract_end_date') or ''
     d['notice_period_start_date'] = d.get('linked_notice_period_start_date') or d.get('notice_period_start_date') or ''
     d['confirmation_status'] = d.get('confirmation_status') or ''
