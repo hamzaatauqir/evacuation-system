@@ -685,6 +685,12 @@ def init_db():
         ('arrival_date', "TEXT DEFAULT ''"),
         ('batch_number', "TEXT DEFAULT ''"),
         ('cnic', "TEXT DEFAULT ''"),
+        ('professional_category', "TEXT DEFAULT 'Nurse'"),
+        ('vendor_name', "TEXT DEFAULT ''"),
+        ('facility_area', "TEXT DEFAULT ''"),
+        ('date_shifted_to_facility', "TEXT DEFAULT ''"),
+        ('contract_start_date', "TEXT DEFAULT ''"),
+        ('stay_reminders_opt_in', "TEXT DEFAULT ''"),
         ('hospital', "TEXT DEFAULT ''"),
         ('department', "TEXT DEFAULT ''"),
         ('accommodation_status', "TEXT DEFAULT ''"),
@@ -3531,6 +3537,8 @@ def _nurse_send_email_smtp_env(to_addr, subject, body_text):
 
 
 FACILITY_VENDOR_DEFAULT = 'AJA Care'
+NURSE_VENDOR_ELIGIBLE_CATEGORIES = {'Nurse', 'Other Health Worker'}
+NURSE_APPROVED_VENDOR_VALUES = {FACILITY_VENDOR_DEFAULT, 'Other / Not Sure'}
 FACILITY_ROSTER_STATUSES = {
     'Assigned', 'Assigned to Facility', 'Pending Nurse Confirmation',
     'Confirmed Staying', 'Temporarily Away', 'Intends to Leave',
@@ -3553,6 +3561,34 @@ FACILITY_STAFF_ROLES = {
 
 def _row_to_dict(row):
     return dict(row) if row else {}
+
+
+def _nurse_professional_category(value, designation=''):
+    raw = (value or '').strip()
+    key = re.sub(r'[^a-z]+', ' ', raw.lower()).strip()
+    aliases = {
+        'nurse': 'Nurse',
+        'staff nurse': 'Nurse',
+        'registered nurse': 'Nurse',
+        'other health worker': 'Other Health Worker',
+        'health worker': 'Other Health Worker',
+        'allied health worker': 'Other Health Worker',
+        'doctor': 'Doctor',
+        'physician': 'Doctor',
+        'medical officer': 'Doctor',
+    }
+    if key in aliases:
+        return aliases[key]
+    if 'doctor' in key or 'physician' in key or 'medical officer' in key:
+        return 'Doctor'
+    if 'nurse' in key:
+        return 'Nurse'
+    if key:
+        return 'Other Health Worker'
+    designation_key = (designation or '').lower()
+    if any(token in designation_key for token in ('doctor', 'physician', 'medical officer')):
+        return 'Doctor'
+    return 'Nurse'
 
 
 def _parse_iso_date(value):
@@ -3692,13 +3728,19 @@ def _facility_roster_to_dict(row):
 
 
 def _facility_portal_dict(row):
+    raw = _row_to_dict(row)
     d = _facility_roster_to_dict(row)
     if not d:
         return None
+    raw_vendor = (raw.get('vendor_name') or '').strip()
+    approved_vendor_label = f'Approved Vendor: {raw_vendor}' if raw_vendor else 'Approved Vendor: To be confirmed'
     return {
         'id': d.get('id'),
         'roster_reference': d.get('roster_reference', ''),
         'facility_name': d.get('facility_name', ''),
+        'vendor_name': raw_vendor,
+        'approved_vendor_label': approved_vendor_label,
+        'current_arrangement': 'Embassy Contracted / Arranged',
         'area': d.get('area', ''),
         'facility_area': d.get('facility_area', ''),
         'room_number': d.get('room_number', ''),
@@ -3711,8 +3753,42 @@ def _facility_portal_dict(row):
         'confirmation_status': d.get('confirmation_status', ''),
         'last_confirmed_at': d.get('last_confirmed_at', ''),
         'notice_flag': d.get('notice_flag', ''),
-        'approved_service_provider': bool(d.get('vendor_name')),
+        'approved_service_provider': bool(raw_vendor),
         'remarks': d.get('remarks', '')
+    }
+
+
+def _nurse_registration_facility_portal_dict(rec):
+    rec = rec or {}
+    current_arrangement = (rec.get('current_accommodation') or rec.get('current_accommodation_status') or '').strip()
+    professional_category = _nurse_professional_category(rec.get('professional_category'), rec.get('designation') or rec.get('job_title_moh') or '')
+    if professional_category == 'Doctor' or professional_category not in NURSE_VENDOR_ELIGIBLE_CATEGORIES:
+        return None
+    if current_arrangement != 'Embassy Contracted / Arranged':
+        return None
+    vendor_name = (rec.get('vendor_name') or '').strip()
+    approved_vendor_label = f'Approved Vendor: {vendor_name}' if vendor_name else 'Approved Vendor: To be confirmed'
+    return {
+        'id': None,
+        'roster_reference': '',
+        'facility_name': rec.get('current_hostel') or '',
+        'vendor_name': vendor_name,
+        'approved_vendor_label': approved_vendor_label,
+        'current_arrangement': current_arrangement,
+        'area': rec.get('facility_area') or '',
+        'facility_area': rec.get('facility_area') or '',
+        'room_number': rec.get('room_number') or '',
+        'bed_number': '',
+        'date_shifted_to_facility': rec.get('date_shifted_to_facility') or '',
+        'contract_start_date': rec.get('contract_start_date') or '',
+        'contract_end_date': '',
+        'notice_period_start_date': '',
+        'current_status': current_arrangement,
+        'confirmation_status': '',
+        'last_confirmed_at': '',
+        'notice_flag': '',
+        'approved_service_provider': bool(vendor_name),
+        'remarks': rec.get('remarks') or '',
     }
 
 
@@ -3798,6 +3874,7 @@ def _facility_apply_registration_match(db, nurse_id, rec, actor='system'):
                phone = COALESCE(NULLIF(phone,''), ?),
                email = COALESCE(NULLIF(email,''), ?),
                workplace = COALESCE(NULLIF(workplace,''), ?),
+               vendor_name = COALESCE(NULLIF(vendor_name,''), ?),
                current_status = ?,
                confirmation_status = 'Pending Nurse Confirmation',
                date_shifted_to_facility = COALESCE(NULLIF(date_shifted_to_facility,''), ?),
@@ -3813,6 +3890,7 @@ def _facility_apply_registration_match(db, nurse_id, rec, actor='system'):
             rec.get('mobile') or '',
             rec.get('email') or '',
             rec.get('hospital') or rec.get('workplace') or '',
+            rec.get('vendor_name') or '',
             current_status,
             shifted,
             contract_start,
@@ -4071,6 +4149,7 @@ def api_nurse_stay_confirmation(data):
 
 def _build_nurse_public_profile_bundle(db, rec):
     """Build portal-safe JSON for a nurse row (no password fields)."""
+    professional_category = _nurse_professional_category(rec.get('professional_category'), rec.get('designation') or rec.get('job_title_moh') or '')
     acc = db.execute("""SELECT request_status, admin_remarks
                         FROM nurse_accommodation_requests
                         WHERE nurse_reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
@@ -4106,11 +4185,12 @@ def _build_nurse_public_profile_bundle(db, rec):
             'public_response': cd.get('public_response', ''),
             'public_actions': [dict(a) for a in actions]
         })
-    facility_row = _facility_find_linked_roster(db, rec)
-    facility_record = _facility_portal_dict(facility_row) if facility_row else None
+    facility_row = None if professional_category == 'Doctor' else _facility_find_linked_roster(db, rec)
+    facility_record = _facility_portal_dict(facility_row) if facility_row else _nurse_registration_facility_portal_dict(rec)
     return {
         'nurse_db_id': int(rec.get('id') or 0),
         'reference_id': rec.get('reference_id', ''),
+        'professional_category': professional_category,
         'full_name': rec.get('full_name', ''),
         'passport_number': rec.get('passport_number', ''),
         'cnic': rec.get('cnic', ''),
@@ -4203,6 +4283,27 @@ def api_nurse_register(data):
     batch_number = (data.get('batch_number') or '').strip()
     hospital = (data.get('hospital') or '').strip()
     designation = (data.get('designation') or '').strip()
+    professional_category = _nurse_professional_category(data.get('professional_category'), designation)
+    current_arrangement = (data.get('current_arrangement') or data.get('current_accommodation') or '').strip()
+    if professional_category == 'Doctor':
+        current_arrangement = ''
+    eligible_vendor_category = professional_category in NURSE_VENDOR_ELIGIBLE_CATEGORIES
+    embassy_arranged = eligible_vendor_category and current_arrangement == 'Embassy Contracted / Arranged'
+    vendor_name = ''
+    facility_name = ''
+    facility_area = ''
+    date_shifted_to_facility = ''
+    contract_start_date = ''
+    stay_reminders_opt_in = ''
+    if embassy_arranged:
+        vendor_name = (data.get('vendor_name') or '').strip() or FACILITY_VENDOR_DEFAULT
+        if vendor_name not in NURSE_APPROVED_VENDOR_VALUES:
+            return {'success': False, 'ok': False, 'error': 'Invalid vendor selection.'}
+        facility_name = (data.get('facility_name') or data.get('facility_building_name') or '').strip()
+        facility_area = (data.get('facility_area') or data.get('area') or '').strip()
+        date_shifted_to_facility = (data.get('date_shifted_to_facility') or '').strip()
+        contract_start_date = (data.get('contract_start_date') or data.get('stay_period_start_date') or '').strip()
+        stay_reminders_opt_in = (data.get('stay_reminders_opt_in') or '').strip()
     email = _nurse_normalize_email(data.get('email') or '')
     password = data.get('password') or ''
     confirm_password = data.get('confirm_password') or ''
@@ -4237,32 +4338,39 @@ def api_nurse_register(data):
         if dup:
             return {'success': False, 'ok': False, 'error': NURSE_ACCOUNT_DUP_MSG, 'duplicate': True, 'reference_id': dup['reference_id']}
         ref = _next_nurse_reference(db)
-        apply_acc = 'Yes' if str(data.get('applying_for_accommodation') or '').strip().lower() in ('yes', 'y', 'true', '1') else 'No'
+        apply_acc = 'Yes' if embassy_arranged else 'No'
         step_values = [_nurse_step_value(data.get(col, 0)) for col, _ in NURSE_PROCESS_STEPS]
         ph, psalt = _nurse_hash_password_pbkdf2(password)
-        cur = db.execute("""INSERT INTO nurse_registrations
-            (reference_id, full_name, passport_number, arrival_date, batch_number, cnic, civil_id, mobile, email,
-             hospital, hospital_or_medical_center, designation, job_title_moh, degree_type, moh_offer_salary_kwd,
-             grading_letter_issued, accommodation_status, current_accommodation, applying_for_accommodation, remarks, issue_notice,
-             step_grading_data_submitted_oec, step_mofa_kuwait_attestation, step_grading_letter_collected_embassy,
-             step_documents_submitted_sdu_moh, step_fingerprint_scanning, step_civil_id_number_generation,
-             step_medical_report_issuance, step_first_salary_cheque_locum, step_iqama_application_filed,
-             step_civil_id_application_submitted, step_second_salary_cheque_locum_received, step_medical_license_application_filed,
-             step_committee_paper_received, step_barateen_paper_submission, step_salary_regular_disbursement,
-             password_hash, password_salt, password_updated_at, email_verified)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                     ?, ?, CURRENT_TIMESTAMP, 0)""",
-            [ref, full_name, passport, arrival_date, batch_number, cnic, civil_id, mobile, email,
-             hospital, (data.get('hospital_or_medical_center') or hospital).strip(), designation, designation,
-             (data.get('degree_type') or '').strip(), (data.get('moh_offer_salary_kwd') or '').strip(),
-             (data.get('grading_letter_issued') or 'No').strip(), (data.get('current_accommodation') or '').strip(),
-             (data.get('current_accommodation') or '').strip(), apply_acc, (data.get('remarks') or '').strip(),
-            (data.get('issue_notice') or '').strip(), *step_values, ph, psalt])
+        insert_columns = [
+            'reference_id', 'full_name', 'passport_number', 'arrival_date', 'batch_number',
+            'cnic', 'civil_id', 'mobile', 'email', 'hospital', 'hospital_or_medical_center',
+            'designation', 'job_title_moh', 'professional_category', 'degree_type',
+            'moh_offer_salary_kwd', 'grading_letter_issued', 'accommodation_status',
+            'current_accommodation', 'applying_for_accommodation', 'vendor_name',
+            'current_hostel', 'facility_area', 'date_shifted_to_facility',
+            'contract_start_date', 'stay_reminders_opt_in', 'remarks', 'issue_notice',
+            *[col for col, _ in NURSE_PROCESS_STEPS],
+            'password_hash', 'password_salt', 'password_updated_at', 'email_verified'
+        ]
+        insert_values = [
+            ref, full_name, passport, arrival_date, batch_number, cnic, civil_id, mobile, email,
+            hospital, (data.get('hospital_or_medical_center') or hospital).strip(), designation, designation,
+            professional_category, (data.get('degree_type') or '').strip(),
+            (data.get('moh_offer_salary_kwd') or '').strip(), (data.get('grading_letter_issued') or 'No').strip(),
+            current_arrangement, current_arrangement, apply_acc, vendor_name, facility_name,
+            facility_area, date_shifted_to_facility, contract_start_date, stay_reminders_opt_in,
+            (data.get('remarks') or '').strip(), (data.get('issue_notice') or '').strip(),
+            *step_values, ph, psalt, datetime.utcnow().isoformat(timespec='seconds'), 0
+        ]
+        cur = db.execute(
+            f"""INSERT INTO nurse_registrations
+                ({', '.join(insert_columns)})
+                VALUES ({', '.join(['?'] * len(insert_columns))})""",
+            insert_values
+        )
         nurse_id = cur.lastrowid
-        facility_name = (data.get('facility_name') or data.get('facility_building_name') or '').strip()
-        room_bed = (data.get('room_bed') or data.get('room_number') or '').strip()
-        if facility_name or room_bed:
+        room_bed = (data.get('room_bed') or data.get('room_number') or '').strip() if embassy_arranged else ''
+        if embassy_arranged and (facility_name or room_bed):
             db.execute(
                 """UPDATE nurse_registrations
                    SET current_hostel = COALESCE(NULLIF(?, ''), current_hostel),
@@ -4271,16 +4379,40 @@ def api_nurse_register(data):
                    WHERE id = ?""",
                 [facility_name, room_bed, nurse_id]
             )
-        _nurse_log(db, 'registration_submitted', ref, passport, 'public', {'full_name': full_name, 'batch_number': batch_number})
-        _facility_apply_registration_match(db, nurse_id, {
-            'id': nurse_id,
-            'reference_id': ref,
-            'full_name': full_name,
-            'passport_number': passport,
-            'civil_id': civil_id,
-            'mobile': mobile,
-            'email': email
-        }, actor='system')
+        _nurse_log(db, 'registration_submitted', ref, passport, 'public', {'full_name': full_name, 'batch_number': batch_number, 'professional_category': professional_category})
+        match = {'matched': False}
+        if eligible_vendor_category:
+            match = _facility_apply_registration_match(db, nurse_id, {
+                'id': nurse_id,
+                'reference_id': ref,
+                'full_name': full_name,
+                'passport_number': passport,
+                'civil_id': civil_id,
+                'mobile': mobile,
+                'email': email,
+                'hospital': hospital,
+                'vendor_name': vendor_name,
+            }, actor='system')
+        if embassy_arranged and not match.get('matched') and match.get('reason') != 'multiple_matches':
+            roster_id, roster_err = _facility_insert_or_update_entry(db, {
+                'nurse_registration_id': nurse_id,
+                'full_name': full_name,
+                'passport_number': passport,
+                'civil_id': civil_id,
+                'phone': mobile,
+                'email': email,
+                'workplace': hospital,
+                'vendor_name': vendor_name,
+                'facility_name': facility_name,
+                'facility_area': facility_area,
+                'date_shifted_to_facility': date_shifted_to_facility,
+                'contract_start_date': contract_start_date,
+                'current_status': 'Pending Nurse Confirmation',
+                'confirmation_status': 'Pending Nurse Confirmation',
+                'remarks': 'Created from public health worker registration.',
+            }, actor='public_registration')
+            if not roster_id:
+                _nurse_log(db, 'facility_roster_link_skipped', ref, passport, 'system', {'error': roster_err})
         db.commit()
         record = {'reference_id': ref, 'full_name': full_name, 'passport_number': passport, 'email': email, 'registration_status': 'Pending Review'}
         ok, detail = _send_nurse_ack_email(record)
@@ -4780,18 +4912,19 @@ def _nurse_registration_public_dict(row):
     d['phone'] = d.get('mobile') or ''
     d['workplace'] = d.get('hospital') or d.get('hospital_workplace') or d.get('hospital_or_medical_center') or ''
     d['current_arrangement'] = d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
-    d['facility_name'] = d.get('facility_name') or d.get('current_hostel') or ''
-    d['vendor_name'] = d.get('vendor_name') or ''
-    d['facility_area'] = d.get('facility_area') or d.get('area') or ''
-    d['facility_address'] = d.get('facility_address') or ''
+    d['professional_category'] = _nurse_professional_category(d.get('professional_category'), d.get('designation') or d.get('job_title_moh') or '')
+    d['facility_name'] = d.get('linked_facility_name') or d.get('facility_name') or d.get('current_hostel') or ''
+    d['vendor_name'] = d.get('linked_vendor_name') or d.get('vendor_name') or ''
+    d['facility_area'] = d.get('linked_facility_area') or d.get('facility_area') or d.get('area') or ''
+    d['facility_address'] = d.get('linked_facility_address') or d.get('facility_address') or ''
     d['room_number'] = d.get('facility_room_number') or d.get('room_number') or ''
     d['bed_number'] = d.get('facility_bed_number') or d.get('bed_number') or ''
     d['facility_roster_id'] = d.get('facility_roster_id') or d.get('roster_id') or ''
     d['roster_reference'] = d.get('roster_reference') or ''
-    d['date_shifted_to_facility'] = d.get('date_shifted_to_facility') or ''
-    d['contract_start_date'] = d.get('contract_start_date') or ''
-    d['contract_end_date'] = d.get('contract_end_date') or ''
-    d['notice_period_start_date'] = d.get('notice_period_start_date') or ''
+    d['date_shifted_to_facility'] = d.get('linked_date_shifted_to_facility') or d.get('date_shifted_to_facility') or ''
+    d['contract_start_date'] = d.get('linked_contract_start_date') or d.get('contract_start_date') or ''
+    d['contract_end_date'] = d.get('linked_contract_end_date') or d.get('contract_end_date') or ''
+    d['notice_period_start_date'] = d.get('linked_notice_period_start_date') or d.get('notice_period_start_date') or ''
     d['confirmation_status'] = d.get('confirmation_status') or ''
     d['facility_current_status'] = d.get('facility_current_status') or ''
     d['assigned_to'] = d.get('assigned_to') or ''
@@ -16876,16 +17009,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rows = db.execute(f"""SELECT n.*,
                                              f.id AS facility_roster_id,
                                              f.roster_reference,
-                                             f.facility_name,
-                                             f.vendor_name,
-                                             COALESCE(NULLIF(f.facility_area,''), f.area) AS facility_area,
-                                             f.facility_address,
+                                             f.facility_name AS linked_facility_name,
+                                             f.vendor_name AS linked_vendor_name,
+                                             COALESCE(NULLIF(f.facility_area,''), f.area) AS linked_facility_area,
+                                             f.facility_address AS linked_facility_address,
                                              f.room_number AS facility_room_number,
                                              f.bed_number AS facility_bed_number,
-                                             f.date_shifted_to_facility,
-                                             f.contract_start_date,
-                                             f.contract_end_date,
-                                             f.notice_period_start_date,
+                                             f.date_shifted_to_facility AS linked_date_shifted_to_facility,
+                                             f.contract_start_date AS linked_contract_start_date,
+                                             f.contract_end_date AS linked_contract_end_date,
+                                             f.notice_period_start_date AS linked_notice_period_start_date,
                                              f.current_status AS facility_current_status,
                                              f.confirmation_status,
                                              f.assigned_to,
@@ -16924,16 +17057,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 select_sql = """SELECT n.*,
                                        f.id AS facility_roster_id,
                                        f.roster_reference,
-                                       f.facility_name,
-                                       f.vendor_name,
-                                       COALESCE(NULLIF(f.facility_area,''), f.area) AS facility_area,
-                                       f.facility_address,
+                                       f.facility_name AS linked_facility_name,
+                                       f.vendor_name AS linked_vendor_name,
+                                       COALESCE(NULLIF(f.facility_area,''), f.area) AS linked_facility_area,
+                                       f.facility_address AS linked_facility_address,
                                        f.room_number AS facility_room_number,
                                        f.bed_number AS facility_bed_number,
-                                       f.date_shifted_to_facility,
-                                       f.contract_start_date,
-                                       f.contract_end_date,
-                                       f.notice_period_start_date,
+                                       f.date_shifted_to_facility AS linked_date_shifted_to_facility,
+                                       f.contract_start_date AS linked_contract_start_date,
+                                       f.contract_end_date AS linked_contract_end_date,
+                                       f.notice_period_start_date AS linked_notice_period_start_date,
                                        f.current_status AS facility_current_status,
                                        f.confirmation_status,
                                        f.assigned_to,

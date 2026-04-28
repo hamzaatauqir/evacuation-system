@@ -13,6 +13,7 @@ export type NursePortalContext = {
   referenceId: string;
   nurseDbId?: number;
   fullName: string;
+  professionalCategory?: string;
   email: string;
   passportMasked: string;
   civilIdMasked: string;
@@ -28,6 +29,9 @@ export type NursePortalContext = {
     id?: number;
     roster_reference?: string;
     facility_name?: string;
+    vendor_name?: string;
+    approved_vendor_label?: string;
+    current_arrangement?: string;
     area?: string;
     facility_area?: string;
     room_number?: string;
@@ -109,6 +113,7 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     referenceId: ref,
     nurseDbId: typeof data?.nurse_db_id === "number" ? data.nurse_db_id : undefined,
     fullName: (data?.full_name || '').toString(),
+    professionalCategory: (data?.professional_category || '').toString(),
     email: (data?.email || '').toString(),
     passportMasked: maskPassport(passport),
     civilIdMasked: maskCivilId(civil),

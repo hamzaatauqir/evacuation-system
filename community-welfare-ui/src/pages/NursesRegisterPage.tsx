@@ -12,6 +12,15 @@ import { T } from "../lib/tokens";
 import { api } from "../lib/api";
 
 const STEPS = ["Personal", "Contact", "Employment", "Welfare", "Account"];
+const PROFESSIONAL_CATEGORIES = ["Nurse", "Other Health Worker", "Doctor"];
+const VENDOR_ELIGIBLE_CATEGORIES = ["Nurse", "Other Health Worker"];
+const CURRENT_ARRANGEMENTS = [
+  "MOH Arranged",
+  "Embassy Contracted / Arranged",
+  "Private (Self Arranged)",
+  "Other",
+];
+const APPROVED_VENDOR_OPTIONS = ["AJA Care", "Other / Not Sure"];
 
 interface FormState {
   fullName?: string;
@@ -25,12 +34,14 @@ interface FormState {
   address?: string;
   hospital?: string;
   jobTitle?: string;
+  professionalCategory?: string;
   dept?: string;
   empType?: string;
   workPermit?: string;
   arrivalDate?: string;
   batchNumber?: string;
   currentArrangement?: string;
+  vendorName?: string;
   facilityName?: string;
   facilityArea?: string;
   dateShiftedToFacility?: string;
@@ -67,6 +78,10 @@ export function NursesRegisterPage() {
     onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
       set(k, e.target.value as FormState[K]),
   });
+  const isVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(form.professionalCategory || "");
+  const isEmbassyArranged = form.currentArrangement === "Embassy Contracted / Arranged";
+  const showStayArrangementWorkflow = isVendorEligible;
+  const showVendorSelection = isVendorEligible && isEmbassyArranged;
 
   if (done) {
     return (
@@ -262,6 +277,31 @@ export function NursesRegisterPage() {
                     {...inp("jobTitle")}
                     placeholder="e.g. Staff Nurse"
                   />
+                  <FSelect
+                    label="Professional Category"
+                    req
+                    value={form.professionalCategory || ""}
+                    onChange={(e) => {
+                      const professionalCategory = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        professionalCategory,
+                        ...(VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory)
+                          ? {}
+                          : {
+                              currentArrangement: "",
+                              vendorName: "",
+                              facilityName: "",
+                              facilityArea: "",
+                              dateShiftedToFacility: "",
+                              contractStartDate: "",
+                              stayRemindersOptIn: "",
+                            }),
+                      }));
+                    }}
+                    placeholder="Select category"
+                    options={PROFESSIONAL_CATEGORIES}
+                  />
                   <Grid cols={2} gap={14}>
                     <FInput label="Department" {...inp("dept")} placeholder="e.g. Cardiology" />
                     <FSelect
@@ -288,19 +328,33 @@ export function NursesRegisterPage() {
                   <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
                     Welfare & Current Arrangement
                   </h3>
-                  <FSelect
-                    label="Current Arrangement"
-                    req
-                    {...inp("currentArrangement")}
-                    placeholder="Select"
-                    options={[
-                      "MOH Arranged",
-                      "Embassy Contracted / Arranged",
-                      "Private (Self Arranged)",
-                      "Other",
-                    ]}
-                  />
-                  {form.currentArrangement === "Embassy Contracted / Arranged" ? (
+                  {showStayArrangementWorkflow ? (
+                    <FSelect
+                      label="Current Arrangement"
+                      req
+                      value={form.currentArrangement || ""}
+                      onChange={(e) => {
+                        const currentArrangement = e.target.value;
+                        setForm((prev) => ({
+                          ...prev,
+                          currentArrangement,
+                          ...(currentArrangement === "Embassy Contracted / Arranged"
+                            ? { vendorName: prev.vendorName || "AJA Care" }
+                            : {
+                                vendorName: "",
+                                facilityName: "",
+                                facilityArea: "",
+                                dateShiftedToFacility: "",
+                                contractStartDate: "",
+                                stayRemindersOptIn: "",
+                              }),
+                        }));
+                      }}
+                      placeholder="Select"
+                      options={CURRENT_ARRANGEMENTS}
+                    />
+                  ) : null}
+                  {showVendorSelection ? (
                     <div
                       style={{
                         marginTop: 12,
@@ -314,12 +368,18 @@ export function NursesRegisterPage() {
                         Embassy-arranged facility details (if available)
                       </h4>
                       <Grid cols={2} gap={14}>
+                        <FSelect
+                          label="Approved Vendor / Service Provider"
+                          value={form.vendorName || "AJA Care"}
+                          onChange={(e) => set("vendorName", e.target.value)}
+                          options={APPROVED_VENDOR_OPTIONS}
+                        />
                         <FInput label="Facility / Building Name" {...inp("facilityName")} placeholder="Building or facility name" />
                         <FInput label="Area" {...inp("facilityArea")} placeholder="Area in Kuwait" />
                         <FInput label="Date shifted to facility" {...inp("dateShiftedToFacility")} type="date" />
                         <FInput label="Contract / stay period start date if available" {...inp("contractStartDate")} type="date" />
                         <FSelect
-                          label="Do you wish to receive portal reminders about leaving notice timelines?"
+                          label="Receive reminders about leaving notice timelines?"
                           {...inp("stayRemindersOptIn")}
                           placeholder="Select"
                           options={["Yes", "No"]}
@@ -453,8 +513,11 @@ export function NursesRegisterPage() {
                           setSubmitError("Password and confirmation do not match.");
                           return;
                         }
-                        const arrangement = form.currentArrangement || "";
-                        const arrangementFlag = /embassy/i.test(arrangement) ? "Yes" : "No";
+                        const professionalCategory = form.professionalCategory || "";
+                        const categoryVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory);
+                        const arrangement = categoryVendorEligible ? form.currentArrangement || "" : "";
+                        const arrangementFlag = categoryVendorEligible && /embassy/i.test(arrangement) ? "Yes" : "No";
+                        const includeFacilityWorkflow = categoryVendorEligible && arrangement === "Embassy Contracted / Arranged";
                         setSubmitting(true);
                         try {
                           const res = await api.post<{
@@ -474,15 +537,21 @@ export function NursesRegisterPage() {
                             batch_number: form.batchNumber,
                             hospital: form.hospital,
                             designation: form.jobTitle,
+                            professional_category: professionalCategory,
                             degree_type: form.dept || "",
                             remarks: form.remarks || "",
                             ["current_" + "accom" + "modation"]: arrangement,
                             ["applying_for_" + "accom" + "modation"]: arrangementFlag,
-                            facility_name: form.facilityName || "",
-                            facility_area: form.facilityArea || "",
-                            date_shifted_to_facility: form.dateShiftedToFacility || "",
-                            contract_start_date: form.contractStartDate || "",
-                            stay_reminders_opt_in: form.stayRemindersOptIn || "",
+                            ...(includeFacilityWorkflow
+                              ? {
+                                  vendor_name: form.vendorName || "AJA Care",
+                                  facility_name: form.facilityName || "",
+                                  facility_area: form.facilityArea || "",
+                                  date_shifted_to_facility: form.dateShiftedToFacility || "",
+                                  contract_start_date: form.contractStartDate || "",
+                                  stay_reminders_opt_in: form.stayRemindersOptIn || "",
+                                }
+                              : {}),
                             issue_notice: "",
                             password: form.password,
                             confirm_password: form.confirmPassword,

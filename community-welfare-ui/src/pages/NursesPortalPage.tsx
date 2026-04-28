@@ -63,6 +63,11 @@ export function NursesPortalPage() {
     : (ctx.registrationStatus || "").toLowerCase().includes("progress")
     ? "processing"
     : "pending";
+  const isDoctor = (ctx.professionalCategory || "").toLowerCase() === "doctor";
+  const vendorName = ctx.facilityRoster?.vendor_name?.trim() || "";
+  const approvedVendorLabel = ctx.facilityRoster?.approved_vendor_label || (vendorName ? `Approved Vendor: ${vendorName}` : "Approved Vendor: To be confirmed");
+  const hasEmbassyArrangement = !isDoctor && !!ctx.facilityRoster && (ctx.facilityRoster.current_arrangement || "Embassy Contracted / Arranged") === "Embassy Contracted / Arranged";
+  const stayArrangementText = `Your current stay arrangement is recorded as Embassy Contracted / Arranged with ${approvedVendorLabel}.`;
 
   async function submitFacilityRequest() {
     setBusy(true); setErr(""); setMsg("");
@@ -235,6 +240,7 @@ export function NursesPortalPage() {
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
                   <Field label="Current Stay Arrangement" value={ctx.facilityRoster?.current_status || "Not linked to a facility record"} />
+                  {hasEmbassyArrangement ? <Field label="Approved Vendor" value={approvedVendorLabel.replace("Approved Vendor: ", "")} /> : null}
                   <Field label="Facility" value={ctx.facilityRoster?.facility_name || "—"} />
                   <Field label="Area" value={ctx.facilityRoster?.facility_area || ctx.facilityRoster?.area || "—"} />
                 </div>
@@ -255,17 +261,17 @@ export function NursesPortalPage() {
 
         {activeTab === "stay" ? (
           <div style={{ display: "grid", gap: 14 }}>
-            {ctx.facilityRoster ? (
+            {ctx.facilityRoster && !isDoctor ? (
               <FormCard title="Stay Arrangement Confirmation">
                 <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
-                  Our records show that you may be linked to an Embassy-facilitated stay arrangement through an approved service provider.
-                  Please confirm your current stay details so the Community Welfare Wing can maintain accurate welfare records and provide
+                  {hasEmbassyArrangement ? stayArrangementText : "Our records show that you may be linked to an Embassy-facilitated stay arrangement through an approved service provider."}
+                  {" "}Please confirm your current stay details so the Community Welfare Wing can maintain accurate welfare records and provide
                   timely support where required.
                 </p>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 }}>
                   <Field label="Roster Reference" value={ctx.facilityRoster.roster_reference || "-"} />
                   <Field label="Facility / Building" value={ctx.facilityRoster.facility_name || "-"} />
-                  <Field label="Approved Service Provider" value={ctx.facilityRoster.approved_service_provider ? "Linked" : "—"} />
+                  {hasEmbassyArrangement ? <Field label="Approved Vendor" value={approvedVendorLabel.replace("Approved Vendor: ", "")} /> : null}
                   <Field label="Notice Period Start" value={ctx.facilityRoster.notice_period_start_date || "-"} />
                 </div>
                 <label>
