@@ -744,6 +744,15 @@ def init_db():
         ('reset_token_expires_at', "TEXT"),
         ('reset_token_used_at', "TEXT"),
         ('last_login_at', "TEXT"),
+        ('mobile_country_code', "TEXT DEFAULT '+965'"),
+        ('mobile_number', "TEXT DEFAULT ''"),
+        ('mobile_full', "TEXT DEFAULT ''"),
+        ('whatsapp_country_code', "TEXT DEFAULT '+965'"),
+        ('whatsapp_number', "TEXT DEFAULT ''"),
+        ('whatsapp_full', "TEXT DEFAULT ''"),
+        ('whatsapp_same_as_mobile', 'INTEGER DEFAULT 1'),
+        ('emergency_country_code', "TEXT DEFAULT '+965'"),
+        ('emergency_contact_full', "TEXT DEFAULT ''"),
     ]:
         try:
             db.execute(f"ALTER TABLE nurse_registrations ADD COLUMN {col} {coltype}")
@@ -4342,6 +4351,26 @@ def _safe_status_label(status):
     return (status or 'Under Review').strip()
 
 
+def _normalize_country_code(code, default='+965'):
+    v = (code or '').strip()
+    if not v:
+        return default
+    if not v.startswith('+'):
+        v = '+' + v
+    digits = ''.join(ch for ch in v if ch.isdigit())
+    return ('+' + digits) if digits else default
+
+
+def _phone_digits(v):
+    return ''.join(ch for ch in str(v or '') if ch.isdigit())
+
+
+def _compose_phone(code, number):
+    cc = _normalize_country_code(code)
+    num = _phone_digits(number)
+    return f"{cc}{num}" if num else ''
+
+
 def _should_notify_applicant_status(status, public_note='', visible_to_applicant=False, safe_statuses=None):
     safe = set(safe_statuses or [])
     status_text = (status or '').strip()
@@ -4754,6 +4783,15 @@ def _build_nurse_public_profile_bundle(db, rec):
         'cnic': rec.get('cnic', ''),
         'civil_id': rec.get('civil_id', ''),
         'mobile': rec.get('mobile', ''),
+        'mobile_country_code': rec.get('mobile_country_code', '') or '+965',
+        'mobile_number': rec.get('mobile_number', ''),
+        'mobile_full': rec.get('mobile_full', '') or rec.get('mobile', ''),
+        'whatsapp_country_code': rec.get('whatsapp_country_code', '') or rec.get('mobile_country_code', '') or '+965',
+        'whatsapp_number': rec.get('whatsapp_number', ''),
+        'whatsapp_full': rec.get('whatsapp_full', '') or rec.get('mobile_full', '') or rec.get('mobile', ''),
+        'whatsapp_same_as_mobile': int(rec.get('whatsapp_same_as_mobile') or 0),
+        'emergency_country_code': rec.get('emergency_country_code', '') or '+965',
+        'emergency_contact_full': rec.get('emergency_contact_full', '') or rec.get('emergency_contact', ''),
         'email': rec.get('email', ''),
         'email_status': _email_status_label(rec),
         'batch_number': rec.get('batch_number', ''),
@@ -4837,7 +4875,20 @@ def api_nurse_register(data):
     passport = _nurse_normalize_passport(data.get('passport_number') or '')
     cnic = (data.get('cnic') or '').strip()
     civil_id = (data.get('civil_id') or '').strip()  # optional — new arrivals may not have Civil ID yet
-    mobile = (data.get('mobile') or '').strip()
+    mobile_country_code = _normalize_country_code(data.get('mobile_country_code') or '+965')
+    mobile_number = _phone_digits(data.get('mobile_number') or data.get('mobile') or '')
+    mobile_full = _compose_phone(mobile_country_code, mobile_number)
+    if not mobile_full:
+        mobile_full = (data.get('mobile_full') or '').strip()
+        mobile_number = _phone_digits(mobile_full)
+    whatsapp_same_as_mobile = 1 if str(data.get('whatsapp_same_as_mobile', 1)).strip().lower() in ('1', 'true', 'yes', 'on') else 0
+    whatsapp_country_code = _normalize_country_code(data.get('whatsapp_country_code') or mobile_country_code)
+    whatsapp_number = _phone_digits(data.get('whatsapp_number') or '')
+    whatsapp_full = mobile_full if whatsapp_same_as_mobile else _compose_phone(whatsapp_country_code, whatsapp_number)
+    emergency_country_code = _normalize_country_code(data.get('emergency_country_code') or '+965')
+    emergency_contact_number = _phone_digits(data.get('emergency_contact') or '')
+    emergency_contact_full = _compose_phone(emergency_country_code, emergency_contact_number)
+    mobile = mobile_full or (data.get('mobile') or '').strip()
     arrival_date = (data.get('arrival_date') or '').strip()
     batch_number = (data.get('batch_number') or '').strip()
     hospital = (data.get('hospital') or '').strip()
@@ -4872,6 +4923,12 @@ def api_nurse_register(data):
     confirm_password = data.get('confirm_password') or ''
     if not full_name or not passport or not mobile or not cnic or not arrival_date or not batch_number or not hospital or not designation:
         return {'success': False, 'ok': False, 'error': 'Please fill all required fields.'}
+    if not mobile_number or len(mobile_number) < 7 or len(mobile_number) > 15:
+        return {'success': False, 'ok': False, 'error': 'Primary mobile number must be 7 to 15 digits.'}
+    if not emergency_contact_number or len(emergency_contact_number) < 7 or len(emergency_contact_number) > 15:
+        return {'success': False, 'ok': False, 'error': 'Emergency contact number must be 7 to 15 digits.'}
+    if not whatsapp_same_as_mobile and (len(whatsapp_number) < 7 or len(whatsapp_number) > 15):
+        return {'success': False, 'ok': False, 'error': 'WhatsApp number must be 7 to 15 digits when different from mobile.'}
     if not qualification_degree:
         return {'success': False, 'ok': False, 'error': 'Qualification / Degree is required.'}
     if qualification_degree == 'Other' and not qualification_degree_other:
@@ -4911,6 +4968,9 @@ def api_nurse_register(data):
         insert_columns = [
             'reference_id', 'full_name', 'passport_number', 'arrival_date', 'batch_number',
             'cnic', 'civil_id', 'mobile', 'email', 'hospital', 'hospital_or_medical_center',
+            'mobile_country_code', 'mobile_number', 'mobile_full',
+            'whatsapp_country_code', 'whatsapp_number', 'whatsapp_full', 'whatsapp_same_as_mobile',
+            'emergency_country_code', 'emergency_contact', 'emergency_contact_full',
             'designation', 'job_title_moh', 'professional_category', 'degree_type',
             'qualification_degree', 'qualification_degree_other',
             'moh_offer_salary_kwd', 'grading_letter_issued', 'accommodation_status',
@@ -4922,7 +4982,11 @@ def api_nurse_register(data):
         ]
         insert_values = [
             ref, full_name, passport, arrival_date, batch_number, cnic, civil_id, mobile, email,
-            hospital, (data.get('hospital_or_medical_center') or hospital).strip(), designation, designation,
+            hospital, (data.get('hospital_or_medical_center') or hospital).strip(),
+            mobile_country_code, mobile_number, mobile_full,
+            whatsapp_country_code, whatsapp_number, whatsapp_full, whatsapp_same_as_mobile,
+            emergency_country_code, emergency_contact_number, emergency_contact_full,
+            designation, designation,
             professional_category, (data.get('degree_type') or '').strip(),
             qualification_degree, qualification_degree_other if qualification_degree == 'Other' else '',
             (data.get('moh_offer_salary_kwd') or '').strip(), (data.get('grading_letter_issued') or 'No').strip(),
@@ -5520,7 +5584,14 @@ def _nurse_registration_public_dict(row):
     d = dict(row)
     d['nurse_reference_id'] = d.get('reference_id') or ''
     d['reference'] = d.get('reference_id') or ''
-    d['phone'] = d.get('mobile') or ''
+    d['mobile_full'] = d.get('mobile_full') or d.get('mobile') or ''
+    d['mobile_number'] = d.get('mobile_number') or _phone_digits(d.get('mobile') or '')
+    d['mobile_country_code'] = d.get('mobile_country_code') or '+965'
+    d['whatsapp_full'] = d.get('whatsapp_full') or d.get('mobile_full') or d.get('mobile') or ''
+    d['whatsapp_number'] = d.get('whatsapp_number') or _phone_digits(d['whatsapp_full'])
+    d['whatsapp_country_code'] = d.get('whatsapp_country_code') or d.get('mobile_country_code') or '+965'
+    d['emergency_contact_full'] = d.get('emergency_contact_full') or d.get('emergency_contact') or ''
+    d['phone'] = d.get('mobile_full') or d.get('mobile') or ''
     d['workplace'] = d.get('hospital') or d.get('hospital_workplace') or d.get('hospital_or_medical_center') or ''
     d['current_arrangement'] = d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
     d['professional_category'] = _nurse_professional_category(d.get('professional_category'), d.get('designation') or d.get('job_title_moh') or '')
@@ -5575,6 +5646,56 @@ def _nurse_registration_actions(db, reference_id):
         d['note'] = note
         actions.append(d)
     return actions
+
+
+def _nurse_enrich_complaint_record(db, complaint_row):
+    d = dict(complaint_row or {})
+    nurse = db.execute(
+        """SELECT id, reference_id, full_name, passport_number, civil_id, mobile, mobile_full, mobile_number,
+                  whatsapp_full, whatsapp_number, email, hospital, current_accommodation, vendor_name,
+                  current_hostel, facility_area, date_shifted_to_facility, contract_start_date,
+                  stay_reminders_opt_in, emergency_contact, emergency_contact_full
+           FROM nurse_registrations
+           WHERE UPPER(TRIM(reference_id)) = UPPER(TRIM(?))
+              OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+           ORDER BY id DESC LIMIT 1""",
+        [d.get('nurse_reference_id', ''), d.get('passport_number', '')]
+    ).fetchone()
+    n = dict(nurse) if nurse else {}
+    details_obj = {}
+    try:
+        details_obj = json.loads(d.get('internal_notes') or '{}')
+    except Exception:
+        details_obj = {}
+    d['complaint_reference'] = d.get('complaint_id') or ''
+    d['case_reference'] = d.get('complaint_id') or ''
+    d['reference'] = d.get('complaint_id') or ''
+    d['nurse_registration_id'] = n.get('id') or 0
+    d['nurse_reference'] = d.get('nurse_reference_id') or n.get('reference_id') or ''
+    d['nurse_name'] = d.get('nurse_full_name') or n.get('full_name') or ''
+    d['passport_number'] = d.get('passport_number') or n.get('passport_number') or ''
+    d['civil_id'] = d.get('civil_id') or n.get('civil_id') or ''
+    d['phone'] = n.get('mobile_full') or n.get('mobile') or d.get('phone') or ''
+    d['whatsapp'] = n.get('whatsapp_full') or n.get('mobile_full') or n.get('mobile') or ''
+    d['email'] = n.get('email') or d.get('email') or ''
+    d['workplace'] = n.get('hospital') or d.get('workplace') or ''
+    d['hospital'] = d.get('hospital') or n.get('hospital') or ''
+    d['complaint_category'] = d.get('complaint_category') or d.get('category') or ''
+    d['complaint_type'] = d.get('category') or d.get('complaint_category') or ''
+    d['details'] = d.get('description') or d.get('details') or ''
+    d['complaint_text'] = d.get('description') or d.get('details') or ''
+    d['assigned_to'] = d.get('assigned_to_name') or d.get('assigned_to_username') or ''
+    d['current_arrangement'] = n.get('current_accommodation') or ''
+    d['vendor_name'] = n.get('vendor_name') or ''
+    d['facility_name'] = n.get('current_hostel') or ''
+    d['facility_area'] = n.get('facility_area') or ''
+    d['date_shifted_to_facility'] = n.get('date_shifted_to_facility') or ''
+    d['contract_start_date'] = n.get('contract_start_date') or ''
+    d['stay_reminders_opt_in'] = n.get('stay_reminders_opt_in') or ''
+    d['emergency_contact'] = n.get('emergency_contact_full') or n.get('emergency_contact') or ''
+    d['preferred_contact_method'] = d.get('preferred_contact_method') or details_obj.get('preferred_contact_method') or ''
+    d['status'] = d.get('status') or d.get('complaint_status') or ''
+    return d
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -18026,7 +18147,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_json({'success': False, 'error': 'Registration not found'}, 404); return
                 record = _nurse_registration_public_dict(row)
                 actions = _nurse_registration_actions(db, record.get('reference_id') or '')
-                self.send_json({'success': True, 'record': record, 'actions': actions})
+                recent_requests = db.execute(
+                    """SELECT complaint_id, COALESCE(category, complaint_category) AS category, subject,
+                              COALESCE(status, complaint_status) AS status, created_at, updated_at
+                       FROM nurse_complaints
+                       WHERE nurse_reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+                       ORDER BY id DESC LIMIT 5""",
+                    [record.get('reference_id') or '', record.get('passport_number') or '']
+                ).fetchall()
+                self.send_json({
+                    'success': True,
+                    'record': record,
+                    'actions': actions,
+                    'recent_requests': [dict(r) for r in recent_requests]
+                })
             finally:
                 db.close()
         elif path == '/api/admin/nurses/accommodation':
@@ -18047,13 +18181,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/nurses/complaints':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             page = _nurse_int(params.get('page', 1), 1, 1, 100000)
             page_size = _nurse_int(params.get('page_size', 20), 20, 1, 200)
             offset = (page - 1) * page_size
             search = (params.get('search') or '').strip()
             status = (params.get('status') or '').strip()
+            scope = (params.get('scope') or '').strip().lower()
             priority = (params.get('priority') or '').strip()
             category = (params.get('category') or '').strip()
             assigned_to = (params.get('assigned_to') or '').strip()
@@ -18073,12 +18208,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         OR UPPER(COALESCE(nurse_full_name,'')) LIKE UPPER(?)
                         OR UPPER(COALESCE(passport_number,'')) LIKE UPPER(?)
                         OR UPPER(COALESCE(subject,'')) LIKE UPPER(?)
+                        OR EXISTS (
+                            SELECT 1 FROM nurse_registrations nr
+                            WHERE (UPPER(TRIM(nr.reference_id)) = UPPER(TRIM(COALESCE(nurse_complaints.nurse_reference_id,'')))
+                               OR UPPER(TRIM(nr.passport_number)) = UPPER(TRIM(COALESCE(nurse_complaints.passport_number,''))))
+                              AND (
+                                  UPPER(COALESCE(nr.mobile,'')) LIKE UPPER(?)
+                                  OR UPPER(COALESCE(nr.mobile_full,'')) LIKE UPPER(?)
+                                  OR UPPER(COALESCE(nr.whatsapp_full,'')) LIKE UPPER(?)
+                                  OR UPPER(COALESCE(nr.whatsapp_number,'')) LIKE UPPER(?)
+                                  OR UPPER(COALESCE(nr.mobile_number,'')) LIKE UPPER(?)
+                                  OR UPPER(COALESCE(nr.civil_id,'')) LIKE UPPER(?)
+                              )
+                        )
                     )""")
                     sv = f"%{search}%"
-                    vals.extend([sv] * 5)
+                    vals.extend([sv] * 11)
                 if status:
                     where.append("(COALESCE(status, complaint_status) = ?)")
                     vals.append(status)
+                if scope == 'resolved':
+                    where.append("COALESCE(status, complaint_status) IN ('Resolved','Closed')")
+                elif scope == 'welfare':
+                    where.append("COALESCE(category, complaint_category) NOT IN ('Facility Assistance Request')")
                 if priority:
                     where.append("priority = ?")
                     vals.append(priority)
@@ -18102,7 +18254,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                   vals + [page_size, offset]).fetchall()
                 items = []
                 for r in rows:
-                    d = dict(r)
+                    d = _nurse_enrich_complaint_record(db, r)
                     nurse_status = db.execute(
                         """SELECT email_verified, email_last_status FROM nurse_registrations
                            WHERE reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
@@ -18130,7 +18282,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                      ORDER BY id DESC LIMIT ? OFFSET ?""", [user['user'], page_size, offset]).fetchall()
                 items = []
                 for r in rows:
-                    d = dict(r)
+                    d = _nurse_enrich_complaint_record(db, r)
                     nurse_status = db.execute(
                         """SELECT email_verified, email_last_status FROM nurse_registrations
                            WHERE reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
@@ -18142,12 +18294,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': items})
             finally:
                 db.close()
-        elif path == '/api/admin/nurses/complaint':
+        elif path in ('/api/admin/nurses/complaint', '/api/admin/nurses/complaint/detail'):
             user = self.require_auth()
             if not user: return
             if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            complaint_id = (params.get('complaint_id') or '').strip()
+            complaint_id = (params.get('complaint_id') or params.get('id') or '').strip()
             if not complaint_id:
                 self.send_json({'success': False, 'error': 'complaint_id required'}, 400); return
             db = get_db()
@@ -18158,7 +18310,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 comp = dict(row)
                 if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
-                nurse = db.execute("""SELECT reference_id, full_name, passport_number, mobile, email, hospital, accommodation_status,
+                nurse = db.execute("""SELECT id, reference_id, full_name, passport_number, civil_id, mobile, mobile_full,
+                                             whatsapp_full, email, hospital, accommodation_status, current_accommodation,
+                                             vendor_name, current_hostel, facility_area, date_shifted_to_facility, contract_start_date,
+                                             stay_reminders_opt_in, emergency_contact, emergency_contact_full,
                                              email_verified, email_last_status
                                       FROM nurse_registrations
                                       WHERE reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
@@ -18179,8 +18334,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _add_nurse_complaint_action(db, complaint_id, 'Seen', user['user'], user['role'],
                                                 old_status='Submitted', new_status='Seen by Admin', visible_to_nurse=0)
                     db.commit()
-                comp['email_status'] = _email_status_label(nurse) if nurse else 'Unverified'
-                self.send_json({'success': True, 'complaint': comp, 'nurse': _attach_email_status(nurse) if nurse else None, 'actions': [dict(a) for a in actions]})
+                complaint = _nurse_enrich_complaint_record(db, comp)
+                complaint['email_status'] = _email_status_label(nurse) if nurse else 'Unverified'
+                self.send_json({
+                    'success': True,
+                    'record': complaint,
+                    'complaint': complaint,
+                    'nurse': _attach_email_status(nurse) if nurse else None,
+                    'actions': [dict(a) for a in actions]
+                })
             finally:
                 db.close()
         elif path == '/api/admin/nurses/complaint-assignees':

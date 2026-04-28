@@ -123,15 +123,13 @@
 const TABS = [
   { key: 'all',          label: 'All Health Workers', endpoint: 'registrations',  params: {} },
   { key: 'pending',      label: 'Pending Review',     endpoint: 'registrations',  params: { registration_status: 'Pending Review' } },
-  { key: 'embassy',      label: 'Embassy-facilitated Facility', endpoint: 'registrations', params: { current_arrangement: 'Embassy Contracted / Arranged' } },
-  { key: 'moh',          label: 'MOH Arranged',        endpoint: 'registrations',  params: { current_arrangement: 'MOH Arranged' } },
-  { key: 'private',      label: 'Private Self Arranged', endpoint: 'registrations', params: { current_arrangement: 'Private (Self Arranged)' } },
-  { key: 'pendingStay',  label: 'Pending Stay Confirmation', endpoint: 'registrations', params: { confirmation_status: 'Pending Nurse Confirmation' } },
-  { key: 'noticeDue',    label: 'Notice Period Due',   endpoint: 'registrations',  params: { notice_due: '1' } },
-  { key: 'leaving',      label: 'Leaving Notice Submitted', endpoint: 'leave-notices', params: {} },
-  { key: 'welfare',      label: 'Welfare Follow-up Required', endpoint: 'registrations', params: { welfare_followup_required: '1' } },
-  { key: 'mine',         label: 'My Assigned',          endpoint: 'registrations',  params: { scope: 'my' } },
-  { key: 'resolved',     label: 'Resolved / Closed',   endpoint: 'registrations',  params: { registration_status: 'Closed' } },
+  { key: 'requests',     label: 'Nurse Requests',      endpoint: 'complaints', params: {} },
+  { key: 'welfare',      label: 'Welfare Issues',      endpoint: 'complaints', params: { scope: 'welfare' } },
+  { key: 'facility',     label: 'Facility Assistance', endpoint: 'complaints', params: { category: 'Facility Assistance Request' } },
+  { key: 'leaving',      label: 'Leaving Notices',     endpoint: 'leave-notices', params: {} },
+  { key: 'mine',         label: 'My Assigned',         endpoint: 'my-complaints', params: {} },
+  { key: 'resolved',     label: 'Resolved / Closed',   endpoint: 'complaints', params: { scope: 'resolved' } },
+  { key: 'registrations',label: 'Registrations',       endpoint: 'registrations', params: {} },
 ];
 let activeTab = 'all';
 let activeRows = [];
@@ -142,7 +140,7 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;'
 function statusType(s){const x=(s||'').toLowerCase();if(x.includes('approved')||x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('reject'))return 'rejected';if(x.includes('assign'))return 'assigned';if(x.includes('review')||x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await')||x.includes('needs'))return 'awaiting';return 'pending';}
 function priorityType(p){const x=(p||'').toLowerCase();if(x.includes('urgent'))return 'urgent';if(x.includes('important')||x.includes('high'))return 'high';if(x.includes('low'))return 'low';return 'medium';}
 function fmtTime(s){if(!s)return '—';return String(s).slice(0,16).replace('T',' ');}
-function isRegistrationTab(){return activeTab!=='leaving' && activeTab!=='requests';}
+function isRegistrationTab(){return ['all','pending','registrations'].includes(activeTab);}
 async function api(url,opts){
   const r=await fetch(url,Object.assign({credentials:'include'},opts||{}));
   let d={};
@@ -166,8 +164,8 @@ function buildHeader(){
   const cols = activeTab==='leaving'
     ? ['Reference','Nurse','Passport','Reason','Status','Updated','Actions']
     : isRegistrationTab()
-    ? ['Reference','Name','Passport / Civil ID','Phone','Workplace','Current Stay Arrangement','Vendor','Facility / Area','Shifted Date','Contract End Date','Notice Period Start','Confirmation Status','Status','Assigned Officer','Last Contact','Actions']
-    : ['Reference','Nurse','Passport / Civil ID','Email','Phone','Hospital','Type','Priority','Status','Assigned','Updated'];
+    ? ['Reference','Name','Passport / Civil ID','Primary Mobile','WhatsApp','Workplace','Current Stay Arrangement','Vendor','Facility / Area','Shifted Date','Contract End Date','Notice Period Start','Confirmation Status','Status','Assigned Officer','Last Contact','Actions']
+    : ['Reference','Nurse','Passport / Civil ID','Phone / WhatsApp','Category','Subject','Priority','Status','Assigned','Submitted','Updated','Actions'];
   document.getElementById('theadRow').innerHTML=cols.map(c=>`<th>${esc(c)}</th>`).join('');
   return cols.length;
 }
@@ -180,11 +178,11 @@ function rowHtml(r){
     const ref=r.nurse_reference_id||r.reference_id||r.reference||'';
     const status=r.registration_status||r.status||'Pending Review';
     const facility=[r.facility_name,r.facility_area].filter(Boolean).join(' / ')||'—';
-    return `<tr onclick="openRegDetail('${esc(ref)}')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.phone||r.mobile||'—')}</td><td><span style="font-size:12px">${esc(r.hospital||r.hospital_workplace||r.workplace||'—')}</span></td><td style="font-size:12px">${esc(r.current_arrangement||r.current_accommodation||'—')}</td><td style="font-size:12px">${esc(r.vendor_name||'—')}</td><td style="font-size:12px">${esc(facility)}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.date_shifted_to_facility||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.contract_end_date||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.notice_period_start_date||r.notice_flag||'—')}</td><td><span class="cwa-badge" data-type="${statusType(r.confirmation_status)}">${esc(r.confirmation_status||'—')}</span></td><td><span class="cwa-badge" data-type="${statusType(status)}">${esc(status)}</span></td><td style="font-size:12px">${esc(r.assigned_to||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.last_contact||r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openRegDetail('${esc(ref)}')">View / Review</button></td></tr>`;
+    return `<tr onclick="openRegDetail('${esc(ref)}')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.mobile_full||r.phone||r.mobile||'—')}</td><td style="font-size:12px">${esc(r.whatsapp_full||r.mobile_full||r.phone||'—')}</td><td><span style="font-size:12px">${esc(r.hospital||r.hospital_workplace||r.workplace||'—')}</span></td><td style="font-size:12px">${esc(r.current_arrangement||r.current_accommodation||'—')}</td><td style="font-size:12px">${esc(r.vendor_name||'—')}</td><td style="font-size:12px">${esc(facility)}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.date_shifted_to_facility||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.contract_end_date||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(r.notice_period_start_date||r.notice_flag||'—')}</td><td><span class="cwa-badge" data-type="${statusType(r.confirmation_status)}">${esc(r.confirmation_status||'—')}</span></td><td><span class="cwa-badge" data-type="${statusType(status)}">${esc(status)}</span></td><td style="font-size:12px">${esc(r.assigned_to||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.last_contact||r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openRegDetail('${esc(ref)}')">View / Review</button></td></tr>`;
   }
   // complaints (default)
   const ref = r.complaint_id||r.reference_id||'';
-  return `<tr onclick="openDetail('${esc(ref)}','complaint')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_full_name||r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.email||'—')}</td><td style="font-size:12px">${esc(r.mobile||r.phone||'')}</td><td style="font-size:12px">${esc(r.hospital||r.workplace||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.category||r.complaint_category||'—')}</td><td><span class="cwa-badge" data-type="${priorityType(r.priority)}">${esc(r.priority||'Normal')}</span></td><td><span class="cwa-badge" data-type="${statusType(r.status||r.complaint_status)}">${esc(r.status||r.complaint_status||'—')}</span></td><td style="font-size:12px;color:${(r.assigned_to_username||r.assigned_to_name)?'var(--cwa-text)':'var(--cwa-muted-lt)'};font-style:${(r.assigned_to_username||r.assigned_to_name)?'normal':'italic'}">${esc(r.assigned_to_name||r.assigned_to_username||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td></tr>`;
+  return `<tr onclick="openDetail('${esc(ref)}','complaint')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_name||r.nurse_full_name||r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.phone||r.mobile||'—')}<div style="color:var(--cwa-muted-lt)">${esc(r.whatsapp||'')}</div></td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.category||r.complaint_category||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.subject||'—')}</td><td><span class="cwa-badge" data-type="${priorityType(r.priority)}">${esc(r.priority||'Normal')}</span></td><td><span class="cwa-badge" data-type="${statusType(r.status||r.complaint_status)}">${esc(r.status||r.complaint_status||'—')}</span></td><td style="font-size:12px;color:${(r.assigned_to_username||r.assigned_to_name)?'var(--cwa-text)':'var(--cwa-muted-lt)'};font-style:${(r.assigned_to_username||r.assigned_to_name)?'normal':'italic'}">${esc(r.assigned_to_name||r.assigned_to_username||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.created_at))}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openDetail('${esc(ref)}','complaint')">Open</button></td></tr>`;
 }
 
 async function loadAssignees(){
@@ -211,9 +209,11 @@ async function loadSummary(){
     document.getElementById('kpiOpen').textContent=(t.open_welfare_requests||t.facility_followup||0).toLocaleString();
     document.getElementById('kpiMine').textContent=(t.facility_my_assigned||t.my_complaints||0).toLocaleString();
     document.getElementById('totalLine').textContent=(t.registrations||0)+' health workers · '+(t.facility_total||0)+' facility records';
-    const counts={all:t.registrations,pending:t.pending_registrations,embassy:t.facility_embassy_arranged,
-      moh:t.moh_arranged,private:t.private_self_arranged,pendingStay:t.facility_pending_confirmation,noticeDue:t.facility_notice_due,leaving:t.facility_leaving,
-      welfare:t.open_welfare_requests||t.facility_followup,mine:t.facility_my_assigned,resolved:t.resolved_complaints};
+    const counts={
+      all:t.registrations,pending:t.pending_registrations,requests:t.open_complaints||0,
+      welfare:t.welfare_complaints||0,facility:t.open_welfare_requests||0,leaving:t.facility_leaving||0,
+      mine:t.my_complaints||t.facility_my_assigned||0,resolved:t.resolved_complaints||0,registrations:t.registrations||0
+    };
     Object.entries(counts).forEach(([k,v])=>{const el=document.getElementById('tc-'+k);if(el)el.textContent=v||0;});
   }catch(e){}
 }
@@ -242,7 +242,7 @@ async function loadList(){
     const d=await api('/api/admin/nurses/'+tab.endpoint+'?'+params.toString());
     activeRows=d.items||[];
     if(!activeRows.length){
-      document.getElementById('rows').innerHTML=`<tr><td colspan="${colCount}" class="cwa-empty">No records match the current filters.</td></tr>`;
+      document.getElementById('rows').innerHTML=`<tr><td colspan="${colCount}" class="cwa-empty">${isRegistrationTab()?'No nurse registrations found.':'No nurse requests or welfare issues found.'}</td></tr>`;
       return;
     }
     document.getElementById('rows').innerHTML=activeRows.map(rowHtml).join('');
@@ -281,7 +281,9 @@ async function openRegDetail(ref){
       ['Passport', r.passport_number||''],
       ['Civil ID', r.civil_id||'—'],
       ['Email', r.email||'—'],
-      ['Phone', r.phone||r.mobile||''],
+      ['Primary Mobile', r.mobile_full||r.phone||r.mobile||''],
+      ['WhatsApp', r.whatsapp_full||r.mobile_full||r.phone||'—'],
+      ['Emergency Contact', r.emergency_contact_full||r.emergency_contact||'—'],
       ['Hospital / Workplace', r.hospital||''],
       ['Professional Category', r.professional_category||'—'],
       ['Qualification / Degree', r.qualification_degree||'—'],
@@ -304,6 +306,7 @@ async function openRegDetail(ref){
       ['Assigned Officer', r.assigned_to||'Unassigned'],
       ['Address', r.current_address||r.address||''],
     ],
+    relatedRequests: d.recent_requests||[],
     canReviewRegistration: true,
     actions: d.actions||[],
     timeline: d.actions||[],
@@ -336,24 +339,43 @@ async function openDetail(ref, kind){
     return;
   }
   // complaint
-  const d=await api('/api/admin/nurses/complaint?complaint_id='+encodeURIComponent(ref)).catch(()=>({success:false}));
-  if(!d.success){ toast(d.error||'Could not load complaint detail','error'); return; }
-  const r=d.record||{};
+  const d=await api('/api/admin/nurses/complaint/detail?id='+encodeURIComponent(ref)).catch(e=>({success:false,error:e.message}));
+  if(!d.success){ toast(d.error||'Unable to load full complaint details. Please refresh or check the complaint reference.','error'); return; }
+  const r=d.record||d.complaint||{};
   const acts=d.actions||[];
   showDrawer({
     ref: r.complaint_id||ref,
-    title: r.nurse_full_name||r.full_name||'Nurse',
-    sub: (r.category||r.complaint_category||'')+' · '+(r.hospital||''),
+    title: r.nurse_name||r.nurse_full_name||r.full_name||'Nurse',
+    sub: (r.category||r.complaint_category||'')+' · '+(r.workplace||r.hospital||''),
     status: r.status||r.complaint_status||'—',
     priority: r.priority||'Normal',
     profile: [
+      ['Nurse Reference', r.nurse_reference||r.nurse_reference_id||'—'],
       ['Passport', r.passport_number||''],
       ['Civil ID', r.civil_id||'—'],
+      ['Primary Mobile', r.phone||r.mobile||'—'],
+      ['WhatsApp', r.whatsapp||'—'],
       ['Email', r.email||'—'],
-      ['Phone', r.mobile||r.phone||''],
-      ['Hospital', r.hospital||r.workplace||''],
-      ['Subject', r.subject||''],
-      ['Description', r.description||''],
+      ['Workplace / Hospital', r.workplace||r.hospital||'—'],
+      ['Current Stay Arrangement', r.current_arrangement||'—'],
+      ['Facility / Building', r.facility_name||'—'],
+      ['Area', r.facility_area||'—'],
+    ],
+    requestDetails: [
+      ['Category', r.category||r.complaint_category||'—'],
+      ['Subject', r.subject||'—'],
+      ['Details / Message', r.description||r.details||'—'],
+      ['Preferred Contact Method', r.preferred_contact_method||'—'],
+      ['Submitted At', fmtTime(r.created_at)],
+    ],
+    facilityContext: [
+      ['Current Stay Arrangement', r.current_arrangement||'—'],
+      ['Approved Vendor / Service Provider', r.vendor_name||'—'],
+      ['Facility / Building', r.facility_name||'—'],
+      ['Area', r.facility_area||'—'],
+      ['Date shifted', r.date_shifted_to_facility||'—'],
+      ['Contract / stay period start date', r.contract_start_date||'—'],
+      ['Notice period status', r.stay_reminders_opt_in||'—'],
     ],
     canAct: true,
     complaintId: r.complaint_id||ref,
@@ -369,6 +391,9 @@ function showDrawer(d){
   const host=document.getElementById('drawerHost');
   const profileHtml=(d.profile||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
   const tlHtml=(d.timeline||[]).slice(0,12).map(a=>`<div class="cwa-drawer__timeline-item"><div class="cwa-drawer__timeline-dot"></div><div class="cwa-drawer__timeline-body"><div class="cwa-drawer__timeline-title">${esc(a.action_type||'Action')}: ${esc(a.new_status||a.note||'')}</div><div class="cwa-drawer__timeline-sub">${esc(a.note||'')} ${a.actor_username?('· by '+esc(a.actor_username)):''}</div></div><div class="cwa-drawer__timeline-time">${esc(fmtTime(a.created_at))}</div></div>`).join('') || '<div class="cwa-empty" style="padding:14px 0">No actions yet.</div>';
+  const requestHtml=(d.requestDetails||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
+  const facilityHtml=(d.facilityContext||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
+  const relatedHtml=(d.relatedRequests||[]).map(x=>`<tr><td>${esc(x.complaint_id||'—')}</td><td>${esc(x.category||'—')}</td><td>${esc(x.subject||'—')}</td><td><span class="cwa-badge" data-type="${statusType(x.status)}">${esc(x.status||'—')}</span></td><td>${esc(fmtTime(x.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="openDetail('${esc(x.complaint_id||'')}','complaint')">Open</button></td></tr>`).join('');
   const assignSel=(d.assignees||[]).length?`<select id="dwAssign" class="cwa-select">${d.assignees.map(a=>`<option value="${esc(a.username)}" ${a.username===d.currentAssign?'selected':''}>${esc(a.display_name||a.username)}</option>`).join('')}</select>`:`<input id="dwAssign" class="cwa-input" placeholder="Username">`;
   const statusOpts=['Submitted','Seen by Admin','Assigned','In Progress','Resolved','Closed'].map(s=>`<option value="${esc(s)}" ${s===d.status?'selected':''}>${esc(s)}</option>`).join('');
   host.innerHTML = `
@@ -394,6 +419,9 @@ function showDrawer(d){
           <div class="cwa-drawer__section-title">Nurse Profile</div>
           <dl class="cwa-drawer__profile">${profileHtml}</dl>
         </div>
+        ${requestHtml?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Submitted Request</div><dl class="cwa-drawer__profile">${requestHtml}</dl></div>`:''}
+        ${facilityHtml?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Facility Context</div><dl class="cwa-drawer__profile">${facilityHtml}</dl></div>`:''}
+        ${d.relatedRequests?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Recent Nurse Requests / Welfare Issues</div>${(d.relatedRequests||[]).length?`<table class="cwa-table"><thead><tr><th>Reference</th><th>Category</th><th>Subject</th><th>Status</th><th>Submitted</th><th>Action</th></tr></thead><tbody>${relatedHtml}</tbody></table>`:'<div class="cwa-empty" style="padding:12px 0">No recent nurse requests.</div>'}</div>`:''}
 
         ${d.canReviewRegistration?`
         <div class="cwa-drawer__section">

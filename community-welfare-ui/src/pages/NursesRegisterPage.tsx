@@ -21,6 +21,17 @@ const CURRENT_ARRANGEMENTS = [
   "Other",
 ];
 const APPROVED_VENDOR_OPTIONS = ["AJA Care", "Other / Not Sure"];
+const COUNTRY_CODE_OPTIONS = [
+  { value: "+965", label: "+965 Kuwait" },
+  { value: "+92", label: "+92 Pakistan" },
+  { value: "+91", label: "+91 India" },
+  { value: "+971", label: "+971 UAE" },
+  { value: "+966", label: "+966 Saudi Arabia" },
+  { value: "+974", label: "+974 Qatar" },
+  { value: "+973", label: "+973 Bahrain" },
+  { value: "+968", label: "+968 Oman" },
+  { value: "+999", label: "Other" },
+];
 const QUALIFICATION_OPTIONS_BY_CATEGORY: Record<string, string[]> = {
   Nurse: ["Diploma Nurse", "BSN Nursing", "Other"],
   Doctor: ["Doctor MBBS", "Doctor BDS", "Other"],
@@ -35,6 +46,11 @@ interface FormState {
   cnic?: string;
   nationality?: string;
   phone?: string;
+  mobileCountryCode?: string;
+  mobileNumber?: string;
+  whatsappSameAsMobile?: boolean;
+  whatsappCountryCode?: string;
+  whatsappNumber?: string;
   email?: string;
   address?: string;
   hospital?: string;
@@ -55,6 +71,7 @@ interface FormState {
   contractStartDate?: string;
   stayRemindersOptIn?: string;
   emergency?: string;
+  emergencyCountryCode?: string;
   remarks?: string;
   declared?: boolean;
   password?: string;
@@ -77,6 +94,12 @@ export function NursesRegisterPage() {
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [showPw, setShowPw] = useState(false);
+  const normalizeDigits = (v: string) => (v || "").replace(/[^\d]/g, "");
+  const composePhone = (code: string, number: string) => {
+    const cc = (code || "").startsWith("+") ? (code || "") : `+${code || ""}`;
+    const num = normalizeDigits(number);
+    return cc && num ? `${cc}${num}` : "";
+  };
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((p) => ({ ...p, [k]: v }));
@@ -258,12 +281,58 @@ export function NursesRegisterPage() {
                     Contact Details
                   </h3>
                   <FInput
-                    label="Phone / WhatsApp Number"
+                    label="Primary Mobile Number"
                     req
-                    {...inp("phone")}
-                    type="tel"
-                    placeholder="+965 XXXX XXXX"
+                    value={form.mobileNumber || ""}
+                    onChange={(e) => set("mobileNumber", e.target.value)}
+                    placeholder="e.g. 5XXXXXXX"
                   />
+                  <FSelect
+                    label="Primary Mobile Country Code"
+                    req
+                    value={form.mobileCountryCode || "+965"}
+                    onChange={(e) => {
+                      const code = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        mobileCountryCode: code,
+                        whatsappCountryCode: prev.whatsappSameAsMobile === false ? (prev.whatsappCountryCode || code) : code,
+                      }));
+                    }}
+                    options={COUNTRY_CODE_OPTIONS}
+                  />
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, gridColumn: "1/-1", fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={form.whatsappSameAsMobile !== false}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          whatsappSameAsMobile: e.target.checked,
+                          whatsappCountryCode: e.target.checked ? (prev.mobileCountryCode || "+965") : (prev.whatsappCountryCode || prev.mobileCountryCode || "+965"),
+                        }))
+                      }
+                    />
+                    WhatsApp number is same as mobile number
+                  </label>
+                  {form.whatsappSameAsMobile === false ? (
+                    <>
+                      <FSelect
+                        label="WhatsApp Country Code"
+                        req
+                        value={form.whatsappCountryCode || form.mobileCountryCode || "+965"}
+                        onChange={(e) => set("whatsappCountryCode", e.target.value)}
+                        options={COUNTRY_CODE_OPTIONS}
+                      />
+                      <FInput
+                        label="WhatsApp Number"
+                        req
+                        value={form.whatsappNumber || ""}
+                        onChange={(e) => set("whatsappNumber", e.target.value)}
+                        placeholder="e.g. 5XXXXXXX"
+                      />
+                    </>
+                  ) : null}
                   <FInput label="Email Address (required for your account)" req {...inp("email")} type="email" placeholder="your@email.com" />
                   <FTextarea
                     label="Current address in Kuwait"
@@ -431,9 +500,16 @@ export function NursesRegisterPage() {
                   <FInput
                     label="Emergency Contact Number"
                     req
-                    {...inp("emergency")}
-                    type="tel"
-                    placeholder="+965 or Pakistan number"
+                    value={form.emergency || ""}
+                    onChange={(e) => set("emergency", e.target.value)}
+                    placeholder="e.g. 5XXXXXXX"
+                  />
+                  <FSelect
+                    label="Emergency Contact Country Code"
+                    req
+                    value={form.emergencyCountryCode || "+965"}
+                    onChange={(e) => set("emergencyCountryCode", e.target.value)}
+                    options={COUNTRY_CODE_OPTIONS}
                   />
                   <FTextarea
                     label="Remarks / Special Concerns"
@@ -555,6 +631,32 @@ export function NursesRegisterPage() {
                           return;
                         }
                         const professionalCategory = form.professionalCategory || "";
+                        const mobileCountryCode = form.mobileCountryCode || "+965";
+                        const whatsappSameAsMobile = form.whatsappSameAsMobile !== false;
+                        const whatsappCountryCode = whatsappSameAsMobile ? mobileCountryCode : (form.whatsappCountryCode || mobileCountryCode);
+                        const emergencyCountryCode = form.emergencyCountryCode || "+965";
+                        const mobileDigits = normalizeDigits(form.mobileNumber || form.phone || "");
+                        const whatsappDigits = normalizeDigits(whatsappSameAsMobile ? mobileDigits : (form.whatsappNumber || ""));
+                        const emergencyDigits = normalizeDigits(form.emergency || "");
+                        const mobileFull = composePhone(mobileCountryCode, mobileDigits);
+                        const whatsappFull = composePhone(whatsappCountryCode, whatsappDigits);
+                        const emergencyFull = composePhone(emergencyCountryCode, emergencyDigits);
+                        if (!mobileCountryCode.startsWith("+") || !emergencyCountryCode.startsWith("+") || !whatsappCountryCode.startsWith("+")) {
+                          setSubmitError("Country code must start with +.");
+                          return;
+                        }
+                        if (mobileDigits.length < 7 || mobileDigits.length > 15) {
+                          setSubmitError("Primary mobile number must be 7 to 15 digits.");
+                          return;
+                        }
+                        if (!whatsappSameAsMobile && (whatsappDigits.length < 7 || whatsappDigits.length > 15)) {
+                          setSubmitError("WhatsApp number must be 7 to 15 digits.");
+                          return;
+                        }
+                        if (emergencyDigits.length < 7 || emergencyDigits.length > 15) {
+                          setSubmitError("Emergency contact number must be 7 to 15 digits.");
+                          return;
+                        }
                         const qualificationDegree = form.qualificationDegree || "";
                         const qualificationDegreeOther = (form.qualificationDegreeOther || "").trim();
                         const categoryVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory);
@@ -586,7 +688,14 @@ export function NursesRegisterPage() {
                             passport_number: form.passport,
                             civil_id: (form.civilId || "").trim(),
                             cnic: form.cnic,
-                            mobile: form.phone,
+                            mobile: mobileFull,
+                            mobile_country_code: mobileCountryCode,
+                            mobile_number: mobileDigits,
+                            mobile_full: mobileFull,
+                            whatsapp_same_as_mobile: whatsappSameAsMobile ? 1 : 0,
+                            whatsapp_country_code: whatsappCountryCode,
+                            whatsapp_number: whatsappDigits,
+                            whatsapp_full: whatsappFull,
                             email: form.email,
                             arrival_date: form.arrivalDate,
                             batch_number: form.batchNumber,
@@ -609,6 +718,9 @@ export function NursesRegisterPage() {
                             stay_reminders_opt_in: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
                             receive_notice_reminders: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
                             issue_notice: "",
+                            emergency_country_code: emergencyCountryCode,
+                            emergency_contact: emergencyDigits,
+                            emergency_contact_full: emergencyFull,
                             password: form.password,
                             confirm_password: form.confirmPassword,
                           });

@@ -30,7 +30,7 @@ export function NursesPortalPage() {
     area: ctx?.facilityRoster?.facility_area || ctx?.facilityRoster?.area || "",
     room_number: ctx?.facilityRoster?.room_number || "",
     bed_number: ctx?.facilityRoster?.bed_number || "",
-    current_phone: ctx?.mobile || "",
+    current_phone: ctx?.mobileFull || ctx?.mobile || "",
     preferred_contact_method: "WhatsApp",
     remarks: "",
   }));
@@ -270,6 +270,9 @@ export function NursesPortalPage() {
                   <Field label="Reference ID" value={ctx.referenceId || "-"} />
                   <Field label="Name" value={ctx.fullName || "-"} />
                   <Field label="Email" value={ctx.email || "-"} />
+                  <Field label="Primary Mobile" value={ctx.mobileFull || ctx.mobile || "—"} />
+                  <Field label="WhatsApp" value={ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "—"} />
+                  <Field label="Emergency Contact" value={ctx.emergencyContactFull || "—"} />
                   <Field label="Passport" value={ctx.passportMasked || "-"} />
                   <Field label="Civil ID (if any)" value={ctx.civilIdMasked || "—"} />
                   <Field label="Qualification / Degree" value={qualificationDisplay} />
@@ -501,10 +504,10 @@ export function NursesPortalPage() {
                 {ctx.complaints.slice(0, 10).map((c, idx) => (
                   <div key={c.complaint_id || idx} style={{ border: "1px solid #E3EBF0", borderRadius: 10, padding: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                      <strong>{c.subject || "Complaint"}</strong>
+                      <strong>{c.subject || "Complaint"} {c.complaint_id ? `(${c.complaint_id})` : ""}</strong>
                       <StatusBadge type={(c.status || "").toLowerCase().includes("resolved") ? "resolved" : "processing"} label={c.status || "In Review"} />
                     </div>
-                    <p style={{ fontSize: 12, color: "#5B6773" }}>Type: {c.category || "-"} | Submitted: {c.submitted_date || "-"}</p>
+                    <p style={{ fontSize: 12, color: "#5B6773" }}>Type: {c.category || "-"} | Submitted: {c.submitted_date || "-"} | Latest update: {c.last_update_date || "-"}</p>
                   </div>
                 ))}
               </div>

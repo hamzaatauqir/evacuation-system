@@ -21,6 +21,9 @@ export type NursePortalContext = {
   passportNumber: string;
   civilId: string;
   mobile: string;
+  mobileFull?: string;
+  whatsappFull?: string;
+  emergencyContactFull?: string;
   hospital: string;
   registrationStatus: string;
   lastUpdated: string;
@@ -122,6 +125,9 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     passportNumber: passport,
     civilId: civil,
     mobile: (data?.mobile || '').toString(),
+    mobileFull: (data?.mobile_full || data?.mobile || '').toString(),
+    whatsappFull: (data?.whatsapp_full || data?.mobile_full || data?.mobile || '').toString(),
+    emergencyContactFull: (data?.emergency_contact_full || '').toString(),
     hospital: (data?.hospital || '').toString(),
     registrationStatus: (data?.registration_status || '').toString(),
     lastUpdated: (data?.process_last_updated_at || '').toString(),
