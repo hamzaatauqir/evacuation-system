@@ -3897,8 +3897,156 @@ def api_admin_death_summary():
             'assigned': _count("SELECT COUNT(*) c FROM death_case_requests WHERE status='Assigned'"),
             'in_progress': _count("SELECT COUNT(*) c FROM death_case_requests WHERE status='In Progress'"),
             'resolved': _count("SELECT COUNT(*) c FROM death_case_requests WHERE status='Resolved'"),
-            'closed': _count("SELECT COUNT(*) c FROM death_case_requests WHERE status='Closed'")
+            'closed': _count("SELECT COUNT(*) c FROM death_case_requests WHERE status='Closed'"),
+            'urgent': _count("SELECT COUNT(*) c FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
         }}
+    finally:
+        db.close()
+
+
+def api_admin_community_welfare_summary(user):
+    """Aggregated KPIs across nurses, legal cases, and death cases for the
+    /admin/community-welfare overview page. Safely handles missing tables."""
+    db = get_db()
+    try:
+        def _count(sql, vals=()):
+            try:
+                return int((db.execute(sql, vals).fetchone()['c']) or 0)
+            except Exception:
+                return 0
+        username = (user or {}).get('user', '') or ''
+        # Per-module counts (degrade to 0 if table missing)
+        nurse_complaints_total = _count("SELECT COUNT(*) c FROM nurse_complaints")
+        nurse_complaints_pending = _count("SELECT COUNT(*) c FROM nurse_complaints WHERE complaint_status IN ('Submitted','Seen','Pending')")
+        nurse_complaints_progress = _count("SELECT COUNT(*) c FROM nurse_complaints WHERE complaint_status IN ('Assigned','In Progress')")
+        nurse_complaints_resolved_week = _count(
+            "SELECT COUNT(*) c FROM nurse_complaints WHERE complaint_status='Resolved' "
+            "AND date(IFNULL(updated_at,created_at)) >= date('now','-7 days')")
+        nurse_complaints_urgent = _count("SELECT COUNT(*) c FROM nurse_complaints WHERE LOWER(IFNULL(priority,''))='urgent' AND complaint_status NOT IN ('Resolved','Closed')")
+        nurse_complaints_mine = _count("SELECT COUNT(*) c FROM nurse_complaints WHERE assigned_to_username=? AND complaint_status NOT IN ('Resolved','Closed')", (username,))
+
+        legal_total = _count("SELECT COUNT(*) c FROM legal_case_requests")
+        legal_pending = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('Submitted','Seen by Admin')")
+        legal_progress = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('Assigned','In Progress')")
+        legal_resolved_week = _count(
+            "SELECT COUNT(*) c FROM legal_case_requests WHERE status='Resolved' "
+            "AND date(IFNULL(updated_at,created_at)) >= date('now','-7 days')")
+        legal_urgent = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
+        legal_mine = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE assigned_to_username=? AND status NOT IN ('Resolved','Closed')", (username,))
+
+        death_total = _count("SELECT COUNT(*) c FROM death_case_requests")
+        death_pending = _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('Submitted','Seen by Admin')")
+        death_progress = _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('Assigned','In Progress')")
+        death_resolved_week = _count(
+            "SELECT COUNT(*) c FROM death_case_requests WHERE status='Resolved' "
+            "AND date(IFNULL(updated_at,created_at)) >= date('now','-7 days')")
+        death_urgent = _count("SELECT COUNT(*) c FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
+        death_mine = _count("SELECT COUNT(*) c FROM death_case_requests WHERE assigned_to_username=? AND status NOT IN ('Resolved','Closed')", (username,))
+
+        # Build urgent_list from the three tables (top 6 most recent urgent unresolved)
+        urgent_list = []
+        try:
+            for r in db.execute(
+                "SELECT complaint_id AS reference, nurse_full_name AS applicant, "
+                "IFNULL(category,IFNULL(complaint_category,'Complaint')) AS type, "
+                "complaint_status AS status, IFNULL(updated_at,created_at) AS time, "
+                "assigned_to_username AS assigned "
+                "FROM nurse_complaints WHERE LOWER(IFNULL(priority,''))='urgent' "
+                "AND complaint_status NOT IN ('Resolved','Closed') "
+                "ORDER BY IFNULL(updated_at,created_at) DESC LIMIT 4").fetchall():
+                d = dict(r); d['module'] = 'nurses'; urgent_list.append(d)
+        except Exception:
+            pass
+        try:
+            for r in db.execute(
+                "SELECT reference_id AS reference, full_name AS applicant, "
+                "case_type AS type, status AS status, "
+                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                "FROM legal_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' "
+                "AND status NOT IN ('Resolved','Closed') "
+                "ORDER BY IFNULL(updated_at,created_at) DESC LIMIT 3").fetchall():
+                d = dict(r); d['module'] = 'legal'; urgent_list.append(d)
+        except Exception:
+            pass
+        try:
+            for r in db.execute(
+                "SELECT reference_id AS reference, deceased_name AS applicant, "
+                "'Death Case' AS type, status AS status, "
+                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                "FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' "
+                "AND status NOT IN ('Resolved','Closed') "
+                "ORDER BY IFNULL(updated_at,created_at) DESC LIMIT 3").fetchall():
+                d = dict(r); d['module'] = 'death'; urgent_list.append(d)
+        except Exception:
+            pass
+
+        return {
+            'success': True,
+            'user_display': (user or {}).get('user', 'Officer'),
+            'user_role': (user or {}).get('role', ''),
+            'totals': {
+                'total': nurse_complaints_total + legal_total + death_total,
+                'pending': nurse_complaints_pending + legal_pending + death_pending,
+                'in_progress': nurse_complaints_progress + legal_progress + death_progress,
+                'urgent': nurse_complaints_urgent + legal_urgent + death_urgent,
+                'resolved_week': nurse_complaints_resolved_week + legal_resolved_week + death_resolved_week,
+                'assigned_to_me': nurse_complaints_mine + legal_mine + death_mine,
+            },
+            'modules': {
+                'nurses_active': nurse_complaints_progress + nurse_complaints_pending,
+                'nurses_pending': nurse_complaints_pending,
+                'legal_active': legal_progress + legal_pending,
+                'legal_pending': legal_pending,
+                'death_active': death_progress + death_pending,
+                'death_pending': death_pending,
+            },
+            'urgent_list': urgent_list[:6],
+        }
+    finally:
+        db.close()
+
+
+def api_admin_community_welfare_recent(limit=10):
+    """Combined recent activity feed across nurses/legal/death."""
+    db = get_db()
+    try:
+        rows = []
+        try:
+            for r in db.execute(
+                "SELECT complaint_id AS reference, nurse_full_name AS applicant, "
+                "IFNULL(category,IFNULL(complaint_category,'Complaint')) AS type, "
+                "complaint_status AS status, IFNULL(updated_at,created_at) AS time, "
+                "assigned_to_username AS assigned "
+                "FROM nurse_complaints ORDER BY IFNULL(updated_at,created_at) DESC LIMIT ?",
+                (limit,)).fetchall():
+                d = dict(r); d['module'] = 'nurses'; rows.append(d)
+        except Exception:
+            pass
+        try:
+            for r in db.execute(
+                "SELECT reference_id AS reference, full_name AS applicant, "
+                "case_type AS type, status AS status, "
+                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                "FROM legal_case_requests ORDER BY IFNULL(updated_at,created_at) DESC LIMIT ?",
+                (limit,)).fetchall():
+                d = dict(r); d['module'] = 'legal'; rows.append(d)
+        except Exception:
+            pass
+        try:
+            for r in db.execute(
+                "SELECT reference_id AS reference, deceased_name AS applicant, "
+                "'Death Case' AS type, status AS status, "
+                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                "FROM death_case_requests ORDER BY IFNULL(updated_at,created_at) DESC LIMIT ?",
+                (limit,)).fetchall():
+                d = dict(r); d['module'] = 'death'; rows.append(d)
+        except Exception:
+            pass
+        # Sort merged feed by time desc and trim
+        def _key(r):
+            return r.get('time') or ''
+        rows.sort(key=_key, reverse=True)
+        return {'success': True, 'items': rows[:limit]}
     finally:
         db.close()
 
@@ -14057,6 +14205,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Inject user role into the page
                 app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
                 self.send_html(app_html)
+        elif path == '/admin/community-welfare':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            if not self.render_template('admin_community_welfare.html'):
+                self.send_json({'error': 'Community Welfare overview template missing'}, 500)
         elif path == '/admin/nurses':
             user = self.require_auth()
             if not user: return
@@ -14120,6 +14275,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] == 'fee_collector':
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_records(params, user))
+        elif path == '/api/admin/community-welfare/summary':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_admin_community_welfare_summary(user))
+        elif path == '/api/admin/community-welfare/recent':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                limit = max(1, min(50, int(params.get('limit', 10))))
+            except Exception:
+                limit = 10
+            self.send_json(api_admin_community_welfare_recent(limit=limit))
         elif path == '/api/admin/nurses/summary':
             user = self.require_auth()
             if not user: return
@@ -22781,10 +22952,12 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <button onclick="go('iraq-public',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Iraq Public (MOFA KW)</span></button>
 <button onclick="go('fee-report',this)" data-fee-report-nav><span class="side-nav-icon" aria-hidden="true"></span><span>Fee Reporting</span></button>
 <button onclick="go('admin',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Admin</span></button>
-<div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Community Welfare Services</div>
-<button data-cwa-nav onclick="window.location.href='/admin/nurses'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurses Registration</span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/legal-opf'"><span class="side-nav-icon" aria-hidden="true"></span><span>Legal Cases Request</span></button>
+<div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Community Welfare</div>
+<button data-cwa-nav onclick="window.location.href='/admin/community-welfare'"><span class="side-nav-icon" aria-hidden="true"></span><span>Overview</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/nurses'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurses</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/legal-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Legal Cases</span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/death-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Death Cases</span></button>
+<button data-cwa-nav onclick="window.open('/','_blank')"><span class="side-nav-icon" aria-hidden="true"></span><span>Public Portal ↗</span></button>
 </div>
 <div class="portal-sidebar-user"><div class="portal-avatar" aria-hidden="true"></div><div><strong>__USER_NAME__</strong><span>__USER_ROLE__</span></div></div>
 </aside>

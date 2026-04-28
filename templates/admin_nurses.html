@@ -3,91 +3,394 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Admin Nurses Dashboard</title>
-  <link rel="stylesheet" href="/static/css/cwa-ui.css">
+  <title>Nurses Management — Embassy of Pakistan, Kuwait</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
 </head>
-<body class="cwa-ui">
-  <header class="cwa-topbar">
-    <div class="cwa-shell">
-      <div class="cwa-logo-strip">Embassy of Pakistan, Kuwait · Community Welfare Wing</div>
-      <nav class="cwa-nav">
-        <a href="/admin/nurses">Nurses</a>
-        <a href="/admin/nurses/my-complaints">My Assigned Cases</a>
-        <a href="/dashboard">Main Dashboard</a>
-      </nav>
-      <a class="cwa-login" href="/login">Session</a>
+<body class="cwa-admin-body">
+<div class="cwa-admin">
+  <header class="cwa-admin-header">
+    <div class="cwa-admin-header__brand">
+      <div class="cwa-admin-header__logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="26" height="26"><path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#fff"/><polygon points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5" fill="#fff"/></svg>
+      </div>
+      <div class="cwa-admin-header__titles">
+        <div class="cwa-admin-header__gov">Government of Pakistan</div>
+        <div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div>
+        <div class="cwa-admin-header__wing">Admin — Community Welfare Wing</div>
+      </div>
+    </div>
+    <div class="cwa-admin-header__actions">
+      <a class="cwa-admin-header__logout" href="/dashboard">Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/logout">Logout</a>
     </div>
   </header>
 
-  <section class="admin-wrap">
-    <div class="cwa-shell">
-      <h1 style="margin:0 0 8px">Admin Nurses Dashboard</h1>
-      <div class="tabs">
-        <span class="tab">All Nurses</span>
-        <span class="tab">Pending Registrations</span>
-        <span class="tab">Accommodation</span>
-        <span class="tab">Complaints / Welfare</span>
-        <span class="tab">Leaving Notices</span>
-        <span class="tab">My Assigned Cases</span>
-        <span class="tab">Resolved / Closed</span>
+  <div class="cwa-admin-shell">
+    <aside class="cwa-admin-sidebar">
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
+        <a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">▢</span><span>Overview</span></a>
+        <a href="/admin/nurses" class="is-active"><span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span></a>
+        <a href="/admin/legal-cases"><span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span></a>
+        <a href="/admin/death-cases"><span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span></a>
       </div>
-
-      <div id="kpi" class="kpi-grid"></div>
-
-      <div class="panel">
-        <h3 style="margin-top:0">Search / Filters</h3>
-        <div class="nurses-grid">
-          <input id="q" placeholder="Search name/passport/civil id/phone/complaint id">
-          <select id="status"><option value="">All Status</option><option>Submitted</option><option>Assigned</option><option>In Progress</option><option>Resolved</option><option>Closed</option></select>
-          <input id="category" placeholder="Request Type / Category">
-          <select id="assigned_to"><option value="">All Assigned Staff</option></select>
-        </div>
-        <div class="actions" style="margin-top:10px">
-          <button id="btnLoad">Load</button>
-        </div>
+      <div class="cwa-admin-sidebar__divider"></div>
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Quick Access</div>
+        <a href="/dashboard"><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
+        <a href="/admin/nurses/my-complaints"><span class="cwa-admin-sidebar__icon">★</span><span>My Assigned</span></a>
       </div>
+    </aside>
 
-      <div class="panel">
-        <h3 style="margin-top:0">Complaints / Welfare Queue</h3>
-        <div style="overflow:auto">
-          <table style="width:100%;border-collapse:collapse">
-            <thead><tr><th style="text-align:left">Ref No.</th><th>Nurse Name</th><th>Passport / Civil ID</th><th>Type</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Last Updated</th></tr></thead>
-            <tbody id="rows"></tbody>
-          </table>
+    <main class="cwa-admin-main">
+      <div class="cwa-admin-subhead">
+        <div>
+          <h1>Nurses Management</h1>
+          <p id="totalLine">Loading…</p>
+        </div>
+        <div style="display:flex;gap:10px">
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="exportCsv()">⤓ Export</button>
         </div>
       </div>
-    </div>
-  </section>
 
-  <script>
-  async function api(url, opts){const r=await fetch(url,opts||{});return r.json();}
-  function statusBadge(v){
-    const x=(v||'').toLowerCase();
-    if(x.includes('submitted')) return '<span class="badge status-submitted">Submitted</span>';
-    if(x.includes('assigned')) return '<span class="badge status-assigned">Assigned</span>';
-    if(x.includes('progress')) return '<span class="badge status-progress">In Progress</span>';
-    if(x.includes('resolved')||x.includes('closed')) return '<span class="badge status-resolved">'+(v||'Resolved')+'</span>';
-    return '<span class="badge">'+(v||'N/A')+'</span>';
+      <div class="cwa-admin-content cwa-fade-in">
+        <div class="cwa-kpi-grid" id="kpiGrid">
+          <div class="cwa-kpi"><div><div class="cwa-kpi__label">Total Nurses</div><div class="cwa-kpi__value" id="kpiTotal">—</div></div><div class="cwa-kpi__icon">◉</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending</div><div class="cwa-kpi__value" id="kpiPending">—</div></div><div class="cwa-kpi__icon">⏱</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Accommodation</div><div class="cwa-kpi__value" id="kpiAccom">—</div></div><div class="cwa-kpi__icon">⌂</div></div>
+          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Open Complaints</div><div class="cwa-kpi__value" id="kpiOpen">—</div></div><div class="cwa-kpi__icon">!</div></div>
+          <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">Resolved</div><div class="cwa-kpi__value" id="kpiResolved">—</div></div><div class="cwa-kpi__icon">✓</div></div>
+        </div>
+
+        <div class="cwa-tabs" id="tabBar"></div>
+
+        <div class="cwa-form-row">
+          <div style="flex:1 1 240px;position:relative">
+            <input id="search" class="cwa-input" placeholder="Search name, passport, civil ID, hospital, complaint ID…" style="padding-left:34px">
+            <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--cwa-muted-lt)">⌕</span>
+          </div>
+          <select id="filterStatus" class="cwa-select" style="width:160px">
+            <option value="">All Status</option>
+            <option value="Submitted">Submitted</option>
+            <option value="Seen by Admin">Seen by Admin</option>
+            <option value="Assigned">Assigned</option>
+            <option value="In Progress">In Progress</option>
+            <option value="Resolved">Resolved</option>
+            <option value="Closed">Closed</option>
+          </select>
+          <select id="filterPriority" class="cwa-select" style="width:160px">
+            <option value="">All Priority</option>
+            <option value="Urgent">Urgent</option>
+            <option value="Important">Important</option>
+            <option value="Normal">Normal</option>
+          </select>
+          <select id="filterAssigned" class="cwa-select" style="width:200px">
+            <option value="">All Assigned Staff</option>
+          </select>
+          <button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="loadList()">Search</button>
+        </div>
+
+        <div class="cwa-card cwa-card--p0">
+          <div class="cwa-table-wrap">
+            <table class="cwa-table" id="resultsTable">
+              <thead><tr id="theadRow"></tr></thead>
+              <tbody id="rows"><tr><td colspan="11" class="cwa-empty">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div id="drawerHost"></div>
+<div id="toastHost"></div>
+
+<script>
+const TABS = [
+  { key: 'all',          label: 'All',              endpoint: 'complaints',     params: {} },
+  { key: 'pending',      label: 'Pending Review',   endpoint: 'complaints',     params: { status: 'Submitted' } },
+  { key: 'requests',     label: 'Nurse Requests',   endpoint: 'complaints',     params: {} },
+  { key: 'welfare',      label: 'Welfare Issues',   endpoint: 'complaints',     params: { category: 'Welfare Assistance' } },
+  { key: 'leaving',      label: 'Leaving Notices',  endpoint: 'leave-notices',  params: {} },
+  { key: 'mine',         label: 'My Assigned',      endpoint: 'my-complaints',  params: {} },
+  { key: 'resolved',     label: 'Resolved / Closed',endpoint: 'complaints',     params: { status: 'Resolved' } },
+  { key: 'registrations',label: 'Registrations',    endpoint: 'registrations',  params: {} },
+];
+let activeTab = 'all';
+let activeRows = [];
+let summary = {};
+let assignees = [];
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function statusType(s){const x=(s||'').toLowerCase();if(x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('assign'))return 'assigned';if(x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await'))return 'awaiting';return 'pending';}
+function priorityType(p){const x=(p||'').toLowerCase();if(x.includes('urgent'))return 'urgent';if(x.includes('important')||x.includes('high'))return 'high';if(x.includes('low'))return 'low';return 'medium';}
+function fmtTime(s){if(!s)return '—';return String(s).slice(0,16).replace('T',' ');}
+async function api(url,opts){const r=await fetch(url,Object.assign({credentials:'include'},opts||{}));if(!r.ok && r.status>=500)throw new Error('HTTP '+r.status);return r.json();}
+function toast(msg, type){
+  const el=document.createElement('div'); el.className='cwa-toast'; if(type)el.dataset.type=type; el.textContent=msg;
+  document.getElementById('toastHost').appendChild(el);
+  setTimeout(()=>el.remove(),3000);
+}
+
+function renderTabs(){
+  const bar=document.getElementById('tabBar');
+  bar.innerHTML=TABS.map(t=>`<button class="cwa-tab${t.key===activeTab?' is-active':''}" onclick="switchTab('${t.key}')">${esc(t.label)}<span class="cwa-tab__count" id="tc-${t.key}">—</span></button>`).join('');
+}
+function switchTab(k){activeTab=k;renderTabs();loadList();}
+
+function buildHeader(){
+  const cols = activeTab==='leaving'
+    ? ['Reference','Nurse','Passport','Reason','Status','Updated','Actions']
+    : activeTab==='registrations'
+    ? ['Reference','Nurse','Passport / Civil ID','Hospital','Status','Updated','Actions']
+    : ['Reference','Nurse','Passport / Civil ID','Email','Phone','Hospital','Type','Priority','Status','Assigned','Updated'];
+  document.getElementById('theadRow').innerHTML=cols.map(c=>`<th>${esc(c)}</th>`).join('');
+  return cols.length;
+}
+
+function rowHtml(r){
+  if(activeTab==='leaving'){
+    return `<tr onclick="openDetail('${esc(r.nurse_reference_id||r.reference||'')}','leaving')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(r.reference_id||r.id||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_full_name||r.full_name||'')}</td><td>${esc(r.passport_number||'')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc((r.reason||'').slice(0,80))}</td><td><span class="cwa-badge" data-type="${statusType(r.status)}">${esc(r.status||'—')}</span></td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openDetail('${esc(r.nurse_reference_id||'')}','leaving')">View</button></td></tr>`;
   }
-  async function loadAssignees(){
+  if(activeTab==='registrations'){
+    return `<tr onclick="openRegDetail('${esc(r.nurse_reference_id||r.reference_id||'')}')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(r.nurse_reference_id||r.reference_id||'—')}</span></td><td style="font-weight:600">${esc(r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'')}</div></div></td><td><span style="font-size:12px">${esc(r.hospital||'')}</span></td><td><span class="cwa-badge" data-type="${statusType(r.registration_status)}">${esc(r.registration_status||'—')}</span></td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openRegDetail('${esc(r.nurse_reference_id||r.reference_id||'')}')">View</button></td></tr>`;
+  }
+  // complaints (default)
+  const ref = r.complaint_id||r.reference_id||'';
+  return `<tr onclick="openDetail('${esc(ref)}','complaint')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_full_name||r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.email||'—')}</td><td style="font-size:12px">${esc(r.mobile||r.phone||'')}</td><td style="font-size:12px">${esc(r.hospital||r.workplace||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.category||r.complaint_category||'—')}</td><td><span class="cwa-badge" data-type="${priorityType(r.priority)}">${esc(r.priority||'Normal')}</span></td><td><span class="cwa-badge" data-type="${statusType(r.status||r.complaint_status)}">${esc(r.status||r.complaint_status||'—')}</span></td><td style="font-size:12px;color:${(r.assigned_to_username||r.assigned_to_name)?'var(--cwa-text)':'var(--cwa-muted-lt)'};font-style:${(r.assigned_to_username||r.assigned_to_name)?'normal':'italic'}">${esc(r.assigned_to_name||r.assigned_to_username||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td></tr>`;
+}
+
+async function loadAssignees(){
+  try{
     const d=await api('/api/admin/nurses/complaint-assignees');
-    assigned_to.innerHTML='<option value="">All Assigned Staff</option>'+(d.items||[]).map(i=>'<option value="'+i.username+'">'+(i.display_name||i.username)+'</option>').join('');
+    assignees=(d.items||[]);
+    const sel=document.getElementById('filterAssigned');
+    sel.innerHTML='<option value="">All Assigned Staff</option>'+assignees.map(a=>`<option value="${esc(a.username)}">${esc(a.display_name||a.username)}</option>`).join('');
+  }catch(e){}
+}
+
+async function loadSummary(){
+  try{
+    summary = await api('/api/admin/nurses/summary');
+    const t=summary.totals||{};
+    document.getElementById('kpiTotal').textContent=(t.registrations||0).toLocaleString();
+    document.getElementById('kpiPending').textContent=(t.pending_registrations||0).toLocaleString();
+    document.getElementById('kpiAccom').textContent=(t.accommodation_requests||0).toLocaleString();
+    document.getElementById('kpiOpen').textContent=(t.open_complaints||0).toLocaleString();
+    document.getElementById('kpiResolved').textContent=(t.resolved_complaints||0).toLocaleString();
+    document.getElementById('totalLine').textContent=(t.registrations||0)+' nurses · '+(t.open_complaints||0)+' open complaints';
+    // tab counts (best-effort)
+    document.getElementById('tc-all').textContent=t.open_complaints!=null?(t.total_complaints||t.open_complaints||0):'—';
+    document.getElementById('tc-pending').textContent=(t.pending_complaints||t.pending_registrations||0);
+    document.getElementById('tc-welfare').textContent=t.welfare_complaints||'—';
+    document.getElementById('tc-leaving').textContent=t.leave_notices||0;
+    document.getElementById('tc-mine').textContent=t.my_complaints||0;
+    document.getElementById('tc-resolved').textContent=t.resolved_complaints||0;
+    document.getElementById('tc-registrations').textContent=t.registrations||0;
+  }catch(e){}
+}
+
+async function loadList(){
+  buildHeader();
+  document.getElementById('rows').innerHTML='<tr><td colspan="11" class="cwa-empty">Loading…</td></tr>';
+  const tab=TABS.find(t=>t.key===activeTab)||TABS[0];
+  const params=new URLSearchParams();
+  params.set('page','1'); params.set('page_size','100');
+  const search=document.getElementById('search').value.trim();
+  const fs=document.getElementById('filterStatus').value;
+  const fp=document.getElementById('filterPriority').value;
+  const fa=document.getElementById('filterAssigned').value;
+  if(search) params.set('search',search);
+  if(fs) params.set('status',fs);
+  if(fp) params.set('priority',fp);
+  if(fa) params.set('assigned_to',fa);
+  Object.entries(tab.params||{}).forEach(([k,v])=>params.set(k,v));
+  try{
+    const d=await api('/api/admin/nurses/'+tab.endpoint+'?'+params.toString());
+    activeRows=d.items||[];
+    if(!activeRows.length){
+      document.getElementById('rows').innerHTML='<tr><td colspan="11" class="cwa-empty">No records match the current filters.</td></tr>';
+      return;
+    }
+    document.getElementById('rows').innerHTML=activeRows.map(rowHtml).join('');
+  }catch(e){
+    document.getElementById('rows').innerHTML='<tr><td colspan="11" class="cwa-empty">Could not load list. '+esc(e.message)+'</td></tr>';
   }
-  async function loadData(){
-    const s=await api('/api/admin/nurses/summary');
-    const t=s.totals||{};
-    const cards=[['Total Nurses',t.total_registrations||0],['Pending Review',t.pending_registrations||0],['Accommodation Requests',t.accommodation_requests||0],['Open Complaints',t.open_complaints||0],['Assigned to Me',t.my_complaints||0],['Resolved',t.resolved_complaints||0]];
-    kpi.innerHTML=cards.map(c=>'<div class="kpi"><div class="lbl">'+c[0]+'</div><div class="val">'+c[1]+'</div></div>').join('');
-    const p=new URLSearchParams({page:'1',page_size:'50',search:q.value,status:status.value,category:category.value,assigned_to:assigned_to.value});
-    const c=await api('/api/admin/nurses/complaints?'+p.toString());
-    rows.innerHTML=(c.items||[]).map(r=>{
-      const ref=r.complaint_id||'';
-      const id=(r.passport_number||'')+' / '+(r.civil_id||'');
-      return '<tr><td>'+ref+'</td><td>'+(r.nurse_full_name||'')+'</td><td>'+id+'</td><td>'+(r.category||r.complaint_category||'')+'</td><td>'+(r.priority||'')+'</td><td>'+statusBadge(r.status||r.complaint_status||'')+'</td><td>'+(r.assigned_to_name||r.assigned_to_username||'')+'</td><td>'+((r.updated_at||'').slice(0,16))+'</td></tr>';
-    }).join('') || '<tr><td colspan="8" class="muted">No results</td></tr>';
+}
+
+function exportCsv(){
+  const params=new URLSearchParams();
+  const search=document.getElementById('search').value.trim();
+  if(search) params.set('search',search);
+  const fs=document.getElementById('filterStatus').value; if(fs) params.set('status',fs);
+  const fp=document.getElementById('filterPriority').value; if(fp) params.set('priority',fp);
+  const fa=document.getElementById('filterAssigned').value; if(fa) params.set('assigned_to',fa);
+  window.location='/api/admin/nurses/complaints/export?'+params.toString();
+}
+
+async function openRegDetail(ref){
+  if(!ref) return;
+  const d=await api('/api/admin/nurses/registration?nurse_reference_id='+encodeURIComponent(ref))
+    .catch(()=>({success:false}));
+  const r=(d&&d.record)||{};
+  showDrawer({
+    ref: r.nurse_reference_id||ref,
+    title: r.full_name||'Nurse',
+    sub: 'Registration · '+(r.hospital||''),
+    status: r.registration_status||'—',
+    priority: '',
+    profile: [
+      ['Passport', r.passport_number||''],
+      ['Civil ID', r.civil_id||'—'],
+      ['Email', r.email||'—'],
+      ['Phone', r.phone||r.mobile||''],
+      ['Hospital', r.hospital||''],
+      ['Department', r.department||r.dept||''],
+      ['Address', r.current_address||r.address||''],
+    ],
+    actions: [],
+    timeline: [],
+    visibilityHelp: ''
+  });
+}
+
+async function openDetail(ref, kind){
+  if(!ref) return;
+  if(kind==='leaving'){
+    // detail endpoint for leave-notices isn't a single API; we surface what we have from list row
+    const r=activeRows.find(x=>x.nurse_reference_id===ref||x.reference_id===ref)||{};
+    showDrawer({
+      ref: r.reference_id||ref,
+      title: r.nurse_full_name||r.full_name||'Nurse',
+      sub: 'Leaving Notice',
+      status: r.status||'—',
+      priority: '',
+      profile: [
+        ['Passport', r.passport_number||''],
+        ['Current Facility', r.current_facility||''],
+        ['Room', r.room_number||'—'],
+        ['Intended Leaving Date', r.intended_leaving_date||''],
+        ['Reason', r.reason||''],
+      ],
+      actions: [],
+      timeline: [],
+      visibilityHelp: ''
+    });
+    return;
   }
-  btnLoad.onclick=loadData;
-  loadAssignees().then(loadData);
-  </script>
+  // complaint
+  const d=await api('/api/admin/nurses/complaint?complaint_id='+encodeURIComponent(ref)).catch(()=>({success:false}));
+  if(!d.success){ toast(d.error||'Could not load complaint detail','error'); return; }
+  const r=d.record||{};
+  const acts=d.actions||[];
+  showDrawer({
+    ref: r.complaint_id||ref,
+    title: r.nurse_full_name||r.full_name||'Nurse',
+    sub: (r.category||r.complaint_category||'')+' · '+(r.hospital||''),
+    status: r.status||r.complaint_status||'—',
+    priority: r.priority||'Normal',
+    profile: [
+      ['Passport', r.passport_number||''],
+      ['Civil ID', r.civil_id||'—'],
+      ['Email', r.email||'—'],
+      ['Phone', r.mobile||r.phone||''],
+      ['Hospital', r.hospital||r.workplace||''],
+      ['Subject', r.subject||''],
+      ['Description', r.description||''],
+    ],
+    canAct: true,
+    complaintId: r.complaint_id||ref,
+    assignees,
+    currentAssign: r.assigned_to_username||'',
+    actions: acts,
+    timeline: acts,
+    visibilityHelp: 'Nurse-visible message will appear in the nurse portal status view.'
+  });
+}
+
+function showDrawer(d){
+  const host=document.getElementById('drawerHost');
+  const profileHtml=(d.profile||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
+  const tlHtml=(d.timeline||[]).slice(0,12).map(a=>`<div class="cwa-drawer__timeline-item"><div class="cwa-drawer__timeline-dot"></div><div class="cwa-drawer__timeline-body"><div class="cwa-drawer__timeline-title">${esc(a.action_type||'Action')}: ${esc(a.new_status||a.note||'')}</div><div class="cwa-drawer__timeline-sub">${esc(a.note||'')} ${a.actor_username?('· by '+esc(a.actor_username)):''}</div></div><div class="cwa-drawer__timeline-time">${esc(fmtTime(a.created_at))}</div></div>`).join('') || '<div class="cwa-empty" style="padding:14px 0">No actions yet.</div>';
+  const assignSel=(d.assignees||[]).length?`<select id="dwAssign" class="cwa-select">${d.assignees.map(a=>`<option value="${esc(a.username)}" ${a.username===d.currentAssign?'selected':''}>${esc(a.display_name||a.username)}</option>`).join('')}</select>`:`<input id="dwAssign" class="cwa-input" placeholder="Username">`;
+  const statusOpts=['Submitted','Seen by Admin','Assigned','In Progress','Resolved','Closed'].map(s=>`<option value="${esc(s)}" ${s===d.status?'selected':''}>${esc(s)}</option>`).join('');
+  host.innerHTML = `
+    <div class="cwa-drawer-overlay" onclick="closeDrawer()"></div>
+    <aside class="cwa-drawer" role="dialog" aria-label="Detail drawer">
+      <div class="cwa-drawer__head">
+        <div>
+          <div class="cwa-drawer__ref">${esc(d.ref)}</div>
+          <div class="cwa-drawer__title">${esc(d.title)}</div>
+          <div class="cwa-drawer__sub">${esc(d.sub||'')}</div>
+        </div>
+        <button class="cwa-drawer__close" onclick="closeDrawer()" aria-label="Close">×</button>
+      </div>
+      <div class="cwa-drawer__accent"></div>
+      <div class="cwa-drawer__body">
+        <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
+          <span class="cwa-badge" data-type="${statusType(d.status)}">${esc(d.status||'—')}</span>
+          ${d.priority?`<span class="cwa-badge" data-type="${priorityType(d.priority)}">${esc(d.priority)} Priority</span>`:''}
+        </div>
+
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Nurse Profile</div>
+          <dl class="cwa-drawer__profile">${profileHtml}</dl>
+        </div>
+
+        ${d.canAct?`
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Assign to Staff</div>
+          <div style="display:flex;gap:8px;align-items:center">${assignSel}<button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="doAssign('${esc(d.complaintId)}')">Assign</button></div>
+        </div>
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Update Status</div>
+          <div style="display:flex;gap:8px;align-items:center"><select id="dwStatus" class="cwa-select">${statusOpts}</select><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="doStatus('${esc(d.complaintId)}')">Save</button></div>
+        </div>
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Add Note / Message</div>
+          <textarea id="dwNote" class="cwa-textarea" placeholder="Note text…"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <select id="dwNoteType" class="cwa-select" style="width:200px"><option value="internal">Internal Note</option><option value="nurse">Nurse-Visible Message</option></select>
+            <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doNote('${esc(d.complaintId)}')">Add Note</button>
+          </div>
+          ${d.visibilityHelp?`<div style="font-size:11px;color:var(--cwa-muted);margin-top:6px">${esc(d.visibilityHelp)}</div>`:''}
+        </div>
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Resolve / Close</div>
+          <textarea id="dwResolveNote" class="cwa-textarea" placeholder="Resolution note…" rows="2"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="doResolve('${esc(d.complaintId)}')">✓ Mark Resolved</button>
+            <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doClose('${esc(d.complaintId)}')">Close</button>
+          </div>
+        </div>
+        `:''}
+
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Activity Timeline</div>
+          <div class="cwa-drawer__timeline">${tlHtml}</div>
+        </div>
+      </div>
+    </aside>`;
+}
+function closeDrawer(){document.getElementById('drawerHost').innerHTML='';}
+
+async function postAction(url, body, okMsg){
+  try{
+    const r=await fetch(url,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(d.success){toast(okMsg,'success');closeDrawer();loadList();loadSummary();}
+    else toast(d.error||'Action failed','error');
+  }catch(e){toast('Network error','error');}
+}
+function doAssign(ref){const a=document.getElementById('dwAssign').value;postAction('/api/admin/nurses/complaint/assign',{complaint_id:ref,assigned_to_username:a},'Assigned');}
+function doStatus(ref){const s=document.getElementById('dwStatus').value;postAction('/api/admin/nurses/complaint/status',{complaint_id:ref,status:s},'Status updated');}
+function doNote(ref){const n=document.getElementById('dwNote').value;const t=document.getElementById('dwNoteType').value;postAction('/api/admin/nurses/complaint/note',{complaint_id:ref,note:n,note_type:t,visible_to_nurse:t==='nurse'?1:0},'Note added');}
+function doResolve(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/nurses/complaint/resolve',{complaint_id:ref,resolution_note:n},'Resolved');}
+function doClose(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/nurses/complaint/close',{complaint_id:ref,note:n},'Closed');}
+
+renderTabs();
+loadAssignees().then(()=>{loadSummary();loadList();});
+</script>
 </body>
 </html>

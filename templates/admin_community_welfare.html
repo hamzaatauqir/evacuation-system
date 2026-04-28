@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Community Welfare Overview — Embassy of Pakistan, Kuwait</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+</head>
+<body class="cwa-admin-body">
+<div class="cwa-admin">
+  <header class="cwa-admin-header">
+    <div class="cwa-admin-header__brand">
+      <div class="cwa-admin-header__logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="26" height="26"><path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#fff"/><polygon points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5" fill="#fff"/></svg>
+      </div>
+      <div class="cwa-admin-header__titles">
+        <div class="cwa-admin-header__gov">Government of Pakistan</div>
+        <div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div>
+        <div class="cwa-admin-header__wing">Admin — Community Welfare Wing</div>
+      </div>
+    </div>
+    <div class="cwa-admin-header__actions">
+      <div class="cwa-admin-header__user">
+        <div class="cwa-admin-header__avatar" id="userAvatar">U</div>
+        <div class="cwa-admin-header__user-meta">
+          <div class="cwa-admin-header__user-name" id="userName">—</div>
+          <div class="cwa-admin-header__user-role" id="userRole">—</div>
+        </div>
+      </div>
+      <a class="cwa-admin-header__logout" href="/dashboard">Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/logout">Logout</a>
+    </div>
+  </header>
+
+  <div class="cwa-admin-shell">
+    <aside class="cwa-admin-sidebar">
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
+        <a href="/admin/community-welfare" class="is-active">
+          <span class="cwa-admin-sidebar__icon">▢</span><span>Overview</span>
+        </a>
+        <a href="/admin/nurses">
+          <span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span>
+        </a>
+        <a href="/admin/legal-cases">
+          <span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span>
+        </a>
+        <a href="/admin/death-cases">
+          <span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span>
+        </a>
+      </div>
+      <div class="cwa-admin-sidebar__divider"></div>
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Quick Access</div>
+        <a href="/dashboard"><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
+        <a href="/" target="_blank"><span class="cwa-admin-sidebar__icon">↗</span><span>Public Portal</span></a>
+      </div>
+    </aside>
+
+    <main class="cwa-admin-main">
+      <div class="cwa-admin-subhead">
+        <div>
+          <h1>Community Welfare Overview</h1>
+          <p id="dateLine">Loading…</p>
+        </div>
+        <div style="display:flex;gap:10px">
+          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/nurses">Nurses</a>
+          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/legal-cases">Legal Cases</a>
+          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/death-cases">Death Cases</a>
+        </div>
+      </div>
+
+      <div class="cwa-admin-content cwa-fade-in">
+
+        <div class="cwa-kpi-grid" id="kpiGrid">
+          <div class="cwa-kpi"><div><div class="cwa-kpi__label">Total Requests</div><div class="cwa-kpi__value" id="kpiTotal">—</div><div class="cwa-kpi__sub">All time</div></div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Review</div><div class="cwa-kpi__value" id="kpiPending">—</div><div class="cwa-kpi__sub">Action needed</div></div><div class="cwa-kpi__icon">⏱</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">In Progress</div><div class="cwa-kpi__value" id="kpiProgress">—</div><div class="cwa-kpi__sub">Being processed</div></div><div class="cwa-kpi__icon">⟳</div></div>
+          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Urgent Cases</div><div class="cwa-kpi__value" id="kpiUrgent">—</div><div class="cwa-kpi__sub">High priority</div></div><div class="cwa-kpi__icon">!</div></div>
+          <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">Resolved This Week</div><div class="cwa-kpi__value" id="kpiResolvedWeek">—</div><div class="cwa-kpi__sub">Closed cases</div></div><div class="cwa-kpi__icon">✓</div></div>
+          <div class="cwa-kpi" data-accent="purple"><div><div class="cwa-kpi__label">Assigned to Me</div><div class="cwa-kpi__value" id="kpiMine">—</div><div class="cwa-kpi__sub" id="kpiMineSub">—</div></div><div class="cwa-kpi__icon">◈</div></div>
+        </div>
+
+        <div class="cwa-grid-2col">
+          <div class="cwa-card">
+            <div class="cwa-card__head">
+              <div class="cwa-card__title">Recent Activity</div>
+              <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/nurses">View All</a>
+            </div>
+            <div class="cwa-table-wrap">
+              <table class="cwa-table">
+                <thead><tr>
+                  <th>Reference</th><th>Applicant</th><th>Type</th>
+                  <th>Status</th><th>Time</th><th>Assigned To</th>
+                </tr></thead>
+                <tbody id="recentRows"><tr><td colspan="6" class="cwa-empty">Loading…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <a class="cwa-module" href="/admin/nurses">
+              <div class="cwa-module__icon" style="background:#eafaf0;color:var(--cwa-green)">◉</div>
+              <div style="flex:1"><div class="cwa-module__title">Nurses</div><div class="cwa-module__sub" id="modNurses">—</div></div>
+              <div class="cwa-module__chev">›</div>
+            </a>
+            <a class="cwa-module" href="/admin/legal-cases">
+              <div class="cwa-module__icon" style="background:#eff6ff;color:var(--cwa-blue)">⚖</div>
+              <div style="flex:1"><div class="cwa-module__title">Legal Cases</div><div class="cwa-module__sub" id="modLegal">—</div></div>
+              <div class="cwa-module__chev">›</div>
+            </a>
+            <a class="cwa-module" href="/admin/death-cases">
+              <div class="cwa-module__icon" style="background:#f5f3ff;color:var(--cwa-purple)">♥</div>
+              <div style="flex:1"><div class="cwa-module__title">Death Cases</div><div class="cwa-module__sub" id="modDeath">—</div></div>
+              <div class="cwa-module__chev">›</div>
+            </a>
+
+            <div class="cwa-card" data-accent-top="error">
+              <div class="cwa-card__title" style="color:var(--cwa-error);margin-bottom:10px">⚠ Urgent Cases</div>
+              <div id="urgentBox" class="cwa-empty">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function fmtTime(s){if(!s)return '';try{const d=new Date(s.replace(' ','T')+'Z');const ms=Date.now()-d.getTime();const min=Math.round(ms/60000);if(min<1)return 'just now';if(min<60)return min+'m ago';const h=Math.round(min/60);if(h<24)return h+'h ago';const dd=Math.round(h/24);return dd+'d ago';}catch(e){return s.slice(0,16);}}
+function statusType(s){const x=(s||'').toLowerCase();if(x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('assign'))return 'assigned';if(x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await'))return 'awaiting';return 'pending';}
+
+async function api(url){const r=await fetch(url,{credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
+
+function setKuwaitDate(){
+  const opts={timeZone:'Asia/Kuwait',weekday:'long',year:'numeric',month:'long',day:'numeric'};
+  const tOpts={timeZone:'Asia/Kuwait',hour:'2-digit',minute:'2-digit'};
+  const d=new Date();
+  document.getElementById('dateLine').textContent=d.toLocaleDateString('en-GB',opts)+' — '+d.toLocaleTimeString('en-GB',tOpts)+' Kuwait Time';
+}
+
+async function loadAll(){
+  setKuwaitDate();
+  let summary={};
+  try { summary = await api('/api/admin/community-welfare/summary'); } catch(e) { summary={success:false,error:e.message}; }
+  const t=summary.totals||{};
+  document.getElementById('kpiTotal').textContent=(t.total||0).toLocaleString();
+  document.getElementById('kpiPending').textContent=(t.pending||0).toLocaleString();
+  document.getElementById('kpiProgress').textContent=(t.in_progress||0).toLocaleString();
+  document.getElementById('kpiUrgent').textContent=(t.urgent||0).toLocaleString();
+  document.getElementById('kpiResolvedWeek').textContent=(t.resolved_week||0).toLocaleString();
+  document.getElementById('kpiMine').textContent=(t.assigned_to_me||0).toLocaleString();
+  document.getElementById('kpiMineSub').textContent=summary.user_display||'You';
+  document.getElementById('userName').textContent=summary.user_display||'Officer';
+  document.getElementById('userRole').textContent=summary.user_role||'';
+  const initial=(summary.user_display||'U').trim().charAt(0).toUpperCase();
+  document.getElementById('userAvatar').textContent=initial;
+
+  const m=summary.modules||{};
+  document.getElementById('modNurses').textContent=((m.nurses_active||0)+' active · '+(m.nurses_pending||0)+' pending');
+  document.getElementById('modLegal').textContent=((m.legal_active||0)+' active · '+(m.legal_pending||0)+' pending');
+  document.getElementById('modDeath').textContent=((m.death_active||0)+' active · '+(m.death_pending||0)+' pending');
+
+  const urgent=(summary.urgent_list||[]);
+  const ub=document.getElementById('urgentBox');
+  if(!urgent.length){ub.innerHTML='<div style="font-size:12px;color:var(--cwa-muted);padding:8px 0">No urgent cases.</div>';}
+  else{
+    ub.innerHTML=urgent.map(u=>{
+      const href=u.module==='legal'?'/admin/legal-cases':u.module==='death'?'/admin/death-cases':'/admin/nurses';
+      return '<a href="'+href+'" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--cwa-border-lt);text-decoration:none;color:inherit"><div><div style="font-size:13px;font-weight:600;color:var(--cwa-navy)">'+esc(u.applicant||'—')+'</div><div style="font-size:11px;color:var(--cwa-muted)">'+esc(u.type||'')+' · '+esc(u.reference||'')+'</div></div><span class="cwa-badge" data-type="urgent">Urgent</span></a>';
+    }).join('');
+  }
+
+  let recent={};
+  try { recent = await api('/api/admin/community-welfare/recent?limit=10'); } catch(e) { recent={items:[]}; }
+  const rows=(recent.items||[]);
+  const tbody=document.getElementById('recentRows');
+  if(!rows.length){
+    tbody.innerHTML='<tr><td colspan="6" class="cwa-empty">No recent activity yet.</td></tr>';
+  } else {
+    tbody.innerHTML=rows.map(r=>{
+      const href=r.module==='legal'?'/admin/legal-cases':r.module==='death'?'/admin/death-cases':'/admin/nurses';
+      return '<tr onclick="window.location.href=\''+href+'\'"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">'+esc(r.reference||'—')+'</span></td><td style="font-weight:600">'+esc(r.applicant||'—')+'</td><td><span style="font-size:12px;color:var(--cwa-muted)">'+esc(r.type||'')+'</span></td><td><span class="cwa-badge" data-type="'+statusType(r.status)+'">'+esc(r.status||'—')+'</span></td><td style="font-size:11px;color:var(--cwa-muted-lt)">'+esc(fmtTime(r.time))+'</td><td style="font-size:12px;color:'+(r.assigned?'var(--cwa-text)':'var(--cwa-muted-lt)')+';font-style:'+(r.assigned?'normal':'italic')+'">'+esc(r.assigned||'Unassigned')+'</td></tr>';
+    }).join('');
+  }
+}
+
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>
