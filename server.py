@@ -13912,6 +13912,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_headers_only(self, status=200, content_type='text/plain; charset=utf-8', content_length=0):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(content_length))
+        self._security_headers()
+        self.end_headers()
+
     def render_template(self, template_name: str):
         template_path = Path(__file__).resolve().parent / 'templates' / template_name
         try:
@@ -13948,9 +13955,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None
         return user
 
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+        if path in ('/', '/login'):
+            self.send_headers_only(200, 'text/html; charset=utf-8', 0)
+            return
+        if path == '/health':
+            self.send_headers_only(200, 'text/plain; charset=utf-8', len(b'OK'))
+            return
+        if path == '/static/css/cwa-admin.css':
+            target = (Path(__file__).resolve().parent / 'static' / 'css' / 'cwa-admin.css').resolve()
+            try:
+                content_length = target.stat().st_size
+            except Exception:
+                self.send_headers_only(404, 'text/plain; charset=utf-8', 0)
+                return
+            self.send_headers_only(200, 'text/css; charset=utf-8', content_length)
+            return
+        self.send_headers_only(404, 'text/plain; charset=utf-8', 0)
+
     def do_GET(self):
         path = urlparse(self.path).path
         params = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+
+        if path == '/health':
+            body = b'OK'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         if path.startswith('/static/'):
             static_root = (Path(__file__).resolve().parent / 'static').resolve()
@@ -14211,7 +14247,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('admin', 'operator'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             if not self.render_template('admin_community_welfare.html'):
-                self.send_json({'error': 'Community Welfare overview template missing'}, 500)
+                self.send_html(ADMIN_COMMUNITY_WELFARE_FALLBACK_PAGE)
         elif path == '/admin/nurses':
             user = self.require_auth()
             if not user: return
@@ -19628,7 +19664,7 @@ ADMIN_NURSES_PAGE = nurse_simple_page("Admin Nurses Dashboard", """
 function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
 function sBadge(v){const c=(v||'').replace(/[^A-Za-z]/g,'');return '<span class="badge s-'+c+'">'+esc(v||'—')+'</span>';}
 function pBadge(v){return '<span class="badge p-'+esc(v||'Normal')+'">'+esc(v||'Normal')+'</span>';}
-async function api(url,opts){const r=await fetch(url,opts||{});return r.json();}
+async function api(url,opts){try{const r=await fetch(url,opts||{});let d={};try{d=await r.json();}catch(_e){}if(!r.ok)return {success:false,error:d.error||('HTTP '+r.status)};return d;}catch(e){return {success:false,error:String(e)}}}
 function qComplaints(){const p=new URLSearchParams();p.set('page_size','20');p.set('search',c_search.value);p.set('status',c_status.value);p.set('priority',c_priority.value);p.set('category',c_category.value);p.set('assigned_to',c_assigned_to.value);p.set('from_date',c_from_date.value);p.set('to_date',c_to_date.value);return p.toString();}
 async function loadAssignees(){
   const d=await api('/api/admin/nurses/complaint-assignees');
@@ -19775,11 +19811,24 @@ tbody tr:hover{{background:#f8fafc}}
 </style></head><body>
 <div class="app">
 <div class="app-head">
-<div><h1>{esc(title)}</h1><div class="crumbs"><a href="/dashboard">&larr; Main Dashboard</a></div></div>
+<div><h1>{esc(title)}</h1><div class="crumbs"><a href="/">&larr; Main Dashboard</a></div></div>
 <div class="flex"><a class="badge" href="/admin/nurses" style="text-decoration:none">Nurses</a> <a class="badge" href="/admin/legal-cases" style="text-decoration:none">Legal Cases</a> <a class="badge" href="/admin/death-cases" style="text-decoration:none">Death Cases</a></div>
 </div>
 {body_html}
 </div></body></html>"""
+
+
+ADMIN_COMMUNITY_WELFARE_FALLBACK_PAGE = cwa_module_page("Community Welfare Overview - Admin", """
+<div class="card">
+<h3>Community Welfare Admin</h3>
+<p class="muted">The overview template is temporarily unavailable. Module dashboards remain available below.</p>
+<div class="flex">
+  <a class="badge" href="/admin/nurses" style="text-decoration:none">Nurses</a>
+  <a class="badge" href="/admin/legal-cases" style="text-decoration:none">Legal Cases</a>
+  <a class="badge" href="/admin/death-cases" style="text-decoration:none">Death Cases</a>
+</div>
+</div>
+""")
 
 
 ADMIN_LEGAL_OPF_COMING_SOON_PAGE = cwa_module_page("Legal Cases Request — Admin", """

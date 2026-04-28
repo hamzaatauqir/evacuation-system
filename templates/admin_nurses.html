@@ -20,7 +20,7 @@
       </div>
     </div>
     <div class="cwa-admin-header__actions">
-      <a class="cwa-admin-header__logout" href="/dashboard">Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/">Main Dashboard</a>
       <a class="cwa-admin-header__logout" href="/logout">Logout</a>
     </div>
   </header>
@@ -126,7 +126,13 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;'
 function statusType(s){const x=(s||'').toLowerCase();if(x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('assign'))return 'assigned';if(x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await'))return 'awaiting';return 'pending';}
 function priorityType(p){const x=(p||'').toLowerCase();if(x.includes('urgent'))return 'urgent';if(x.includes('important')||x.includes('high'))return 'high';if(x.includes('low'))return 'low';return 'medium';}
 function fmtTime(s){if(!s)return '—';return String(s).slice(0,16).replace('T',' ');}
-async function api(url,opts){const r=await fetch(url,Object.assign({credentials:'include'},opts||{}));if(!r.ok && r.status>=500)throw new Error('HTTP '+r.status);return r.json();}
+async function api(url,opts){
+  const r=await fetch(url,Object.assign({credentials:'include'},opts||{}));
+  let d={};
+  try{d=await r.json();}catch(e){}
+  if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
+  return d;
+}
 function toast(msg, type){
   const el=document.createElement('div'); el.className='cwa-toast'; if(type)el.dataset.type=type; el.textContent=msg;
   document.getElementById('toastHost').appendChild(el);
