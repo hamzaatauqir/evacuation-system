@@ -5690,10 +5690,31 @@ def api_welfare_feedback(data):
     category = _clean_text(data.get('category'), 160)
     subject = _clean_text(data.get('subject'), 240)
     details = _clean_text(data.get('details'), 4000)
+    requester_email = _clean_text(data.get('email'), 180)
     if not requester_name or not requester_phone or not category or not subject or not details:
         return {'ok': False, 'success': False, 'error': 'Full name, phone, category, subject, and details are required'}
     db = get_db()
     try:
+        # Allow repeated feedback from the same person; only soft-block near-exact rapid re-submits.
+        if requester_email:
+            recent_same = db.execute(
+                """SELECT id FROM welfare_cases
+                   WHERE case_type = 'community_feedback'
+                     AND lower(trim(COALESCE(requester_name, ''))) = lower(trim(?))
+                     AND lower(trim(COALESCE(requester_email, ''))) = lower(trim(?))
+                     AND lower(trim(COALESCE(subject_name, ''))) = lower(trim(?))
+                     AND lower(trim(COALESCE(details, ''))) = lower(trim(?))
+                     AND datetime(created_at) >= datetime('now', '-10 minutes')
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                [requester_name, requester_email, subject, details]
+            ).fetchone()
+            if recent_same:
+                return {
+                    'ok': False,
+                    'success': False,
+                    'error': 'A similar feedback submission was received recently. Please wait a few minutes before submitting the same message again.'
+                }
         reference = _welfare_next_reference(db, 'FBK')
         cur = db.execute(
             """INSERT INTO welfare_cases
@@ -5705,7 +5726,7 @@ def api_welfare_feedback(data):
                 category,
                 requester_name,
                 requester_phone,
-                _clean_text(data.get('email'), 180),
+                requester_email,
                 _clean_text(data.get('preferred_contact_method'), 120),
                 subject,
                 subject,
@@ -5718,12 +5739,15 @@ def api_welfare_feedback(data):
             case_type='community_feedback',
             case_reference=reference,
             event_type='request_received',
-            applicant_email=_clean_text(data.get('email'), 180),
+            applicant_email=requester_email,
             applicant_name=requester_name,
             status='New',
             tracking_link='https://cwakuwait.com'
         )
-        return {'ok': True, 'success': True, 'reference': reference}
+        return {'ok': True, 'success': True, 'reference': reference, 'message': 'Your feedback has been received.'}
+    except sqlite3.IntegrityError:
+        db.rollback()
+        return {'ok': False, 'success': False, 'error': 'Unable to create feedback case at the moment. Please try again.'}
     except Exception as e:
         db.rollback()
         return {'ok': False, 'success': False, 'error': str(e)}

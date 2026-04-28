@@ -23,10 +23,21 @@ export function CommunityFeedbackPage() {
     setError("");
     setSubmitting(true);
     try {
-      const res = await api.post<{ ok: boolean; reference: string }>("/api/welfare/feedback", form);
+      const res = await api.post<{ ok?: boolean; success?: boolean; reference?: string; error?: string; message?: string }>(
+        "/api/welfare/feedback",
+        form
+      );
+      if (!res.reference) {
+        throw new Error(res.error || "Unable to submit at the moment. Please try again or contact the Community Welfare Wing.");
+      }
       setReference(res.reference);
     } catch (err) {
-      setError((err as Error).message);
+      const msg = (err as Error).message || "";
+      if (!msg || /failed to fetch|networkerror|request failed/i.test(msg)) {
+        setError("Unable to submit at the moment. Please try again or contact the Community Welfare Wing.");
+      } else {
+        setError(msg);
+      }
     } finally {
       setSubmitting(false);
     }
