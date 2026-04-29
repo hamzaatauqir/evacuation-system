@@ -4,7 +4,7 @@ import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { StatusBadge } from "../components/StatusBadge";
-import { api } from "../lib/api";
+import { api, BACKEND_PORTAL } from "../lib/api";
 import { addLocalPortalRequest, clearNursePortal, getLocalPortalRequests, getNursePortal } from "../lib/nursePortal";
 
 export function NursesPortalPage() {
@@ -79,6 +79,18 @@ export function NursesPortalPage() {
   const showStaySummary = !isDoctor && !!currentArrangement;
   const stayArea = ctx.facilityRoster?.facility_area || ctx.facilityRoster?.area || "";
   const stayReminderPref = (ctx.facilityRoster as any)?.receive_notice_reminders || (ctx.facilityRoster as any)?.stay_reminders_opt_in || "";
+  const monthlyCheckinStatus =
+    ctx.facilityRoster?.monthly_checkin_status ||
+    ctx.facilityRoster?.latest_monthly_checkin_status ||
+    "";
+  const monthlyCheckinPending = !!ctx.facilityRoster?.latest_monthly_checkin_pending;
+  const monthlyCheckinUrl = ctx.facilityRoster?.latest_monthly_checkin_url
+    ? `${BACKEND_PORTAL}${ctx.facilityRoster.latest_monthly_checkin_url}`
+    : "";
+  const monthlyCheckinReceivedAt =
+    ctx.facilityRoster?.last_monthly_checkin_response_at ||
+    ctx.facilityRoster?.latest_monthly_checkin_received_at ||
+    "";
   const qualificationDisplay = qualificationInfo.degree === "Other"
     ? (qualificationInfo.other || "—")
     : (qualificationInfo.degree || "—");
@@ -341,6 +353,8 @@ export function NursesPortalPage() {
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
                   {showStaySummary ? <Field label="Current Stay Arrangement" value={currentArrangement} /> : null}
+                  {showStaySummary ? <Field label="Latest Monthly Check-in" value={monthlyCheckinStatus || "—"} /> : null}
+                  {monthlyCheckinReceivedAt ? <Field label="Check-in Received" value={monthlyCheckinReceivedAt} /> : null}
                   {hasEmbassyArrangement ? <Field label="Approved Vendor / Service Provider" value={approvedVendorLabel.replace("Approved Vendor: ", "")} /> : null}
                   {hasEmbassyArrangement ? <Field label="Facility / Building" value={ctx.facilityRoster?.facility_name || "—"} /> : null}
                   {showStaySummary && stayArea ? <Field label="Area" value={stayArea} /> : null}
@@ -357,6 +371,22 @@ export function NursesPortalPage() {
                 <div style={{ marginBottom: 8 }}><StatusBadge type={statusType as any} label={ctx.registrationStatus || "Pending"} /></div>
                 <p style={{ color: "#5B6773", fontSize: 13, marginTop: 8 }}><strong>Embassy remarks:</strong> {ctx.remarks || "No remarks yet."}</p>
                 <p style={{ color: "#5B6773", fontSize: 13, marginTop: 8 }}><strong>What you should do now:</strong> Keep tracking this portal for review updates and follow any Embassy remarks.</p>
+                {showStaySummary ? (
+                  <div style={{ marginTop: 14, borderTop: "1px solid #E3EBF0", paddingTop: 12 }}>
+                    <p style={{ color: "#5B6773", fontSize: 13, margin: "0 0 8px" }}>
+                      <strong>Monthly welfare check-in:</strong> {monthlyCheckinStatus || "No active monthly check-in."}
+                    </p>
+                    {monthlyCheckinPending && monthlyCheckinUrl ? (
+                      <Btn variant="primary" onClick={() => window.location.assign(monthlyCheckinUrl)}>
+                        Complete Monthly Welfare Check-in
+                      </Btn>
+                    ) : monthlyCheckinReceivedAt ? (
+                      <p style={{ color: "#166534", fontSize: 13, margin: 0 }}>
+                        Your latest monthly welfare check-in was received on {monthlyCheckinReceivedAt}.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
             <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16 }}>
@@ -399,8 +429,15 @@ export function NursesPortalPage() {
                   <Field label="Roster Reference" value={ctx.facilityRoster.roster_reference || "-"} />
                   <Field label="Facility / Building" value={ctx.facilityRoster.facility_name || "-"} />
                   {hasEmbassyArrangement ? <Field label="Approved Vendor" value={approvedVendorLabel.replace("Approved Vendor: ", "")} /> : null}
+                  <Field label="Monthly Check-in Status" value={monthlyCheckinStatus || "—"} />
+                  <Field label="Last Check-in Response" value={monthlyCheckinReceivedAt || "—"} />
                   <Field label="Notice Period Start" value={ctx.facilityRoster.notice_period_start_date || "-"} />
                 </div>
+                {monthlyCheckinPending && monthlyCheckinUrl ? (
+                  <Btn variant="primary" onClick={() => window.location.assign(monthlyCheckinUrl)}>
+                    Complete Monthly Welfare Check-in
+                  </Btn>
+                ) : null}
                 <label>
                   Confirmation option
                   <select className="f-input" value={stay.confirmation_option} onChange={(e) => setStay({ ...stay, confirmation_option: e.target.value })}>

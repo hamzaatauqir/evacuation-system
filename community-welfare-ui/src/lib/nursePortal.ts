@@ -47,6 +47,15 @@ export type NursePortalContext = {
     current_status?: string;
     confirmation_status?: string;
     last_confirmed_at?: string;
+    last_monthly_checkin_sent_at?: string;
+    last_monthly_checkin_response_at?: string;
+    monthly_checkin_status?: string;
+    welfare_followup_required?: number;
+    reconciliation_status?: string;
+    latest_monthly_checkin_status?: string;
+    latest_monthly_checkin_received_at?: string;
+    latest_monthly_checkin_pending?: boolean;
+    latest_monthly_checkin_url?: string;
     notice_flag?: string;
     approved_service_provider?: boolean;
     remarks?: string;

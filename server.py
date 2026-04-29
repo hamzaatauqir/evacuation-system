@@ -103,6 +103,7 @@ ONEDRIVE_LOCK = threading.Lock()  # guards _onedrive_refresh_runtime under Threa
 # on first use via the flag below, preserving prior behavior.
 _DB_WAL_APPLIED = False
 _DB_WAL_LOCK = threading.Lock()
+MONTHLY_WELFARE_CHECKIN_LOCK = threading.Lock()
 
 
 def _apply_wal_once():
@@ -755,6 +756,11 @@ def init_db():
         ('whatsapp_same_as_mobile', 'INTEGER DEFAULT 1'),
         ('emergency_country_code', "TEXT DEFAULT '+965'"),
         ('emergency_contact_full', "TEXT DEFAULT ''"),
+        ('current_status', "TEXT DEFAULT ''"),
+        ('facility_status', "TEXT DEFAULT ''"),
+        ('stay_confirmation_status', "TEXT DEFAULT ''"),
+        ('monthly_checkin_status', "TEXT DEFAULT ''"),
+        ('vendor_facility_checkin_eligible', 'INTEGER DEFAULT 0'),
     ]:
         try:
             db.execute(f"ALTER TABLE nurse_registrations ADD COLUMN {col} {coltype}")
@@ -1309,6 +1315,12 @@ def init_db():
         ('last_notice_reminder_at', 'TIMESTAMP'),
         ('reminder_count', 'INTEGER DEFAULT 0'),
         ('active', 'INTEGER DEFAULT 1'),
+        ('vendor_facility_checkin_eligible', 'INTEGER DEFAULT 0'),
+        ('last_monthly_checkin_sent_at', 'TIMESTAMP'),
+        ('last_monthly_checkin_campaign', "TEXT DEFAULT ''"),
+        ('last_monthly_checkin_response_at', 'TIMESTAMP'),
+        ('monthly_checkin_status', "TEXT DEFAULT ''"),
+        ('left_date', "TEXT DEFAULT ''"),
         ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
         ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
         ('remarks', 'TEXT')
@@ -1318,6 +1330,119 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS stay_confirmation_campaigns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_reference TEXT UNIQUE,
+        campaign_year INTEGER,
+        campaign_month INTEGER,
+        campaign_type TEXT DEFAULT 'monthly_welfare_checkin',
+        vendor_name TEXT DEFAULT '',
+        facility_name TEXT DEFAULT '',
+        channel TEXT DEFAULT 'email',
+        target TEXT DEFAULT 'active_vendor_residents',
+        status TEXT DEFAULT 'pending',
+        created_by TEXT DEFAULT '',
+        started_at TIMESTAMP,
+        completed_at TIMESTAMP,
+        total_targeted INTEGER DEFAULT 0,
+        total_sent INTEGER DEFAULT 0,
+        total_failed INTEGER DEFAULT 0,
+        total_confirmed INTEGER DEFAULT 0,
+        total_intends_to_leave INTEGER DEFAULT 0,
+        total_left_facility INTEGER DEFAULT 0,
+        total_details_correction INTEGER DEFAULT 0,
+        total_needs_assistance INTEGER DEFAULT 0,
+        total_no_response INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stay_confirmation_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token TEXT UNIQUE,
+        campaign_id INTEGER,
+        roster_id INTEGER,
+        roster_reference TEXT DEFAULT '',
+        nurse_registration_id INTEGER,
+        nurse_reference TEXT DEFAULT '',
+        vendor_name TEXT DEFAULT '',
+        facility_name TEXT DEFAULT '',
+        email TEXT DEFAULT '',
+        whatsapp_full TEXT DEFAULT '',
+        mobile_full TEXT DEFAULT '',
+        action_taken TEXT DEFAULT '',
+        welfare_response TEXT DEFAULT '',
+        remarks TEXT DEFAULT '',
+        used_at TIMESTAMP,
+        expires_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by TEXT DEFAULT '',
+        channel TEXT DEFAULT 'email',
+        status TEXT DEFAULT 'created'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stay_campaign_month_vendor_channel
+        ON stay_confirmation_campaigns(campaign_year, campaign_month, campaign_type, vendor_name, channel);
+    CREATE INDEX IF NOT EXISTS idx_stay_tokens_token ON stay_confirmation_tokens(token);
+    CREATE INDEX IF NOT EXISTS idx_stay_tokens_campaign ON stay_confirmation_tokens(campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_stay_tokens_roster ON stay_confirmation_tokens(roster_id);
+    CREATE INDEX IF NOT EXISTS idx_stay_tokens_nurse ON stay_confirmation_tokens(nurse_registration_id);
+    CREATE INDEX IF NOT EXISTS idx_stay_tokens_status ON stay_confirmation_tokens(status);
+    """)
+    for table_name, additions in {
+        'stay_confirmation_campaigns': [
+            ('campaign_reference', 'TEXT'),
+            ('campaign_year', 'INTEGER'),
+            ('campaign_month', 'INTEGER'),
+            ('campaign_type', "TEXT DEFAULT 'monthly_welfare_checkin'"),
+            ('vendor_name', "TEXT DEFAULT ''"),
+            ('facility_name', "TEXT DEFAULT ''"),
+            ('channel', "TEXT DEFAULT 'email'"),
+            ('target', "TEXT DEFAULT 'active_vendor_residents'"),
+            ('status', "TEXT DEFAULT 'pending'"),
+            ('created_by', "TEXT DEFAULT ''"),
+            ('started_at', 'TIMESTAMP'),
+            ('completed_at', 'TIMESTAMP'),
+            ('total_targeted', 'INTEGER DEFAULT 0'),
+            ('total_sent', 'INTEGER DEFAULT 0'),
+            ('total_failed', 'INTEGER DEFAULT 0'),
+            ('total_confirmed', 'INTEGER DEFAULT 0'),
+            ('total_intends_to_leave', 'INTEGER DEFAULT 0'),
+            ('total_left_facility', 'INTEGER DEFAULT 0'),
+            ('total_details_correction', 'INTEGER DEFAULT 0'),
+            ('total_needs_assistance', 'INTEGER DEFAULT 0'),
+            ('total_no_response', 'INTEGER DEFAULT 0'),
+            ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+            ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ],
+        'stay_confirmation_tokens': [
+            ('token', 'TEXT'),
+            ('campaign_id', 'INTEGER'),
+            ('roster_id', 'INTEGER'),
+            ('roster_reference', "TEXT DEFAULT ''"),
+            ('nurse_registration_id', 'INTEGER'),
+            ('nurse_reference', "TEXT DEFAULT ''"),
+            ('vendor_name', "TEXT DEFAULT ''"),
+            ('facility_name', "TEXT DEFAULT ''"),
+            ('email', "TEXT DEFAULT ''"),
+            ('whatsapp_full', "TEXT DEFAULT ''"),
+            ('mobile_full', "TEXT DEFAULT ''"),
+            ('action_taken', "TEXT DEFAULT ''"),
+            ('welfare_response', "TEXT DEFAULT ''"),
+            ('remarks', "TEXT DEFAULT ''"),
+            ('used_at', 'TIMESTAMP'),
+            ('expires_at', 'TIMESTAMP'),
+            ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+            ('created_by', "TEXT DEFAULT ''"),
+            ('channel', "TEXT DEFAULT 'email'"),
+            ('status', "TEXT DEFAULT 'created'"),
+        ],
+    }.items():
+        for col, coltype in additions:
+            try:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
+                db.commit()
+            except sqlite3.OperationalError:
+                pass
     for col, coltype in [
         ('date_shifted_to_facility', "TEXT DEFAULT ''"),
         ('reason_category', "TEXT DEFAULT ''"),
@@ -3621,6 +3746,10 @@ def _nurse_send_email_smtp_env(to_addr, subject, body_text):
 
 
 FACILITY_VENDOR_DEFAULT = 'AJA Care'
+MONTHLY_WELFARE_CHECKIN_TYPE = 'monthly_welfare_checkin'
+MONTHLY_WELFARE_CHECKIN_CHANNEL = 'email'
+MONTHLY_WELFARE_CHECKIN_EXCLUDED_STATUSES = {'Left Facility', 'Closed / Archived', 'Inactive'}
+MONTHLY_WELFARE_CHECKIN_WELFARE_RESPONSES = {'needs_assistance', 'callback_requested', 'service_difficulty'}
 NURSE_VENDOR_ELIGIBLE_CATEGORIES = {'Nurse', 'Other Health Worker'}
 NURSE_APPROVED_VENDOR_VALUES = {FACILITY_VENDOR_DEFAULT, 'Other / Not Sure'}
 FACILITY_ROSTER_STATUSES = {
@@ -3634,7 +3763,7 @@ FACILITY_ROSTER_STATUSES = {
 FACILITY_CONFIRMATION_STATUSES = {
     'Pending Nurse Confirmation', 'Stay Confirmed', 'Shifted from Facility',
     'Intends to Leave', 'Correction Requested', 'Welfare Follow-up Requested',
-    'Reconciliation Required', 'Not Applicable'
+    'Reconciliation Required', 'Confirmed', 'Not Applicable'
 }
 FACILITY_STAFF_ROLES = {
     'admin', 'operator', 'operator_special', 'welfare_officer',
@@ -3793,6 +3922,8 @@ def _facility_roster_to_dict(row):
         'notice_period_start_date', 'current_status', 'confirmation_status',
         'last_confirmed_at', 'last_vendor_update_at', 'last_embassy_verification_at',
         'assigned_to', 'assigned_role', 'due_date', 'action_required', 'reconciliation_status',
+        'last_monthly_checkin_sent_at', 'last_monthly_checkin_campaign',
+        'last_monthly_checkin_response_at', 'monthly_checkin_status', 'left_date',
         'created_at', 'updated_at', 'remarks'
     ):
         d[key] = d.get(key) or ''
@@ -3804,6 +3935,7 @@ def _facility_roster_to_dict(row):
     d['security_deposit_kwd'] = _facility_float_value(d.get('security_deposit_kwd'), 120)
     d['welfare_followup_required'] = 1 if _facility_int_value(d.get('welfare_followup_required'), 0) else 0
     d['alternative_stay_review_required'] = 1 if _facility_int_value(d.get('alternative_stay_review_required'), 0) else 0
+    d['vendor_facility_checkin_eligible'] = 1 if _facility_int_value(d.get('vendor_facility_checkin_eligible'), 0) else 0
     d['active'] = 1 if _facility_int_value(d.get('active') if d.get('active') is not None else 1, 1) else 0
     d['notice_flag'] = _facility_notice_flag(d)
     d['room_bed'] = ' / '.join([x for x in (d.get('room_number'), d.get('bed_number')) if x]) or ''
@@ -3836,6 +3968,11 @@ def _facility_portal_dict(row):
         'current_status': d.get('current_status', ''),
         'confirmation_status': d.get('confirmation_status', ''),
         'last_confirmed_at': d.get('last_confirmed_at', ''),
+        'last_monthly_checkin_sent_at': d.get('last_monthly_checkin_sent_at', ''),
+        'last_monthly_checkin_response_at': d.get('last_monthly_checkin_response_at', ''),
+        'monthly_checkin_status': d.get('monthly_checkin_status', ''),
+        'welfare_followup_required': d.get('welfare_followup_required', 0),
+        'reconciliation_status': d.get('reconciliation_status', ''),
         'notice_flag': d.get('notice_flag', ''),
         'approved_service_provider': bool(raw_vendor),
         'remarks': d.get('remarks', '')
@@ -3873,6 +4010,11 @@ def _nurse_registration_facility_portal_dict(rec):
         'current_status': current_arrangement,
         'confirmation_status': '',
         'last_confirmed_at': '',
+        'last_monthly_checkin_sent_at': '',
+        'last_monthly_checkin_response_at': '',
+        'monthly_checkin_status': rec.get('monthly_checkin_status') or '',
+        'welfare_followup_required': 0,
+        'reconciliation_status': '',
         'notice_flag': '',
         'approved_service_provider': bool(vendor_name),
         'stay_reminders_opt_in': stay_reminders_opt_in,
@@ -3922,7 +4064,7 @@ def _facility_find_linked_roster(db, rec):
     nurse_id = rec.get('id') or rec.get('nurse_db_id') or 0
     if nurse_id:
         row = db.execute(
-            "SELECT * FROM facility_roster WHERE nurse_registration_id = ? AND active = 1 ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM facility_roster WHERE nurse_registration_id = ? AND (active = 1 OR current_status = 'Left Facility') ORDER BY id DESC LIMIT 1",
             [nurse_id]
         ).fetchone()
         if row:
@@ -4661,6 +4803,815 @@ def _facility_create_welfare_followup(db, roster, note, category='Facility Assis
     return reference
 
 
+def _kuwait_now():
+    return datetime.utcnow() + timedelta(hours=3)
+
+
+def _sql_now():
+    return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _sql_dt(dt):
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _rowish_get(record, key, default=''):
+    if not record:
+        return default
+    try:
+        if isinstance(record, sqlite3.Row):
+            return record[key] if key in record.keys() else default
+        if isinstance(record, dict):
+            return record.get(key, default)
+        return getattr(record, key, default)
+    except Exception:
+        return default
+
+
+def _normalized_vendor(value):
+    return (value or '').strip()
+
+
+def is_vendor_facility_checkin_eligible(record):
+    professional_category = _nurse_professional_category(
+        _rowish_get(record, 'professional_category') or _rowish_get(record, 'nurse_professional_category'),
+        _rowish_get(record, 'designation') or _rowish_get(record, 'job_title_moh') or ''
+    )
+    current_arrangement = (
+        _rowish_get(record, 'current_arrangement')
+        or _rowish_get(record, 'current_accommodation')
+        or _rowish_get(record, 'current_accommodation_status')
+        or ''
+    ).strip()
+    if not current_arrangement and (
+        _rowish_get(record, 'roster_id') or _rowish_get(record, 'roster_reference') or _rowish_get(record, 'facility_name')
+    ):
+        current_arrangement = 'Embassy Contracted / Arranged'
+    vendor_name = _normalized_vendor(_rowish_get(record, 'vendor_name') or _rowish_get(record, 'linked_vendor_name'))
+    current_status = (_rowish_get(record, 'current_status') or _rowish_get(record, 'facility_current_status') or '').strip()
+    email = (_rowish_get(record, 'email') or '').strip()
+    whatsapp = (_rowish_get(record, 'whatsapp_full') or '').strip()
+    mobile = (_rowish_get(record, 'mobile_full') or _rowish_get(record, 'mobile') or _rowish_get(record, 'phone') or '').strip()
+    active = _facility_int_value(_rowish_get(record, 'active', 1), 1)
+    explicit = _facility_int_value(_rowish_get(record, 'vendor_facility_checkin_eligible', 0), 0)
+    return (
+        professional_category in ("Nurse", "Other Health Worker")
+        and current_arrangement == "Embassy Contracted / Arranged"
+        and vendor_name == FACILITY_VENDOR_DEFAULT
+        and current_status not in MONTHLY_WELFARE_CHECKIN_EXCLUDED_STATUSES
+        and (active == 1 or explicit == 1)
+        and bool(email or whatsapp or mobile)
+    )
+
+
+def _monthly_checkin_log(db, event_type, status, row=None, subject='', body='', error='', channel='email'):
+    row = row or {}
+    recipient_reference = (
+        _rowish_get(row, 'nurse_reference')
+        or _rowish_get(row, 'reference_id')
+        or _rowish_get(row, 'roster_reference')
+        or _rowish_get(row, 'campaign_reference')
+        or ''
+    )
+    try:
+        db.execute(
+            """INSERT INTO notification_log
+               (case_type, case_reference, recipient_type, recipient_name, recipient_phone, recipient_email,
+                recipient_reference, channel, event_type, message_type, subject, message_body, status, error,
+                sent_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)""",
+            [
+                'monthly_welfare_checkin',
+                _rowish_get(row, 'campaign_reference') or _rowish_get(row, 'roster_reference') or recipient_reference,
+                'health_worker',
+                _rowish_get(row, 'full_name') or _rowish_get(row, 'name') or '',
+                _rowish_get(row, 'whatsapp_full') or _rowish_get(row, 'mobile_full') or _rowish_get(row, 'phone') or '',
+                _rowish_get(row, 'email') or '',
+                recipient_reference,
+                channel or 'email',
+                event_type,
+                event_type,
+                subject or '',
+                body or '',
+                status or '',
+                error or '',
+                status or '',
+            ]
+        )
+    except Exception as exc:
+        print(f'[MonthlyWelfareCheckin] notification log failed: {exc}', flush=True)
+
+
+def _monthly_campaign_reference(year, month, vendor, channel):
+    vendor_part = re.sub(r'[^A-Z0-9]+', '', (vendor or FACILITY_VENDOR_DEFAULT).upper())[:12] or 'VENDOR'
+    channel_part = re.sub(r'[^A-Z0-9]+', '', (channel or 'email').upper())[:8] or 'EMAIL'
+    return f"WCHK-{int(year):04d}{int(month):02d}-{vendor_part}-{channel_part}-{secrets.token_hex(3).upper()}"
+
+
+def _select_monthly_checkin_targets(db, vendor=FACILITY_VENDOR_DEFAULT, facility_name='', target='active_vendor_residents'):
+    where = [
+        "COALESCE(f.vendor_name, '') = ?",
+        "(COALESCE(f.active, 1) = 1 OR COALESCE(f.vendor_facility_checkin_eligible, 0) = 1)",
+        "COALESCE(f.current_status, '') NOT IN ('Left Facility','Closed / Archived','Inactive')",
+    ]
+    vals = [vendor or FACILITY_VENDOR_DEFAULT]
+    if target == 'selected_facility' and facility_name:
+        where.append("COALESCE(f.facility_name, '') = ?")
+        vals.append(facility_name)
+    elif target == 'pending_confirmation':
+        where.append("""(
+            COALESCE(f.confirmation_status, '') IN ('Pending', 'Pending Nurse Confirmation')
+            OR COALESCE(f.monthly_checkin_status, '') IN ('Sent', 'Pending Response')
+        )""")
+    elif target == 'notice_due':
+        where.append("""(
+            COALESCE(f.notice_period_start_date, '') != ''
+            AND date(f.notice_period_start_date) <= date('now')
+        )""")
+    rows = db.execute(
+        f"""SELECT f.id AS roster_id, f.roster_reference, f.nurse_registration_id,
+                  f.full_name, f.passport_number, f.civil_id, f.phone, f.email AS roster_email,
+                  f.vendor_name, f.facility_name, f.facility_area, f.area, f.current_status,
+                  f.confirmation_status, f.active, f.vendor_facility_checkin_eligible,
+                  f.monthly_checkin_status, f.welfare_followup_required,
+                  n.id AS nurse_id, n.reference_id AS nurse_reference,
+                  n.full_name AS nurse_full_name, n.email AS nurse_email,
+                  n.mobile AS nurse_mobile, n.mobile_full, n.whatsapp_full,
+                  n.professional_category, n.designation, n.job_title_moh,
+                  n.current_accommodation, n.current_accommodation_status,
+                  n.vendor_facility_checkin_eligible AS nurse_explicit_eligible
+           FROM facility_roster f
+           LEFT JOIN nurse_registrations n ON n.id = f.nurse_registration_id
+           WHERE {' AND '.join(where)}
+           ORDER BY f.facility_name, f.full_name""",
+        vals
+    ).fetchall()
+    targets = []
+    seen = set()
+    for row in rows:
+        d = dict(row)
+        d['email'] = (d.get('nurse_email') or d.get('roster_email') or '').strip()
+        d['mobile_full'] = d.get('mobile_full') or d.get('nurse_mobile') or d.get('phone') or ''
+        d['whatsapp_full'] = d.get('whatsapp_full') or d.get('mobile_full') or d.get('phone') or ''
+        d['full_name'] = d.get('nurse_full_name') or d.get('full_name') or ''
+        d['id'] = d.get('roster_id')
+        d['current_arrangement'] = d.get('current_accommodation') or d.get('current_accommodation_status') or 'Embassy Contracted / Arranged'
+        d['vendor_facility_checkin_eligible'] = d.get('vendor_facility_checkin_eligible') or d.get('nurse_explicit_eligible') or 0
+        key = d.get('roster_id') or f"nurse:{d.get('nurse_id') or d.get('nurse_reference')}"
+        nurse_key = f"nurse:{d.get('nurse_id') or d.get('nurse_reference')}" if (d.get('nurse_id') or d.get('nurse_reference')) else ''
+        if key in seen or (nurse_key and nurse_key in seen):
+            continue
+        if is_vendor_facility_checkin_eligible(d):
+            targets.append(d)
+            seen.add(key)
+            if nurse_key:
+                seen.add(nurse_key)
+    explicit_rows = db.execute(
+        """SELECT n.id AS nurse_id, n.reference_id AS nurse_reference,
+                  n.full_name, n.email, n.mobile AS nurse_mobile, n.mobile_full, n.whatsapp_full,
+                  n.professional_category, n.designation, n.job_title_moh,
+                  n.current_accommodation, n.current_accommodation_status,
+                  n.current_status, n.vendor_name,
+                  n.current_hostel AS facility_name, n.facility_area, n.vendor_facility_checkin_eligible
+           FROM nurse_registrations n
+           LEFT JOIN facility_roster f ON f.nurse_registration_id = n.id
+                AND (COALESCE(f.active, 1) = 1 OR COALESCE(f.current_status, '') = 'Left Facility')
+           WHERE COALESCE(n.vendor_facility_checkin_eligible, 0) = 1
+             AND COALESCE(n.vendor_name, '') = ?
+             AND COALESCE(f.id, 0) = 0
+           ORDER BY n.full_name""",
+        [vendor or FACILITY_VENDOR_DEFAULT]
+    ).fetchall()
+    for row in explicit_rows:
+        d = dict(row)
+        d['roster_id'] = None
+        d['roster_reference'] = ''
+        d['nurse_registration_id'] = d.get('nurse_id')
+        d['email'] = (d.get('email') or '').strip()
+        d['mobile_full'] = d.get('mobile_full') or d.get('nurse_mobile') or ''
+        d['whatsapp_full'] = d.get('whatsapp_full') or d.get('mobile_full') or ''
+        d['current_arrangement'] = d.get('current_accommodation') or d.get('current_accommodation_status') or ''
+        d['id'] = None
+        key = f"nurse:{d.get('nurse_id') or d.get('nurse_reference')}"
+        if key in seen:
+            continue
+        if is_vendor_facility_checkin_eligible(d):
+            targets.append(d)
+            seen.add(key)
+    return targets
+
+
+def _refresh_campaign_totals(db, campaign_id):
+    if not campaign_id:
+        return
+    row = db.execute(
+        """SELECT
+              COUNT(*) total_targeted,
+              SUM(CASE WHEN status IN ('sent','used','no_response') THEN 1 ELSE 0 END) total_sent,
+              SUM(CASE WHEN status IN ('failed','skipped_smtp_missing','skipped_no_email','whatsapp_not_configured') THEN 1 ELSE 0 END) total_failed,
+              SUM(CASE WHEN action_taken = 'confirmed_staying' THEN 1 ELSE 0 END) total_confirmed,
+              SUM(CASE WHEN action_taken = 'intends_to_leave' THEN 1 ELSE 0 END) total_intends_to_leave,
+              SUM(CASE WHEN action_taken = 'left_facility' THEN 1 ELSE 0 END) total_left_facility,
+              SUM(CASE WHEN action_taken = 'details_correction' THEN 1 ELSE 0 END) total_details_correction,
+              SUM(CASE WHEN welfare_response IN ('needs_assistance','callback_requested','service_difficulty') THEN 1 ELSE 0 END) total_needs_assistance,
+              SUM(CASE WHEN status = 'no_response' THEN 1 ELSE 0 END) total_no_response
+           FROM stay_confirmation_tokens WHERE campaign_id = ?""",
+        [campaign_id]
+    ).fetchone()
+    d = dict(row or {})
+    db.execute(
+        """UPDATE stay_confirmation_campaigns
+           SET total_targeted = ?, total_sent = ?, total_failed = ?, total_confirmed = ?,
+               total_intends_to_leave = ?, total_left_facility = ?, total_details_correction = ?,
+               total_needs_assistance = ?, total_no_response = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        [
+            int(d.get('total_targeted') or 0), int(d.get('total_sent') or 0), int(d.get('total_failed') or 0),
+            int(d.get('total_confirmed') or 0), int(d.get('total_intends_to_leave') or 0),
+            int(d.get('total_left_facility') or 0), int(d.get('total_details_correction') or 0),
+            int(d.get('total_needs_assistance') or 0), int(d.get('total_no_response') or 0),
+            campaign_id
+        ]
+    )
+
+
+def _monthly_checkin_email_body(name, reference, confirmation_link):
+    return (
+        f"Dear {name or 'Health Worker'},\n\n"
+        "The Community Welfare Wing, Embassy of Pakistan, Kuwait, is updating welfare records for Pakistani nurses linked to Embassy-facilitated stay arrangements through approved service providers.\n\n"
+        "Please confirm your current stay arrangement and let us know if any welfare follow-up is required.\n\n"
+        f"Secure link:\n{confirmation_link}\n\n"
+        f"Reference: {reference or 'N/A'}\n\n"
+        "This link is valid for 14 days.\n\n"
+        "Regards,\n"
+        "Community Welfare Wing\n"
+        "Embassy of Pakistan, Kuwait"
+    )
+
+
+def _monthly_checkin_whatsapp_body(name, confirmation_link):
+    return (
+        "Embassy of Pakistan, Kuwait – Community Welfare Wing\n\n"
+        f"Dear {name or 'Health Worker'}, please confirm your current stay arrangement and welfare status for Embassy records:\n"
+        f"{confirmation_link}"
+    )
+
+
+def _run_monthly_welfare_campaign(vendor=FACILITY_VENDOR_DEFAULT, facility_name='', channel='email',
+                                  target='active_vendor_residents', created_by='system'):
+    vendor = (vendor or FACILITY_VENDOR_DEFAULT).strip() or FACILITY_VENDOR_DEFAULT
+    channel = (channel or MONTHLY_WELFARE_CHECKIN_CHANNEL).strip().lower() or MONTHLY_WELFARE_CHECKIN_CHANNEL
+    target = (target or 'active_vendor_residents').strip() or 'active_vendor_residents'
+    if vendor != FACILITY_VENDOR_DEFAULT:
+        return {'success': False, 'error': 'Only AJA Care is currently approved for automated monthly welfare check-ins.'}
+    if channel not in ('email', 'whatsapp'):
+        return {'success': False, 'error': 'Unsupported campaign channel.'}
+    now_kw = _kuwait_now()
+    year, month = now_kw.year, now_kw.month
+    db = get_db()
+    campaign_id = None
+    try:
+        existing = db.execute(
+            """SELECT * FROM stay_confirmation_campaigns
+               WHERE campaign_year = ? AND campaign_month = ? AND campaign_type = ?
+                 AND vendor_name = ? AND channel = ?
+               ORDER BY id DESC LIMIT 1""",
+            [year, month, MONTHLY_WELFARE_CHECKIN_TYPE, vendor, channel]
+        ).fetchone()
+        if existing:
+            return {
+                'success': True,
+                'skipped': True,
+                'reason': 'campaign_already_exists',
+                'campaign': dict(existing),
+            }
+        campaign_reference = _monthly_campaign_reference(year, month, vendor, channel)
+        cur = db.execute(
+            """INSERT INTO stay_confirmation_campaigns
+               (campaign_reference, campaign_year, campaign_month, campaign_type, vendor_name,
+                facility_name, channel, target, status, created_by, started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, CURRENT_TIMESTAMP)""",
+            [
+                campaign_reference, year, month, MONTHLY_WELFARE_CHECKIN_TYPE, vendor,
+                facility_name or '', channel, target, created_by or 'system'
+            ]
+        )
+        campaign_id = cur.lastrowid
+        targets = _select_monthly_checkin_targets(db, vendor=vendor, facility_name=facility_name, target=target)
+        total_sent = 0
+        total_failed = 0
+        smtp_missing = False
+        subject = 'Community Welfare Wing – Monthly Welfare Check-in'
+        base = _nurse_portal_public_base_url()
+        for person in targets:
+            token = secrets.token_urlsafe(32)
+            expires_at = _sql_dt(datetime.utcnow() + timedelta(days=14))
+            reference = person.get('nurse_reference') or person.get('roster_reference') or ''
+            link = f"{base}/stay-confirm?token={quote(token, safe='')}"
+            email = (person.get('email') or '').strip()
+            whatsapp = (person.get('whatsapp_full') or '').strip()
+            mobile = (person.get('mobile_full') or person.get('phone') or '').strip()
+            cur_t = db.execute(
+                """INSERT INTO stay_confirmation_tokens
+                   (token, campaign_id, roster_id, roster_reference, nurse_registration_id,
+                    nurse_reference, vendor_name, facility_name, email, whatsapp_full, mobile_full,
+                    expires_at, created_by, channel, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created')""",
+                [
+                    token, campaign_id, person.get('roster_id'), person.get('roster_reference') or '',
+                    person.get('nurse_id') or person.get('nurse_registration_id'), person.get('nurse_reference') or '',
+                    vendor, person.get('facility_name') or '', email, whatsapp, mobile, expires_at,
+                    created_by or 'system', channel
+                ]
+            )
+            token_id = cur_t.lastrowid
+            send_status = 'failed'
+            error = ''
+            body = _monthly_checkin_email_body(person.get('full_name') or '', reference, link)
+            if channel == 'email':
+                if not email:
+                    send_status = 'skipped_no_email'
+                    error = 'missing_email'
+                else:
+                    send_res = send_notification_email(email, subject, body)
+                    if send_res.get('ok'):
+                        send_status = 'sent'
+                    else:
+                        error = send_res.get('reason') or 'send_failed'
+                        send_status = 'skipped_smtp_missing' if error == 'smtp_not_configured' else 'failed'
+                        smtp_missing = smtp_missing or send_status == 'skipped_smtp_missing'
+            else:
+                body = _monthly_checkin_whatsapp_body(person.get('full_name') or '', link)
+                if not (os.environ.get('WHATSAPP_API_URL') and os.environ.get('WHATSAPP_API_TOKEN')):
+                    print('WhatsApp not configured; monthly check-in not sent.', flush=True)
+                    send_status = 'whatsapp_not_configured'
+                    error = 'whatsapp_not_configured'
+                else:
+                    send_status = 'failed'
+                    error = 'whatsapp_integration_not_enabled'
+            db.execute(
+                "UPDATE stay_confirmation_tokens SET status = ? WHERE id = ?",
+                [send_status, token_id]
+            )
+            if person.get('roster_id'):
+                roster_monthly_status = 'Sent' if send_status == 'sent' else ('Failed Delivery' if send_status in ('failed', 'skipped_smtp_missing', 'skipped_no_email', 'whatsapp_not_configured') else send_status)
+                db.execute(
+                    """UPDATE facility_roster
+                       SET last_monthly_checkin_sent_at = CURRENT_TIMESTAMP,
+                           last_monthly_checkin_campaign = ?,
+                           monthly_checkin_status = ?,
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    [campaign_reference, roster_monthly_status, person.get('roster_id')]
+                )
+            log_row = {**person, 'campaign_reference': campaign_reference, 'email': email}
+            _monthly_checkin_log(db, 'monthly_welfare_checkin_sent', send_status, log_row, subject, body, error, channel)
+            if send_status == 'sent':
+                total_sent += 1
+            else:
+                total_failed += 1
+        _refresh_campaign_totals(db, campaign_id)
+        final_status = 'completed'
+        if smtp_missing and total_sent == 0:
+            final_status = 'skipped_smtp_missing'
+        elif total_failed:
+            final_status = 'completed_with_errors'
+        db.execute(
+            """UPDATE stay_confirmation_campaigns
+               SET status = ?, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [final_status, campaign_id]
+        )
+        _refresh_campaign_totals(db, campaign_id)
+        db.commit()
+        campaign = dict(db.execute("SELECT * FROM stay_confirmation_campaigns WHERE id = ?", [campaign_id]).fetchone())
+        return {'success': True, 'campaign': campaign, 'targeted': len(targets), 'sent': total_sent, 'failed': total_failed}
+    except sqlite3.IntegrityError:
+        db.rollback()
+        existing = db.execute(
+            """SELECT * FROM stay_confirmation_campaigns
+               WHERE campaign_year = ? AND campaign_month = ? AND campaign_type = ?
+                 AND vendor_name = ? AND channel = ?
+               ORDER BY id DESC LIMIT 1""",
+            [year, month, MONTHLY_WELFARE_CHECKIN_TYPE, vendor, channel]
+        ).fetchone()
+        return {'success': True, 'skipped': True, 'reason': 'campaign_already_exists', 'campaign': dict(existing) if existing else None}
+    except Exception as exc:
+        db.rollback()
+        if campaign_id:
+            try:
+                db.execute(
+                    "UPDATE stay_confirmation_campaigns SET status = 'completed_with_errors', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    [campaign_id]
+                )
+                db.commit()
+            except Exception:
+                pass
+        return {'success': False, 'error': str(exc)}
+    finally:
+        db.close()
+
+
+def run_due_monthly_welfare_checkin_campaign(force=False):
+    if not MONTHLY_WELFARE_CHECKIN_LOCK.acquire(blocking=False):
+        return {'success': True, 'skipped': True, 'reason': 'already_running'}
+    try:
+        mark_monthly_checkin_no_response()
+        now_kw = _kuwait_now()
+        if not force and (now_kw.day != 1 or now_kw.hour < 9):
+            return {'success': True, 'skipped': True, 'reason': 'not_due', 'kuwait_time': now_kw.isoformat(timespec='seconds')}
+        return _run_monthly_welfare_campaign(
+            vendor=FACILITY_VENDOR_DEFAULT,
+            channel=MONTHLY_WELFARE_CHECKIN_CHANNEL,
+            target='active_vendor_residents',
+            created_by='monthly_scheduler'
+        )
+    except Exception as exc:
+        print(f'[MonthlyWelfareCheckin] scheduler suppressed error: {exc}', flush=True)
+        return {'success': False, 'error': str(exc)}
+    finally:
+        try:
+            MONTHLY_WELFARE_CHECKIN_LOCK.release()
+        except RuntimeError:
+            pass
+
+
+def monthly_welfare_checkin_scheduler_loop():
+    while True:
+        try:
+            run_due_monthly_welfare_checkin_campaign(force=False)
+        except Exception as exc:
+            print(f'[MonthlyWelfareCheckin] background loop suppressed error: {exc}', flush=True)
+        time.sleep(6 * 60 * 60)
+
+
+def _load_stay_confirmation_token(db, token):
+    return db.execute(
+        """SELECT t.*,
+                  f.roster_reference AS roster_reference_actual,
+                  f.full_name AS roster_full_name,
+                  f.current_status AS roster_current_status,
+                  f.confirmation_status AS roster_confirmation_status,
+                  f.facility_area AS roster_facility_area,
+                  f.area AS roster_area,
+                  f.welfare_followup_required AS roster_welfare_followup_required,
+                  f.reconciliation_status AS roster_reconciliation_status,
+                  f.active AS roster_active,
+                  n.id AS nurse_id_actual,
+                  n.reference_id AS nurse_reference_actual,
+                  n.full_name AS nurse_full_name
+           FROM stay_confirmation_tokens t
+           LEFT JOIN facility_roster f ON f.id = t.roster_id
+           LEFT JOIN nurse_registrations n ON n.id = t.nurse_registration_id
+           WHERE t.token = ?
+           ORDER BY t.id DESC LIMIT 1""",
+        [token]
+    ).fetchone()
+
+
+def _stay_confirmation_token_valid(row):
+    if not row:
+        return False
+    if row['used_at'] or row['action_taken']:
+        return False
+    exp = (row['expires_at'] or '').strip()
+    if not exp:
+        return False
+    try:
+        return datetime.fromisoformat(exp.replace(' ', 'T')) >= datetime.utcnow()
+    except Exception:
+        return False
+
+
+def _monthly_checkin_followup_case(db, roster_payload, stay_action, welfare_response, remarks, preferred_contact=''):
+    roster_payload = roster_payload or {}
+    try:
+        reference = _welfare_next_reference(db, 'MWC')
+    except Exception:
+        reference = f"CWA-MWC-{datetime.now().strftime('%Y')}-{int(time.time()) % 10000:04d}"
+    action_label = {
+        'intends_to_leave': 'Stay Arrangement Change / Intends to Leave',
+        'left_facility': 'Left Facility Confirmation',
+        'details_correction': 'Facility Details Correction',
+    }.get(stay_action, 'Health Worker Facility Follow-up')
+    if welfare_response in MONTHLY_WELFARE_CHECKIN_WELFARE_RESPONSES:
+        action_label = 'Health Worker Facility Follow-up'
+    details = {
+        'source': 'Monthly Welfare Check-in',
+        'stay_action': stay_action,
+        'welfare_response': welfare_response,
+        'nurse_reference': roster_payload.get('nurse_reference') or roster_payload.get('reference_id') or '',
+        'roster_reference': roster_payload.get('roster_reference') or '',
+        'vendor_name': roster_payload.get('vendor_name') or FACILITY_VENDOR_DEFAULT,
+        'facility_name': roster_payload.get('facility_name') or '',
+        'preferred_contact_method': preferred_contact or '',
+    }
+    cur = db.execute(
+        """INSERT INTO welfare_cases
+           (case_reference, case_type, category, requester_name, requester_phone, requester_email,
+            subject_name, subject_phone, subject_address, concern_summary, details, priority,
+            status, escalation_level)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Normal', 'New', 'normal')""",
+        [
+            reference,
+            'Health Worker Facility Follow-up',
+            action_label,
+            roster_payload.get('full_name') or roster_payload.get('nurse_name') or '',
+            roster_payload.get('phone') or roster_payload.get('mobile_full') or roster_payload.get('whatsapp_full') or '',
+            roster_payload.get('email') or '',
+            roster_payload.get('full_name') or roster_payload.get('nurse_name') or '',
+            roster_payload.get('phone') or roster_payload.get('mobile_full') or roster_payload.get('whatsapp_full') or '',
+            roster_payload.get('facility_name') or '',
+            remarks or action_label,
+            json.dumps(details)
+        ]
+    )
+    _welfare_insert_action(db, cur.lastrowid, 'monthly_checkin', 'created', '', 'New', action_label, False)
+    return reference
+
+
+def mark_monthly_checkin_no_response(campaign_id=None):
+    db = get_db()
+    try:
+        vals = []
+        where = [
+            "COALESCE(action_taken, '') = ''",
+            "used_at IS NULL",
+            "status IN ('sent','created')",
+            "datetime(created_at) <= datetime('now', '-7 days')",
+        ]
+        if campaign_id:
+            where.append("campaign_id = ?")
+            vals.append(campaign_id)
+        rows = db.execute(
+            f"SELECT * FROM stay_confirmation_tokens WHERE {' AND '.join(where)} LIMIT 1000",
+            vals
+        ).fetchall()
+        campaign_ids = set()
+        for row in rows:
+            d = dict(row)
+            db.execute("UPDATE stay_confirmation_tokens SET status = 'no_response' WHERE id = ?", [d['id']])
+            if d.get('roster_id'):
+                db.execute(
+                    """UPDATE facility_roster
+                       SET monthly_checkin_status = 'No Response',
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    [d.get('roster_id')]
+                )
+            _monthly_checkin_log(db, 'monthly_welfare_checkin_no_response', 'no_response', d, '', '', '', d.get('channel') or 'email')
+            if d.get('campaign_id'):
+                campaign_ids.add(d.get('campaign_id'))
+        for cid in campaign_ids:
+            _refresh_campaign_totals(db, cid)
+        db.commit()
+        return {'success': True, 'marked': len(rows)}
+    except Exception as exc:
+        db.rollback()
+        print(f'[MonthlyWelfareCheckin] no-response marking failed: {exc}', flush=True)
+        return {'success': False, 'error': str(exc)}
+    finally:
+        db.close()
+
+
+def stay_confirmation_page_html(token):
+    token = (token or '').strip()
+    invalid_html = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Monthly Welfare Check-in</title><style>body{font-family:Arial,sans-serif;background:#f6f9fc;color:#1f2937;margin:0}.wrap{max-width:680px;margin:0 auto;padding:32px 18px}.card{background:#fff;border:1px solid #dbe5ea;border-radius:10px;padding:22px;box-shadow:0 8px 24px rgba(15,23,42,.08)}h1{color:#15324a;margin:0 0 10px}.muted{color:#64748b;line-height:1.55}</style></head><body><main class="wrap"><section class="card"><h1>Monthly Welfare Check-in</h1><p class="muted">This confirmation link is invalid or has expired. Please log in to the Health Workers Portal to update your stay arrangement.</p></section></main></body></html>"""
+    if not token:
+        return invalid_html, 400
+    db = get_db()
+    try:
+        row = _load_stay_confirmation_token(db, token)
+        if not _stay_confirmation_token_valid(row):
+            if row and not row['used_at'] and not row['action_taken']:
+                try:
+                    db.execute("UPDATE stay_confirmation_tokens SET status = 'expired' WHERE id = ?", [row['id']])
+                    db.commit()
+                except Exception:
+                    pass
+            return invalid_html, 410
+        d = dict(row)
+        name = d.get('nurse_full_name') or d.get('roster_full_name') or 'Health Worker'
+        reference = d.get('nurse_reference_actual') or d.get('nurse_reference') or d.get('roster_reference_actual') or d.get('roster_reference') or ''
+        facility = d.get('facility_name') or ''
+        area = d.get('roster_facility_area') or d.get('roster_area') or ''
+        vendor = d.get('vendor_name') or FACILITY_VENDOR_DEFAULT
+        safe_context = ''.join([
+            f"<div><span>Name</span><b>{esc(name)}</b></div>",
+            f"<div><span>Reference</span><b>{esc(reference or 'N/A')}</b></div>",
+            f"<div><span>Facility / Area</span><b>{esc(' / '.join([x for x in (facility, area) if x]) or 'To be confirmed')}</b></div>",
+            f"<div><span>Approved Vendor / Service Provider</span><b>{esc(vendor)}</b></div>",
+        ])
+        html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Monthly Welfare Check-in</title>
+<style>*{{box-sizing:border-box}}body{{font-family:Arial,sans-serif;background:#f6f9fc;color:#172033;margin:0}}.wrap{{max-width:760px;margin:0 auto;padding:28px 16px}}.card{{background:#fff;border:1px solid #dbe5ea;border-radius:10px;padding:22px;box-shadow:0 8px 24px rgba(15,23,42,.08)}}h1{{color:#15324a;margin:0 0 10px;font-size:26px}}h2{{font-size:16px;color:#15324a;margin:20px 0 10px}}p{{line-height:1.55;color:#475569}}.ctx{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:14px 0}}.ctx div{{border:1px solid #e2e8f0;border-radius:8px;padding:10px;background:#f8fafc}}.ctx span{{display:block;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:4px}}.ctx b{{font-size:13px}}label.opt{{display:block;border:1px solid #dbe5ea;border-radius:8px;padding:11px;margin-bottom:8px;cursor:pointer}}label.opt:has(input:checked){{border-color:#2f7d4e;background:#f0fdf4}}textarea,input,select{{width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:10px;font:inherit}}button{{border:0;border-radius:8px;background:#2f7d4e;color:white;padding:11px 14px;font-weight:800;cursor:pointer;width:100%;margin-top:14px}}.msg{{display:none;border-radius:8px;padding:12px;margin-top:14px}}.ok{{display:block;background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}}.err{{display:block;background:#fff4f4;color:#991b1b;border:1px solid #fecaca}}@media(max-width:520px){{.card{{padding:18px}}h1{{font-size:22px}}}}</style></head>
+<body><main class="wrap"><section class="card"><h1>Monthly Welfare Check-in</h1><p>Please confirm your current stay arrangement so the Community Welfare Wing can maintain accurate welfare records and provide timely assistance where required.</p><div class="ctx">{safe_context}</div>
+<form id="checkinForm">
+<h2>Current Stay Arrangement</h2>
+<label class="opt"><input type="radio" name="stay_action" value="confirmed_staying" required> I am still staying at the listed facility</label>
+<label class="opt"><input type="radio" name="stay_action" value="intends_to_leave"> I intend to leave / change my stay arrangement</label>
+<label class="opt"><input type="radio" name="stay_action" value="left_facility"> I have already left the facility</label>
+<label class="opt"><input type="radio" name="stay_action" value="details_correction"> My facility details need correction</label>
+<div id="conditionalFields" style="display:grid;gap:8px;margin:10px 0"></div>
+<h2>Welfare Check-in</h2>
+<label class="opt"><input type="radio" name="welfare_response" value="no_followup" required> I am okay and no follow-up is required</label>
+<label class="opt"><input type="radio" name="welfare_response" value="needs_assistance"> I need Embassy welfare assistance</label>
+<label class="opt"><input type="radio" name="welfare_response" value="callback_requested"> I would like a callback / meeting</label>
+<label class="opt"><input type="radio" name="welfare_response" value="service_difficulty"> I want to share a service difficulty</label>
+<label style="display:block;margin-top:12px">Remarks / details for Embassy follow-up<textarea name="remarks" rows="4"></textarea></label>
+<label style="display:block;margin-top:12px">Preferred contact method<select name="preferred_contact_method"><option>WhatsApp</option><option>Phone Call</option><option>Email</option></select></label>
+<button id="submitBtn" type="submit">Submit Monthly Welfare Check-in</button>
+</form><div id="msg" class="msg"></div></section></main>
+<script>
+const token={json.dumps(token)};
+const fields=document.getElementById('conditionalFields');
+document.querySelectorAll('input[name="stay_action"]').forEach(el=>el.addEventListener('change',()=>{{
+  const v=document.querySelector('input[name="stay_action"]:checked')?.value||'';
+  fields.innerHTML='';
+  if(v==='intends_to_leave')fields.innerHTML='<label>Intended leaving date<input type="date" name="intended_leaving_date"></label>';
+  if(v==='left_facility')fields.innerHTML='<label>Date left facility<input type="date" name="left_date"></label>';
+  if(v==='details_correction')fields.innerHTML='<label>Correct facility if known<input name="correct_facility"></label><label>Correct area if known<input name="correct_area"></label>';
+}}));
+document.getElementById('checkinForm').addEventListener('submit',async(ev)=>{{
+  ev.preventDefault();
+  const fd=new FormData(ev.currentTarget);
+  const payload=Object.fromEntries(fd.entries());
+  payload.token=token;
+  const msg=document.getElementById('msg');
+  const btn=document.getElementById('submitBtn');
+  btn.disabled=true;btn.textContent='Submitting...';msg.className='msg';msg.textContent='';
+  try{{
+    const r=await fetch('/api/stay-confirm',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});
+    const d=await r.json().catch(()=>({{}}));
+    if(!r.ok||d.success===false)throw new Error(d.error||'Could not submit confirmation.');
+    ev.currentTarget.style.display='none';
+    msg.className='msg ok';
+    msg.textContent='Thank you. Your welfare check-in has been received by the Community Welfare Wing.';
+  }}catch(e){{msg.className='msg err';msg.textContent=e.message||'Could not submit confirmation.';btn.disabled=false;btn.textContent='Submit Monthly Welfare Check-in';}}
+}});
+</script></body></html>"""
+        return html, 200
+    finally:
+        db.close()
+
+
+def api_stay_confirm_submit(data):
+    token = (data.get('token') or '').strip()
+    stay_action = (data.get('stay_action') or '').strip()
+    welfare_response = (data.get('welfare_response') or '').strip()
+    remarks = _clean_text(data.get('remarks'), 3000)
+    if stay_action not in ('confirmed_staying', 'intends_to_leave', 'left_facility', 'details_correction'):
+        return {'success': False, 'error': 'Please select a valid stay arrangement option.'}
+    if welfare_response not in ('no_followup', 'needs_assistance', 'callback_requested', 'service_difficulty'):
+        return {'success': False, 'error': 'Please select a valid welfare check-in option.'}
+    db = get_db()
+    try:
+        row = _load_stay_confirmation_token(db, token)
+        if not row:
+            return {'success': False, 'error': 'This confirmation link is invalid or has expired.'}
+        if row['used_at'] or row['action_taken']:
+            return {'success': False, 'error': 'This monthly welfare check-in link has already been used.'}
+        if not _stay_confirmation_token_valid(row):
+            db.execute("UPDATE stay_confirmation_tokens SET status = 'expired' WHERE id = ?", [row['id']])
+            db.commit()
+            return {'success': False, 'error': 'This confirmation link is invalid or has expired.'}
+        d = dict(row)
+        roster_id = d.get('roster_id')
+        nurse_id = d.get('nurse_registration_id')
+        now = _sql_now()
+        old_status = d.get('roster_current_status') or ''
+        current_status = old_status
+        confirmation_status = d.get('roster_confirmation_status') or ''
+        monthly_status = ''
+        active_value = None
+        welfare_required = 1 if welfare_response in MONTHLY_WELFARE_CHECKIN_WELFARE_RESPONSES else 0
+        reconciliation_status = d.get('roster_reconciliation_status') or ''
+        action_required = ''
+        left_date = _clean_text(data.get('left_date'), 40) or _kuwait_now().date().isoformat()
+        if stay_action == 'confirmed_staying':
+            current_status = 'Confirmed Staying'
+            confirmation_status = 'Confirmed'
+            monthly_status = 'Needs Assistance' if welfare_required else 'Confirmed Staying'
+            active_value = 1
+        elif stay_action == 'intends_to_leave':
+            current_status = 'Intends to Leave'
+            monthly_status = 'Intends to Leave'
+            welfare_required = 1
+            active_value = 1
+            action_required = 'Stay arrangement change follow-up required'
+        elif stay_action == 'left_facility':
+            current_status = 'Left Facility'
+            monthly_status = 'Left Facility'
+            welfare_required = 1
+            active_value = 0
+            action_required = 'Left facility confirmation follow-up required'
+        elif stay_action == 'details_correction':
+            monthly_status = 'Details Correction'
+            welfare_required = 1
+            reconciliation_status = 'Reconciliation Required'
+            action_required = 'Facility details correction required'
+        if welfare_response in MONTHLY_WELFARE_CHECKIN_WELFARE_RESPONSES and stay_action == 'confirmed_staying':
+            monthly_status = 'Needs Assistance'
+            action_required = 'Welfare follow-up required'
+        structured_note = {
+            'stay_action': stay_action,
+            'welfare_response': welfare_response,
+            'remarks': remarks,
+            'intended_leaving_date': _clean_text(data.get('intended_leaving_date'), 40),
+            'left_date': _clean_text(data.get('left_date'), 40),
+            'correct_facility': _clean_text(data.get('correct_facility'), 220),
+            'correct_area': _clean_text(data.get('correct_area'), 160),
+            'preferred_contact_method': _clean_text(data.get('preferred_contact_method'), 80),
+            'token_id': d.get('id'),
+            'campaign_id': d.get('campaign_id'),
+        }
+        roster_payload = {
+            'full_name': d.get('nurse_full_name') or d.get('roster_full_name') or '',
+            'nurse_reference': d.get('nurse_reference_actual') or d.get('nurse_reference') or '',
+            'roster_reference': d.get('roster_reference_actual') or d.get('roster_reference') or '',
+            'vendor_name': d.get('vendor_name') or FACILITY_VENDOR_DEFAULT,
+            'facility_name': structured_note['correct_facility'] or d.get('facility_name') or '',
+            'email': d.get('email') or '',
+            'whatsapp_full': d.get('whatsapp_full') or '',
+            'mobile_full': d.get('mobile_full') or '',
+        }
+        if roster_id:
+            updates = [
+                "current_status = ?",
+                "monthly_checkin_status = ?",
+                "last_monthly_checkin_response_at = ?",
+                "welfare_followup_required = ?",
+                "reconciliation_status = ?",
+                "action_required = COALESCE(NULLIF(?, ''), action_required)",
+                "updated_at = CURRENT_TIMESTAMP",
+            ]
+            vals = [current_status, monthly_status, now, welfare_required, reconciliation_status, action_required]
+            if confirmation_status:
+                updates.append("confirmation_status = ?")
+                vals.append(confirmation_status)
+            if stay_action == 'confirmed_staying':
+                updates.append("last_confirmed_at = ?")
+                vals.append(now)
+            if active_value is not None:
+                updates.append("active = ?")
+                vals.append(active_value)
+            if stay_action == 'left_facility':
+                updates.append("left_date = ?")
+                vals.append(left_date)
+            if stay_action == 'details_correction':
+                if structured_note['correct_facility']:
+                    updates.append("facility_name = ?")
+                    vals.append(structured_note['correct_facility'])
+                if structured_note['correct_area']:
+                    updates.append("facility_area = ?")
+                    vals.append(structured_note['correct_area'])
+                    updates.append("area = ?")
+                    vals.append(structured_note['correct_area'])
+            vals.append(roster_id)
+            db.execute(f"UPDATE facility_roster SET {', '.join(updates)} WHERE id = ?", vals)
+            _facility_insert_action(
+                db, roster_id, 'nurse/self-service/monthly_checkin',
+                'monthly_welfare_checkin_response',
+                old_status,
+                current_status,
+                json.dumps(structured_note),
+                True
+            )
+            if not nurse_id:
+                _facility_insert_action(db, roster_id, 'monthly_checkin', 'admin_note', '', '', 'Nurse registration is not linked to this roster record.', False)
+        if nurse_id:
+            db.execute(
+                """UPDATE nurse_registrations
+                   SET current_status = ?, facility_status = ?, stay_confirmation_status = ?,
+                       monthly_checkin_status = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [current_status, current_status, confirmation_status or monthly_status, monthly_status, nurse_id]
+            )
+            if not roster_id:
+                _nurse_log(db, 'monthly_checkin_roster_link_required', d.get('nurse_reference') or '', '', 'monthly_checkin',
+                           {'token_id': d.get('id'), 'campaign_id': d.get('campaign_id')})
+        if not roster_id and nurse_id:
+            _monthly_checkin_followup_case(db, roster_payload, 'details_correction', welfare_response, 'Monthly check-in response received without a linked roster record. Please reconcile roster linkage.', structured_note['preferred_contact_method'])
+        elif stay_action in ('intends_to_leave', 'left_facility', 'details_correction') or welfare_response in MONTHLY_WELFARE_CHECKIN_WELFARE_RESPONSES:
+            _monthly_checkin_followup_case(db, roster_payload, stay_action, welfare_response, remarks, structured_note['preferred_contact_method'])
+        db.execute(
+            """UPDATE stay_confirmation_tokens
+               SET action_taken = ?, welfare_response = ?, remarks = ?, used_at = CURRENT_TIMESTAMP,
+                   status = 'used'
+               WHERE id = ?""",
+            [stay_action, welfare_response, json.dumps(structured_note), d['id']]
+        )
+        _monthly_checkin_log(db, 'monthly_welfare_checkin_response', 'received', {**d, **roster_payload}, '', json.dumps(structured_note), '', d.get('channel') or 'email')
+        if d.get('campaign_id'):
+            _refresh_campaign_totals(db, d.get('campaign_id'))
+        db.commit()
+        return {'success': True, 'message': 'Thank you. Your welfare check-in has been received by the Community Welfare Wing.'}
+    except Exception as exc:
+        db.rollback()
+        return {'success': False, 'error': str(exc)}
+    finally:
+        db.close()
+
+
 def api_nurse_stay_confirmation(data):
     ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip()
     passport = _nurse_normalize_passport(data.get('passport_number') or '')
@@ -4807,6 +5758,36 @@ def _build_nurse_public_profile_bundle(db, rec):
         })
     facility_row = None if professional_category == 'Doctor' else _facility_find_linked_roster(db, rec)
     facility_record = _facility_portal_dict(facility_row) if facility_row else _nurse_registration_facility_portal_dict(rec)
+    if facility_record:
+        latest_token = db.execute(
+            """SELECT token, status, action_taken, welfare_response, used_at, created_at, expires_at
+               FROM stay_confirmation_tokens
+               WHERE (
+                   (? != 0 AND roster_id = ?)
+                   OR (? != 0 AND nurse_registration_id = ?)
+               )
+               ORDER BY id DESC LIMIT 1""",
+            [
+                int(facility_record.get('id') or 0), int(facility_record.get('id') or 0),
+                int(rec.get('id') or 0), int(rec.get('id') or 0)
+            ]
+        ).fetchone()
+        if latest_token:
+            td = dict(latest_token)
+            pending = (
+                not td.get('used_at')
+                and not td.get('action_taken')
+                and (td.get('status') or '') in ('created', 'sent', 'no_response')
+                and (td.get('expires_at') or '')
+            )
+            try:
+                pending = pending and datetime.fromisoformat(str(td.get('expires_at')).replace(' ', 'T')) >= datetime.utcnow()
+            except Exception:
+                pending = False
+            facility_record['latest_monthly_checkin_status'] = td.get('action_taken') or td.get('status') or ''
+            facility_record['latest_monthly_checkin_received_at'] = td.get('used_at') or ''
+            facility_record['latest_monthly_checkin_pending'] = bool(pending)
+            facility_record['latest_monthly_checkin_url'] = f"/stay-confirm?token={quote(td.get('token') or '', safe='')}" if pending else ''
     return {
         'nurse_db_id': int(rec.get('id') or 0),
         'reference_id': rec.get('reference_id', ''),
@@ -5691,7 +6672,9 @@ def api_admin_nurses_summary(user=None):
             except Exception:
                 return 0
         username = (user or {}).get('user', '') or ''
-        return {'success': True, 'totals': {
+        vendor = FACILITY_VENDOR_DEFAULT
+        facility_totals = _facility_occupancy_kpis(db)
+        totals = {
             'registrations': _count("SELECT COUNT(*) c FROM nurse_registrations"),
             'pending_registrations': _count("SELECT COUNT(*) c FROM nurse_registrations WHERE registration_status IN ('Pending', 'Pending Review')"),
             'accommodation_requests': _count("SELECT COUNT(*) c FROM nurse_accommodation_requests"),
@@ -5716,7 +6699,23 @@ def api_admin_nurses_summary(user=None):
                                                WHERE COALESCE(category, complaint_category) = 'Facility Assistance Request'
                                                  AND COALESCE(status, complaint_status) NOT IN ('Resolved','Closed')"""),
             'facility_my_assigned': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND assigned_to = ?", [username]) if username else 0,
-        }}
+            'total_health_workers': _count("SELECT COUNT(*) c FROM nurse_registrations"),
+            'embassy_facilitated_residents': facility_totals.get('embassy_facilitated_residents', 0),
+            'aja_care_residents': facility_totals.get('total_aja_care_residents', 0),
+            'confirmed_staying': facility_totals.get('confirmed_staying', 0),
+            'intending_to_leave': facility_totals.get('intending_to_leave', 0),
+            'left_facility': facility_totals.get('left_facility', 0),
+            'needs_assistance': facility_totals.get('needs_assistance', 0),
+            'pending_stay_confirmation': facility_totals.get('pending_confirmation', 0),
+            'no_response': facility_totals.get('no_response', 0),
+            'details_correction': facility_totals.get('details_correction', 0),
+            'reconciliation_required': facility_totals.get('reconciliation_required', 0),
+            'active_currently_staying': facility_totals.get('active_currently_staying', 0),
+            'total_vendor_linked_residents': facility_totals.get('total_vendor_linked_residents', 0),
+            'total_aja_care_residents': facility_totals.get('total_aja_care_residents', 0),
+            'vendor_name': vendor,
+        }
+        return {'success': True, 'totals': totals}
     finally:
         db.close()
 
@@ -5760,6 +6759,11 @@ def _nurse_registration_public_dict(row):
     d['notice_period_start_date'] = d.get('linked_notice_period_start_date') or d.get('notice_period_start_date') or ''
     d['confirmation_status'] = d.get('confirmation_status') or ''
     d['facility_current_status'] = d.get('facility_current_status') or ''
+    d['monthly_checkin_status'] = d.get('monthly_checkin_status') or ''
+    d['last_monthly_checkin_sent_at'] = d.get('last_monthly_checkin_sent_at') or ''
+    d['last_monthly_checkin_response_at'] = d.get('last_monthly_checkin_response_at') or ''
+    d['last_confirmed_at'] = d.get('last_confirmed_at') or ''
+    d['welfare_followup_required'] = int(d.get('welfare_followup_required') or 0)
     d['assigned_to'] = d.get('assigned_to') or ''
     d['assigned_role'] = d.get('assigned_role') or ''
     d['action_required'] = d.get('action_required') or ''
@@ -7189,14 +8193,15 @@ def _facility_occupancy_kpis(db):
             return int(db.execute(sql, vals).fetchone()['c'] or 0)
         except Exception:
             return 0
-    return {
+    vendor = FACILITY_VENDOR_DEFAULT
+    kpis = {
         'total_assigned': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1"),
         'embassy_facilitated_residents': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1"),
         'confirmed_staying': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Confirmed Staying'"),
         'pending_confirmation': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND confirmation_status = 'Pending Nurse Confirmation'"),
         'intending_to_leave': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Intends to Leave'"),
         'leaving_notice_submitted': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Leaving Notice Submitted'"),
-        'left_facility': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status = 'Left Facility'"),
+        'left_facility': count("SELECT COUNT(*) c FROM facility_roster WHERE current_status = 'Left Facility'"),
         'vendor_mismatch_records': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND reconciliation_status = 'Reconciliation Required'"),
         'reconciliation_required': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND reconciliation_status = 'Reconciliation Required'"),
         'welfare_followup_required': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND welfare_followup_required = 1"),
@@ -7204,6 +8209,40 @@ def _facility_occupancy_kpis(db):
         'alternative_stay_review': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND alternative_stay_review_required = 1"),
         'notice_period_due': 0,
     }
+    kpis.update({
+        'total_vendor_linked_residents': count("SELECT COUNT(*) c FROM facility_roster WHERE COALESCE(vendor_name,'') != ''"),
+        'total_aja_care_residents': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ?", [vendor]),
+        'active_currently_staying': count(
+            "SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND active = 1 AND current_status NOT IN ('Left Facility','Closed / Archived','Inactive')",
+            [vendor]
+        ),
+        'aja_confirmed_staying': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND current_status = 'Confirmed Staying'", [vendor]),
+        'aja_intending_to_leave': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND current_status = 'Intends to Leave'", [vendor]),
+        'aja_left_facility': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND current_status = 'Left Facility'", [vendor]),
+        'details_correction': count(
+            "SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND (monthly_checkin_status = 'Details Correction' OR reconciliation_status = 'Reconciliation Required')",
+            [vendor]
+        ),
+        'needs_assistance': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND welfare_followup_required = 1", [vendor]),
+        'no_response': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND monthly_checkin_status = 'No Response'", [vendor]),
+        'aja_pending_confirmation': count(
+            """SELECT COUNT(*) c FROM facility_roster
+               WHERE vendor_name = ? AND (
+                   confirmation_status IN ('Pending','Pending Nurse Confirmation')
+                   OR monthly_checkin_status IN ('Sent','Pending Response')
+               )""",
+            [vendor]
+        ),
+        'pending_reconciliation': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND reconciliation_status = 'Reconciliation Required'", [vendor]),
+    })
+    kpis['confirmed_staying'] = kpis['aja_confirmed_staying']
+    kpis['intending_to_leave'] = kpis['aja_intending_to_leave']
+    kpis['left_facility'] = kpis['aja_left_facility']
+    kpis['pending_confirmation'] = kpis['aja_pending_confirmation']
+    kpis['reconciliation_required'] = kpis['pending_reconciliation']
+    kpis['open_welfare_requests'] = kpis['needs_assistance']
+    kpis['welfare_followup_required'] = kpis['needs_assistance']
+    return kpis
 
 
 def api_admin_facility_occupancy(params, user):
@@ -7211,7 +8250,7 @@ def api_admin_facility_occupancy(params, user):
         return {'success': False, 'error': 'Unauthorized'}
     db = get_db()
     try:
-        where = ["active = 1"]
+        where = ["(active = 1 OR current_status = 'Left Facility')"]
         vals = []
         for param, col in (
             ('facility', 'facility_name'), ('facility_name', 'facility_name'),
@@ -7292,7 +8331,7 @@ def api_admin_facility_detail(params, user):
     db = get_db()
     try:
         vals = []
-        where = ["active = 1"]
+        where = ["(active = 1 OR current_status = 'Left Facility')"]
         if facility:
             where.append("facility_name = ?")
             vals.append(facility)
@@ -7333,6 +8372,199 @@ def api_admin_facility_detail(params, user):
             'items': rows,
             'actions': actions
         }
+    finally:
+        db.close()
+
+
+def api_admin_send_confirmation_campaign(data, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    vendor = _clean_text(data.get('vendor') or data.get('vendor_name') or FACILITY_VENDOR_DEFAULT, 120) or FACILITY_VENDOR_DEFAULT
+    facility_name = _clean_text(data.get('facility_name'), 220)
+    channel = _clean_text(data.get('channel') or MONTHLY_WELFARE_CHECKIN_CHANNEL, 40).lower() or MONTHLY_WELFARE_CHECKIN_CHANNEL
+    target = _clean_text(data.get('target') or 'active_vendor_residents', 80) or 'active_vendor_residents'
+    if target not in ('active_vendor_residents', 'pending_confirmation', 'notice_due', 'selected_facility'):
+        return {'success': False, 'error': 'Invalid campaign target.'}
+    if target == 'selected_facility' and not facility_name:
+        return {'success': False, 'error': 'Facility name is required for selected facility campaigns.'}
+    return _run_monthly_welfare_campaign(
+        vendor=vendor,
+        facility_name=facility_name,
+        channel=channel,
+        target=target,
+        created_by=(user or {}).get('user') or 'admin'
+    )
+
+
+def api_admin_facility_checkin_campaigns(params, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    mark_monthly_checkin_no_response()
+    db = get_db()
+    try:
+        campaigns = [dict(r) for r in db.execute(
+            """SELECT * FROM stay_confirmation_campaigns
+               WHERE campaign_type = ?
+               ORDER BY campaign_year DESC, campaign_month DESC, id DESC
+               LIMIT 24""",
+            [MONTHLY_WELFARE_CHECKIN_TYPE]
+        ).fetchall()]
+        for c in campaigns:
+            c['total_confirmed_staying'] = c.get('total_confirmed') or 0
+        campaign_id = int(params.get('campaign_id') or (campaigns[0]['id'] if campaigns else 0) or 0)
+        tokens = []
+        if campaign_id:
+            tokens = [dict(r) for r in db.execute(
+                """SELECT t.id, t.campaign_id, t.roster_id, t.roster_reference, t.nurse_registration_id,
+                          t.nurse_reference, t.vendor_name, t.facility_name, t.email, t.whatsapp_full,
+                          t.mobile_full, t.action_taken, t.welfare_response, t.used_at, t.created_at,
+                          t.channel, t.status,
+                          COALESCE(n.full_name, f.full_name, '') AS nurse_name,
+                          f.current_status, f.monthly_checkin_status, f.last_confirmed_at,
+                          f.last_monthly_checkin_response_at, f.welfare_followup_required,
+                          f.reconciliation_status
+                   FROM stay_confirmation_tokens t
+                   LEFT JOIN facility_roster f ON f.id = t.roster_id
+                   LEFT JOIN nurse_registrations n ON n.id = t.nurse_registration_id
+                   WHERE t.campaign_id = ?
+                   ORDER BY t.id DESC LIMIT 500""",
+                [campaign_id]
+            ).fetchall()]
+        no_response = [dict(r) for r in db.execute(
+            """SELECT f.id, f.roster_reference, f.nurse_registration_id, f.full_name, f.vendor_name,
+                      f.facility_name, f.current_status, f.monthly_checkin_status,
+                      f.last_monthly_checkin_sent_at, f.last_monthly_checkin_response_at,
+                      f.welfare_followup_required, f.reconciliation_status, f.assigned_to
+               FROM facility_roster f
+               WHERE f.vendor_name = ? AND f.monthly_checkin_status = 'No Response'
+               ORDER BY datetime(f.updated_at) DESC LIMIT 200""",
+            [FACILITY_VENDOR_DEFAULT]
+        ).fetchall()]
+        return {'success': True, 'campaigns': campaigns, 'items': tokens, 'no_response': no_response, 'kpis': _facility_occupancy_kpis(db)}
+    finally:
+        db.close()
+
+
+def api_admin_stay_confirmation_resend(data, user):
+    if not _facility_user_can_access(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    token_id = int(data.get('token_id') or 0)
+    roster_id = int(data.get('roster_id') or 0)
+    db = get_db()
+    try:
+        row = None
+        if token_id:
+            row = db.execute("SELECT * FROM stay_confirmation_tokens WHERE id = ?", [token_id]).fetchone()
+        elif roster_id:
+            row = db.execute(
+                """SELECT * FROM stay_confirmation_tokens
+                   WHERE roster_id = ? ORDER BY id DESC LIMIT 1""",
+                [roster_id]
+            ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Check-in token not found.'}
+        d = dict(row)
+        email = (d.get('email') or '').strip()
+        if not email:
+            _monthly_checkin_log(db, 'monthly_welfare_checkin_resend', 'skipped_no_email', d, '', '', 'missing_email', 'email')
+            db.commit()
+            return {'success': False, 'error': 'No email address is available for this record.'}
+        new_token = secrets.token_urlsafe(32)
+        expires_at = _sql_dt(datetime.utcnow() + timedelta(days=14))
+        base = _nurse_portal_public_base_url()
+        link = f"{base}/stay-confirm?token={quote(new_token, safe='')}"
+        name = ''
+        if d.get('roster_id'):
+            rr = db.execute("SELECT full_name FROM facility_roster WHERE id = ?", [d.get('roster_id')]).fetchone()
+            name = rr['full_name'] if rr else ''
+        if not name and d.get('nurse_registration_id'):
+            nr = db.execute("SELECT full_name FROM nurse_registrations WHERE id = ?", [d.get('nurse_registration_id')]).fetchone()
+            name = nr['full_name'] if nr else ''
+        subject = 'Community Welfare Wing – Monthly Welfare Check-in'
+        body = _monthly_checkin_email_body(name, d.get('nurse_reference') or d.get('roster_reference') or '', link)
+        send_res = send_notification_email(email, subject, body)
+        status = 'sent' if send_res.get('ok') else ('skipped_smtp_missing' if send_res.get('reason') == 'smtp_not_configured' else 'failed')
+        db.execute(
+            """UPDATE stay_confirmation_tokens
+               SET token = ?, expires_at = ?, status = ?, action_taken = '', welfare_response = '',
+                   remarks = '', used_at = NULL, created_at = CURRENT_TIMESTAMP, created_by = ?
+               WHERE id = ?""",
+            [new_token, expires_at, status, (user or {}).get('user') or 'admin', d['id']]
+        )
+        if d.get('roster_id'):
+            db.execute(
+                """UPDATE facility_roster
+                   SET monthly_checkin_status = ?, last_monthly_checkin_sent_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                ['Sent' if status == 'sent' else 'Failed Delivery', d.get('roster_id')]
+            )
+        _monthly_checkin_log(db, 'monthly_welfare_checkin_resend', status, d, subject, body, send_res.get('reason') or '', 'email')
+        if d.get('campaign_id'):
+            _refresh_campaign_totals(db, d.get('campaign_id'))
+        db.commit()
+        return {'success': status == 'sent', 'status': status, 'error': '' if status == 'sent' else send_res.get('reason') or status}
+    except Exception as exc:
+        db.rollback()
+        return {'success': False, 'error': str(exc)}
+    finally:
+        db.close()
+
+
+def api_admin_facility_checkin_report_csv(user):
+    if not _facility_user_can_access(user):
+        return None, {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        rows = db.execute(
+            """SELECT c.campaign_year, c.campaign_month, c.campaign_reference, c.vendor_name AS campaign_vendor,
+                      c.facility_name AS campaign_facility, c.channel, c.status AS campaign_status,
+                      c.total_targeted, c.total_sent, c.total_failed, c.total_confirmed,
+                      c.total_intends_to_leave, c.total_left_facility, c.total_details_correction,
+                      c.total_needs_assistance, c.total_no_response, c.started_at, c.completed_at,
+                      t.roster_reference, t.nurse_reference, COALESCE(n.full_name, f.full_name, '') AS nurse_name,
+                      t.facility_name, t.action_taken, t.welfare_response, t.status AS token_status,
+                      t.created_at AS sent_at, t.used_at AS responded_at,
+                      f.current_status, f.monthly_checkin_status, f.welfare_followup_required,
+                      f.reconciliation_status
+               FROM stay_confirmation_campaigns c
+               LEFT JOIN stay_confirmation_tokens t ON t.campaign_id = c.id
+               LEFT JOIN facility_roster f ON f.id = t.roster_id
+               LEFT JOIN nurse_registrations n ON n.id = t.nurse_registration_id
+               WHERE c.campaign_type = ?
+               ORDER BY c.campaign_year DESC, c.campaign_month DESC, c.id DESC, t.id DESC""",
+            [MONTHLY_WELFARE_CHECKIN_TYPE]
+        ).fetchall()
+        out = io.StringIO()
+        writer = csv.writer(out)
+        headers = [
+            'campaign_year', 'campaign_month', 'campaign_reference', 'vendor', 'facility', 'channel',
+            'campaign_status', 'total_targeted', 'total_sent', 'total_failed', 'total_confirmed_staying',
+            'total_intends_to_leave', 'total_left_facility', 'total_details_correction',
+            'total_needs_assistance', 'total_no_response', 'started_at', 'completed_at',
+            'nurse_name', 'nurse_reference', 'roster_reference', 'token_facility', 'sent_at',
+            'stay_response', 'welfare_response', 'responded_at', 'token_status',
+            'current_status', 'monthly_checkin_status', 'welfare_followup_required',
+            'reconciliation_status'
+        ]
+        writer.writerow(headers)
+        for row in rows:
+            d = dict(row)
+            writer.writerow([
+                d.get('campaign_year', ''), d.get('campaign_month', ''), d.get('campaign_reference', ''),
+                d.get('campaign_vendor', ''), d.get('campaign_facility', ''), d.get('channel', ''),
+                d.get('campaign_status', ''), d.get('total_targeted', ''), d.get('total_sent', ''),
+                d.get('total_failed', ''), d.get('total_confirmed', ''), d.get('total_intends_to_leave', ''),
+                d.get('total_left_facility', ''), d.get('total_details_correction', ''),
+                d.get('total_needs_assistance', ''), d.get('total_no_response', ''),
+                d.get('started_at', ''), d.get('completed_at', ''), d.get('nurse_name', ''),
+                d.get('nurse_reference', ''), d.get('roster_reference', ''), d.get('facility_name', ''),
+                d.get('sent_at', ''), d.get('action_taken', ''), d.get('welfare_response', ''),
+                d.get('responded_at', ''), d.get('token_status', ''), d.get('current_status', ''),
+                d.get('monthly_checkin_status', ''), d.get('welfare_followup_required', ''),
+                d.get('reconciliation_status', '')
+            ])
+        return out.getvalue().encode('utf-8-sig'), None
     finally:
         db.close()
 
@@ -17651,6 +18883,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_html(email_verification_result_html(bool(result.get('success'))), 200 if result.get('success') else 400)
             return
 
+        if path == '/stay-confirm':
+            html, status = stay_confirmation_page_html(params.get('token', ''))
+            self.send_html(html, status)
+            return
+
         if path.startswith('/static/'):
             static_root = (Path(__file__).resolve().parent / 'static').resolve()
             rel_path = path[len('/static/'):].lstrip('/')
@@ -18102,6 +19339,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             self.send_json(api_admin_facility_detail(params, user))
+        elif path == '/api/admin/facility-occupancy/campaigns':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_facility_checkin_campaigns(params, user))
+        elif path == '/api/admin/facility-occupancy/no-response':
+            user = self.require_auth()
+            if not user: return
+            data = api_admin_facility_checkin_campaigns(params, user)
+            if data.get('success'):
+                data['items'] = data.get('no_response', [])
+            self.send_json(data)
+        elif path == '/api/admin/facility-occupancy/campaign-report':
+            user = self.require_auth()
+            if not user: return
+            body, err = api_admin_facility_checkin_report_csv(user)
+            if err:
+                self.send_json(err, 403); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="monthly_welfare_checkin_{datetime.now().strftime("%Y%m%d")}.csv"')
+            self.send_header('Content-Length', len(body))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body)
         elif path == '/api/admin/alternative-facilities':
             user = self.require_auth()
             if not user: return
@@ -18133,6 +19394,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             current_arrangement = (params.get('current_arrangement') or '').strip()
             confirmation_status = (params.get('confirmation_status') or '').strip()
             facility_status = (params.get('facility_status') or '').strip()
+            monthly_checkin_status = (params.get('monthly_checkin_status') or '').strip()
+            reconciliation_status = (params.get('reconciliation_status') or '').strip()
+            vendor_name = (params.get('vendor_name') or params.get('vendor') or '').strip()
             assigned_to = (params.get('assigned_to') or '').strip()
             scope = (params.get('scope') or '').strip().lower()
             notice_due = (params.get('notice_due') or '').strip()
@@ -18186,6 +19450,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if facility_status:
                     where.append("COALESCE(f.current_status,'') = ?")
                     vals.append(facility_status)
+                if monthly_checkin_status:
+                    where.append("COALESCE(f.monthly_checkin_status,'') = ?")
+                    vals.append(monthly_checkin_status)
+                if reconciliation_status:
+                    where.append("COALESCE(f.reconciliation_status,'') = ?")
+                    vals.append(reconciliation_status)
+                if vendor_name:
+                    where.append("COALESCE(f.vendor_name, n.vendor_name, '') = ?")
+                    vals.append(vendor_name)
                 if assigned_to:
                     where.append("COALESCE(f.assigned_to,'') = ?")
                     vals.append(assigned_to)
@@ -18210,7 +19483,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
                 where_sql = " AND ".join(where)
                 from_sql = """nurse_registrations n
-                              LEFT JOIN facility_roster f ON f.nurse_registration_id = n.id AND f.active = 1"""
+                              LEFT JOIN facility_roster f ON f.nurse_registration_id = n.id
+                               AND (f.active = 1 OR f.current_status = 'Left Facility')"""
                 total = int(db.execute(f"SELECT COUNT(DISTINCT n.id) c FROM {from_sql} WHERE {where_sql}", vals).fetchone()['c'] or 0)
                 rows = db.execute(f"""SELECT n.*,
                                              f.id AS facility_roster_id,
@@ -18230,6 +19504,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                              f.assigned_to,
                                              f.assigned_role,
                                              f.last_confirmed_at,
+                                             f.last_monthly_checkin_sent_at,
+                                             f.last_monthly_checkin_response_at,
+                                             f.monthly_checkin_status,
                                              f.welfare_followup_required,
                                              f.alternative_stay_review_required,
                                              f.action_required,
@@ -18278,12 +19555,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                        f.assigned_to,
                                        f.assigned_role,
                                        f.last_confirmed_at,
+                                       f.last_monthly_checkin_sent_at,
+                                       f.last_monthly_checkin_response_at,
+                                       f.monthly_checkin_status,
                                        f.welfare_followup_required,
                                        f.alternative_stay_review_required,
                                        f.action_required,
                                        f.reconciliation_status
                                 FROM nurse_registrations n
-                                LEFT JOIN facility_roster f ON f.nurse_registration_id = n.id AND f.active = 1"""
+                                LEFT JOIN facility_roster f ON f.nurse_registration_id = n.id
+                                 AND (f.active = 1 OR f.current_status = 'Left Facility')"""
                 if ident.isdigit():
                     row = db.execute(select_sql + " WHERE n.id = ? ORDER BY n.id DESC LIMIT 1", [int(ident)]).fetchone()
                 else:
@@ -18294,6 +19575,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_json({'success': False, 'error': 'Registration not found'}, 404); return
                 record = _nurse_registration_public_dict(row)
                 actions = _nurse_registration_actions(db, record.get('reference_id') or '')
+                if record.get('facility_roster_id'):
+                    roster_actions = db.execute(
+                        """SELECT id, action_type, actor_username, note, old_value, new_value, created_at
+                           FROM facility_roster_actions
+                           WHERE roster_id = ?
+                           ORDER BY id DESC LIMIT 100""",
+                        [record.get('facility_roster_id')]
+                    ).fetchall()
+                    for a in roster_actions:
+                        ad = dict(a)
+                        ad['details'] = ad.get('note') or ad.get('new_value') or ''
+                        actions.append(ad)
                 recent_requests = db.execute(
                     """SELECT complaint_id, COALESCE(category, complaint_category) AS category, subject,
                               COALESCE(status, complaint_status) AS status, created_at, updated_at
@@ -20416,6 +21709,16 @@ function printBoth(){{
             self.send_json(result, 200 if result.get('success') or result.get('locked') else 400)
             return
 
+        if path == '/api/stay-confirm':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            result = api_stay_confirm_submit(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+
         if path == '/api/welfare/locating-assistance':
             try:
                 data = json.loads(body) if body else {}
@@ -20738,6 +22041,34 @@ function printBoth(){{
             except json.JSONDecodeError:
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_nurse_leave_notice_submit(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/facility-occupancy/send-confirmation-campaign':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_send_confirmation_campaign(data, user)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/facility-occupancy/resend-confirmation':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_stay_confirmation_resend(data, user)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/facility-occupancy/mark-no-response':
+            user = self.require_auth()
+            if not user: return
+            if not _facility_user_can_access(user):
+                self.send_json({'success': False, 'error': 'Unauthorized'}, 403); return
+            result = mark_monthly_checkin_no_response()
             self.send_json(result, 200 if result.get('success') else 400)
             return
         elif path.startswith('/api/admin/facility-roster/'):
@@ -23611,24 +24942,30 @@ resetForm();loadRoster();async function refreshNotificationBadges(){try{const r=
 FACILITY_OCCUPANCY_ADMIN_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Facility Occupancy - Community Welfare Wing</title><link rel="stylesheet" href="/static/css/cwa-admin.css">
-<style>.mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px}.mini-card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:14px}.mini-card b{display:block;color:#15324a;font-size:24px}.actionbar{display:flex;gap:8px;flex-wrap:wrap}.small-note{font-size:12px;color:#6b7b88}.filterbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.filterbar>*{min-width:150px}.split{display:grid;grid-template-columns:1fr;gap:14px}</style></head>
+<style>.mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px}.mini-card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:14px}.mini-card b{display:block;color:#15324a;font-size:24px}.actionbar{display:flex;gap:8px;flex-wrap:wrap}.small-note{font-size:12px;color:#6b7b88}.filterbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.filterbar>*{min-width:150px}.split{display:grid;grid-template-columns:1fr;gap:14px}.checkin-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:16px}.checkin-title{margin:0;color:#15324a}.checkin-actions{display:flex;gap:8px;flex-wrap:wrap}.checkin-table{margin-top:12px}</style></head>
 <body class="cwa-admin-body"><div class="cwa-admin"><header class="cwa-admin-header"><div class="cwa-admin-header__brand"><div class="cwa-admin-header__logo" aria-hidden="true"></div><div class="cwa-admin-header__titles"><div class="cwa-admin-header__gov">Government of Pakistan</div><div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div><div class="cwa-admin-header__wing">Health Workers Facility Occupancy</div></div></div><div class="cwa-admin-header__actions"><a class="cwa-admin-header__logout" href="/admin/dashboard">Main Dashboard</a><a class="cwa-admin-header__logout" href="/logout">Logout</a></div></header>
 <div class="cwa-admin-shell"><aside class="cwa-admin-sidebar"><div class="cwa-admin-sidebar__group"><div class="cwa-admin-sidebar__section-title">Community Welfare</div><a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">[]</span><span>CWA Overview</span><span class="badge-count hidden" data-badge="community_welfare"></span></a><a href="/admin/nurses"><span class="cwa-admin-sidebar__icon">HW</span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span></a><a href="/admin/legal-cases"><span class="cwa-admin-sidebar__icon">LC</span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></a><a href="/admin/death-cases"><span class="cwa-admin-sidebar__icon">DC</span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></a><a href="/admin/facility-roster"><span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span><span class="badge-count hidden" data-badge="facility_roster"></span></a><a href="/admin/facility-occupancy" class="is-active"><span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span><span class="badge-count hidden" data-badge="facility_occupancy"></span></a><a href="/admin/facility-reconciliation"><span class="cwa-admin-sidebar__icon">VR</span><span>Vendor Coordination</span></a><a href="/admin/alternative-facilities"><span class="cwa-admin-sidebar__icon">AF</span><span>Alternative Stay Options</span><span class="badge-count hidden" data-badge="alternative_facilities"></span></a><a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">WC</span><span>Welfare Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span></a><a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">ME</span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span></a><a href="/admin/ambassador-review"><span class="cwa-admin-sidebar__icon">AR</span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></a></div></aside>
-<main class="cwa-admin-main"><div class="cwa-admin-subhead"><div><h1>Facility Occupancy & Welfare Follow-up</h1><p>To maintain accurate welfare records, support Pakistani health workers, and coordinate timely assistance where required.</p></div><div class="actionbar"><a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/facility-roster">Manage Roster</a><a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/alternative-facilities">Alternative Stay Options</a><a class="cwa-btn cwa-btn--navy cwa-btn--sm" href="/api/admin/facility-roster/export">Export List</a></div></div>
-<div class="cwa-admin-content cwa-fade-in"><div class="mini-grid" id="kpis"></div><div class="filterbar"><input id="fVendor" class="cwa-input" placeholder="Vendor"><input id="fFacility" class="cwa-input" placeholder="Facility / Building"><input id="fArea" class="cwa-input" placeholder="Area"><select id="fStatus" class="cwa-select"><option value="">All Status</option><option>Confirmed Staying</option><option>Pending Nurse Confirmation</option><option>Intends to Leave</option><option>Leaving Notice Submitted</option><option>Left Facility</option><option>Reconciliation Required</option></select><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="loadOccupancy()">Filter</button></div>
+<main class="cwa-admin-main"><div class="cwa-admin-subhead"><div><h1>Facility Occupancy & Welfare Follow-up</h1><p>To maintain accurate welfare records, support Pakistani health workers, and coordinate timely assistance where required.</p></div><div class="actionbar"><button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="runMonthlyCheckin()">Run Monthly Check-in Now</button><a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/facility-roster">Manage Roster</a><a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/alternative-facilities">Alternative Stay Options</a><a class="cwa-btn cwa-btn--navy cwa-btn--sm" href="/api/admin/facility-roster/export">Export List</a></div></div>
+<div class="cwa-admin-content cwa-fade-in"><div class="mini-grid" id="kpis"></div><div class="cwa-card cwa-card--p0" style="margin:14px 0"><div class="checkin-head"><div><h3 class="checkin-title">Vendor Facility Monthly Check-in</h3><p class="small-note">Monthly Welfare Check-in and Stay Arrangement Confirmation for AJA Care linked residents.</p></div><div class="checkin-actions"><button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="runMonthlyCheckin()">Run Monthly Check-in Now</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="viewNoResponse()">View No Response</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="exportCampaignReport()">Export Campaign Report</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="loadCheckins()">Refresh</button></div></div><div class="mini-grid" id="checkinKpis" style="padding:0 16px 14px"></div><div class="cwa-table-wrap checkin-table"><table class="cwa-table"><thead><tr><th>Month</th><th>Vendor</th><th>Facility</th><th>Channel</th><th>Total Targeted</th><th>Sent</th><th>Failed</th><th>Confirmed</th><th>Needs Assistance</th><th>No Response</th><th>Status</th><th>Started</th><th>Completed</th></tr></thead><tbody id="campaignRows"><tr><td colspan="13" class="cwa-empty">Loading...</td></tr></tbody></table></div><div class="cwa-table-wrap checkin-table"><table class="cwa-table"><thead><tr><th>Nurse name</th><th>Reference</th><th>Facility</th><th>Sent at</th><th>Response</th><th>Welfare response</th><th>Responded at</th><th>Status</th><th>Action required</th></tr></thead><tbody id="checkinDetailRows"><tr><td colspan="9" class="cwa-empty">No campaign selected.</td></tr></tbody></table></div></div><div class="filterbar"><input id="fVendor" class="cwa-input" placeholder="Vendor"><input id="fFacility" class="cwa-input" placeholder="Facility / Building"><input id="fArea" class="cwa-input" placeholder="Area"><select id="fStatus" class="cwa-select"><option value="">All Status</option><option>Confirmed Staying</option><option>Pending Nurse Confirmation</option><option>Intends to Leave</option><option>Leaving Notice Submitted</option><option>Left Facility</option><option>Reconciliation Required</option></select><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="loadOccupancy()">Filter</button></div>
 <div class="cwa-card cwa-card--p0"><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Vendor</th><th>Facility / Building</th><th>Area</th><th>Expected Residents</th><th>Confirmed Staying</th><th>Pending Confirmation</th><th>Intending to Leave</th><th>Leaving Notice Submitted</th><th>Left Facility</th><th>Notice Period Due</th><th>Open Welfare Requests</th><th>Reconciliation Required</th><th>Last Vendor Update</th><th>Last Embassy Verification</th><th>Actions</th></tr></thead><tbody id="facRows"><tr><td colspan="15" class="cwa-empty">Loading...</td></tr></tbody></table></div></div>
-<div id="detailWrap" class="cwa-card cwa-card--p0" style="margin-top:14px;display:none"><div style="padding:16px"><h3 id="detailTitle" style="color:#15324a"></h3><p id="detailSummary" class="small-note">Facility Occupancy Record detail</p></div><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Reference</th><th>Name</th><th>Passport</th><th>Civil ID</th><th>Phone</th><th>Workplace</th><th>Room / Bed</th><th>Shifted Date</th><th>Contract Start</th><th>Contract End</th><th>Notice Period Start</th><th>Current Status</th><th>Confirmation Status</th><th>Assigned Officer</th><th>Actions</th></tr></thead><tbody id="detailRows"></tbody></table></div></div></div></main></div></div>
+<div id="detailWrap" class="cwa-card cwa-card--p0" style="margin-top:14px;display:none"><div style="padding:16px"><h3 id="detailTitle" style="color:#15324a"></h3><p id="detailSummary" class="small-note">Facility Occupancy Record detail</p></div><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Roster Reference</th><th>Nurse ID / Reference</th><th>Name</th><th>Vendor</th><th>Facility</th><th>Current Status</th><th>Monthly Check-in Status</th><th>Last Confirmed At</th><th>Last Check-in Response At</th><th>Welfare Follow-up Required</th><th>Reconciliation Status</th><th>Assigned Officer</th><th>Actions</th></tr></thead><tbody id="detailRows"></tbody></table></div></div></div></main></div></div>
 <script>
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}
 async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}
 function val(id){return document.getElementById(id).value.trim()}
 function badge(s){let x=String(s||'').toLowerCase();return '<span class="cwa-badge" data-type="'+(x.includes('confirmed')?'resolved':x.includes('left')?'rejected':x.includes('required')?'urgent':'processing')+'">'+esc(s||'-')+'</span>'}
-async function loadOccupancy(){const p=new URLSearchParams();if(val('fVendor'))p.set('vendor',val('fVendor'));if(val('fFacility'))p.set('facility',val('fFacility'));if(val('fArea'))p.set('area',val('fArea'));if(val('fStatus'))p.set('status',val('fStatus'));try{const d=await jget('/api/admin/facility-occupancy?'+p.toString());const k=d.kpis||{};document.getElementById('kpis').innerHTML=[['Embassy-Facilitated Residents',k.embassy_facilitated_residents||k.total_assigned],['Confirmed Staying',k.confirmed_staying],['Pending Confirmation',k.pending_confirmation],['Intending to Leave',k.intending_to_leave],['Leaving Notice Submitted',k.leaving_notice_submitted],['Left Facility',k.left_facility],['Notice Period Due',k.notice_period_due],['Reconciliation Required',k.reconciliation_required||k.vendor_mismatch_records],['Open Welfare Requests',k.open_welfare_requests||k.welfare_followup_required],['Alternative Stay Review',k.alternative_stay_review]].map(x=>'<div class="mini-card"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');document.getElementById('facRows').innerHTML=(d.facilities||[]).map(f=>'<tr><td>'+esc(f.vendor_name||'-')+'</td><td><b>'+esc(f.facility_name||'-')+'</b></td><td>'+esc(f.area||'-')+'</td><td>'+f.expected_residents+'</td><td>'+f.confirmed_staying+'</td><td>'+f.pending_confirmation+'</td><td>'+f.intending_to_leave+'</td><td>'+f.leaving_notice_submitted+'</td><td>'+f.left_facility+'</td><td>'+f.notice_period_due+'</td><td>'+f.open_welfare_requests+'</td><td>'+f.reconciliation_required+'</td><td>'+esc(String(f.last_vendor_update||'').slice(0,16)||'-')+'</td><td>'+esc(String(f.last_embassy_verification||'').slice(0,16)||'-')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="loadDetail(\\''+esc(f.facility_name||'')+'\\',\\''+esc(f.vendor_name||'')+'\\',\\''+esc(f.area||'')+'\\')">View Facility Roster</button></td></tr>').join('')||'<tr><td colspan="15" class="cwa-empty">No facility records found.</td></tr>'}catch(e){document.getElementById('facRows').innerHTML='<tr><td colspan="15" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}
-async function loadDetail(facility,vendor,area){const p=new URLSearchParams({facility});if(vendor)p.set('vendor',vendor);if(area)p.set('area',area);const d=await jget('/api/admin/facility-occupancy/detail?'+p.toString());document.getElementById('detailWrap').style.display='block';document.getElementById('detailTitle').textContent=(d.vendor_name?('Vendor: '+d.vendor_name+' / '):'')+(d.facility||facility||'Facility');const s=d.summary||{};document.getElementById('detailSummary').textContent='Expected '+(s.expected_residents||0)+' | Confirmed '+(s.confirmed_residents||0)+' | Pending '+(s.unconfirmed_residents||0)+' | Reconciliation '+(s.reconciliation_required||0);document.getElementById('detailRows').innerHTML=(d.items||[]).map(r=>'<tr><td><b>'+esc(r.roster_reference)+'</b></td><td>'+esc(r.full_name)+'</td><td>'+esc(r.passport_number||'-')+'</td><td>'+esc(r.civil_id||'-')+'</td><td>'+esc(r.phone||'-')+'</td><td>'+esc(r.workplace||'-')+'</td><td>'+esc(r.room_bed||'-')+'</td><td>'+esc(r.date_shifted_to_facility||'-')+'</td><td>'+esc(r.contract_start_date||'-')+'</td><td>'+esc(r.contract_end_date||'-')+'</td><td>'+esc(r.notice_period_start_date||'-')+'</td><td>'+badge(r.current_status)+'</td><td>'+badge(r.confirmation_status)+'</td><td>'+esc(r.assigned_to||'Unassigned')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="assignRow('+r.id+')">Assign Follow-up</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="vendorUpdate('+r.id+')">Vendor Coordination</button></td></tr>').join('')||'<tr><td colspan="15" class="cwa-empty">No residents found.</td></tr>';document.getElementById('detailWrap').scrollIntoView({behavior:'smooth'})}
+async function loadOccupancy(){const p=new URLSearchParams();if(val('fVendor'))p.set('vendor',val('fVendor'));if(val('fFacility'))p.set('facility',val('fFacility'));if(val('fArea'))p.set('area',val('fArea'));if(val('fStatus'))p.set('status',val('fStatus'));try{const d=await jget('/api/admin/facility-occupancy?'+p.toString());const k=d.kpis||{};document.getElementById('kpis').innerHTML=[['AJA Care linked residents',k.total_aja_care_residents],['Active currently staying',k.active_currently_staying],['Confirmed staying',k.confirmed_staying],['Intends to leave',k.intending_to_leave],['Left facility',k.left_facility],['Details correction',k.details_correction],['Needs assistance',k.needs_assistance],['No response',k.no_response],['Pending confirmation',k.pending_confirmation],['Reconciliation required',k.reconciliation_required]].map(x=>'<div class="mini-card"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');document.getElementById('facRows').innerHTML=(d.facilities||[]).map(f=>'<tr><td>'+esc(f.vendor_name||'-')+'</td><td><b>'+esc(f.facility_name||'-')+'</b></td><td>'+esc(f.area||'-')+'</td><td>'+f.expected_residents+'</td><td>'+f.confirmed_staying+'</td><td>'+f.pending_confirmation+'</td><td>'+f.intending_to_leave+'</td><td>'+f.leaving_notice_submitted+'</td><td>'+f.left_facility+'</td><td>'+f.notice_period_due+'</td><td>'+f.open_welfare_requests+'</td><td>'+f.reconciliation_required+'</td><td>'+esc(String(f.last_vendor_update||'').slice(0,16)||'-')+'</td><td>'+esc(String(f.last_embassy_verification||'').slice(0,16)||'-')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="loadDetail(\\''+esc(f.facility_name||'')+'\\',\\''+esc(f.vendor_name||'')+'\\',\\''+esc(f.area||'')+'\\')">View Facility Roster</button></td></tr>').join('')||'<tr><td colspan="15" class="cwa-empty">No facility records found.</td></tr>'}catch(e){document.getElementById('facRows').innerHTML='<tr><td colspan="15" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}
+async function loadDetail(facility,vendor,area){const p=new URLSearchParams({facility});if(vendor)p.set('vendor',vendor);if(area)p.set('area',area);const d=await jget('/api/admin/facility-occupancy/detail?'+p.toString());document.getElementById('detailWrap').style.display='block';document.getElementById('detailTitle').textContent=(d.vendor_name?('Vendor: '+d.vendor_name+' / '):'')+(d.facility||facility||'Facility');const s=d.summary||{};document.getElementById('detailSummary').textContent='Expected '+(s.expected_residents||0)+' | Confirmed '+(s.confirmed_residents||0)+' | Pending '+(s.unconfirmed_residents||0)+' | Reconciliation '+(s.reconciliation_required||0);document.getElementById('detailRows').innerHTML=(d.items||[]).map(r=>'<tr><td><b>'+esc(r.roster_reference||'-')+'</b></td><td>'+esc(r.nurse_registration_id||r.nurse_reference||'-')+'</td><td>'+esc(r.full_name||'-')+'</td><td>'+esc(r.vendor_name||'-')+'</td><td>'+esc(r.facility_name||'-')+'</td><td>'+badge(r.current_status)+'</td><td>'+badge(r.monthly_checkin_status||'-')+'</td><td>'+esc(String(r.last_confirmed_at||'').slice(0,16)||'-')+'</td><td>'+esc(String(r.last_monthly_checkin_response_at||'').slice(0,16)||'-')+'</td><td>'+esc(r.welfare_followup_required?'Yes':'No')+'</td><td>'+esc(r.reconciliation_status||'-')+'</td><td>'+esc(r.assigned_to||'Unassigned')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="assignRow('+r.id+')">Assign Follow-up</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="vendorUpdate('+r.id+')">Vendor Coordination</button></td></tr>').join('')||'<tr><td colspan="13" class="cwa-empty">No residents found.</td></tr>';document.getElementById('detailWrap').scrollIntoView({behavior:'smooth'})}
 async function assignRow(id){const assigned_to=prompt('Assign follow-up to username');if(!assigned_to)return;const due_date=prompt('Due date (YYYY-MM-DD), optional')||'';await jpost('/api/admin/facility-roster/assign',{roster_id:id,assigned_to,due_date,note:'Assigned from facility occupancy dashboard'});loadOccupancy()}
 async function vendorUpdate(id){const reported_status=prompt('Vendor Coordination: currently_staying, left, changed_room, not_found, new_resident, facility_transfer');if(!reported_status)return;const note=prompt('Coordination note')||'';await jpost('/api/admin/facility-roster/vendor-update',{roster_id:id,reported_status,note});loadOccupancy()}
-loadOccupancy();async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});}catch(e){}}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);
+function monthLabel(c){return String(c.campaign_year||'')+'-'+String(c.campaign_month||'').padStart(2,'0')}
+async function runMonthlyCheckin(){if(!confirm('Run Monthly Welfare Check-in for eligible AJA Care linked residents now?'))return;try{const d=await jpost('/api/admin/facility-occupancy/send-confirmation-campaign',{vendor:'AJA Care',channel:'email',target:'active_vendor_residents'});alert(d.skipped?'Campaign already exists for this month.':'Campaign processed. Targeted '+(d.targeted||0)+' record(s).');await loadCheckins();await loadOccupancy();}catch(e){alert(e.message||'Could not run campaign')}}
+async function loadCheckins(){try{const d=await jget('/api/admin/facility-occupancy/campaigns');const k=d.kpis||{};document.getElementById('checkinKpis').innerHTML=[['Sent this month',(d.campaigns&&d.campaigns[0]&&d.campaigns[0].total_sent)||0],['Confirmed staying',k.confirmed_staying],['Intends to leave',k.intending_to_leave],['Left facility',k.left_facility],['Details correction',k.details_correction],['Needs assistance',k.needs_assistance],['No response',k.no_response],['Failed delivery',(d.campaigns&&d.campaigns[0]&&d.campaigns[0].total_failed)||0]].map(x=>'<div class="mini-card"><b>'+Number(x[1]||0)+'</b><span>'+esc(x[0])+'</span></div>').join('');document.getElementById('campaignRows').innerHTML=(d.campaigns||[]).map(c=>'<tr><td>'+esc(monthLabel(c))+'</td><td>'+esc(c.vendor_name||'-')+'</td><td>'+esc(c.facility_name||'All')+'</td><td>'+esc(c.channel||'-')+'</td><td>'+Number(c.total_targeted||0)+'</td><td>'+Number(c.total_sent||0)+'</td><td>'+Number(c.total_failed||0)+'</td><td>'+Number(c.total_confirmed||0)+'</td><td>'+Number(c.total_needs_assistance||0)+'</td><td>'+Number(c.total_no_response||0)+'</td><td>'+badge(c.status)+'</td><td>'+esc(String(c.started_at||'').slice(0,16)||'-')+'</td><td>'+esc(String(c.completed_at||'').slice(0,16)||'-')+'</td></tr>').join('')||'<tr><td colspan="13" class="cwa-empty">No monthly check-in campaigns yet.</td></tr>';document.getElementById('checkinDetailRows').innerHTML=(d.items||[]).map(r=>'<tr><td>'+esc(r.nurse_name||'-')+'</td><td>'+esc(r.nurse_reference||r.roster_reference||'-')+'</td><td>'+esc(r.facility_name||'-')+'</td><td>'+esc(String(r.created_at||'').slice(0,16)||'-')+'</td><td>'+esc(r.action_taken||'-')+'</td><td>'+esc(r.welfare_response||'-')+'</td><td>'+esc(String(r.used_at||'').slice(0,16)||'-')+'</td><td>'+badge(r.monthly_checkin_status||r.status)+'</td><td>'+esc(r.welfare_followup_required?'Welfare follow-up':(r.reconciliation_status||'-'))+'</td></tr>').join('')||'<tr><td colspan="9" class="cwa-empty">No token details for latest campaign.</td></tr>'}catch(e){document.getElementById('campaignRows').innerHTML='<tr><td colspan="13" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}
+function exportCampaignReport(){window.location='/api/admin/facility-occupancy/campaign-report'}
+async function viewNoResponse(){try{const d=await jget('/api/admin/facility-occupancy/no-response');document.getElementById('checkinDetailRows').innerHTML=(d.items||[]).map(r=>'<tr><td>'+esc(r.full_name||'-')+'</td><td>'+esc(r.roster_reference||'-')+'</td><td>'+esc(r.facility_name||'-')+'</td><td>'+esc(String(r.last_monthly_checkin_sent_at||'').slice(0,16)||'-')+'</td><td>No response</td><td>-</td><td>'+esc(String(r.last_monthly_checkin_response_at||'').slice(0,16)||'-')+'</td><td>'+badge(r.monthly_checkin_status||'-')+'</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="assignRow('+Number(r.id||0)+')">Assign</button> <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="resendCheckin('+Number(r.id||0)+')">Resend</button></td></tr>').join('')||'<tr><td colspan="9" class="cwa-empty">No no-response records.</td></tr>'}catch(e){alert(e.message||'Could not load no-response queue')}}
+async function resendCheckin(rosterId){try{await jpost('/api/admin/facility-occupancy/resend-confirmation',{roster_id:rosterId});await viewNoResponse();await loadCheckins();}catch(e){alert(e.message||'Could not resend check-in')}}
+loadOccupancy();loadCheckins();async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});}catch(e){}}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);
 </script></body></html>"""
 
 ALTERNATIVE_FACILITIES_ADMIN_PAGE = """<!DOCTYPE html>
@@ -31325,6 +32662,16 @@ if __name__ == '__main__':
     start_email_worker()
     _iraq_backfill = run_iraq_forwarded_email_backfill_once('startup_auto')
     print(f"[IraqEmailBackfill] {_iraq_backfill}", flush=True)
+    try:
+        _monthly_startup = run_due_monthly_welfare_checkin_campaign(force=False)
+        print(f"[MonthlyWelfareCheckin] startup: {_monthly_startup}", flush=True)
+    except Exception as _mwc_err:
+        print(f"[MonthlyWelfareCheckin] startup suppressed error: {_mwc_err}", flush=True)
+    try:
+        monthly_thread = threading.Thread(target=monthly_welfare_checkin_scheduler_loop, daemon=True)
+        monthly_thread.start()
+    except Exception as _mwc_thread_err:
+        print(f"[MonthlyWelfareCheckin] background thread not started: {_mwc_thread_err}", flush=True)
     bind_port = PORT
     server = None
     max_tries = 20
