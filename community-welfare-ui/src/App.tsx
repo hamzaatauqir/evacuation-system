@@ -13,6 +13,7 @@ import { LegalOpfPage } from "./pages/LegalOpfPage";
 import { DeathCasesPage } from "./pages/DeathCasesPage";
 import { LocatingAssistancePage } from "./pages/LocatingAssistancePage";
 import { CommunityFeedbackPage } from "./pages/CommunityFeedbackPage";
+import { TrackRequestPage } from "./pages/TrackRequestPage";
 import { AdminCwaDashboard } from "./pages/AdminCwaDashboard";
 import { AdminNursesPage } from "./pages/AdminNursesPage";
 import { AdminLegalCasesPage } from "./pages/AdminLegalCasesPage";
@@ -36,6 +37,7 @@ export default function App() {
       <Route path="/death-cases" element={<DeathCasesPage />} />
       <Route path="/locating-assistance" element={<LocatingAssistancePage />} />
       <Route path="/community-feedback" element={<CommunityFeedbackPage />} />
+      <Route path="/track-request" element={<TrackRequestPage />} />
       <Route path="/admin" element={<Navigate to="/admin/community-welfare" replace />} />
       <Route path="/admin/community-welfare" element={<AdminCwaDashboard />} />
       <Route path="/admin/nurses" element={<AdminNursesPage />} />

@@ -7,7 +7,6 @@ import { ContactCard } from "../components/ContactCard";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { Icon, type IconName } from "../components/Icon";
-import { BACKEND_PORTAL } from "../lib/api";
 import { T } from "../lib/tokens";
 
 type Variant = "primary" | "navy" | "secondary" | "ghost" | "danger" | "light";
@@ -160,11 +159,22 @@ export function CwaHomePage() {
                   color: "#fff",
                   borderColor: "rgba(255,255,255,.2)",
                 }}
-                onClick={() => window.location.assign(`${BACKEND_PORTAL}/track-application`)}
+                onClick={() => navigate("/track-request")}
               >
                 <Icon name="search" size={17} color="white" /> Track Application
               </Btn>
             </div>
+            <p
+              style={{
+                fontSize: 12,
+                color: "rgba(255,255,255,.68)",
+                marginTop: 12,
+                maxWidth: 560,
+                lineHeight: 1.6,
+              }}
+            >
+              Track feedback, complaints, legal/OPF support, locating assistance, death case requests, and health worker requests using your reference number.
+            </p>
           </div>
           <div style={{ flex: "1 1 300px", maxWidth: 440 }}>
             <HeroCarousel inline caption="Serving the Pakistani Community in Kuwait" />

@@ -17089,6 +17089,298 @@ def api_iraq_public_track(params):
         }
     }
 
+
+def _public_track_not_found():
+    return {
+        'success': False,
+        'found': False,
+        'error': 'No request was found for this reference number. Please check the reference and try again.'
+    }
+
+
+def _public_track_status_text(status):
+    key = (status or '').strip().lower()
+    mapping = {
+        'submitted': 'Your request has been received.',
+        'new': 'Your request has been received.',
+        'seen by admin': 'Your request has been received.',
+        'assigned': 'Your request has been assigned for follow-up.',
+        'in progress': 'Your request is being reviewed.',
+        'field verification required': 'Your request is being reviewed.',
+        'awaiting requester response': 'Further information is required. Please check the latest public update.',
+        'awaiting applicant response': 'Further information is required. Please check the latest public update.',
+        'awaiting family response': 'Further information is required. Please check the latest public update.',
+        'follow-up completed': 'Follow-up has been completed and the request is pending final review.',
+        'resolved': 'Your request has been marked as resolved.',
+        'closed': 'Your request has been closed.',
+        'reopened': 'Your request is being reviewed.',
+        'pending review': 'Your request has been received.',
+        'seen': 'Your request has been received.',
+    }
+    return mapping.get(key, 'Your request is being reviewed.')
+
+
+def _public_track_next_step(status):
+    key = (status or '').strip().lower()
+    if key in ('awaiting requester response', 'awaiting applicant response', 'awaiting family response'):
+        return 'Please review the latest public update and provide any requested information.'
+    if key in ('resolved', 'closed'):
+        return 'No immediate action is required. Keep your reference number for future follow-up.'
+    if key in ('submitted', 'new', 'seen by admin', 'pending review', 'seen'):
+        return 'The Community Welfare Wing will review your request and publish updates when available.'
+    if key == 'assigned':
+        return 'The assigned team will continue follow-up and share public updates when available.'
+    return 'Please keep your reference number and check again for updates.'
+
+
+def _public_track_stage(status):
+    key = (status or '').strip().lower()
+    if key in ('submitted', 'new', 'seen by admin', 'pending review', 'seen'):
+        return 'Submitted'
+    if key == 'assigned':
+        return 'Assigned'
+    if key in ('in progress', 'field verification required', 'reopened'):
+        return 'In Progress'
+    if key in ('awaiting requester response', 'awaiting applicant response', 'awaiting family response'):
+        return 'Information Requested'
+    if key == 'follow-up completed':
+        return 'Final Review'
+    if key in ('resolved', 'closed'):
+        return 'Completed'
+    return 'In Progress'
+
+
+def _public_track_safe_notes(rows):
+    notes = []
+    for row in rows:
+        d = dict(row)
+        note = (d.get('note') or '').strip()
+        if not note:
+            continue
+        notes.append({
+            'note': note,
+            'created_at': d.get('created_at') or ''
+        })
+    return notes
+
+
+def _legacy_ref_to_current(ref, target_prefix):
+    up = (ref or '').strip().upper()
+    if up.startswith(target_prefix + '-'):
+        return up
+    digits = re.findall(r'(\d+)', up)
+    if not digits:
+        return ''
+    seq = int(digits[-1])
+    if target_prefix in ('LGL', 'DTH'):
+        return f'{target_prefix}-{seq:05d}'
+    return ''
+
+
+def api_public_request_track(params):
+    reference = (params.get('reference') or '').strip().upper()
+    if not reference:
+        return _public_track_not_found()
+    reference = re.sub(r'\s+', '', reference)
+
+    db = get_db()
+    try:
+        if reference.startswith('CWA-FBK-') or reference.startswith('CWA-LOC-'):
+            row = db.execute(
+                """SELECT id, case_reference, case_type, status, created_at, updated_at
+                   FROM welfare_cases
+                   WHERE UPPER(TRIM(case_reference)) = ?
+                   LIMIT 1""",
+                [reference]
+            ).fetchone()
+            if not row:
+                return _public_track_not_found()
+            rec = dict(row)
+            notes = db.execute(
+                """SELECT note, created_at
+                   FROM welfare_case_actions
+                   WHERE case_id = ?
+                     AND COALESCE(visible_to_requester, 0) = 1
+                     AND TRIM(COALESCE(note, '')) != ''
+                   ORDER BY id DESC
+                   LIMIT 20""",
+                [rec['id']]
+            ).fetchall()
+            status = rec.get('status') or 'Submitted'
+            service_type = 'Community Feedback / Complaints' if reference.startswith('CWA-FBK-') else 'Locating / Contacting Assistance'
+            return {
+                'success': True,
+                'found': True,
+                'reference': rec.get('case_reference') or reference,
+                'service_type': service_type,
+                'submitted_at': rec.get('created_at') or '',
+                'status': status,
+                'last_updated': rec.get('updated_at') or rec.get('created_at') or '',
+                'current_stage': _public_track_stage(status),
+                'message': _public_track_status_text(status),
+                'public_notes': _public_track_safe_notes(notes),
+                'next_step': _public_track_next_step(status)
+            }
+
+        if reference.startswith('LEGAL-') or reference.startswith('OPF-') or reference.startswith('LGL-'):
+            legal_ref = reference if reference.startswith('LGL-') else _legacy_ref_to_current(reference, 'LGL')
+            candidates = [reference]
+            if legal_ref and legal_ref not in candidates:
+                candidates.append(legal_ref)
+            row = db.execute(
+                f"""SELECT reference_id, status, case_type, created_at, updated_at, last_action_at
+                    FROM legal_case_requests
+                    WHERE UPPER(TRIM(reference_id)) IN ({','.join('?' for _ in candidates)})
+                    ORDER BY id DESC
+                    LIMIT 1""",
+                candidates
+            ).fetchone()
+            if not row:
+                return _public_track_not_found()
+            rec = dict(row)
+            notes = db.execute(
+                """SELECT note, created_at
+                   FROM legal_case_actions
+                   WHERE reference_id = ?
+                     AND COALESCE(visible_to_applicant, 0) = 1
+                     AND TRIM(COALESCE(note, '')) != ''
+                   ORDER BY id DESC
+                   LIMIT 20""",
+                [rec.get('reference_id') or '']
+            ).fetchall()
+            status = rec.get('status') or 'Submitted'
+            case_type = (rec.get('case_type') or '').strip().lower()
+            service_type = 'OPF / Legal Support' if ('opf' in case_type or reference.startswith('OPF-')) else 'Legal Assistance'
+            return {
+                'success': True,
+                'found': True,
+                'reference': rec.get('reference_id') or reference,
+                'service_type': service_type,
+                'submitted_at': rec.get('created_at') or '',
+                'status': status,
+                'last_updated': rec.get('last_action_at') or rec.get('updated_at') or rec.get('created_at') or '',
+                'current_stage': _public_track_stage(status),
+                'message': _public_track_status_text(status),
+                'public_notes': _public_track_safe_notes(notes),
+                'next_step': _public_track_next_step(status)
+            }
+
+        if reference.startswith('DC-') or reference.startswith('DEATH-') or reference.startswith('DTH-'):
+            death_ref = reference if reference.startswith('DTH-') else _legacy_ref_to_current(reference, 'DTH')
+            candidates = [reference]
+            if death_ref and death_ref not in candidates:
+                candidates.append(death_ref)
+            row = db.execute(
+                f"""SELECT reference_id, status, created_at, updated_at, last_action_at
+                    FROM death_case_requests
+                    WHERE UPPER(TRIM(reference_id)) IN ({','.join('?' for _ in candidates)})
+                    ORDER BY id DESC
+                    LIMIT 1""",
+                candidates
+            ).fetchone()
+            if not row:
+                return _public_track_not_found()
+            rec = dict(row)
+            status = rec.get('status') or 'Submitted'
+            return {
+                'success': True,
+                'found': True,
+                'reference': rec.get('reference_id') or reference,
+                'service_type': 'Death Case Assistance',
+                'submitted_at': rec.get('created_at') or '',
+                'status': status,
+                'last_updated': rec.get('last_action_at') or rec.get('updated_at') or rec.get('created_at') or '',
+                'current_stage': _public_track_stage(status),
+                'message': _public_track_status_text(status),
+                'public_notes': [],
+                'next_step': _public_track_next_step(status)
+            }
+
+        if reference.startswith('NUR-'):
+            row = db.execute(
+                """SELECT reference_id, registration_status, created_at, updated_at,
+                          COALESCE(email_verified, 0) AS email_verified
+                   FROM nurse_registrations
+                   WHERE UPPER(TRIM(reference_id)) = ?
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                [reference]
+            ).fetchone()
+            if not row:
+                return _public_track_not_found()
+            rec = dict(row)
+            status = rec.get('registration_status') or 'Pending Review'
+            message = _public_track_status_text(status)
+            if int(rec.get('email_verified') or 0) == 0:
+                message = 'Email verification is pending. Please verify your email address to receive official updates.'
+            return {
+                'success': True,
+                'found': True,
+                'reference': rec.get('reference_id') or reference,
+                'service_type': 'Nurse Registration',
+                'submitted_at': rec.get('created_at') or '',
+                'status': status,
+                'last_updated': rec.get('updated_at') or rec.get('created_at') or '',
+                'current_stage': 'Nurse Registration',
+                'message': message,
+                'public_notes': [],
+                'next_step': 'Your health worker registration has been received. Your portal account is active if email is verified.'
+            }
+
+        if reference.startswith('NCMP-'):
+            row = db.execute(
+                """SELECT id, nurse_reference_id, complaint_status, status, created_at, updated_at, last_action_at
+                   FROM nurse_complaints
+                   WHERE UPPER(TRIM(COALESCE(complaint_id, ''))) = ?
+                      OR UPPER(TRIM(COALESCE(complaint_reference, ''))) = ?
+                      OR UPPER(TRIM(COALESCE(case_reference, ''))) = ?
+                      OR UPPER(TRIM(COALESCE(reference, ''))) = ?
+                      OR UPPER(TRIM(COALESCE(nurse_complaint_id, ''))) = ?
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                [reference, reference, reference, reference, reference]
+            ).fetchone()
+            if not row:
+                row = db.execute(
+                    """SELECT id, nurse_reference_id, complaint_status, status, created_at, updated_at, last_action_at
+                       FROM nurse_complaints
+                       WHERE UPPER(TRIM(COALESCE(nurse_reference_id, ''))) = ?
+                       ORDER BY id DESC
+                       LIMIT 1""",
+                    [reference]
+                ).fetchone()
+            if not row:
+                return _public_track_not_found()
+            rec = dict(row)
+            notes = db.execute(
+                """SELECT note, created_at
+                   FROM nurse_complaint_actions
+                   WHERE complaint_id = ?
+                     AND COALESCE(visible_to_nurse, 0) = 1
+                     AND TRIM(COALESCE(note, '')) != ''
+                   ORDER BY id DESC
+                   LIMIT 20""",
+                [reference]
+            ).fetchall()
+            status = rec.get('status') or rec.get('complaint_status') or 'Submitted'
+            return {
+                'success': True,
+                'found': True,
+                'reference': reference,
+                'service_type': 'Nurse Complaint / Request',
+                'submitted_at': rec.get('created_at') or '',
+                'status': status,
+                'last_updated': rec.get('last_action_at') or rec.get('updated_at') or rec.get('created_at') or '',
+                'current_stage': _public_track_stage(status),
+                'message': _public_track_status_text(status),
+                'public_notes': _public_track_safe_notes(notes),
+                'next_step': 'Your request is pending follow-up if applicable.'
+            }
+
+        return _public_track_not_found()
+    finally:
+        db.close()
+
 def api_iraq_cwa_daily_sent_summary(params):
     day = (params.get('date') or datetime.now().strftime('%Y-%m-%d')).strip()
     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day):
@@ -20614,6 +20906,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/iraq-public-track':
             # Iraq public tracking API — no login needed
             self.send_json(api_iraq_public_track(params))
+        elif path == '/api/public-request-track':
+            # Community Welfare public request tracking API — no login needed
+            self.send_json(api_public_request_track(params))
         elif path == '/api/public-track':
             # Public tracking API — no login needed
             search_val = params.get('q', '').strip()
