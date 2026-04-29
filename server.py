@@ -760,6 +760,19 @@ def init_db():
         ('facility_status', "TEXT DEFAULT ''"),
         ('stay_confirmation_status', "TEXT DEFAULT ''"),
         ('monthly_checkin_status', "TEXT DEFAULT ''"),
+        ('current_arrangement', "TEXT DEFAULT ''"),
+        ('vendor_facility_eligible', 'INTEGER DEFAULT 0'),
+        ('embassy_facilitated_resident', 'INTEGER DEFAULT 0'),
+        ('aja_care_resident', 'INTEGER DEFAULT 0'),
+        ('contract_months', 'INTEGER DEFAULT 6'),
+        ('notice_period_months', 'INTEGER DEFAULT 3'),
+        ('contract_end_date', "TEXT DEFAULT ''"),
+        ('notice_period_start_date', "TEXT DEFAULT ''"),
+        ('moh_hotel_name', "TEXT DEFAULT ''"),
+        ('moh_hotel_area', "TEXT DEFAULT ''"),
+        ('moh_hotel_start_date', "TEXT DEFAULT ''"),
+        ('moh_hotel_expected_end_date', "TEXT DEFAULT ''"),
+        ('moh_hotel_duration_months', 'INTEGER DEFAULT 3'),
         ('vendor_facility_checkin_eligible', 'INTEGER DEFAULT 0'),
     ]:
         try:
@@ -1300,6 +1313,7 @@ def init_db():
         ('notice_period_months', 'INTEGER DEFAULT 3'),
         ('notice_period_start_date', 'TEXT'),
         ('current_status', "TEXT DEFAULT 'Assigned'"),
+        ('current_arrangement', "TEXT DEFAULT ''"),
         ('confirmation_status', "TEXT DEFAULT 'Pending Nurse Confirmation'"),
         ('last_confirmed_at', 'TIMESTAMP'),
         ('last_vendor_update_at', 'TIMESTAMP'),
@@ -1315,6 +1329,7 @@ def init_db():
         ('last_notice_reminder_at', 'TIMESTAMP'),
         ('reminder_count', 'INTEGER DEFAULT 0'),
         ('active', 'INTEGER DEFAULT 1'),
+        ('nurse_reference', "TEXT DEFAULT ''"),
         ('vendor_facility_checkin_eligible', 'INTEGER DEFAULT 0'),
         ('last_monthly_checkin_sent_at', 'TIMESTAMP'),
         ('last_monthly_checkin_campaign', "TEXT DEFAULT ''"),
@@ -3932,6 +3947,7 @@ NURSE_VENDOR_ELIGIBLE_CATEGORIES = {'Nurse', 'Other Health Worker'}
 NURSE_APPROVED_VENDOR_VALUES = {FACILITY_VENDOR_DEFAULT, 'Other / Not Sure'}
 FACILITY_ROSTER_STATUSES = {
     'Assigned', 'Assigned to Facility', 'Pending Nurse Confirmation',
+    'Pending Stay Confirmation', 'Registered - Vendor Facility',
     'Confirmed Staying', 'Temporarily Away', 'Intends to Leave',
     'Leaving Notice Submitted', 'Transition Planned',
     'Shifted to Alternative Facility', 'Left Facility',
@@ -3939,6 +3955,7 @@ FACILITY_ROSTER_STATUSES = {
     'Field Follow-up Required', 'Closed / Archived', 'Inactive'
 }
 FACILITY_CONFIRMATION_STATUSES = {
+    'Pending',
     'Pending Nurse Confirmation', 'Stay Confirmed', 'Shifted from Facility',
     'Intends to Leave', 'Correction Requested', 'Welfare Follow-up Requested',
     'Reconciliation Required', 'Confirmed', 'Not Applicable'
@@ -4007,6 +4024,23 @@ def _facility_notice_start(contract_end_date, notice_period_months=3):
     if not contract_end_date:
         return ''
     return _date_add_months(contract_end_date, -abs(int(notice_period_months or 3)))
+
+
+def _stay_date_defaults(start_date='', contract_months=6, notice_months=3):
+    start = (start_date or '').strip()
+    try:
+        contract_months = int(contract_months or 6)
+    except Exception:
+        contract_months = 6
+    try:
+        notice_months = int(notice_months or 3)
+    except Exception:
+        notice_months = 3
+    contract_months = max(1, min(36, contract_months))
+    notice_months = max(1, min(12, notice_months))
+    end = _date_add_months(start, contract_months) if start else ''
+    notice_start = _facility_notice_start(end, notice_months) if end else ''
+    return start, end, contract_months, notice_months, notice_start
 
 
 def _facility_normalized_dates(data):
@@ -4092,12 +4126,12 @@ def _facility_roster_to_dict(row):
     d['facility_area'] = d.get('facility_area') or d.get('area') or ''
     d['area'] = d.get('area') or d.get('facility_area') or ''
     for key in (
-        'roster_reference', 'full_name', 'passport_number', 'civil_id', 'phone', 'email',
+        'roster_reference', 'nurse_reference', 'full_name', 'passport_number', 'civil_id', 'phone', 'email',
         'workplace', 'facility_name', 'vendor_name', 'area', 'facility_area',
         'facility_address', 'room_number', 'bed_number', 'transport_included',
         'transport_type',
         'date_shifted_to_facility', 'contract_start_date', 'contract_end_date',
-        'notice_period_start_date', 'current_status', 'confirmation_status',
+        'notice_period_start_date', 'current_status', 'current_arrangement', 'confirmation_status',
         'last_confirmed_at', 'last_vendor_update_at', 'last_embassy_verification_at',
         'assigned_to', 'assigned_role', 'due_date', 'action_required', 'reconciliation_status',
         'last_monthly_checkin_sent_at', 'last_monthly_checkin_campaign',
@@ -4131,10 +4165,11 @@ def _facility_portal_dict(row):
     return {
         'id': d.get('id'),
         'roster_reference': d.get('roster_reference', ''),
+        'nurse_reference': d.get('nurse_reference', ''),
         'facility_name': d.get('facility_name', ''),
         'vendor_name': raw_vendor,
         'approved_vendor_label': approved_vendor_label,
-        'current_arrangement': 'Embassy Contracted / Arranged',
+        'current_arrangement': d.get('current_arrangement') or 'Embassy Contracted / Arranged',
         'area': d.get('area', ''),
         'facility_area': d.get('facility_area', ''),
         'room_number': d.get('room_number', ''),
@@ -4153,6 +4188,9 @@ def _facility_portal_dict(row):
         'reconciliation_status': d.get('reconciliation_status', ''),
         'notice_flag': d.get('notice_flag', ''),
         'approved_service_provider': bool(raw_vendor),
+        'vendor_facility_eligible': d.get('vendor_facility_checkin_eligible', 0),
+        'embassy_facilitated_resident': 1 if raw_vendor == FACILITY_VENDOR_DEFAULT else 0,
+        'aja_care_resident': 1 if raw_vendor == FACILITY_VENDOR_DEFAULT else 0,
         'remarks': d.get('remarks', '')
     }
 
@@ -4166,26 +4204,25 @@ def _nurse_registration_facility_portal_dict(rec):
     if not current_arrangement:
         return None
     vendor_name = (rec.get('vendor_name') or '').strip()
-    if current_arrangement == 'Embassy Contracted / Arranged' and not vendor_name:
-        vendor_name = FACILITY_VENDOR_DEFAULT
     approved_vendor_label = f'Approved Vendor: {vendor_name}' if vendor_name else 'Approved Vendor: To be confirmed'
     stay_reminders_opt_in = (rec.get('stay_reminders_opt_in') or rec.get('receive_notice_reminders') or '').strip()
+    is_moh_hotel = current_arrangement == 'MOH Provided Hotel - Arrival Stay'
     return {
         'id': None,
         'roster_reference': '',
-        'facility_name': rec.get('current_hostel') or '',
+        'facility_name': rec.get('moh_hotel_name') if is_moh_hotel else (rec.get('current_hostel') or ''),
         'vendor_name': vendor_name,
         'approved_vendor_label': approved_vendor_label,
         'current_arrangement': current_arrangement,
-        'area': rec.get('facility_area') or '',
-        'facility_area': rec.get('facility_area') or '',
+        'area': rec.get('moh_hotel_area') if is_moh_hotel else (rec.get('facility_area') or ''),
+        'facility_area': rec.get('moh_hotel_area') if is_moh_hotel else (rec.get('facility_area') or ''),
         'room_number': rec.get('room_number') or '',
         'bed_number': '',
-        'date_shifted_to_facility': rec.get('date_shifted_to_facility') or '',
+        'date_shifted_to_facility': rec.get('moh_hotel_start_date') if is_moh_hotel else (rec.get('date_shifted_to_facility') or ''),
         'contract_start_date': rec.get('contract_start_date') or '',
-        'contract_end_date': '',
-        'notice_period_start_date': '',
-        'current_status': current_arrangement,
+        'contract_end_date': rec.get('contract_end_date') or '',
+        'notice_period_start_date': rec.get('notice_period_start_date') or '',
+        'current_status': rec.get('facility_status') or current_arrangement,
         'confirmation_status': '',
         'last_confirmed_at': '',
         'last_monthly_checkin_sent_at': '',
@@ -4195,6 +4232,14 @@ def _nurse_registration_facility_portal_dict(rec):
         'reconciliation_status': '',
         'notice_flag': '',
         'approved_service_provider': bool(vendor_name),
+        'vendor_facility_eligible': int(rec.get('vendor_facility_eligible') or rec.get('vendor_facility_checkin_eligible') or 0),
+        'embassy_facilitated_resident': int(rec.get('embassy_facilitated_resident') or 0),
+        'aja_care_resident': int(rec.get('aja_care_resident') or 0),
+        'moh_hotel_name': rec.get('moh_hotel_name') or '',
+        'moh_hotel_area': rec.get('moh_hotel_area') or '',
+        'moh_hotel_start_date': rec.get('moh_hotel_start_date') or '',
+        'moh_hotel_expected_end_date': rec.get('moh_hotel_expected_end_date') or '',
+        'moh_hotel_duration_months': int(rec.get('moh_hotel_duration_months') or 3),
         'stay_reminders_opt_in': stay_reminders_opt_in,
         'receive_notice_reminders': stay_reminders_opt_in,
         'remarks': rec.get('remarks') or '',
@@ -4326,6 +4371,113 @@ def _facility_apply_registration_match(db, nurse_id, rec, actor='system'):
         True
     )
     return {'matched': True, 'roster_id': row['id'], 'roster_reference': row['roster_reference']}
+
+
+def _registration_vendor_flags(professional_category, current_arrangement, vendor_name):
+    category = _nurse_professional_category(professional_category, '')
+    is_aja = (
+        category in NURSE_VENDOR_ELIGIBLE_CATEGORIES
+        and (current_arrangement or '').strip() == 'Embassy Contracted / Arranged'
+        and (vendor_name or '').strip() == FACILITY_VENDOR_DEFAULT
+    )
+    return {
+        'vendor_facility_eligible': 1 if is_aja else 0,
+        'vendor_facility_checkin_eligible': 1 if is_aja else 0,
+        'embassy_facilitated_resident': 1 if is_aja else 0,
+        'aja_care_resident': 1 if is_aja else 0,
+        'facility_status': 'Pending Stay Confirmation' if is_aja else '',
+        'stay_confirmation_status': 'Pending Nurse Confirmation' if is_aja else '',
+    }
+
+
+def _sync_vendor_facility_roster_for_registration(db, nurse_id, rec, actor='system'):
+    rec = dict(rec or {})
+    flags = _registration_vendor_flags(
+        rec.get('professional_category'),
+        rec.get('current_arrangement') or rec.get('current_accommodation'),
+        rec.get('vendor_name')
+    )
+    if not flags['aja_care_resident']:
+        return {'matched': False, 'reason': 'not_vendor_facility'}
+    start_seed = rec.get('contract_start_date') or rec.get('date_shifted_to_facility') or ''
+    start, contract_end, contract_months, notice_months, notice_start = _stay_date_defaults(start_seed, rec.get('contract_months') or 6, rec.get('notice_period_months') or 3)
+    existing = _facility_find_linked_roster(db, {'id': nurse_id, **rec})
+    roster_payload = {
+        'nurse_registration_id': nurse_id,
+        'nurse_reference': rec.get('reference_id') or '',
+        'full_name': rec.get('full_name') or '',
+        'passport_number': rec.get('passport_number') or '',
+        'civil_id': rec.get('civil_id') or '',
+        'phone': rec.get('mobile_full') or rec.get('mobile') or '',
+        'email': rec.get('email') or '',
+        'workplace': rec.get('hospital') or rec.get('hospital_workplace') or '',
+        'vendor_name': FACILITY_VENDOR_DEFAULT,
+        'facility_name': rec.get('facility_name') or rec.get('current_hostel') or '',
+        'facility_area': rec.get('facility_area') or '',
+        'date_shifted_to_facility': rec.get('date_shifted_to_facility') or start,
+        'contract_start_date': start,
+        'contract_end_date': contract_end,
+        'notice_period_months': notice_months,
+        'notice_period_start_date': notice_start,
+        'current_arrangement': 'Embassy Contracted / Arranged',
+        'current_status': 'Pending Stay Confirmation',
+        'confirmation_status': 'Pending Nurse Confirmation',
+        'active': 1,
+        'vendor_facility_checkin_eligible': 1,
+        'remarks': 'Created or linked from public health worker registration.',
+    }
+    if existing:
+        ex = dict(existing)
+        reconciliation = ex.get('reconciliation_status') or ''
+        if (ex.get('vendor_name') or FACILITY_VENDOR_DEFAULT) != FACILITY_VENDOR_DEFAULT:
+            reconciliation = 'Reconciliation Required'
+        db.execute(
+            """UPDATE facility_roster
+               SET nurse_registration_id = ?,
+                   nurse_reference = COALESCE(NULLIF(nurse_reference, ''), ?),
+                   full_name = COALESCE(NULLIF(full_name, ''), ?),
+                   phone = COALESCE(NULLIF(phone, ''), ?),
+                   email = COALESCE(NULLIF(email, ''), ?),
+                   workplace = COALESCE(NULLIF(workplace, ''), ?),
+                   vendor_name = ?,
+                   facility_name = COALESCE(NULLIF(facility_name, ''), ?),
+                   facility_area = COALESCE(NULLIF(facility_area, ''), ?),
+                   area = COALESCE(NULLIF(area, ''), ?),
+                   current_arrangement = 'Embassy Contracted / Arranged',
+                   current_status = CASE WHEN COALESCE(current_status, '') IN ('', 'Assigned', 'Assigned to Facility', 'Pending Nurse Confirmation')
+                                         THEN 'Pending Stay Confirmation' ELSE current_status END,
+                   confirmation_status = COALESCE(NULLIF(confirmation_status, ''), 'Pending Nurse Confirmation'),
+                   date_shifted_to_facility = COALESCE(NULLIF(date_shifted_to_facility, ''), ?),
+                   contract_start_date = COALESCE(NULLIF(contract_start_date, ''), ?),
+                   contract_end_date = COALESCE(NULLIF(contract_end_date, ''), ?),
+                   notice_period_months = ?,
+                   notice_period_start_date = COALESCE(NULLIF(notice_period_start_date, ''), ?),
+                   vendor_facility_checkin_eligible = 1,
+                   reconciliation_status = ?,
+                   active = 1,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [
+                nurse_id, rec.get('reference_id') or '', roster_payload['full_name'], roster_payload['phone'],
+                roster_payload['email'], roster_payload['workplace'], FACILITY_VENDOR_DEFAULT,
+                roster_payload['facility_name'], roster_payload['facility_area'], roster_payload['facility_area'],
+                roster_payload['date_shifted_to_facility'], start, contract_end, notice_months, notice_start,
+                reconciliation, ex['id']
+            ]
+        )
+        _facility_insert_action(db, ex['id'], actor, 'vendor_facility_linked', '', rec.get('reference_id') or str(nurse_id), 'AJA Care registration linked to facility roster.', True)
+        return {'matched': True, 'roster_id': ex['id'], 'roster_reference': ex.get('roster_reference') or ''}
+    roster_id, roster_err = _facility_insert_or_update_entry(db, roster_payload, actor=actor)
+    if roster_id:
+        db.execute(
+            """UPDATE facility_roster
+               SET nurse_reference = ?, current_arrangement = 'Embassy Contracted / Arranged',
+                   vendor_facility_checkin_eligible = 1, current_status = 'Pending Stay Confirmation',
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [rec.get('reference_id') or '', roster_id]
+        )
+    return {'matched': bool(roster_id), 'roster_id': roster_id, 'error': roster_err}
 
 
 def _log_welfare_notification(person, message_type, channel, subject, body, status, error=''):
@@ -5031,11 +5183,17 @@ def is_vendor_facility_checkin_eligible(record):
     whatsapp = (_rowish_get(record, 'whatsapp_full') or '').strip()
     mobile = (_rowish_get(record, 'mobile_full') or _rowish_get(record, 'mobile') or _rowish_get(record, 'phone') or '').strip()
     active = _facility_int_value(_rowish_get(record, 'active', 1), 1)
-    explicit = _facility_int_value(_rowish_get(record, 'vendor_facility_checkin_eligible', 0), 0)
+    explicit = _facility_int_value(
+        _rowish_get(record, 'vendor_facility_checkin_eligible', 0)
+        or _rowish_get(record, 'vendor_facility_eligible', 0)
+        or _rowish_get(record, 'aja_care_resident', 0),
+        0
+    )
+    aja_resident = _facility_int_value(_rowish_get(record, 'aja_care_resident', 0), 0)
     return (
         professional_category in ("Nurse", "Other Health Worker")
-        and current_arrangement == "Embassy Contracted / Arranged"
-        and vendor_name == FACILITY_VENDOR_DEFAULT
+        and (current_arrangement == "Embassy Contracted / Arranged" or aja_resident == 1)
+        and (vendor_name == FACILITY_VENDOR_DEFAULT or aja_resident == 1)
         and current_status not in MONTHLY_WELFARE_CHECKIN_EXCLUDED_STATUSES
         and (active == 1 or explicit == 1)
         and bool(email or whatsapp or mobile)
@@ -6131,21 +6289,55 @@ def api_nurse_register(data):
     if eligible_vendor_category and not current_arrangement:
         return {'success': False, 'ok': False, 'error': 'Current Stay Arrangement is required for Nurse / Other Health Worker.'}
     embassy_arranged = eligible_vendor_category and current_arrangement == 'Embassy Contracted / Arranged'
+    moh_hotel_arranged = eligible_vendor_category and current_arrangement == 'MOH Provided Hotel - Arrival Stay'
     vendor_name = ''
     facility_name = ''
     facility_area = ''
     date_shifted_to_facility = ''
     contract_start_date = ''
+    contract_end_date = ''
+    notice_period_start_date = ''
+    contract_months = 6
+    notice_period_months = 3
     stay_reminders_opt_in = ''
+    moh_hotel_name = ''
+    moh_hotel_area = ''
+    moh_hotel_start_date = ''
+    moh_hotel_expected_end_date = ''
+    moh_hotel_duration_months = 3
     if embassy_arranged:
-        vendor_name = (data.get('vendor_name') or '').strip() or FACILITY_VENDOR_DEFAULT
+        vendor_name = (data.get('vendor_name') or '').strip()
         if vendor_name not in NURSE_APPROVED_VENDOR_VALUES:
             return {'success': False, 'ok': False, 'error': 'Invalid vendor selection.'}
         facility_name = (data.get('facility_name') or data.get('facility_building_name') or '').strip()
         facility_area = (data.get('facility_area') or data.get('area') or '').strip()
         date_shifted_to_facility = (data.get('date_shifted_to_facility') or '').strip()
         contract_start_date = (data.get('contract_start_date') or data.get('stay_period_start_date') or '').strip()
+        contract_start_date, contract_end_date, contract_months, notice_period_months, notice_period_start_date = _stay_date_defaults(
+            contract_start_date or date_shifted_to_facility,
+            data.get('contract_months') or 6,
+            data.get('notice_period_months') or 3
+        )
         stay_reminders_opt_in = (data.get('stay_reminders_opt_in') or data.get('receive_notice_reminders') or '').strip() or 'Yes'
+    if moh_hotel_arranged:
+        moh_hotel_name = (data.get('moh_hotel_name') or data.get('facility_name') or '').strip()
+        moh_hotel_area = (data.get('moh_hotel_area') or data.get('facility_area') or data.get('area') or '').strip()
+        moh_hotel_start_date = (data.get('moh_hotel_start_date') or data.get('date_shifted_to_facility') or '').strip()
+        try:
+            moh_hotel_duration_months = int(data.get('moh_hotel_duration_months') or 3)
+        except Exception:
+            moh_hotel_duration_months = 3
+        moh_hotel_duration_months = max(1, min(12, moh_hotel_duration_months))
+        moh_hotel_expected_end_date = (data.get('moh_hotel_expected_end_date') or '').strip()
+        if moh_hotel_start_date and not moh_hotel_expected_end_date:
+            moh_hotel_expected_end_date = _date_add_months(moh_hotel_start_date, moh_hotel_duration_months)
+        facility_area = moh_hotel_area
+    vendor_flags = _registration_vendor_flags(professional_category, current_arrangement, vendor_name)
+    if professional_category == 'Doctor' or not embassy_arranged:
+        vendor_name = ''
+    facility_status = vendor_flags['facility_status']
+    current_status = facility_status
+    stay_confirmation_status = vendor_flags['stay_confirmation_status']
     email = _nurse_normalize_email(data.get('email') or '')
     password = data.get('password') or ''
     confirm_password = data.get('confirm_password') or ''
@@ -6202,9 +6394,16 @@ def api_nurse_register(data):
             'designation', 'job_title_moh', 'professional_category', 'degree_type',
             'qualification_degree', 'qualification_degree_other',
             'moh_offer_salary_kwd', 'grading_letter_issued', 'accommodation_status',
-            'current_accommodation', 'applying_for_accommodation', 'vendor_name',
+            'current_accommodation', 'current_arrangement', 'applying_for_accommodation', 'vendor_name',
             'current_hostel', 'facility_area', 'date_shifted_to_facility',
-            'contract_start_date', 'stay_reminders_opt_in', 'remarks', 'issue_notice',
+            'contract_start_date', 'contract_end_date', 'contract_months',
+            'notice_period_months', 'notice_period_start_date',
+            'facility_status', 'current_status', 'stay_confirmation_status',
+            'vendor_facility_eligible', 'vendor_facility_checkin_eligible',
+            'embassy_facilitated_resident', 'aja_care_resident',
+            'moh_hotel_name', 'moh_hotel_area', 'moh_hotel_start_date',
+            'moh_hotel_expected_end_date', 'moh_hotel_duration_months',
+            'stay_reminders_opt_in', 'remarks', 'issue_notice',
             *[col for col, _ in NURSE_PROCESS_STEPS],
             'password_hash', 'password_salt', 'password_updated_at', 'email_verified'
         ]
@@ -6218,8 +6417,14 @@ def api_nurse_register(data):
             professional_category, (data.get('degree_type') or '').strip(),
             qualification_degree, qualification_degree_other if qualification_degree == 'Other' else '',
             (data.get('moh_offer_salary_kwd') or '').strip(), (data.get('grading_letter_issued') or 'No').strip(),
-            current_arrangement, current_arrangement, apply_acc, vendor_name, facility_name,
-            facility_area, date_shifted_to_facility, contract_start_date, stay_reminders_opt_in,
+            current_arrangement, current_arrangement, current_arrangement, apply_acc, vendor_name, facility_name,
+            facility_area, date_shifted_to_facility, contract_start_date, contract_end_date,
+            contract_months, notice_period_months, notice_period_start_date,
+            facility_status, current_status, stay_confirmation_status,
+            vendor_flags['vendor_facility_eligible'], vendor_flags['vendor_facility_checkin_eligible'],
+            vendor_flags['embassy_facilitated_resident'], vendor_flags['aja_care_resident'],
+            moh_hotel_name, moh_hotel_area, moh_hotel_start_date, moh_hotel_expected_end_date,
+            moh_hotel_duration_months, stay_reminders_opt_in,
             (data.get('remarks') or '').strip(), (data.get('issue_notice') or '').strip(),
             *step_values, ph, psalt, datetime.utcnow().isoformat(timespec='seconds'), 0
         ]
@@ -6241,39 +6446,33 @@ def api_nurse_register(data):
                 [facility_name, room_bed, nurse_id]
             )
         _nurse_log(db, 'registration_submitted', ref, passport, 'public', {'full_name': full_name, 'batch_number': batch_number, 'professional_category': professional_category})
-        match = {'matched': False}
-        if eligible_vendor_category:
-            match = _facility_apply_registration_match(db, nurse_id, {
+        if vendor_flags['aja_care_resident']:
+            match = _sync_vendor_facility_roster_for_registration(db, nurse_id, {
                 'id': nurse_id,
                 'reference_id': ref,
                 'full_name': full_name,
                 'passport_number': passport,
                 'civil_id': civil_id,
                 'mobile': mobile,
+                'mobile_full': mobile_full,
                 'email': email,
                 'hospital': hospital,
-                'vendor_name': vendor_name,
-            }, actor='system')
-        if embassy_arranged and not match.get('matched') and match.get('reason') != 'multiple_matches':
-            roster_id, roster_err = _facility_insert_or_update_entry(db, {
-                'nurse_registration_id': nurse_id,
-                'full_name': full_name,
-                'passport_number': passport,
-                'civil_id': civil_id,
-                'phone': mobile,
-                'email': email,
-                'workplace': hospital,
+                'professional_category': professional_category,
+                'current_arrangement': current_arrangement,
+                'current_accommodation': current_arrangement,
                 'vendor_name': vendor_name,
                 'facility_name': facility_name,
+                'current_hostel': facility_name,
                 'facility_area': facility_area,
                 'date_shifted_to_facility': date_shifted_to_facility,
                 'contract_start_date': contract_start_date,
-                'current_status': 'Pending Nurse Confirmation',
-                'confirmation_status': 'Pending Nurse Confirmation',
-                'remarks': 'Created from public health worker registration.',
+                'contract_end_date': contract_end_date,
+                'contract_months': contract_months,
+                'notice_period_months': notice_period_months,
+                'notice_period_start_date': notice_period_start_date,
             }, actor='public_registration')
-            if not roster_id:
-                _nurse_log(db, 'facility_roster_link_skipped', ref, passport, 'system', {'error': roster_err})
+            if not match.get('matched'):
+                _nurse_log(db, 'facility_roster_link_skipped', ref, passport, 'system', {'error': match.get('error') or match.get('reason')})
         db.commit()
         verification = _send_email_verification_for_record(
             'nurse_registrations', nurse_id, ref, full_name, email, 'nurse_registration'
@@ -6899,8 +7098,9 @@ def api_admin_nurses_summary(user=None):
             'current_accommodation_related': _count("SELECT COUNT(*) c FROM nurse_accommodation_requests WHERE request_status IN ('Pending', 'In Review', 'In Progress')"),
             'facility_total': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1"),
             'moh_arranged': _count("SELECT COUNT(*) c FROM nurse_registrations WHERE current_accommodation = 'MOH Arranged'"),
+            'moh_hotel_arrival_stay': _count("SELECT COUNT(*) c FROM nurse_registrations WHERE current_accommodation = 'MOH Provided Hotel - Arrival Stay'"),
             'private_self_arranged': _count("SELECT COUNT(*) c FROM nurse_registrations WHERE current_accommodation = 'Private (Self Arranged)'"),
-            'facility_embassy_arranged': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND current_status NOT IN ('Inactive','Closed / Archived')"),
+            'facility_embassy_arranged': facility_totals.get('embassy_facilitated_residents', 0),
             'facility_pending_confirmation': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND confirmation_status = 'Pending Nurse Confirmation'"),
             'facility_notice_due': _count("""SELECT COUNT(*) c FROM facility_roster
                                              WHERE active = 1 AND notice_period_start_date != ''
@@ -6952,7 +7152,7 @@ def _nurse_registration_public_dict(row):
     d['emergency_contact_full'] = d.get('emergency_contact_full') or d.get('emergency_contact') or ''
     d['phone'] = d.get('mobile_full') or d.get('mobile') or ''
     d['workplace'] = d.get('hospital') or d.get('hospital_workplace') or d.get('hospital_or_medical_center') or ''
-    d['current_arrangement'] = d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
+    d['current_arrangement'] = d.get('current_arrangement') or d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
     d['professional_category'] = _nurse_professional_category(d.get('professional_category'), d.get('designation') or d.get('job_title_moh') or '')
     d['facility_name'] = d.get('linked_facility_name') or d.get('facility_name') or d.get('current_hostel') or ''
     d['vendor_name'] = d.get('linked_vendor_name') or d.get('vendor_name') or ''
@@ -6964,14 +7164,22 @@ def _nurse_registration_public_dict(row):
     d['roster_reference'] = d.get('roster_reference') or ''
     d['date_shifted_to_facility'] = d.get('linked_date_shifted_to_facility') or d.get('date_shifted_to_facility') or ''
     d['contract_start_date'] = d.get('linked_contract_start_date') or d.get('contract_start_date') or ''
+    d['contract_end_date'] = d.get('linked_contract_end_date') or d.get('contract_end_date') or ''
+    d['notice_period_start_date'] = d.get('linked_notice_period_start_date') or d.get('notice_period_start_date') or ''
+    d['notice_period_months'] = _facility_int_value(d.get('notice_period_months'), 3)
+    d['contract_months'] = _facility_int_value(d.get('contract_months'), 6)
     d['stay_period_start_date'] = d.get('contract_start_date') or ''
     d['receive_notice_reminders'] = d.get('stay_reminders_opt_in') or d.get('receive_notice_reminders') or ''
     d['qualification_degree'] = d.get('qualification_degree') or ''
     d['qualification_degree_other'] = d.get('qualification_degree_other') or ''
-    d['contract_end_date'] = d.get('linked_contract_end_date') or d.get('contract_end_date') or ''
-    d['notice_period_start_date'] = d.get('linked_notice_period_start_date') or d.get('notice_period_start_date') or ''
     d['confirmation_status'] = d.get('confirmation_status') or ''
     d['facility_current_status'] = d.get('facility_current_status') or ''
+    d['vendor_facility_eligible'] = 1 if _facility_int_value(d.get('vendor_facility_eligible') or d.get('vendor_facility_checkin_eligible'), 0) else 0
+    d['embassy_facilitated_resident'] = 1 if _facility_int_value(d.get('embassy_facilitated_resident'), 0) else 0
+    d['aja_care_resident'] = 1 if _facility_int_value(d.get('aja_care_resident'), 0) else 0
+    for hotel_key in ('moh_hotel_name', 'moh_hotel_area', 'moh_hotel_start_date', 'moh_hotel_expected_end_date'):
+        d[hotel_key] = d.get(hotel_key) or ''
+    d['moh_hotel_duration_months'] = _facility_int_value(d.get('moh_hotel_duration_months'), 3)
     d['monthly_checkin_status'] = d.get('monthly_checkin_status') or ''
     d['last_monthly_checkin_sent_at'] = d.get('last_monthly_checkin_sent_at') or ''
     d['last_monthly_checkin_response_at'] = d.get('last_monthly_checkin_response_at') or ''
@@ -8400,6 +8608,34 @@ def api_admin_facility_matches(user):
         db.close()
 
 
+def _aja_vendor_people_count(db, roster_clause='', nurse_clause='', roster_vals=(), nurse_vals=()):
+    roster_clause = f" {roster_clause}" if roster_clause else ''
+    nurse_clause = f" {nurse_clause}" if nurse_clause else ''
+    sql = f"""SELECT COUNT(*) c FROM (
+        SELECT 'n:' || n.id AS person_key
+        FROM nurse_registrations n
+        WHERE COALESCE(n.professional_category, 'Nurse') != 'Doctor'
+          AND COALESCE(n.current_arrangement, n.current_accommodation, '') = 'Embassy Contracted / Arranged'
+          AND COALESCE(n.vendor_name, '') = ?
+          {nurse_clause}
+        UNION
+        SELECT CASE WHEN COALESCE(f.nurse_registration_id, 0) != 0
+                    THEN 'n:' || f.nurse_registration_id
+                    ELSE 'r:' || f.id END AS person_key
+        FROM facility_roster f
+        LEFT JOIN nurse_registrations n ON n.id = f.nurse_registration_id
+        WHERE COALESCE(n.professional_category, 'Nurse') != 'Doctor'
+          AND COALESCE(f.current_arrangement, 'Embassy Contracted / Arranged') = 'Embassy Contracted / Arranged'
+          AND COALESCE(f.vendor_name, '') = ?
+          {roster_clause}
+    )"""
+    try:
+        return int(db.execute(sql, [FACILITY_VENDOR_DEFAULT, *list(nurse_vals), FACILITY_VENDOR_DEFAULT, *list(roster_vals)]).fetchone()['c'] or 0)
+    except Exception as exc:
+        print(f'[FacilityKPI] AJA count failed: {exc}', flush=True)
+        return 0
+
+
 def _facility_occupancy_kpis(db):
     def count(sql, vals=()):
         try:
@@ -8422,36 +8658,39 @@ def _facility_occupancy_kpis(db):
         'alternative_stay_review': count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND alternative_stay_review_required = 1"),
         'notice_period_due': 0,
     }
+    active_roster = "AND COALESCE(f.active, 1) = 1 AND COALESCE(f.current_status, '') NOT IN ('Left Facility','Closed / Archived','Inactive')"
+    active_nurse = "AND COALESCE(n.current_status, n.facility_status, '') NOT IN ('Left Facility','Closed / Archived','Inactive')"
+    pending_roster = """AND (
+        COALESCE(f.current_status, '') IN ('Pending Stay Confirmation','Registered - Vendor Facility','Sent','Pending Response','Pending Nurse Confirmation','Assigned','Assigned to Facility')
+        OR COALESCE(f.monthly_checkin_status, '') IN ('Sent','Pending Response')
+        OR COALESCE(f.confirmation_status, '') IN ('Pending','Pending Nurse Confirmation')
+    )"""
+    pending_nurse = """AND (
+        COALESCE(n.current_status, n.facility_status, '') IN ('Pending Stay Confirmation','Registered - Vendor Facility','Sent','Pending Response')
+        OR COALESCE(n.stay_confirmation_status, '') IN ('Pending','Pending Nurse Confirmation')
+    )"""
     kpis.update({
-        'total_vendor_linked_residents': count("SELECT COUNT(*) c FROM facility_roster WHERE COALESCE(vendor_name,'') != ''"),
-        'total_aja_care_residents': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ?", [vendor]),
-        'active_currently_staying': count(
-            "SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND active = 1 AND current_status NOT IN ('Left Facility','Closed / Archived','Inactive')",
-            [vendor]
-        ),
-        'aja_confirmed_staying': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND current_status = 'Confirmed Staying'", [vendor]),
-        'aja_intending_to_leave': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND current_status = 'Intends to Leave'", [vendor]),
-        'aja_left_facility': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND current_status = 'Left Facility'", [vendor]),
+        'total_vendor_linked_residents': _aja_vendor_people_count(db, active_roster, active_nurse),
+        'total_aja_care_residents': _aja_vendor_people_count(db, active_roster, active_nurse),
+        'active_currently_staying': _aja_vendor_people_count(db, active_roster, active_nurse),
+        'aja_confirmed_staying': _aja_vendor_people_count(db, "AND COALESCE(f.current_status, '') = 'Confirmed Staying'", "AND COALESCE(n.current_status, n.facility_status, '') = 'Confirmed Staying'"),
+        'aja_intending_to_leave': _aja_vendor_people_count(db, "AND COALESCE(f.current_status, '') = 'Intends to Leave'", "AND COALESCE(n.current_status, n.facility_status, '') = 'Intends to Leave'"),
+        'aja_left_facility': _aja_vendor_people_count(db, "AND COALESCE(f.current_status, '') = 'Left Facility'", "AND COALESCE(n.current_status, n.facility_status, '') = 'Left Facility'"),
         'details_correction': count(
             "SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND (monthly_checkin_status = 'Details Correction' OR reconciliation_status = 'Reconciliation Required')",
             [vendor]
         ),
         'needs_assistance': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND welfare_followup_required = 1", [vendor]),
         'no_response': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND monthly_checkin_status = 'No Response'", [vendor]),
-        'aja_pending_confirmation': count(
-            """SELECT COUNT(*) c FROM facility_roster
-               WHERE vendor_name = ? AND (
-                   confirmation_status IN ('Pending','Pending Nurse Confirmation')
-                   OR monthly_checkin_status IN ('Sent','Pending Response')
-               )""",
-            [vendor]
-        ),
+        'aja_pending_confirmation': _aja_vendor_people_count(db, pending_roster, pending_nurse),
         'pending_reconciliation': count("SELECT COUNT(*) c FROM facility_roster WHERE vendor_name = ? AND reconciliation_status = 'Reconciliation Required'", [vendor]),
     })
     kpis['confirmed_staying'] = kpis['aja_confirmed_staying']
     kpis['intending_to_leave'] = kpis['aja_intending_to_leave']
     kpis['left_facility'] = kpis['aja_left_facility']
     kpis['pending_confirmation'] = kpis['aja_pending_confirmation']
+    kpis['embassy_facilitated_residents'] = kpis['total_aja_care_residents']
+    kpis['total_assigned'] = kpis['total_aja_care_residents']
     kpis['reconciliation_required'] = kpis['pending_reconciliation']
     kpis['open_welfare_requests'] = kpis['needs_assistance']
     kpis['welfare_followup_required'] = kpis['needs_assistance']

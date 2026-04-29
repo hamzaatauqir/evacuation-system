@@ -76,6 +76,12 @@ export function NursesPortalPage() {
   const approvedVendorLabel = ctx.facilityRoster?.approved_vendor_label || (vendorName ? `Approved Vendor: ${vendorName}` : "Approved Vendor: To be confirmed");
   const currentArrangement = (ctx.facilityRoster?.current_arrangement || "").trim();
   const hasEmbassyArrangement = !isDoctor && currentArrangement === "Embassy Contracted / Arranged";
+  const isMohHotel = !isDoctor && currentArrangement === "MOH Provided Hotel - Arrival Stay";
+  const mohHotelName = (ctx.facilityRoster as any)?.moh_hotel_name || "";
+  const mohHotelArea = (ctx.facilityRoster as any)?.moh_hotel_area || "";
+  const mohHotelStartDate = (ctx.facilityRoster as any)?.moh_hotel_start_date || "";
+  const mohHotelExpectedEndDate = (ctx.facilityRoster as any)?.moh_hotel_expected_end_date || "";
+  const mohHotelDurationMonths = (ctx.facilityRoster as any)?.moh_hotel_duration_months || 3;
   const showStaySummary = !isDoctor && !!currentArrangement;
   const stayArea = ctx.facilityRoster?.facility_area || ctx.facilityRoster?.area || "";
   const stayReminderPref = (ctx.facilityRoster as any)?.receive_notice_reminders || (ctx.facilityRoster as any)?.stay_reminders_opt_in || "";
@@ -363,6 +369,21 @@ export function NursesPortalPage() {
                   ) : null}
                   {hasEmbassyArrangement && stayReminderPref ? (
                     <Field label="Notice reminders" value={stayReminderPref} />
+                  ) : null}
+                  {isMohHotel && mohHotelName ? (
+                    <Field label="Hotel / Facility" value={mohHotelName} />
+                  ) : null}
+                  {isMohHotel && mohHotelArea ? (
+                    <Field label="Hotel Area" value={mohHotelArea} />
+                  ) : null}
+                  {isMohHotel && mohHotelStartDate ? (
+                    <Field label="Arrival Stay Start" value={mohHotelStartDate} />
+                  ) : null}
+                  {isMohHotel && mohHotelExpectedEndDate ? (
+                    <Field label="Expected End Date" value={mohHotelExpectedEndDate} />
+                  ) : null}
+                  {isMohHotel ? (
+                    <Field label="Expected Duration" value={`${mohHotelDurationMonths} month(s)`} />
                   ) : null}
                 </div>
               </div>

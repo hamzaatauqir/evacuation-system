@@ -69,6 +69,7 @@
           <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Intending to Leave</div><div class="cwa-kpi__value" id="kpiIntending">—</div></div><div class="cwa-kpi__icon">→</div></div>
           <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Left Facility</div><div class="cwa-kpi__value" id="kpiLeft">—</div></div><div class="cwa-kpi__icon">L</div></div>
           <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">MOH Arranged</div><div class="cwa-kpi__value" id="kpiMoh">—</div></div><div class="cwa-kpi__icon">M</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">MOH Provided Hotel</div><div class="cwa-kpi__value" id="kpiMohHotel">—</div><div class="cwa-kpi__sub">Arrival Stay (3-month default)</div></div><div class="cwa-kpi__icon">H</div></div>
           <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Private Self Arranged</div><div class="cwa-kpi__value" id="kpiPrivate">—</div></div><div class="cwa-kpi__icon">P</div></div>
           <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Stay Confirmation</div><div class="cwa-kpi__value" id="kpiStay">—</div></div><div class="cwa-kpi__icon">?</div></div>
           <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Needs Assistance</div><div class="cwa-kpi__value" id="kpiNeeds">—</div></div><div class="cwa-kpi__icon">!</div></div>
@@ -134,6 +135,9 @@ const TABS = [
   { key: 'confirmed_staying', label: 'Confirmed Staying', endpoint: 'registrations', params: { facility_status: 'Confirmed Staying' } },
   { key: 'intending_leave', label: 'Intending to Leave', endpoint: 'registrations', params: { facility_status: 'Intends to Leave' } },
   { key: 'left_facility', label: 'Left Facility', endpoint: 'registrations', params: { facility_status: 'Left Facility' } },
+  { key: 'moh_arranged', label: 'MOH Arranged', endpoint: 'registrations', params: { current_arrangement: 'MOH Arranged' } },
+  { key: 'moh_hotel', label: 'MOH Hotel', endpoint: 'registrations', params: { current_arrangement: 'MOH Provided Hotel - Arrival Stay' } },
+  { key: 'private', label: 'Private Self Arranged', endpoint: 'registrations', params: { current_arrangement: 'Private (Self Arranged)' } },
   { key: 'needs_assistance', label: 'Needs Assistance', endpoint: 'registrations', params: { welfare_followup_required: '1' } },
   { key: 'no_response', label: 'No Response', endpoint: 'registrations', params: { monthly_checkin_status: 'No Response' } },
   { key: 'reconciliation', label: 'Reconciliation Required', endpoint: 'registrations', params: { reconciliation_status: 'Reconciliation Required' } },
@@ -221,6 +225,7 @@ async function loadSummary(){
     document.getElementById('kpiIntending').textContent=(t.intending_to_leave||0).toLocaleString();
     document.getElementById('kpiLeft').textContent=(t.left_facility||0).toLocaleString();
     document.getElementById('kpiMoh').textContent=(t.moh_arranged||0).toLocaleString();
+    const mohHotelEl=document.getElementById('kpiMohHotel'); if(mohHotelEl) mohHotelEl.textContent=(t.moh_hotel_arrival_stay||t.moh_hotel||0).toLocaleString();
     document.getElementById('kpiPrivate').textContent=(t.private_self_arranged||0).toLocaleString();
     document.getElementById('kpiStay').textContent=(t.pending_stay_confirmation||t.facility_pending_confirmation||0).toLocaleString();
     document.getElementById('kpiNeeds').textContent=(t.needs_assistance||t.facility_followup||0).toLocaleString();
@@ -232,7 +237,9 @@ async function loadSummary(){
     const counts={
       all:t.registrations,pending:t.pending_registrations,embassy_facility:t.embassy_facilitated_residents||0,aja_care:t.aja_care_residents||t.total_aja_care_residents||0,
       confirmed_staying:t.confirmed_staying||0,intending_leave:t.intending_to_leave||0,left_facility:t.left_facility||0,needs_assistance:t.needs_assistance||0,
-      no_response:t.no_response||0,reconciliation:t.reconciliation_required||0,requests:t.open_complaints||0,
+      no_response:t.no_response||0,reconciliation:t.reconciliation_required||0,
+      moh_arranged:t.moh_arranged||0,moh_hotel:t.moh_hotel_arrival_stay||t.moh_hotel||0,private:t.private_self_arranged||0,
+      requests:t.open_complaints||0,
       welfare:t.welfare_complaints||0,facility:t.open_welfare_requests||0,leaving:t.facility_leaving||0,
       mine:t.my_complaints||t.facility_my_assigned||0,resolved:t.resolved_complaints||0,registrations:t.registrations||0
     };

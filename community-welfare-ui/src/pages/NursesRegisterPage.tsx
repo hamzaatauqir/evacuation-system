@@ -16,10 +16,12 @@ const PROFESSIONAL_CATEGORIES = ["Nurse", "Other Health Worker", "Doctor"];
 const VENDOR_ELIGIBLE_CATEGORIES = ["Nurse", "Other Health Worker"];
 const CURRENT_ARRANGEMENTS = [
   "MOH Arranged",
+  "MOH Provided Hotel - Arrival Stay",
   { value: "Embassy Contracted / Arranged", label: "AJA Care Vendor Embassy Contracted" },
   "Private (Self Arranged)",
   "Other",
 ];
+const MOH_HOTEL_DURATION_OPTIONS = ["1", "2", "3", "4", "5", "6"];
 const APPROVED_VENDOR_OPTIONS = ["AJA Care", "Other / Not Sure"];
 const COUNTRY_CODE_OPTIONS = [
   { value: "+965", label: "+965 Kuwait" },
@@ -70,6 +72,11 @@ interface FormState {
   dateShiftedToFacility?: string;
   contractStartDate?: string;
   stayRemindersOptIn?: string;
+  mohHotelName?: string;
+  mohHotelArea?: string;
+  mohHotelStartDate?: string;
+  mohHotelExpectedEndDate?: string;
+  mohHotelDurationMonths?: string;
   emergency?: string;
   emergencyCountryCode?: string;
   remarks?: string;
@@ -110,11 +117,13 @@ export function NursesRegisterPage() {
   });
   const isVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(form.professionalCategory || "");
   const isEmbassyArranged = form.currentArrangement === "Embassy Contracted / Arranged";
+  const isMohHotel = form.currentArrangement === "MOH Provided Hotel - Arrival Stay";
   const showAreaField =
     isVendorEligible &&
     ["Embassy Contracted / Arranged", "Private (Self Arranged)", "MOH Arranged"].includes(form.currentArrangement || "");
   const showStayArrangementWorkflow = isVendorEligible;
   const showVendorSelection = isVendorEligible && isEmbassyArranged;
+  const showMohHotelDetails = isVendorEligible && isMohHotel;
   const qualificationOptions = QUALIFICATION_OPTIONS_BY_CATEGORY[form.professionalCategory || ""] || [];
   const showQualificationOther = form.qualificationDegree === "Other";
 
@@ -448,13 +457,34 @@ export function NursesRegisterPage() {
                           ...prev,
                           currentArrangement,
                           ...(currentArrangement === "Embassy Contracted / Arranged"
-                            ? { vendorName: prev.vendorName || "AJA Care" }
+                            ? {
+                                vendorName: prev.vendorName || "AJA Care",
+                                mohHotelName: "",
+                                mohHotelArea: "",
+                                mohHotelStartDate: "",
+                                mohHotelExpectedEndDate: "",
+                                mohHotelDurationMonths: "",
+                              }
+                            : currentArrangement === "MOH Provided Hotel - Arrival Stay"
+                            ? {
+                                vendorName: "",
+                                facilityName: "",
+                                dateShiftedToFacility: "",
+                                contractStartDate: "",
+                                stayRemindersOptIn: "",
+                                mohHotelDurationMonths: prev.mohHotelDurationMonths || "3",
+                              }
                             : {
                                 vendorName: "",
                                 facilityName: "",
                                 dateShiftedToFacility: "",
                                 contractStartDate: "",
                                 stayRemindersOptIn: "Yes",
+                                mohHotelName: "",
+                                mohHotelArea: "",
+                                mohHotelStartDate: "",
+                                mohHotelExpectedEndDate: "",
+                                mohHotelDurationMonths: "",
                               }),
                         }));
                       }}
@@ -490,6 +520,38 @@ export function NursesRegisterPage() {
                           value={form.stayRemindersOptIn || "Yes"}
                           onChange={(e) => set("stayRemindersOptIn", e.target.value)}
                           options={["Yes", "No"]}
+                        />
+                      </Grid>
+                    </div>
+                  ) : null}
+                  {showMohHotelDetails ? (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 14,
+                        background: T.surfaceLow,
+                        border: `1px solid ${T.borderLt}`,
+                        borderRadius: 10,
+                      }}
+                    >
+                      <h4 style={{ fontSize: 13, color: T.navy, fontWeight: 800, marginBottom: 12 }}>
+                        MOH Provided Hotel — Arrival Stay Details
+                      </h4>
+                      <Grid cols={2} gap={14}>
+                        <FInput label="Hotel / Facility Name" {...inp("mohHotelName")} placeholder="Hotel or facility name" />
+                        <FInput label="Area" {...inp("mohHotelArea")} placeholder="Area in Kuwait" />
+                        <FInput label="Date shifted to hotel / arrival stay" {...inp("mohHotelStartDate")} type="date" />
+                        <FSelect
+                          label="Expected stay duration (months)"
+                          value={form.mohHotelDurationMonths || "3"}
+                          onChange={(e) => set("mohHotelDurationMonths", e.target.value)}
+                          options={MOH_HOTEL_DURATION_OPTIONS}
+                        />
+                        <FInput
+                          label="Expected end date (optional)"
+                          {...inp("mohHotelExpectedEndDate")}
+                          type="date"
+                          hint="If left blank, the Embassy will compute it from your start date and duration."
                         />
                       </Grid>
                     </div>
@@ -675,6 +737,11 @@ export function NursesRegisterPage() {
                         const arrangement = categoryVendorEligible ? form.currentArrangement || "" : "";
                         const arrangementFlag = categoryVendorEligible && /embassy/i.test(arrangement) ? "Yes" : "No";
                         const includeFacilityWorkflow = categoryVendorEligible && arrangement === "Embassy Contracted / Arranged";
+                        const includeMohHotelWorkflow = categoryVendorEligible && arrangement === "MOH Provided Hotel - Arrival Stay";
+                        const mohHotelDuration = (() => {
+                          const n = parseInt(form.mohHotelDurationMonths || "3", 10);
+                          return Number.isFinite(n) && n > 0 ? Math.min(12, n) : 3;
+                        })();
                         setSubmitting(true);
                         try {
                           const res = await api.post<{
@@ -717,6 +784,11 @@ export function NursesRegisterPage() {
                             stay_period_start_date: includeFacilityWorkflow ? (form.contractStartDate || "") : "",
                             stay_reminders_opt_in: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
                             receive_notice_reminders: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
+                            moh_hotel_name: includeMohHotelWorkflow ? (form.mohHotelName || "") : "",
+                            moh_hotel_area: includeMohHotelWorkflow ? (form.mohHotelArea || "") : "",
+                            moh_hotel_start_date: includeMohHotelWorkflow ? (form.mohHotelStartDate || "") : "",
+                            moh_hotel_expected_end_date: includeMohHotelWorkflow ? (form.mohHotelExpectedEndDate || "") : "",
+                            moh_hotel_duration_months: includeMohHotelWorkflow ? mohHotelDuration : 0,
                             issue_notice: "",
                             emergency_country_code: emergencyCountryCode,
                             emergency_contact: emergencyDigits,
