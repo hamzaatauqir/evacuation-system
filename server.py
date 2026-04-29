@@ -4110,7 +4110,9 @@ def can_access_admin_route(role, path):
         return True
     if role == 'fee_collector':
         return (
-            path in ('/fee-collection', '/dashboard')
+            path in ('/fee-collection', '/fee-collector', '/dashboard')
+            or path.startswith('/fee-collector/')
+            or path.startswith('/print/fee-')
             or path.startswith('/api/fee-')
             or path.startswith('/api/office-expense')
         )
@@ -21244,6 +21246,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('fee_collector', 'admin'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_html(FEE_COLLECTION_PAGE.replace('__USER_NAME__', user['user']).replace('__USER_ROLE__', user['role']))
+        elif path == '/fee-collector':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('fee_collector', 'admin', 'operator', 'operator_special'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_html(FEE_COLLECTION_PAGE.replace('__USER_NAME__', user['user']).replace('__USER_ROLE__', user['role']))
         elif path == '/iraq-embassy-admin':
             user = self.require_auth()
             if not user: return
@@ -23239,11 +23247,141 @@ function printBoth(){{
                 self.send_html(combined)
             else:
                 self.send_html('<p>No confirmed linked Note Verbal was found for this Iraq record. Please confirm the link in Note Verbal Review first.</p>', 404)
+        elif path == '/fee-collector/receipt-voucher':
+            print(f"[FeeVoucher] route hit {path} {params}", flush=True)
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            source = (params.get('source') or '').strip()
+            id_value = params.get('id') or params.get('record_id') or params.get('fee_id') or params.get('receipt_id') or ''
+            try:
+                rid = int(str(id_value).strip()) if str(id_value).strip() else 0
+            except Exception:
+                rid = 0
+            if source and rid > 0:
+                self.send_redirect(f"/print/fee-receipt?source={quote(source)}&id={rid}")
+                return
+            if rid <= 0:
+                self.send_html('<p>Receipt record not found.</p>', 404); return
+            db = get_db()
+            try:
+                dist = db.execute("SELECT id FROM fee_distributions WHERE id = ? LIMIT 1", [rid]).fetchone()
+                if dist:
+                    self.send_redirect(f"/print/fee-distribution-receipt?id={rid}")
+                    return
+                coll = db.execute(
+                    """SELECT source_table, source_id
+                       FROM fee_collections
+                       WHERE id = ?
+                       ORDER BY id DESC
+                       LIMIT 1""",
+                    [rid]
+                ).fetchone()
+                if coll:
+                    src = (coll['source_table'] or '').strip()
+                    src_id = int(coll['source_id'] or 0)
+                    if src and src_id > 0:
+                        self.send_redirect(f"/print/fee-receipt?source={quote(src)}&id={src_id}")
+                        return
+                self.send_html('<p>Receipt record not found.</p>', 404)
+            finally:
+                db.close()
+        elif path == '/fee-collector/handover-voucher':
+            print(f"[FeeVoucher] route hit {path} {params}", flush=True)
+            user = self.require_auth()
+            if not user: return
+            if user['role'] not in ('admin', 'operator', 'operator_special', 'fee_collector'):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            wing = (params.get('wing') or 'diplomatic').strip().lower() or 'diplomatic'
+            day = (params.get('date') or '').strip()
+            if not day:
+                day = datetime.now().strftime('%Y-%m-%d')
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day):
+                day = datetime.now().strftime('%Y-%m-%d')
+            db = get_db()
+            try:
+                rows = db.execute(
+                    """SELECT id, amount, currency, receipt_number, entered_by, handed_over_by, received_by,
+                              distribution_date, created_at, notes
+                       FROM fee_distributions
+                       WHERE LOWER(COALESCE(action_type, '')) = 'handed_over'
+                         AND LOWER(COALESCE(wing, '')) = ?
+                         AND date(COALESCE(distribution_date, created_at)) = date(?)
+                       ORDER BY id DESC""",
+                    [wing, day]
+                ).fetchall()
+            finally:
+                db.close()
+            safe_rows = [dict(r) for r in rows]
+            total = 0.0
+            for row in safe_rows:
+                try:
+                    total += float(str(row.get('amount') if row.get('amount') is not None else 0).replace(',', '').strip() or 0)
+                except Exception:
+                    pass
+            wing_label = 'Diplomatic Wing' if wing == 'diplomatic' else ((wing or 'Wing').replace('_', ' ').title())
+            generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            rows_html = ''
+            for row in safe_rows:
+                try:
+                    row_amount = float(str(row.get('amount') or 0).replace(',', '').strip() or 0)
+                except Exception:
+                    row_amount = 0.0
+                rows_html += (
+                    '<tr>'
+                    f"<td>{esc(row.get('created_at') or row.get('distribution_date') or '-')}</td>"
+                    f"<td>{esc(row.get('receipt_number') or '-')}</td>"
+                    f"<td>{esc(row.get('entered_by') or '-')}</td>"
+                    f"<td>{esc(row.get('handed_over_by') or '-')}</td>"
+                    f"<td>{esc(row.get('received_by') or '-')}</td>"
+                    f"<td>{row_amount:.2f} {esc((row.get('currency') or 'KWD').upper())}</td>"
+                    '</tr>'
+                )
+            if not rows_html:
+                rows_html = '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:18px">No Diplomatic Wing collections found for selected date.</td></tr>'
+            self.send_html(f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Handover Voucher - {esc(wing_label)} - {esc(day)}</title>
+<style>
+body{{font-family:Arial,sans-serif;background:#f1f5f9;margin:0;padding:18px;color:#0f172a}}
+.tools{{max-width:980px;margin:0 auto 12px;text-align:right}}
+.tools button{{border:none;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer}}
+.tools .print{{background:#0f4c81;color:#fff}} .tools .close{{background:#cbd5e1;color:#0f172a;margin-left:8px}}
+.page{{max-width:980px;margin:0 auto;background:#fff;border:1px solid #d8e0e8;border-radius:14px;padding:18px 20px}}
+h1{{margin:0 0 6px;font-size:24px;color:#0b2848}} .sub{{margin:0 0 14px;color:#475569;font-size:13px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-bottom:12px}}
+.card{{border:1px solid #e2e8f0;border-radius:10px;padding:10px;background:#f8fafc}}
+.k{{font-size:11px;color:#64748b;text-transform:uppercase;font-weight:700;letter-spacing:.6px}} .v{{margin-top:4px;font-size:18px;font-weight:800;color:#0f172a}}
+table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-bottom:1px solid #e2e8f0;padding:8px;text-align:left;font-size:12px}} th{{color:#475569;text-transform:uppercase;font-size:10px}}
+.sig{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:24px}} .line{{padding-top:38px;border-bottom:1px solid #64748b}}
+@media print{{body{{background:#fff;padding:0}} .tools{{display:none}} .page{{border:none;border-radius:0}}}}
+</style></head><body>
+<div class="tools"><button class="print" onclick="window.print()">Print Voucher</button><button class="close" onclick="window.close()">Close</button></div>
+<div class="page">
+  <h1>Embassy of Pakistan, Kuwait</h1>
+  <p class="sub">Community Welfare / Fee Collection - Handover Amount Voucher for {esc(wing_label)}</p>
+  <div class="grid">
+    <div class="card"><div class="k">Wing</div><div class="v">{esc(wing_label)}</div></div>
+    <div class="card"><div class="k">Date</div><div class="v">{esc(day)}</div></div>
+    <div class="card"><div class="k">Collections Included</div><div class="v">{len(safe_rows)}</div></div>
+    <div class="card"><div class="k">Total Amount</div><div class="v">{total:.2f} KWD</div></div>
+  </div>
+  <table><thead><tr><th>Date/Time</th><th>Receipt #</th><th>Prepared By</th><th>Handed Over By</th><th>Received By</th><th>Amount</th></tr></thead><tbody>{rows_html}</tbody></table>
+  <div class="grid" style="margin-top:16px">
+    <div class="card"><div class="k">Prepared By</div><div class="v" style="font-size:14px">{esc(user.get('user') or '-')}</div></div>
+    <div class="card"><div class="k">Received By / Diplomatic Wing</div><div class="v" style="font-size:14px">____________________</div></div>
+    <div class="card"><div class="k">Generated At</div><div class="v" style="font-size:14px">{esc(generated_at)}</div></div>
+  </div>
+  <div class="sig">
+    <div><div class="line"></div><div class="sub">Prepared by (Fee Collector)</div></div>
+    <div><div class="line"></div><div class="sub">Received by (Diplomatic Wing)</div></div>
+  </div>
+</div></body></html>""")
         elif path == '/print/fee-distribution-receipt':
             try:
+                print(f"[FeeVoucher] route hit {path} {params}", flush=True)
                 user = self.require_auth()
                 if not user: return
-                if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
+                if user['role'] not in ('admin', 'operator', 'operator_special', 'fee_collector'):
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 try:
                     rid = int(str(params.get('id', 0) or 0).strip())
@@ -23616,9 +23754,10 @@ function printBoth(){{
                 self.send_html(f"<p>Unable to render office expense record right now.</p><p style='color:#666'>Error: {esc(str(e))}</p>", 500)
 
         elif path == '/print/fee-receipt':
+            print(f"[FeeVoucher] route hit {path} {params}", flush=True)
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
+            if user['role'] not in ('admin', 'operator', 'operator_special', 'fee_collector'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             source = (params.get('source') or '').strip()
             try:
@@ -26267,6 +26406,7 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
         </label>
       </div>
       <div class="row" style="justify-content:flex-end;margin-top:12px">
+        <button class="btn alt" onclick="openDiplomaticHandoverVoucher()">Handover Amount Voucher for Diplomatic Wing</button>
         <button class="btn" onclick="saveSettlement()">Save Entry</button>
       </div>
       <div class="muted" style="margin-top:8px">Handed-over entries generate receipt numbers automatically. Settlement corrections are admin-only and preserve the original receipt number.</div>
@@ -26573,6 +26713,18 @@ let officeModalId=0;
 let officeModalMode='view';
 
 function settlementWingLabel(v){return v==='community_wing'?'Community Wing':(v==='diplomatic'?'Diplomatic Wing':String(v||'-').replace('_',' '));}
+function ymdToday(){
+  const d=new Date();
+  const m=String(d.getMonth()+1).padStart(2,'0');
+  const day=String(d.getDate()).padStart(2,'0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+function openDiplomaticHandoverVoucher(){
+  const dateEl=document.getElementById('stDate');
+  const selected=(dateEl&&dateEl.value?dateEl.value:'').trim();
+  const date=/^\\d{4}-\\d{2}-\\d{2}$/.test(selected)?selected:ymdToday();
+  window.open('/fee-collector/handover-voucher?wing=diplomatic&date='+encodeURIComponent(date),'_blank');
+}
 function settlementEditedHtml(r){
   if(!r||!r.edited_at) return '-';
   return `<div style="font-weight:700;color:#6a1b9a">Edited</div><div class="muted">by ${esc(r.edited_by||'-')}<br>${esc(r.edited_at||'-')}</div>${r.edit_reason?`<div class="muted">Reason: ${esc(r.edit_reason)}</div>`:''}`;
@@ -26741,7 +26893,7 @@ async function runSearch(){
       <div class="row" style="margin-top:8px">
         <button class="btn" ${clr?'disabled':''} onclick="collectFee('${r.source}',${r.id})">Collect KWD 2</button>
         ${USER_ROLE==='admin'?`<button class="btn warn" ${clr?'disabled':''} onclick="waiveFee('${r.source}',${r.id})">Waive (Gratis)</button>`:''}
-        ${isPaid?`<button class="btn alt" onclick="window.open('/print/fee-receipt?source='+encodeURIComponent('${r.source}')+'&id=${r.id}','_blank')">Print Receipt</button>`:''}
+        ${isPaid?`<button class="btn alt" onclick="window.open('/fee-collector/receipt-voucher?source='+encodeURIComponent('${r.source}')+'&id=${r.id}','_blank')">Print Receipt</button>`:''}
         ${clr&&!isPaid?'<span class="muted">Waived.</span>':''}
       </div>
     </div>`;
@@ -26753,7 +26905,7 @@ async function collectFee(source,id){
   if(d&&d.success){
     runSearch();
     if(confirm('Fee marked as paid. Print receipt now?')){
-      window.open('/print/fee-receipt?source='+encodeURIComponent(source)+'&id='+id,'_blank');
+      window.open('/fee-collector/receipt-voucher?source='+encodeURIComponent(source)+'&id='+id,'_blank');
     }
     loadSettlement();
   }else alert((d&&d.error)||'Failed');
@@ -26775,7 +26927,7 @@ async function loadSettlement(){
   (d.rows||[]).slice(0,40).forEach(r=>{
     const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);
     const wing=settlementWingLabel(r.wing);
-    const voucherHtml=isVoucher?`<div class="table-actions"><span>${esc(r.receipt_number)}</span><a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank" class="action-link">Print Voucher</a></div>`:(r.receipt_number?esc(r.receipt_number):'-');
+    const voucherHtml=isVoucher?`<div class="table-actions"><span>${esc(r.receipt_number)}</span><a href="/fee-collector/receipt-voucher?receipt_id=${Number(r.id)||0}" target="_blank" class="action-link">Print Voucher</a></div>`:(r.receipt_number?esc(r.receipt_number):'-');
     const actionBtn=USER_ROLE==='admin'?`<button class="btn gray" onclick="openSettlementEdit(${Number(r.id)||0})">Edit</button>`:'';
     h+=`<tr><td>${esc(r.distribution_date||'')}</td><td>${esc((r.action_type||'').replace('_',' '))}</td><td>${esc(wing)}</td><td>${fmt(r.amount)} ${esc(r.currency||'KWD')}</td><td>${esc(r.received_by||'-')}</td><td>${voucherHtml}</td><td>${settlementEditedHtml(r)}</td>${USER_ROLE==='admin'?`<td>${actionBtn||'-'}</td>`:''}</tr>`;
   });
@@ -33608,7 +33760,7 @@ const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.innerHTML=ch;
 } else { const ct=document.getElementById('feeCollectionHistTbl'); if(ct)ct.closest('.scroll-t').style.display='none'; }
 
 let th='<thead><tr><th>Date/Time</th><th>Action Type</th><th>Amount</th><th>Wing</th><th>Entered By</th><th>Handed Over By</th><th>Received By</th><th>Receipt #</th><th>Notes</th><th>Edited</th><th>Voucher / Actions</th></tr></thead><tbody>';
-(d.rows||[]).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=feeStmtWingLabel(r.wing);const actions=[];if(isVoucher)actions.push(`<a href="/print/fee-distribution-receipt?id=${r.id}" target="_blank">Print Voucher</a>`);if(USER_ROLE==='admin')actions.push(`<button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="openFeeSettlementEdit(${Number(r.id)||0})">Edit</button>`);th+=`<tr><td>${escHtml(r.created_at||r.distribution_date||'-')}</td><td>${escHtml((r.action_type||'-').replace('_',' '))}</td><td>${money(r.amount||0)} ${escHtml(r.currency||'KWD')}</td><td>${escHtml(wing)}</td><td>${escHtml(r.entered_by||'-')}</td><td>${escHtml(r.handed_over_by||'-')}</td><td>${escHtml(r.received_by||'-')}</td><td>${escHtml(r.receipt_number||'-')}</td><td>${escHtml(r.notes||'-')}</td><td>${feeStmtEditedHtml(r)}</td><td>${actions.length?actions.join(' '):'-'}</td></tr>`});
+(d.rows||[]).forEach(r=>{const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);const wing=feeStmtWingLabel(r.wing);const actions=[];if(isVoucher)actions.push(`<a href="/fee-collector/receipt-voucher?receipt_id=${Number(r.id)||0}" target="_blank">Print Voucher</a>`);if(USER_ROLE==='admin')actions.push(`<button class="btn btn-i" style="padding:2px 8px;font-size:.75em" onclick="openFeeSettlementEdit(${Number(r.id)||0})">Edit</button>`);th+=`<tr><td>${escHtml(r.created_at||r.distribution_date||'-')}</td><td>${escHtml((r.action_type||'-').replace('_',' '))}</td><td>${money(r.amount||0)} ${escHtml(r.currency||'KWD')}</td><td>${escHtml(wing)}</td><td>${escHtml(r.entered_by||'-')}</td><td>${escHtml(r.handed_over_by||'-')}</td><td>${escHtml(r.received_by||'-')}</td><td>${escHtml(r.receipt_number||'-')}</td><td>${escHtml(r.notes||'-')}</td><td>${feeStmtEditedHtml(r)}</td><td>${actions.length?actions.join(' '):'-'}</td></tr>`});
 th+='</tbody>';
 const tt=document.getElementById('feeStmtTxnTbl'); if(tt)tt.innerHTML=th;
 if(USER_ROLE==='admin') loadFeeOfficeLedger();
