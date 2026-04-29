@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Assigned Cases</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+  <style>
+    body{background:#f4f7fa}.staff-wrap{max-width:1280px;margin:0 auto;padding:18px}
+    .staff-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}
+    .staff-head h1{margin:0;color:#15324a;font-size:24px}.staff-head p{margin:4px 0 0;color:#607182}
+    .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0}.kpi{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:14px}.kpi b{display:block;font-size:26px;color:#15324a}.kpi span{font-size:12px;color:#68798a}
+    .notice{background:#fff;border:1px solid #dce7ef;border-left:4px solid #15324a;border-radius:8px;padding:12px;margin-bottom:12px;color:#31495f}
+    .tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}.tools button{border:1px solid #d7e2ea;background:#fff;border-radius:6px;padding:9px 12px;font-weight:700;color:#29445b;cursor:pointer}.tools button.active{background:#15324a;color:#fff}
+    .card{background:#fff;border:1px solid #e3ebf0;border-radius:8px}.table-wrap{overflow:auto}.cases{width:100%;border-collapse:collapse}.cases th,.cases td{border-bottom:1px solid #eef3f7;padding:10px;text-align:left;font-size:13px}.cases tr{cursor:pointer}.cases tr:hover{background:#f7fafc}
+    .drawer{position:fixed;inset:0;background:rgba(15,35,52,.45);display:none;align-items:stretch;justify-content:flex-end;z-index:40}.drawer.open{display:flex}.panel{background:#fff;width:min(760px,100%);height:100%;overflow:auto;padding:18px;box-sizing:border-box}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.field{border:1px solid #edf2f6;border-radius:7px;padding:9px}.field span{display:block;font-size:11px;color:#6b7b88}.field b{display:block;color:#172b3a;margin-top:3px}.actions{display:grid;grid-template-columns:1fr;gap:10px;margin-top:14px}.actions textarea,.actions select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.timeline{margin-top:14px}.event{border-left:3px solid #dce7ef;padding:8px 0 8px 10px;font-size:13px}
+  </style>
+</head>
+<body>
+  <main class="staff-wrap">
+    <div class="staff-head">
+      <div>
+        <h1>My Assigned Cases</h1>
+        <p>Assigned cases only. You can view and update cases assigned to your user account.</p>
+        <div class="muted">Signed in as __USER_NAME__ (__USER_ROLE__)</div>
+      </div>
+      <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/logout">Logout</a>
+    </div>
+    <div class="notice">This page does not provide access to full admin modules, unassigned records, user management, statistics, or system settings.</div>
+    <section class="kpis" id="kpis"></section>
+    <div class="tools" id="filters"></div>
+    <section class="card table-wrap">
+      <table class="cases">
+        <thead><tr><th>Module</th><th>Reference</th><th>Applicant / Subject</th><th>Contact</th><th>Subject</th><th>Status</th><th>Priority</th><th>Due</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="8" class="cwa-empty">Loading assigned cases...</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+  <div class="drawer" id="drawer">
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+        <div><h2 id="dTitle" style="margin:0;color:#15324a">Case Detail</h2><div id="dMeta" class="muted"></div></div>
+        <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="closeDrawer()">Close</button>
+      </div>
+      <div class="grid" id="detailGrid" style="margin-top:12px"></div>
+      <div class="actions">
+        <div>
+          <label><strong>Update status</strong></label>
+          <select id="statusSel"><option>Seen by Staff</option><option>In Progress</option><option>Information Requested</option><option>Follow-up Completed</option><option>Unable to Contact</option><option>Resolved by Staff</option></select>
+          <button class="cwa-btn cwa-btn--navy cwa-btn--sm" style="margin-top:8px" onclick="saveStatus()">Save Status</button>
+        </div>
+        <div>
+          <label><strong>Add note</strong></label>
+          <textarea id="noteText" rows="4" placeholder="Internal note. Field staff may mark as applicant-visible when appropriate."></textarea>
+          <label style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:13px"><input id="visibleNote" type="checkbox"> Applicant-visible message where allowed</label>
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" style="margin-top:8px" onclick="addNote()">Add Note</button>
+          <button class="cwa-btn cwa-btn--primary cwa-btn--sm" style="margin-top:8px" onclick="resolveCase()">Mark Follow-up Completed</button>
+        </div>
+      </div>
+      <div class="timeline" id="timeline"></div>
+    </div>
+  </div>
+<script>
+const USER_NAME='__USER_NAME__', USER_ROLE='__USER_ROLE__';
+let state={filter:'',items:[],current:null};
+const filters=[['','All Assigned'],['pending','Pending'],['in_progress','In Progress'],['completed','Follow-up Completed']];
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function api(url,opts){const r=await fetch(url,{credentials:'include',...(opts||{})});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}
+function renderFilters(){document.getElementById('filters').innerHTML=filters.map(([id,l])=>`<button class="${state.filter===id?'active':''}" onclick="load('${id}')">${l}</button>`).join('')}
+function renderKpis(c){document.getElementById('kpis').innerHTML=[['assigned_to_me','Assigned to Me'],['pending','Pending'],['in_progress','In Progress'],['followup_completed','Follow-up Completed']].map(([k,l])=>`<div class="kpi"><b>${Number(c[k]||0)}</b><span>${l}</span></div>`).join('')}
+function renderRows(){document.getElementById('rows').innerHTML=(state.items||[]).map(r=>`<tr onclick="openDetail('${esc(r.module)}','${esc(r.id)}')"><td>${esc(r.module)}</td><td><b>${esc(r.reference)}</b></td><td>${esc(r.applicant_name||'-')}</td><td>${esc(r.phone||r.whatsapp||r.email||'-')}</td><td>${esc(r.subject||r.case_type||'-')}</td><td><span class="cwa-badge" data-type="processing">${esc(r.status||'-')}</span></td><td>${esc(r.priority||'Normal')}</td><td>${esc(r.due_date||'-')}</td></tr>`).join('')||'<tr><td colspan="8" class="cwa-empty">No assigned cases found.</td></tr>'}
+function field(k,v){return `<div class="field"><span>${esc(k)}</span><b>${esc(v||'-')}</b></div>`}
+function closeDrawer(){document.getElementById('drawer').classList.remove('open')}
+async function openDetail(module,id){const d=await api('/api/staff/my-cases/detail?module='+encodeURIComponent(module)+'&id='+encodeURIComponent(id));state.current={module,id,record:d.record};const r=d.record||{};const ref=r.case_reference||r.complaint_id||r.roster_reference||r.reference_id||r.id;document.getElementById('dTitle').textContent=ref||'Case Detail';document.getElementById('dMeta').textContent=module+' | '+(r.status||r.complaint_status||r.reconciliation_status||'');
+document.getElementById('detailGrid').innerHTML=[
+field('Reference',ref),field('Name',r.requester_name||r.nurse_full_name||r.full_name||r.reporter_name||r.deceased_name),field('Phone',r.requester_phone||r.mobile||r.phone||r.reporter_mobile),field('WhatsApp',r.whatsapp_full||r.phone),field('Email',r.requester_email||r.email||r.reporter_email),field('Category / Type',r.category||r.case_type||r.complaint_category),field('Subject',r.subject||r.subject_name||r.concern_summary),field('Status',r.status||r.complaint_status||r.reconciliation_status),field('Priority',r.priority),field('Due Date',r.due_date),field('Details',r.details||r.description||r.concern_summary||r.remarks)
+].join('');
+document.getElementById('timeline').innerHTML='<h3 style="color:#15324a">Activity Timeline</h3>'+((d.actions||[]).map(a=>`<div class="event"><strong>${esc(a.action_type||'update')}</strong> · ${esc(a.actor_username||'system')}<br>${esc(a.note||a.new_status||a.new_value||'')}<br><span class="muted">${esc(a.created_at||'')}</span></div>`).join('')||'<div class="muted">No activity yet.</div>');
+document.getElementById('drawer').classList.add('open')}
+async function addNote(){if(!state.current)return;await api('/api/staff/my-cases/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({module:state.current.module,id:state.current.id,note:document.getElementById('noteText').value,visible_to_applicant:document.getElementById('visibleNote').checked})});document.getElementById('noteText').value='';await openDetail(state.current.module,state.current.id);await load(state.filter)}
+async function saveStatus(){if(!state.current)return;await api('/api/staff/my-cases/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({module:state.current.module,id:state.current.id,status:document.getElementById('statusSel').value,note:document.getElementById('noteText').value})});await openDetail(state.current.module,state.current.id);await load(state.filter)}
+async function resolveCase(){if(!state.current)return;await api('/api/staff/my-cases/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({module:state.current.module,id:state.current.id,resolution_note:document.getElementById('noteText').value,status:'Follow-up Completed'})});await openDetail(state.current.module,state.current.id);await load(state.filter)}
+async function load(filter){state.filter=filter||'';renderFilters();try{const qs=state.filter?'?status='+encodeURIComponent(state.filter):'';const d=await api('/api/staff/my-cases'+qs);state.items=d.items||[];renderKpis(d.counters||{});renderRows()}catch(e){document.getElementById('rows').innerHTML='<tr><td colspan="8" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}
+renderFilters();load('');
+</script>
+</body>
+</html>

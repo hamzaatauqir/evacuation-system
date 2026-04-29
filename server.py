@@ -788,8 +788,11 @@ def init_db():
         ('assigned_to_user_id', "TEXT DEFAULT ''"),
         ('assigned_to_username', "TEXT DEFAULT ''"),
         ('assigned_to_name', "TEXT DEFAULT ''"),
+        ('assigned_role', "TEXT DEFAULT ''"),
+        ('assigned_department', "TEXT DEFAULT ''"),
         ('assigned_by', "TEXT DEFAULT ''"),
         ('assigned_at', "TEXT DEFAULT ''"),
+        ('due_date', "TEXT DEFAULT ''"),
         ('assignment_note', "TEXT DEFAULT ''"),
         ('resolved_at', "TEXT DEFAULT ''"),
         ('closed_at', "TEXT DEFAULT ''"),
@@ -1178,6 +1181,8 @@ def init_db():
         ('status', "TEXT DEFAULT 'New'"),
         ('assigned_to', 'TEXT'),
         ('assigned_role', 'TEXT'),
+        ('assigned_department', "TEXT DEFAULT ''"),
+        ('assigned_at', 'TIMESTAMP'),
         ('escalation_level', "TEXT DEFAULT 'normal'"),
         ('due_date', 'TEXT'),
         ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
@@ -1253,7 +1258,7 @@ def init_db():
         action_required TEXT DEFAULT '',
         welfare_followup_required INTEGER DEFAULT 0,
         alternative_stay_review_required INTEGER DEFAULT 0,
-        reconciliation_status TEXT DEFAULT '',
+        reconciliation_status TEXT DEFAULT 'Pending Reconciliation',
         notice_reminder_sent_at TIMESTAMP,
         last_notice_reminder_at TIMESTAMP,
         reminder_count INTEGER DEFAULT 0,
@@ -1324,7 +1329,25 @@ def init_db():
         ('action_required', "TEXT DEFAULT ''"),
         ('welfare_followup_required', 'INTEGER DEFAULT 0'),
         ('alternative_stay_review_required', 'INTEGER DEFAULT 0'),
-        ('reconciliation_status', "TEXT DEFAULT ''"),
+        ('reconciliation_status', "TEXT DEFAULT 'Pending Reconciliation'"),
+        ('reconciliation_outcome', "TEXT DEFAULT ''"),
+        ('reconciliation_called_at', 'TEXT'),
+        ('reconciliation_called_by', "TEXT DEFAULT ''"),
+        ('reconciliation_attempts', 'INTEGER DEFAULT 0'),
+        ('reconciliation_next_followup_at', "TEXT DEFAULT ''"),
+        ('reconciliation_last_note', "TEXT DEFAULT ''"),
+        ('reconciliation_contact_result', "TEXT DEFAULT ''"),
+        ('reconciliation_completed_at', 'TEXT'),
+        ('reconciliation_source', "TEXT DEFAULT ''"),
+        ('assigned_department', "TEXT DEFAULT ''"),
+        ('preferred_contact_method', "TEXT DEFAULT ''"),
+        ('private_arrangement_area', "TEXT DEFAULT ''"),
+        ('moh_hotel_name', "TEXT DEFAULT ''"),
+        ('moh_hotel_area', "TEXT DEFAULT ''"),
+        ('moh_hotel_start_date', "TEXT DEFAULT ''"),
+        ('moh_hotel_expected_end_date', "TEXT DEFAULT ''"),
+        ('whatsapp_full', "TEXT DEFAULT ''"),
+        ('mobile_full', "TEXT DEFAULT ''"),
         ('notice_reminder_sent_at', 'TIMESTAMP'),
         ('last_notice_reminder_at', 'TIMESTAMP'),
         ('reminder_count', 'INTEGER DEFAULT 0'),
@@ -1345,6 +1368,16 @@ def init_db():
             db.commit()
         except sqlite3.OperationalError:
             pass
+    try:
+        db.execute("""UPDATE facility_roster
+                      SET reconciliation_status = 'Pending Reconciliation'
+                      WHERE COALESCE(reconciliation_status, '') = ''
+                        AND (COALESCE(vendor_name, '') = ?
+                             OR COALESCE(current_arrangement, '') = 'Embassy Contracted / Arranged')""",
+                   [FACILITY_VENDOR_DEFAULT])
+        db.commit()
+    except Exception:
+        pass
     db.executescript("""
     CREATE TABLE IF NOT EXISTS stay_confirmation_campaigns (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1672,6 +1705,24 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
         db.commit()
     except sqlite3.OperationalError:
+        pass
+    for col, coltype in [
+        ('mobile_number', "TEXT DEFAULT ''"),
+        ('designation', "TEXT DEFAULT ''"),
+        ('department', "TEXT DEFAULT ''"),
+        ('is_active', 'INTEGER DEFAULT 1'),
+        ('show_contact_to_applicant', 'INTEGER DEFAULT 0'),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE users ADD COLUMN {col} {coltype}")
+            db.commit()
+        except sqlite3.OperationalError:
+            pass
+    try:
+        db.execute("UPDATE users SET is_active = 1 WHERE is_active IS NULL")
+        db.execute("UPDATE users SET show_contact_to_applicant = 1 WHERE role = 'field_staff' AND COALESCE(show_contact_to_applicant, 0) = 0")
+        db.commit()
+    except Exception:
         pass
     # Normalize border crossing names
     db.execute("UPDATE evacuees SET border_crossing='Khafji Border' WHERE border_crossing IN ('Khafji Boarder','Khafji Crossing','khafji border','khafji')")
@@ -2008,6 +2059,18 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_death_case_actions_ref ON death_case_actions(reference_id);
     CREATE INDEX IF NOT EXISTS idx_death_case_actions_created ON death_case_actions(created_at);
     """)
+
+    for table_name in ('legal_case_requests', 'death_case_requests'):
+        for col, coltype in [
+            ('assigned_role', "TEXT DEFAULT ''"),
+            ('assigned_department', "TEXT DEFAULT ''"),
+            ('due_date', "TEXT DEFAULT ''"),
+        ]:
+            try:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
+                db.commit()
+            except sqlite3.OperationalError:
+                pass
 
     email_verification_columns = [
         ('email_verified', 'INTEGER DEFAULT 0'),
@@ -3951,8 +4014,11 @@ FACILITY_ROSTER_STATUSES = {
     'Confirmed Staying', 'Temporarily Away', 'Intends to Leave',
     'Leaving Notice Submitted', 'Transition Planned',
     'Shifted to Alternative Facility', 'Left Facility',
+    'Private Self Arranged', 'MOH Arranged', 'MOH Provided Hotel - Arrival Stay',
     'Record Correction Needed', 'Reconciliation Required',
-    'Field Follow-up Required', 'Closed / Archived', 'Inactive'
+    'Field Follow-up Required', 'Needs Embassy Assistance',
+    'No Answer', 'Call Later', 'Unable to Reach',
+    'Closed / Archived', 'Inactive'
 }
 FACILITY_CONFIRMATION_STATUSES = {
     'Pending',
@@ -3963,7 +4029,28 @@ FACILITY_CONFIRMATION_STATUSES = {
 FACILITY_STAFF_ROLES = {
     'admin', 'operator', 'operator_special', 'welfare_officer',
     'inspector_field', 'legal_officer', 'death_case_officer',
-    'community_desk', 'senior_review', 'ambassador_review'
+    'community_desk', 'senior_review', 'ambassador_review', 'field_staff'
+}
+RESTRICTED_STAFF_ROLES = {'field_staff', 'nadra_staff', 'passport_staff'}
+LIMITED_STAFF_CASE_ROLES = RESTRICTED_STAFF_ROLES | {'community_desk', 'inspector_field'}
+AJA_RECONCILIATION_PAGE_ROLES = {
+    'admin', 'operator', 'welfare_officer', 'community_desk', 'inspector_field', 'field_staff'
+}
+AJA_RECONCILIATION_ADMIN_ROLES = {'admin', 'operator', 'welfare_officer', 'community_desk'}
+AJA_RECONCILIATION_OUTCOMES = {
+    'Confirmed Staying at AJA Care',
+    'Left AJA Care',
+    'Intends to Leave',
+    'Private Self Arranged',
+    'MOH Arranged',
+    'MOH Provided Hotel',
+    'Details Correction Required',
+    'Needs Embassy Assistance',
+    'Unable to Confirm',
+}
+STAFF_LIMITED_STATUSES = {
+    'Seen by Staff', 'In Progress', 'Information Requested',
+    'Follow-up Completed', 'Unable to Contact', 'Resolved by Staff'
 }
 
 
@@ -4134,6 +4221,12 @@ def _facility_roster_to_dict(row):
         'notice_period_start_date', 'current_status', 'current_arrangement', 'confirmation_status',
         'last_confirmed_at', 'last_vendor_update_at', 'last_embassy_verification_at',
         'assigned_to', 'assigned_role', 'due_date', 'action_required', 'reconciliation_status',
+        'reconciliation_outcome', 'reconciliation_called_at', 'reconciliation_called_by',
+        'reconciliation_next_followup_at', 'reconciliation_last_note',
+        'reconciliation_contact_result', 'reconciliation_completed_at', 'reconciliation_source',
+        'assigned_department', 'preferred_contact_method', 'private_arrangement_area',
+        'moh_hotel_name', 'moh_hotel_area', 'moh_hotel_start_date', 'moh_hotel_expected_end_date',
+        'whatsapp_full', 'mobile_full',
         'last_monthly_checkin_sent_at', 'last_monthly_checkin_campaign',
         'last_monthly_checkin_response_at', 'monthly_checkin_status', 'left_date',
         'created_at', 'updated_at', 'remarks'
@@ -4148,6 +4241,9 @@ def _facility_roster_to_dict(row):
     d['welfare_followup_required'] = 1 if _facility_int_value(d.get('welfare_followup_required'), 0) else 0
     d['alternative_stay_review_required'] = 1 if _facility_int_value(d.get('alternative_stay_review_required'), 0) else 0
     d['vendor_facility_checkin_eligible'] = 1 if _facility_int_value(d.get('vendor_facility_checkin_eligible'), 0) else 0
+    d['reconciliation_attempts'] = _facility_int_value(d.get('reconciliation_attempts'), 0)
+    d['whatsapp_full'] = d.get('whatsapp_full') or d.get('phone') or ''
+    d['mobile_full'] = d.get('mobile_full') or d.get('phone') or ''
     d['active'] = 1 if _facility_int_value(d.get('active') if d.get('active') is not None else 1, 1) else 0
     d['notice_flag'] = _facility_notice_flag(d)
     d['room_bed'] = ' / '.join([x for x in (d.get('room_number'), d.get('bed_number')) if x]) or ''
@@ -4917,6 +5013,34 @@ def _notification_staff_lookup(username):
             [uname]
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        db.close()
+
+
+def _assignment_public_note_for_staff(username):
+    uname = (username or '').strip()
+    if not uname:
+        return "The assigned officer/staff member may contact you if further information is required."
+    db = get_db()
+    try:
+        row = db.execute("""SELECT username, role, COALESCE(full_name, username) AS full_name,
+                                   COALESCE(mobile_number, '') AS mobile_number,
+                                   COALESCE(show_contact_to_applicant, 0) AS show_contact_to_applicant
+                            FROM users WHERE username = ? LIMIT 1""", [uname]).fetchone()
+        if not row:
+            return "The assigned officer/staff member may contact you if further information is required."
+        role = row['role'] or ''
+        mobile = row['mobile_number'] or ''
+        show_mobile = bool(mobile and (role == 'field_staff' or int(row['show_contact_to_applicant'] or 0) == 1))
+        if show_mobile:
+            return (
+                "Your request has been assigned for follow-up. The assigned staff member may contact you "
+                "to obtain further information. You may also contact them during working hours quoting your "
+                f"reference number. Assigned staff contact: {mobile}"
+            )
+        return "The assigned officer/staff member may contact you if further information is required."
+    except Exception:
+        return "The assigned officer/staff member may contact you if further information is required."
     finally:
         db.close()
 
@@ -7516,7 +7640,8 @@ WELFARE_ESCALATION_LEVELS = {'normal', 'senior_review', 'ambassador_review'}
 WELFARE_ADMIN_ROLES = {'admin', 'operator', 'operator_special'}
 WELFARE_CASE_ACCESS_ROLES = {
     'admin', 'operator', 'operator_special', 'welfare_officer', 'inspector_field', 'legal_officer',
-    'death_case_officer', 'community_desk', 'senior_review', 'ambassador_review'
+    'death_case_officer', 'community_desk', 'senior_review', 'ambassador_review',
+    'field_staff', 'nadra_staff', 'passport_staff'
 }
 WELFARE_ASSIGNABLE_ROLES = tuple(sorted(WELFARE_CASE_ACCESS_ROLES))
 
@@ -7917,7 +8042,7 @@ def api_admin_welfare_assign(data, user):
         note = _clean_text(data.get('note'), 2000)
         if not assigned_to:
             return {'success': False, 'error': 'Assignee is required'}
-        assignee = db.execute("SELECT username, full_name, role FROM users WHERE username = ?", [assigned_to]).fetchone()
+        assignee = db.execute("SELECT username, full_name, role, COALESCE(department,'') AS department FROM users WHERE username = ?", [assigned_to]).fetchone()
         if not assignee:
             return {'success': False, 'error': 'Assignee not found'}
         assigned_role = assigned_role or assignee['role'] or ''
@@ -7925,9 +8050,10 @@ def api_admin_welfare_assign(data, user):
         new_status = 'Assigned' if (row['status'] or '') == 'New' else row['status']
         db.execute(
             """UPDATE welfare_cases
-               SET assigned_to = ?, assigned_role = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+               SET assigned_to = ?, assigned_role = ?, assigned_department = ?, assigned_at = CURRENT_TIMESTAMP,
+                   status = ?, updated_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
-            [assigned_to, assigned_role, new_status, row['id']]
+            [assigned_to, assigned_role, assignee['department'] or '', new_status, row['id']]
         )
         _welfare_insert_action(db, row['id'], user.get('user'), 'assigned', old_assignee, assigned_to, note, False)
         db.commit()
@@ -7952,6 +8078,7 @@ def api_admin_welfare_assign(data, user):
                 applicant_email=row_d.get('requester_email') or '',
                 applicant_name=row_d.get('requester_name') or 'Applicant',
                 status=new_status,
+                public_note=_assignment_public_note_for_staff(assigned_to),
                 tracking_link='https://cwakuwait.com'
             )
         return {'success': True}
@@ -8448,7 +8575,7 @@ def api_admin_facility_assign(data, user):
         row = db.execute("SELECT * FROM facility_roster WHERE id = ?", [roster_id]).fetchone()
         if not row:
             return {'success': False, 'error': 'Roster entry not found'}
-        assignee = db.execute("SELECT username, full_name, role, email FROM users WHERE username = ?", [assigned_to]).fetchone()
+        assignee = db.execute("SELECT username, full_name, role, email, COALESCE(department,'') AS department FROM users WHERE username = ?", [assigned_to]).fetchone()
         if not assignee:
             return {'success': False, 'error': 'Assignee not found'}
         assigned_role = assigned_role or assignee['role'] or ''
@@ -8459,9 +8586,9 @@ def api_admin_facility_assign(data, user):
         db.execute(
             """UPDATE facility_roster
                SET assigned_to = ?, assigned_role = ?, due_date = ?, current_status = ?,
-                   updated_at = CURRENT_TIMESTAMP
+                   assigned_department = ?, updated_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
-            [assigned_to, assigned_role, due_date, new_status, roster_id]
+            [assigned_to, assigned_role, due_date, new_status, assignee['department'] or '', roster_id]
         )
         _facility_insert_action(db, roster_id, user.get('user'), 'assigned', old_assigned, assigned_to, note, False)
         details_key = f'"roster_reference": "{row["roster_reference"]}"'
@@ -8472,10 +8599,11 @@ def api_admin_facility_assign(data, user):
         if existing_case:
             db.execute(
                 """UPDATE welfare_cases
-                   SET assigned_to = ?, assigned_role = ?, status = 'Field Verification Required',
+                   SET assigned_to = ?, assigned_role = ?, assigned_department = ?, assigned_at = CURRENT_TIMESTAMP,
+                       status = 'Field Verification Required',
                        due_date = COALESCE(NULLIF(?, ''), due_date), updated_at = CURRENT_TIMESTAMP
                    WHERE id = ?""",
-                [assigned_to, assigned_role, due_date, existing_case['id']]
+                [assigned_to, assigned_role, assignee['department'] or '', due_date, existing_case['id']]
             )
             _welfare_insert_action(db, existing_case['id'], user.get('user'), 'assigned', old_assigned, assigned_to, note, False)
         else:
@@ -8484,16 +8612,17 @@ def api_admin_facility_assign(data, user):
                 """INSERT INTO welfare_cases
                    (case_reference, case_type, category, requester_name, requester_phone, requester_email,
                     subject_name, subject_passport, subject_civil_id, subject_phone, subject_address,
-                    concern_summary, details, priority, status, assigned_to, assigned_role, escalation_level, due_date)
+                    concern_summary, details, priority, status, assigned_to, assigned_role, assigned_department,
+                    assigned_at, escalation_level, due_date)
                    VALUES (?, 'nurse', 'Facility Occupancy Record', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Normal',
-                           'Field Verification Required', ?, ?, 'normal', ?)""",
+                           'Field Verification Required', ?, ?, ?, CURRENT_TIMESTAMP, 'normal', ?)""",
                 [
                     case_ref, row['full_name'] or '', row['phone'] or '', row['email'] or '',
                     row['full_name'] or '', row['passport_number'] or '', row['civil_id'] or '', row['phone'] or '',
                     row['facility_name'] or '',
                     note or 'Facility occupancy welfare follow-up assigned.',
                     json.dumps({'source': 'facility_roster', 'roster_reference': row['roster_reference'], 'facility_name': row['facility_name'], 'vendor_name': row['vendor_name']}),
-                    assigned_to, assigned_role, due_date
+                    assigned_to, assigned_role, assignee['department'] or '', due_date
                 ]
             )
             _welfare_insert_action(db, cur.lastrowid, user.get('user'), 'assigned', '', assigned_to, note, False)
@@ -8522,6 +8651,7 @@ def api_admin_facility_assign(data, user):
                 applicant_email=row_d.get('email') or '',
                 applicant_name=row_d.get('full_name') or 'Applicant',
                 status=new_status,
+                public_note=_assignment_public_note_for_staff(assigned_to),
                 tracking_link='https://cwakuwait.com/nurses/login'
             )
         return {'success': True}
@@ -8563,6 +8693,838 @@ def api_admin_facility_note(data, user):
                 )
         return {'success': True}
     except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def _aja_reconciliation_role_allowed(user):
+    return bool(user) and (user.get('role') or '') in AJA_RECONCILIATION_PAGE_ROLES
+
+
+def _aja_reconciliation_access_clause(user, params=None, force_assigned=False):
+    params = params or {}
+    role = (user or {}).get('role') or ''
+    username = (user or {}).get('user') or ''
+    assigned_to = _clean_text(params.get('assigned_to'), 120)
+    where = []
+    vals = []
+    if role in RESTRICTED_STAFF_ROLES or force_assigned:
+        where.append("COALESCE(f.assigned_to, '') = ?")
+        vals.append(username)
+    elif assigned_to and assigned_to != 'all':
+        if assigned_to == 'me':
+            assigned_to = username
+        where.append("COALESCE(f.assigned_to, '') = ?")
+        vals.append(assigned_to)
+    return where, vals
+
+
+def _aja_reconciliation_base_where(user, params=None, force_assigned=False):
+    where = [
+        """(COALESCE(f.vendor_name, '') = ?
+             OR COALESCE(f.current_arrangement, '') = 'Embassy Contracted / Arranged'
+             OR COALESCE(n.aja_care_resident, 0) = 1)""",
+        "COALESCE(f.current_status, '') NOT IN ('Closed / Archived', 'Inactive')",
+    ]
+    vals = [FACILITY_VENDOR_DEFAULT]
+    access_where, access_vals = _aja_reconciliation_access_clause(user, params, force_assigned=force_assigned)
+    where.extend(access_where)
+    vals.extend(access_vals)
+    return where, vals
+
+
+def _aja_reconciliation_status_filter(status):
+    status = (status or 'pending').strip().lower()
+    if status == 'all':
+        return '', []
+    if status == 'pending':
+        return """AND COALESCE(f.reconciliation_status, '') IN ('', 'Pending Reconciliation')
+                  AND COALESCE(f.current_status, '') NOT IN ('Left Facility', 'Private Self Arranged', 'MOH Arranged', 'MOH Provided Hotel - Arrival Stay')""", []
+    if status == 'call_later':
+        return "AND COALESCE(f.reconciliation_status, '') = 'Call Later'", []
+    if status == 'no_answer':
+        return "AND COALESCE(f.reconciliation_status, '') = 'No Answer'", []
+    if status == 'reconciled':
+        return "AND COALESCE(f.reconciliation_status, '') = 'Reconciled'", []
+    if status == 'left':
+        return "AND (COALESCE(f.reconciliation_outcome, '') = 'Left AJA Care' OR COALESCE(f.current_status, '') = 'Left Facility')", []
+    if status == 'private':
+        return "AND (COALESCE(f.reconciliation_outcome, '') = 'Private Self Arranged' OR COALESCE(f.current_arrangement, '') = 'Private (Self Arranged)' OR COALESCE(f.current_status, '') = 'Private Self Arranged')", []
+    if status == 'moh_arranged':
+        return "AND (COALESCE(f.reconciliation_outcome, '') = 'MOH Arranged' OR COALESCE(f.current_arrangement, '') = 'MOH Arranged' OR COALESCE(f.current_status, '') = 'MOH Arranged')", []
+    if status == 'moh_hotel':
+        return "AND (COALESCE(f.reconciliation_outcome, '') = 'MOH Provided Hotel' OR COALESCE(f.current_arrangement, '') = 'MOH Provided Hotel - Arrival Stay' OR COALESCE(f.current_status, '') = 'MOH Provided Hotel - Arrival Stay')", []
+    if status == 'needs_assistance':
+        return "AND (COALESCE(f.welfare_followup_required, 0) = 1 OR COALESCE(f.reconciliation_outcome, '') = 'Needs Embassy Assistance')", []
+    if status == 'unable_to_reach':
+        return "AND COALESCE(f.reconciliation_status, '') = 'Unable to Reach'", []
+    if status == 'needs_followup':
+        return "AND COALESCE(f.reconciliation_status, '') IN ('Needs Follow-up', 'Reconciliation Required')", []
+    return "AND COALESCE(f.reconciliation_status, '') = ?", [status]
+
+
+def _aja_reconciliation_select_sql(extra_sql=''):
+    return f"""SELECT f.*,
+                      n.reference_id AS linked_nurse_reference,
+                      n.full_name AS linked_nurse_name,
+                      n.mobile_full AS linked_mobile_full,
+                      n.whatsapp_full AS linked_whatsapp_full,
+                      n.email AS linked_email,
+                      n.professional_category AS linked_professional_category,
+                      n.aja_care_resident AS linked_aja_care_resident
+               FROM facility_roster f
+               LEFT JOIN nurse_registrations n ON n.id = f.nurse_registration_id
+               {extra_sql}"""
+
+
+def _aja_reconciliation_to_dict(row):
+    raw = dict(row or {})
+    d = _facility_roster_to_dict(raw)
+    d['nurse_reference'] = d.get('nurse_reference') or raw.get('linked_nurse_reference') or ''
+    d['full_name'] = d.get('full_name') or raw.get('linked_nurse_name') or ''
+    d['phone'] = d.get('phone') or raw.get('linked_mobile_full') or d.get('mobile_full') or ''
+    d['mobile_full'] = d.get('mobile_full') or raw.get('linked_mobile_full') or d.get('phone') or ''
+    d['whatsapp_full'] = d.get('whatsapp_full') or raw.get('linked_whatsapp_full') or d.get('phone') or ''
+    d['email'] = d.get('email') or raw.get('linked_email') or ''
+    d['vendor_name'] = d.get('vendor_name') or FACILITY_VENDOR_DEFAULT
+    d['facility_name'] = d.get('facility_name') or 'AJA Care - To be confirmed'
+    d['assigned_to'] = d.get('assigned_to') or 'Unassigned'
+    d['source_file_remarks'] = d.get('remarks') or d.get('reconciliation_source') or ''
+    d['is_aja_reconciliation_record'] = True
+    return d
+
+
+def _aja_reconciliation_summary(db, user):
+    where, vals = _aja_reconciliation_base_where(user, {}, force_assigned=(user.get('role') in RESTRICTED_STAFF_ROLES))
+    where_sql = ' AND '.join(where)
+
+    def count(extra='', extra_vals=()):
+        sql = _aja_reconciliation_select_sql(f"WHERE {where_sql} {extra}")
+        return int(db.execute(f"SELECT COUNT(*) c FROM ({sql})", vals + list(extra_vals)).fetchone()['c'] or 0)
+
+    return {
+        'total_aja_records': count(),
+        'pending_reconciliation': count("AND COALESCE(f.reconciliation_status, '') IN ('', 'Pending Reconciliation')"),
+        'reconciled': count("AND COALESCE(f.reconciliation_status, '') = 'Reconciled'"),
+        'confirmed_staying': count("AND COALESCE(f.current_status, '') = 'Confirmed Staying' AND COALESCE(f.vendor_name, '') = ? AND COALESCE(f.active, 1) = 1", [FACILITY_VENDOR_DEFAULT]),
+        'left_facility': count("AND (COALESCE(f.current_status, '') = 'Left Facility' OR COALESCE(f.reconciliation_outcome, '') = 'Left AJA Care')"),
+        'private_self_arranged': count("AND (COALESCE(f.current_arrangement, '') = 'Private (Self Arranged)' OR COALESCE(f.current_status, '') = 'Private Self Arranged')"),
+        'moh_arranged': count("AND (COALESCE(f.current_arrangement, '') = 'MOH Arranged' OR COALESCE(f.current_status, '') = 'MOH Arranged')"),
+        'moh_hotel': count("AND (COALESCE(f.current_arrangement, '') = 'MOH Provided Hotel - Arrival Stay' OR COALESCE(f.current_status, '') = 'MOH Provided Hotel - Arrival Stay')"),
+        'intends_to_leave': count("AND COALESCE(f.current_status, '') = 'Intends to Leave'"),
+        'needs_assistance': count("AND COALESCE(f.welfare_followup_required, 0) = 1"),
+        'call_later': count("AND COALESCE(f.reconciliation_status, '') = 'Call Later'"),
+        'no_answer': count("AND COALESCE(f.reconciliation_status, '') = 'No Answer'"),
+        'unable_to_reach': count("AND COALESCE(f.reconciliation_status, '') = 'Unable to Reach'"),
+        'assigned_to_me': count("AND COALESCE(f.assigned_to, '') = ?", [user.get('user') or '']),
+    }
+
+
+def _aja_reconciliation_next_id(db, user, after_id=0, status='pending', assigned_to='all'):
+    params = {'assigned_to': assigned_to or 'all'}
+    where, vals = _aja_reconciliation_base_where(user, params, force_assigned=(user.get('role') in RESTRICTED_STAFF_ROLES))
+    if int(after_id or 0) > 0:
+        where.append("f.id > ?")
+        vals.append(int(after_id or 0))
+    status_sql, status_vals = _aja_reconciliation_status_filter(status)
+    sql = _aja_reconciliation_select_sql(f"WHERE {' AND '.join(where)} {status_sql} ORDER BY f.id ASC LIMIT 1")
+    row = db.execute(sql, vals + status_vals).fetchone()
+    if not row and int(after_id or 0) > 0:
+        where2, vals2 = _aja_reconciliation_base_where(user, params, force_assigned=(user.get('role') in RESTRICTED_STAFF_ROLES))
+        sql = _aja_reconciliation_select_sql(f"WHERE {' AND '.join(where2)} {status_sql} ORDER BY f.id ASC LIMIT 1")
+        row = db.execute(sql, vals2 + status_vals).fetchone()
+    return int(row['id']) if row else None
+
+
+def api_admin_aja_reconciliation_queue(params, user):
+    if not _aja_reconciliation_role_allowed(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    status = _clean_text(params.get('status') or 'pending', 40).lower()
+    try:
+        limit = max(1, min(100, int(params.get('limit') or 25)))
+    except Exception:
+        limit = 25
+    try:
+        offset = max(0, int(params.get('offset') or 0))
+    except Exception:
+        offset = 0
+    if user.get('role') in RESTRICTED_STAFF_ROLES:
+        params = {**params, 'assigned_to': 'me'}
+    db = get_db()
+    try:
+        where, vals = _aja_reconciliation_base_where(user, params, force_assigned=(user.get('role') in RESTRICTED_STAFF_ROLES))
+        status_sql, status_vals = _aja_reconciliation_status_filter(status)
+        sql = _aja_reconciliation_select_sql(
+            f"WHERE {' AND '.join(where)} {status_sql} ORDER BY f.id ASC LIMIT ? OFFSET ?"
+        )
+        rows = db.execute(sql, vals + status_vals + [limit, offset]).fetchall()
+        items = [_aja_reconciliation_to_dict(r) for r in rows]
+        where_joined = ' AND '.join(where)
+        count_sql = _aja_reconciliation_select_sql(f"WHERE {where_joined} {status_sql}")
+        total = int(db.execute(
+            f"SELECT COUNT(*) c FROM ({count_sql})",
+            vals + status_vals
+        ).fetchone()['c'] or 0)
+        current = items[0] if items else None
+        next_id = items[1]['id'] if len(items) > 1 else _aja_reconciliation_next_id(
+            db, user, current.get('id') if current else 0, status, params.get('assigned_to') or 'all'
+        )
+        return {
+            'success': True,
+            'summary': _aja_reconciliation_summary(db, user),
+            'current': current,
+            'next_id': next_id,
+            'items': items,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+        }
+    except Exception as exc:
+        traceback.print_exc()
+        return {'success': False, 'error': str(exc)}
+    finally:
+        db.close()
+
+
+def _aja_reconciliation_can_update(row, user):
+    if not row or not user:
+        return False
+    role = user.get('role') or ''
+    if role in AJA_RECONCILIATION_ADMIN_ROLES or role in ('admin', 'operator'):
+        return True
+    return role in RESTRICTED_STAFF_ROLES and (row['assigned_to'] or '') == (user.get('user') or '')
+
+
+def _update_linked_nurse_after_reconciliation(db, roster, updates):
+    nurse_id = int(roster.get('nurse_registration_id') or 0)
+    if nurse_id <= 0:
+        return
+    cols = _table_columns(db, 'nurse_registrations')
+    assignments, vals = [], []
+    for col, value in updates.items():
+        if col in cols:
+            assignments.append(f"{col} = ?")
+            vals.append(value)
+    if assignments:
+        vals.append(nurse_id)
+        db.execute(f"UPDATE nurse_registrations SET {', '.join(assignments)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", vals)
+
+
+def api_admin_aja_reconciliation_update(data, user):
+    if not _aja_reconciliation_role_allowed(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    roster_id = int(data.get('roster_id') or data.get('id') or 0)
+    if roster_id <= 0:
+        return {'success': False, 'error': 'roster_id is required'}
+    outcome = _clean_text(data.get('outcome'), 120)
+    call_result = _clean_text(data.get('call_result'), 80)
+    remarks = _clean_text(data.get('remarks'), 3000)
+    mode = _clean_text(data.get('mode') or data.get('action'), 40).lower()
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM facility_roster WHERE id = ?", [roster_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Roster entry not found'}
+        current = _facility_roster_to_dict(row)
+        if not _aja_reconciliation_can_update(row, user):
+            return {'success': False, 'error': 'Forbidden. This record is not assigned to you.'}
+        old_status = current.get('current_status') or ''
+        old_recon = current.get('reconciliation_status') or ''
+        now = _sql_now()
+        today = _kuwait_now().date().isoformat()
+        if mode == 'skip':
+            _facility_insert_action(db, roster_id, user.get('user'), 'aja_reconciliation_skipped', old_recon, old_recon, remarks or 'Skipped to next record.', False)
+            db.commit()
+            return {'success': True, 'next_id': _aja_reconciliation_next_id(db, user, roster_id, data.get('status') or 'pending', data.get('assigned_to') or 'all')}
+
+        if mode == 'no_answer' and not call_result:
+            call_result = 'No Answer'
+        if mode == 'call_later' and not call_result:
+            call_result = 'Asked to Call Later'
+        if outcome and outcome not in AJA_RECONCILIATION_OUTCOMES:
+            return {'success': False, 'error': 'Invalid reconciliation outcome'}
+
+        updates = {
+            'reconciliation_called_at': now,
+            'reconciliation_called_by': user.get('user') or '',
+            'reconciliation_contact_result': call_result,
+            'reconciliation_last_note': remarks,
+            'reconciliation_next_followup_at': _clean_text(data.get('next_followup_at'), 80),
+            'preferred_contact_method': _clean_text(data.get('preferred_contact_method'), 80),
+            'updated_at': now,
+        }
+        attempts_delta = 1 if (call_result or outcome or mode in ('no_answer', 'call_later')) else 0
+        if attempts_delta:
+            updates['reconciliation_attempts'] = int(current.get('reconciliation_attempts') or 0) + attempts_delta
+        corrected_phone = _clean_text(data.get('corrected_phone'), 80)
+        corrected_whatsapp = _clean_text(data.get('corrected_whatsapp'), 80)
+        corrected_email = _clean_text(data.get('corrected_email'), 180)
+        if corrected_phone:
+            updates['phone'] = corrected_phone
+            updates['mobile_full'] = corrected_phone
+        if corrected_whatsapp:
+            updates['whatsapp_full'] = corrected_whatsapp
+        if corrected_email:
+            updates['email'] = corrected_email
+
+        nurse_updates = {}
+        if corrected_phone:
+            nurse_updates.update({'mobile': corrected_phone, 'mobile_full': corrected_phone})
+        if corrected_whatsapp:
+            nurse_updates['whatsapp_full'] = corrected_whatsapp
+        if corrected_email:
+            nurse_updates['email'] = corrected_email
+
+        status_only_call = call_result in ('No Answer', 'Switched Off', 'Asked to Call Later') and not outcome
+        if status_only_call:
+            updates['reconciliation_status'] = 'No Answer' if call_result in ('No Answer', 'Switched Off') else 'Call Later'
+            updates['current_status'] = old_status or 'Assigned to Facility'
+        elif outcome == 'Confirmed Staying at AJA Care':
+            updates.update({
+                'current_status': 'Confirmed Staying',
+                'confirmation_status': 'Confirmed',
+                'reconciliation_status': 'Reconciled',
+                'reconciliation_outcome': outcome,
+                'reconciliation_completed_at': now,
+                'active': 1,
+                'last_confirmed_at': now,
+                'vendor_name': FACILITY_VENDOR_DEFAULT,
+                'current_arrangement': 'Embassy Contracted / Arranged',
+                'vendor_facility_checkin_eligible': 1,
+            })
+            if data.get('date_shifted_to_facility'):
+                updates['date_shifted_to_facility'] = _clean_text(data.get('date_shifted_to_facility'), 40)
+            nurse_updates.update({
+                'current_status': 'Confirmed Staying',
+                'facility_status': 'Confirmed Staying',
+                'stay_confirmation_status': 'Confirmed',
+                'current_arrangement': 'Embassy Contracted / Arranged',
+                'current_accommodation': 'Embassy Contracted / Arranged',
+                'vendor_name': FACILITY_VENDOR_DEFAULT,
+                'vendor_facility_eligible': 1,
+                'vendor_facility_checkin_eligible': 1,
+                'embassy_facilitated_resident': 1,
+                'aja_care_resident': 1,
+            })
+        elif outcome == 'Left AJA Care':
+            left_date = _clean_text(data.get('left_date'), 40) or today
+            updates.update({
+                'current_status': 'Left Facility',
+                'reconciliation_status': 'Reconciled',
+                'reconciliation_outcome': outcome,
+                'reconciliation_completed_at': now,
+                'active': 0,
+                'left_date': left_date,
+                'action_required': 'Left AJA Care confirmation recorded',
+            })
+            nurse_updates.update({'current_status': 'Left Facility', 'facility_status': 'Left Facility'})
+            _facility_create_welfare_followup(db, {**current, **updates}, remarks or 'Nurse reported leaving AJA Care.', category='Left Facility Confirmation', priority='Normal')
+        elif outcome == 'Intends to Leave':
+            updates.update({
+                'current_status': 'Intends to Leave',
+                'reconciliation_status': 'Needs Follow-up',
+                'reconciliation_outcome': outcome,
+                'welfare_followup_required': 1,
+                'active': 1,
+                'action_required': 'Stay arrangement change follow-up required',
+            })
+            nurse_updates.update({'current_status': 'Intends to Leave', 'facility_status': 'Intends to Leave'})
+            _facility_create_welfare_followup(db, {**current, **updates}, remarks or 'Nurse intends to leave or change stay arrangement.', category='Stay Arrangement Change / Intends to Leave', priority='Normal')
+        elif outcome == 'Private Self Arranged':
+            updates.update({
+                'current_status': 'Private Self Arranged',
+                'current_arrangement': 'Private (Self Arranged)',
+                'reconciliation_status': 'Reconciled',
+                'reconciliation_outcome': outcome,
+                'reconciliation_completed_at': now,
+                'private_arrangement_area': _clean_text(data.get('private_arrangement_area') or data.get('current_area_facility'), 180),
+                'active': 0,
+                'vendor_facility_checkin_eligible': 0,
+            })
+            nurse_updates.update({'current_status': 'Private Self Arranged', 'facility_status': 'Private Self Arranged', 'current_arrangement': 'Private (Self Arranged)', 'current_accommodation': 'Private (Self Arranged)', 'vendor_name': '', 'vendor_facility_eligible': 0, 'vendor_facility_checkin_eligible': 0, 'embassy_facilitated_resident': 0, 'aja_care_resident': 0})
+        elif outcome == 'MOH Arranged':
+            updates.update({
+                'current_status': 'MOH Arranged',
+                'current_arrangement': 'MOH Arranged',
+                'reconciliation_status': 'Reconciled',
+                'reconciliation_outcome': outcome,
+                'reconciliation_completed_at': now,
+                'facility_area': _clean_text(data.get('private_arrangement_area') or data.get('current_area_facility'), 180),
+                'active': 0,
+                'vendor_facility_checkin_eligible': 0,
+            })
+            nurse_updates.update({'current_status': 'MOH Arranged', 'facility_status': 'MOH Arranged', 'current_arrangement': 'MOH Arranged', 'current_accommodation': 'MOH Arranged', 'vendor_name': '', 'vendor_facility_eligible': 0, 'vendor_facility_checkin_eligible': 0, 'embassy_facilitated_resident': 0, 'aja_care_resident': 0})
+        elif outcome == 'MOH Provided Hotel':
+            start_date = _clean_text(data.get('moh_hotel_start_date'), 40)
+            expected_end = _clean_text(data.get('moh_hotel_expected_end_date'), 40)
+            if start_date and not expected_end:
+                expected_end = _date_add_months(start_date, 3)
+            updates.update({
+                'current_status': 'MOH Provided Hotel - Arrival Stay',
+                'current_arrangement': 'MOH Provided Hotel - Arrival Stay',
+                'reconciliation_status': 'Reconciled',
+                'reconciliation_outcome': outcome,
+                'reconciliation_completed_at': now,
+                'moh_hotel_name': _clean_text(data.get('moh_hotel_name'), 220),
+                'moh_hotel_area': _clean_text(data.get('moh_hotel_area') or data.get('private_arrangement_area'), 180),
+                'moh_hotel_start_date': start_date,
+                'moh_hotel_expected_end_date': expected_end,
+                'active': 0,
+                'vendor_facility_checkin_eligible': 0,
+            })
+            nurse_updates.update({'current_status': 'MOH Provided Hotel - Arrival Stay', 'facility_status': 'MOH Provided Hotel - Arrival Stay', 'current_arrangement': 'MOH Provided Hotel - Arrival Stay', 'current_accommodation': 'MOH Provided Hotel - Arrival Stay', 'vendor_name': '', 'vendor_facility_eligible': 0, 'vendor_facility_checkin_eligible': 0, 'embassy_facilitated_resident': 0, 'aja_care_resident': 0, 'moh_hotel_name': updates['moh_hotel_name'], 'moh_hotel_area': updates['moh_hotel_area'], 'moh_hotel_start_date': start_date, 'moh_hotel_expected_end_date': expected_end})
+        elif outcome == 'Details Correction Required':
+            updates.update({
+                'reconciliation_status': 'Reconciliation Required',
+                'reconciliation_outcome': outcome,
+                'welfare_followup_required': 1,
+                'action_required': 'Facility details correction required',
+            })
+            _facility_create_welfare_followup(db, {**current, **updates}, remarks or 'Facility details require correction after reconciliation call.', category='Facility Details Correction', priority='Normal')
+        elif outcome == 'Needs Embassy Assistance':
+            updates.update({
+                'current_status': 'Needs Embassy Assistance',
+                'reconciliation_status': 'Needs Follow-up',
+                'reconciliation_outcome': outcome,
+                'welfare_followup_required': 1,
+                'action_required': 'Welfare follow-up required',
+            })
+            _facility_create_welfare_followup(db, {**current, **updates}, remarks or 'Nurse requested Embassy welfare assistance during reconciliation call.', category='Health Worker Facility Follow-up', priority='High')
+        elif outcome == 'Unable to Confirm':
+            updates.update({
+                'reconciliation_status': 'Unable to Reach',
+                'reconciliation_outcome': outcome,
+                'action_required': 'Reconciliation follow-up required',
+            })
+        elif not outcome and call_result:
+            updates['reconciliation_status'] = 'Call Later' if call_result == 'Asked to Call Later' else ('No Answer' if call_result in ('No Answer', 'Switched Off') else 'Needs Follow-up')
+
+        assignments = [f"{col} = ?" for col in updates.keys()]
+        db.execute(f"UPDATE facility_roster SET {', '.join(assignments)} WHERE id = ?", list(updates.values()) + [roster_id])
+        _update_linked_nurse_after_reconciliation(db, current, nurse_updates)
+        note = remarks or f'Reconciliation call result: {call_result or "—"}; outcome: {outcome or updates.get("reconciliation_status") or "—"}'
+        _facility_insert_action(db, roster_id, user.get('user'), 'aja_reconciliation_update', old_status or old_recon, updates.get('current_status') or updates.get('reconciliation_status') or '', note, False)
+        try:
+            db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                       ['aja_reconciliation_update', roster_id, user.get('user'), json.dumps({'role': user.get('role'), 'outcome': outcome, 'call_result': call_result})])
+        except Exception:
+            pass
+        db.commit()
+        return {
+            'success': True,
+            'id': roster_id,
+            'status': updates.get('current_status') or old_status,
+            'reconciliation_status': updates.get('reconciliation_status') or old_recon,
+            'next_id': _aja_reconciliation_next_id(db, user, roster_id, data.get('status') or 'pending', data.get('assigned_to') or 'all')
+        }
+    except Exception as e:
+        traceback.print_exc()
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_aja_reconciliation_assign(data, user):
+    if (user or {}).get('role') not in AJA_RECONCILIATION_ADMIN_ROLES:
+        return {'success': False, 'error': 'Only authorized administrators can assign reconciliation records.'}
+    roster_ids = data.get('roster_ids') or []
+    if data.get('roster_id') and not roster_ids:
+        roster_ids = [data.get('roster_id')]
+    try:
+        roster_ids = [int(x) for x in roster_ids if int(x) > 0]
+    except Exception:
+        return {'success': False, 'error': 'Invalid roster_ids'}
+    assigned_to = _clean_text(data.get('assigned_to'), 120)
+    due_date = _clean_text(data.get('due_date'), 40)
+    note = _clean_text(data.get('note'), 2000)
+    if not roster_ids or not assigned_to:
+        return {'success': False, 'error': 'roster_ids and assigned_to are required'}
+    db = get_db()
+    try:
+        assignee = db.execute("SELECT username, role, COALESCE(full_name, username) AS full_name, COALESCE(email,'') AS email, COALESCE(department,'') AS department FROM users WHERE username = ? AND COALESCE(is_active,1)=1", [assigned_to]).fetchone()
+        if not assignee:
+            return {'success': False, 'error': 'Assignee not found or inactive'}
+        updated = 0
+        for rid in roster_ids:
+            row = db.execute("SELECT * FROM facility_roster WHERE id = ?", [rid]).fetchone()
+            if not row:
+                continue
+            old_assigned = row['assigned_to'] or ''
+            db.execute("""UPDATE facility_roster
+                          SET assigned_to = ?, assigned_role = ?, assigned_department = ?, due_date = ?,
+                              reconciliation_status = CASE WHEN COALESCE(reconciliation_status,'') = '' THEN 'Pending Reconciliation' ELSE reconciliation_status END,
+                              updated_at = CURRENT_TIMESTAMP
+                          WHERE id = ?""",
+                       [assigned_to, assignee['role'] or '', assignee['department'] or '', due_date, rid])
+            _facility_insert_action(db, rid, user.get('user'), 'aja_reconciliation_assigned', old_assigned, assigned_to, note, False)
+            updated += 1
+        db.commit()
+        if assignee['email']:
+            notify_case_event(
+                case_type='facility',
+                case_reference=f'{updated} AJA roster record(s)',
+                event_type='case_assigned_to_staff',
+                applicant_name='AJA Care reconciliation queue',
+                staff_username=assigned_to,
+                staff_email=assignee['email'],
+                priority='Normal',
+                due_date=due_date,
+                admin_link='https://portal.cwakuwait.com/admin/aja-reconciliation'
+            )
+        return {'success': True, 'assigned': updated}
+    except Exception as e:
+        traceback.print_exc()
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_aja_reconciliation_export(user):
+    if not _aja_reconciliation_role_allowed(user):
+        return None, {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        where, vals = _aja_reconciliation_base_where(user, {}, force_assigned=(user.get('role') in RESTRICTED_STAFF_ROLES))
+        rows = db.execute(_aja_reconciliation_select_sql(f"WHERE {' AND '.join(where)} ORDER BY f.id ASC"), vals).fetchall()
+        out = io.StringIO()
+        writer = csv.writer(out)
+        headers = [
+            'roster_reference', 'full_name', 'passport_number', 'civil_id', 'phone', 'whatsapp',
+            'email', 'vendor_name', 'facility_name', 'reconciliation_status',
+            'reconciliation_outcome', 'current_status', 'active', 'called_by', 'called_at',
+            'attempts', 'next_followup_at', 'remarks'
+        ]
+        writer.writerow(headers)
+        for row in rows:
+            r = _aja_reconciliation_to_dict(row)
+            writer.writerow([
+                r.get('roster_reference', ''), r.get('full_name', ''), r.get('passport_number', ''),
+                r.get('civil_id', ''), r.get('phone', ''), r.get('whatsapp_full', ''),
+                r.get('email', ''), r.get('vendor_name', ''), r.get('facility_name', ''),
+                r.get('reconciliation_status', ''), r.get('reconciliation_outcome', ''),
+                r.get('current_status', ''), r.get('active', ''), r.get('reconciliation_called_by', ''),
+                r.get('reconciliation_called_at', ''), r.get('reconciliation_attempts', ''),
+                r.get('reconciliation_next_followup_at', ''), r.get('reconciliation_last_note', '') or r.get('remarks', '')
+            ])
+        return out.getvalue().encode('utf-8-sig'), None
+    finally:
+        db.close()
+
+
+def _staff_cases_user_allowed(user):
+    return bool(user) and (user.get('role') or '') in LIMITED_STAFF_CASE_ROLES
+
+
+def _staff_department_match(user, item):
+    role = (user or {}).get('role') or ''
+    if role not in ('nadra_staff', 'passport_staff'):
+        return True
+    dept = (item.get('assigned_department') or '').strip().lower()
+    haystack = ' '.join(str(item.get(k) or '') for k in (
+        'module', 'case_type', 'category', 'subject', 'details', 'latest_note_summary'
+    )).lower()
+    if role == 'nadra_staff':
+        return dept == 'nadra' or any(term in haystack for term in ('nadra', 'cnic', 'nicop', 'poc', 'identity card', 'identity document'))
+    if role == 'passport_staff':
+        return dept == 'passport' or any(term in haystack for term in ('passport', 'travel document', 'passport renewal', 'passport issue'))
+    return True
+
+
+def _staff_item(module, source_id, reference, case_type='', applicant_name='', phone='', whatsapp='', email='',
+                subject='', status='', priority='', assigned_at='', due_date='', latest_note_summary='',
+                action_required='', assigned_department='', category='', details=''):
+    item = {
+        'module': module,
+        'id': source_id,
+        'reference': reference or str(source_id or ''),
+        'case_type': case_type or category or module,
+        'category': category or '',
+        'applicant_name': applicant_name or '',
+        'requester_name': applicant_name or '',
+        'phone': phone or '',
+        'whatsapp': whatsapp or phone or '',
+        'email': email or '',
+        'subject': subject or '',
+        'status': status or '',
+        'priority': priority or 'Normal',
+        'assigned_at': assigned_at or '',
+        'due_date': due_date or '',
+        'latest_note_summary': latest_note_summary or '',
+        'action_required': action_required or '',
+        'assigned_department': assigned_department or '',
+        'details': details or '',
+    }
+    return item
+
+
+def _staff_case_status_bucket(status):
+    s = (status or '').strip().lower()
+    if s in ('follow-up completed', 'resolved by staff', 'resolved', 'closed'):
+        return 'completed'
+    if s in ('in progress', 'assigned', 'seen by staff', 'field verification required', 'needs follow-up'):
+        return 'in_progress'
+    return 'pending'
+
+
+def api_staff_my_cases(params, user):
+    if not _staff_cases_user_allowed(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    username = user.get('user') or ''
+    db = get_db()
+    try:
+        items = []
+        for r in db.execute("""SELECT id, case_reference, case_type, category, requester_name,
+                                      requester_phone, requester_email, subject_name, concern_summary,
+                                      details, priority, status, assigned_at, due_date,
+                                      assigned_department
+                               FROM welfare_cases
+                               WHERE COALESCE(assigned_to, '') = ?
+                               ORDER BY id DESC LIMIT 300""", [username]).fetchall():
+            d = dict(r)
+            items.append(_staff_item(
+                'welfare', d.get('id'), d.get('case_reference'), d.get('case_type'),
+                d.get('requester_name') or d.get('subject_name'), d.get('requester_phone'), '',
+                d.get('requester_email'), d.get('concern_summary') or d.get('subject_name'),
+                d.get('status'), d.get('priority'), d.get('assigned_at'), d.get('due_date'),
+                d.get('details'), '', d.get('assigned_department'), d.get('category'), d.get('details')
+            ))
+        for r in db.execute("""SELECT c.id, c.complaint_id, COALESCE(c.category, c.complaint_category) AS category,
+                                      c.subject, COALESCE(c.status, c.complaint_status) AS status,
+                                      c.priority, c.assigned_at, c.due_date, c.assigned_department,
+                                      c.nurse_full_name, c.nurse_reference_id, c.passport_number,
+                                      c.description, c.internal_notes, c.public_response,
+                                      n.mobile_full, n.whatsapp_full, n.email, n.full_name
+                               FROM nurse_complaints c
+                               LEFT JOIN nurse_registrations n ON n.reference_id = c.nurse_reference_id
+                               WHERE COALESCE(c.assigned_to_username, '') = ?
+                               ORDER BY c.id DESC LIMIT 300""", [username]).fetchall():
+            d = dict(r)
+            items.append(_staff_item(
+                'nurse_complaint', d.get('id'), d.get('complaint_id'), d.get('category'),
+                d.get('nurse_full_name') or d.get('full_name'), d.get('mobile_full'), d.get('whatsapp_full'),
+                d.get('email'), d.get('subject'), d.get('status'), d.get('priority'),
+                d.get('assigned_at'), d.get('due_date'), d.get('internal_notes') or d.get('public_response'),
+                '', d.get('assigned_department'), d.get('category'), d.get('description')
+            ))
+        for r in db.execute("""SELECT * FROM facility_roster
+                               WHERE COALESCE(assigned_to, '') = ?
+                               ORDER BY id DESC LIMIT 300""", [username]).fetchall():
+            d = _facility_roster_to_dict(r)
+            items.append(_staff_item(
+                'facility_reconciliation', d.get('id'), d.get('roster_reference'),
+                'AJA Care Reconciliation', d.get('full_name'), d.get('phone'),
+                d.get('whatsapp_full'), d.get('email'),
+                d.get('action_required') or d.get('reconciliation_outcome') or 'Facility reconciliation',
+                d.get('reconciliation_status') or d.get('current_status'),
+                'Normal', '', d.get('due_date'), d.get('reconciliation_last_note') or d.get('remarks'),
+                d.get('action_required'), d.get('assigned_department'), 'Facility Roster',
+                d.get('remarks')
+            ))
+        for r in db.execute("""SELECT id, reference_id, full_name, mobile, email, case_type, subject,
+                                      description, priority, status, assigned_at, due_date,
+                                      assigned_department, internal_notes, public_response
+                               FROM legal_case_requests
+                               WHERE COALESCE(assigned_to_username, '') = ?
+                               ORDER BY id DESC LIMIT 300""", [username]).fetchall():
+            d = dict(r)
+            items.append(_staff_item(
+                'legal', d.get('id'), d.get('reference_id'), d.get('case_type'), d.get('full_name'),
+                d.get('mobile'), '', d.get('email'), d.get('subject'), d.get('status'), d.get('priority'),
+                d.get('assigned_at'), d.get('due_date'), d.get('internal_notes') or d.get('public_response'),
+                '', d.get('assigned_department'), d.get('case_type'), d.get('description')
+            ))
+        for r in db.execute("""SELECT id, reference_id, deceased_name, reporter_name, reporter_mobile,
+                                      reporter_email, priority, status, assigned_at, due_date,
+                                      assigned_department, description, internal_notes, public_response
+                               FROM death_case_requests
+                               WHERE COALESCE(assigned_to_username, '') = ?
+                               ORDER BY id DESC LIMIT 300""", [username]).fetchall():
+            d = dict(r)
+            items.append(_staff_item(
+                'death', d.get('id'), d.get('reference_id'), 'Death Case Follow-up',
+                d.get('reporter_name') or d.get('deceased_name'), d.get('reporter_mobile'), '',
+                d.get('reporter_email'), d.get('deceased_name'), d.get('status'), d.get('priority'),
+                d.get('assigned_at'), d.get('due_date'), d.get('internal_notes') or d.get('public_response'),
+                '', d.get('assigned_department'), 'Death Case', d.get('description')
+            ))
+        items = [i for i in items if _staff_department_match(user, i)]
+        status_filter = _clean_text(params.get('status'), 60).lower()
+        if status_filter:
+            if status_filter == 'pending':
+                items = [i for i in items if _staff_case_status_bucket(i.get('status')) == 'pending']
+            elif status_filter == 'in_progress':
+                items = [i for i in items if _staff_case_status_bucket(i.get('status')) == 'in_progress']
+            elif status_filter == 'completed':
+                items = [i for i in items if _staff_case_status_bucket(i.get('status')) == 'completed']
+        counters = {
+            'assigned_to_me': len(items),
+            'pending': sum(1 for i in items if _staff_case_status_bucket(i.get('status')) == 'pending'),
+            'in_progress': sum(1 for i in items if _staff_case_status_bucket(i.get('status')) == 'in_progress'),
+            'followup_completed': sum(1 for i in items if _staff_case_status_bucket(i.get('status')) == 'completed'),
+        }
+        items.sort(key=lambda x: (x.get('due_date') or '9999-99-99', x.get('assigned_at') or ''), reverse=False)
+        return {'success': True, 'items': items[:500], 'total': len(items), 'counters': counters}
+    finally:
+        db.close()
+
+
+def _staff_load_case(db, user, module, ident):
+    module = (module or '').strip()
+    ident = (ident or '').strip()
+    username = user.get('user') or ''
+    if not module or not ident:
+        return None, [], {'success': False, 'error': 'module and id are required'}
+    row = None
+    actions = []
+    if module == 'welfare':
+        if ident.isdigit():
+            row = db.execute("SELECT * FROM welfare_cases WHERE id = ?", [int(ident)]).fetchone()
+        else:
+            row = db.execute("SELECT * FROM welfare_cases WHERE case_reference = ?", [ident]).fetchone()
+        if row and (row['assigned_to'] or '') == username:
+            actions = [dict(a) for a in db.execute("SELECT * FROM welfare_case_actions WHERE case_id = ? ORDER BY id DESC LIMIT 100", [row['id']]).fetchall()]
+    elif module == 'nurse_complaint':
+        row = _find_nurse_complaint(db, ident)
+        if row and (row['assigned_to_username'] or '') == username:
+            ref = _nurse_complaint_reference(dict(row))
+            actions = [dict(a) for a in db.execute("SELECT * FROM nurse_complaint_actions WHERE complaint_id = ? ORDER BY id DESC LIMIT 100", [ref]).fetchall()]
+    elif module == 'facility_reconciliation':
+        if not ident.isdigit():
+            row = db.execute("SELECT * FROM facility_roster WHERE roster_reference = ?", [ident]).fetchone()
+        else:
+            row = db.execute("SELECT * FROM facility_roster WHERE id = ?", [int(ident)]).fetchone()
+        if row and (row['assigned_to'] or '') == username:
+            actions = [dict(a) for a in db.execute("SELECT * FROM facility_roster_actions WHERE roster_id = ? ORDER BY id DESC LIMIT 100", [row['id']]).fetchall()]
+    elif module == 'legal':
+        if ident.isdigit():
+            row = db.execute("SELECT * FROM legal_case_requests WHERE id = ?", [int(ident)]).fetchone()
+        else:
+            row = db.execute("SELECT * FROM legal_case_requests WHERE reference_id = ?", [ident]).fetchone()
+        if row and (row['assigned_to_username'] or '') == username:
+            actions = [dict(a) for a in db.execute("SELECT * FROM legal_case_actions WHERE reference_id = ? ORDER BY id DESC LIMIT 100", [row['reference_id']]).fetchall()]
+    elif module == 'death':
+        if ident.isdigit():
+            row = db.execute("SELECT * FROM death_case_requests WHERE id = ?", [int(ident)]).fetchone()
+        else:
+            row = db.execute("SELECT * FROM death_case_requests WHERE reference_id = ?", [ident]).fetchone()
+        if row and (row['assigned_to_username'] or '') == username:
+            actions = [dict(a) for a in db.execute("SELECT * FROM death_case_actions WHERE reference_id = ? ORDER BY id DESC LIMIT 100", [row['reference_id']]).fetchall()]
+    if not row:
+        return None, [], {'success': False, 'error': 'Forbidden or not found'}
+    record = dict(row)
+    probe = _staff_item(module, record.get('id'), record.get('case_reference') or record.get('complaint_id') or record.get('roster_reference') or record.get('reference_id'), details=json.dumps(record, default=str), assigned_department=record.get('assigned_department') or '')
+    if not _staff_department_match(user, probe):
+        return None, [], {'success': False, 'error': 'Forbidden'}
+    return record, actions, None
+
+
+def api_staff_case_detail(params, user):
+    if not _staff_cases_user_allowed(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        record, actions, err = _staff_load_case(db, user, params.get('module'), params.get('id') or params.get('reference'))
+        if err:
+            return err
+        return {'success': True, 'record': record, 'actions': actions}
+    finally:
+        db.close()
+
+
+def _audit_staff_action(db, user, module, reference, action_type, old_status='', new_status='', visible=False):
+    try:
+        db.execute("INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+                   [action_type, reference or '', user.get('user') or '', json.dumps({
+                       'role': user.get('role') or '',
+                       'module': module,
+                       'old_status': old_status or '',
+                       'new_status': new_status or '',
+                       'visible_to_applicant': 1 if visible else 0,
+                   })])
+    except Exception:
+        pass
+
+
+def api_staff_case_action(data, user, action):
+    if not _staff_cases_user_allowed(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    module = _clean_text(data.get('module'), 80)
+    ident = _clean_text(data.get('id') or data.get('reference'), 120)
+    note = _clean_text(data.get('note') or data.get('resolution_note'), 3000)
+    requested_status = _clean_text(data.get('status'), 80)
+    db = get_db()
+    try:
+        record, actions, err = _staff_load_case(db, user, module, ident)
+        if err:
+            return err
+        role = user.get('role') or ''
+        visible_requested = str(data.get('visible_to_applicant') or data.get('visible_to_nurse') or '').lower() in ('1', 'true', 'yes', 'on')
+        visible = visible_requested and role in ('field_staff', 'community_desk', 'inspector_field')
+        reference = record.get('case_reference') or record.get('complaint_id') or record.get('roster_reference') or record.get('reference_id') or str(record.get('id'))
+        old_status = record.get('status') or record.get('complaint_status') or record.get('reconciliation_status') or ''
+        new_status = requested_status
+        if action == 'resolve':
+            new_status = requested_status if requested_status in STAFF_LIMITED_STATUSES else 'Follow-up Completed'
+        if action == 'status':
+            if new_status not in STAFF_LIMITED_STATUSES:
+                return {'success': False, 'error': 'Status not allowed for staff workflow'}
+        if action == 'note' and not note:
+            return {'success': False, 'error': 'note is required'}
+
+        if module == 'welfare':
+            if action in ('status', 'resolve'):
+                db.execute("UPDATE welfare_cases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [new_status, record['id']])
+                _welfare_insert_action(db, record['id'], user.get('user'), 'staff_status' if action == 'status' else 'staff_resolved', old_status, new_status, note, visible)
+            else:
+                _welfare_insert_action(db, record['id'], user.get('user'), 'staff_note', '', '', note, visible)
+        elif module == 'nurse_complaint':
+            ref = _nurse_complaint_reference(record)
+            if action in ('status', 'resolve'):
+                db.execute("""UPDATE nurse_complaints SET complaint_status = ?, status = ?,
+                              updated_at = CURRENT_TIMESTAMP, last_action_at = CURRENT_TIMESTAMP, updated_by = ?
+                              WHERE id = ?""", [new_status, new_status, user.get('user'), record['id']])
+                _add_nurse_complaint_action(db, ref, 'Staff Status' if action == 'status' else 'Staff Follow-up Completed', user.get('user'), role, note=note, old_status=old_status, new_status=new_status, visible_to_nurse=visible)
+            else:
+                col = 'public_response' if visible else 'internal_notes'
+                db.execute(f"UPDATE nurse_complaints SET {col} = ?, updated_at = CURRENT_TIMESTAMP, last_action_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?", [note, user.get('user'), record['id']])
+                _add_nurse_complaint_action(db, ref, 'Nurse-Visible Message' if visible else 'Internal Note', user.get('user'), role, note=note, visible_to_nurse=visible)
+        elif module == 'facility_reconciliation':
+            if action in ('status', 'resolve'):
+                recon_status = 'Unable to Reach' if new_status == 'Unable to Contact' else ('Needs Follow-up' if new_status in ('In Progress', 'Information Requested', 'Seen by Staff') else old_status)
+                db.execute("""UPDATE facility_roster SET reconciliation_status = COALESCE(NULLIF(?, ''), reconciliation_status),
+                              action_required = ?, reconciliation_last_note = COALESCE(NULLIF(?, ''), reconciliation_last_note),
+                              updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                           [recon_status, new_status, note, record['id']])
+                _facility_insert_action(db, record['id'], user.get('user'), 'staff_status' if action == 'status' else 'staff_followup_completed', old_status, new_status, note, visible)
+            else:
+                _facility_insert_action(db, record['id'], user.get('user'), 'nurse_visible_message' if visible else 'internal_note', '', '', note, visible)
+        elif module == 'legal':
+            ref = record['reference_id']
+            if action in ('status', 'resolve'):
+                db.execute("UPDATE legal_case_requests SET status = ?, updated_at = CURRENT_TIMESTAMP, last_action_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?", [new_status, user.get('user'), record['id']])
+                _add_legal_case_action(db, ref, 'Staff Status' if action == 'status' else 'Staff Follow-up Completed', user.get('user'), role, note=note, old_status=old_status, new_status=new_status, visible_to_applicant=visible)
+            else:
+                col = 'public_response' if visible else 'internal_notes'
+                db.execute(f"UPDATE legal_case_requests SET {col} = ?, updated_at = CURRENT_TIMESTAMP, last_action_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?", [note, user.get('user'), record['id']])
+                _add_legal_case_action(db, ref, 'Public Reply' if visible else 'Internal Note', user.get('user'), role, note=note, visible_to_applicant=visible)
+        elif module == 'death':
+            ref = record['reference_id']
+            if action in ('status', 'resolve'):
+                db.execute("UPDATE death_case_requests SET status = ?, updated_at = CURRENT_TIMESTAMP, last_action_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?", [new_status, user.get('user'), record['id']])
+                _add_death_case_action(db, ref, 'Staff Status' if action == 'status' else 'Staff Follow-up Completed', user.get('user'), role, note=note, old_status=old_status, new_status=new_status, visible_to_reporter=visible)
+            else:
+                col = 'public_response' if visible else 'internal_notes'
+                db.execute(f"UPDATE death_case_requests SET {col} = ?, updated_at = CURRENT_TIMESTAMP, last_action_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?", [note, user.get('user'), record['id']])
+                _add_death_case_action(db, ref, 'Public Reply' if visible else 'Internal Note', user.get('user'), role, note=note, visible_to_reporter=visible)
+        _audit_staff_action(db, user, module, reference, f'staff_{action}', old_status, new_status, visible)
+        db.commit()
+        return {'success': True, 'status': new_status or old_status}
+    except Exception as e:
+        traceback.print_exc()
         db.rollback()
         return {'success': False, 'error': str(e)}
     finally:
@@ -9414,6 +10376,32 @@ def get_session(cookie_str):
         s = SESSIONS.get(token.value)
     if s and s['expires'] > time.time(): return s
     return None
+
+def _is_restricted_staff_user(user):
+    return bool(user) and (user.get('role') or '') in RESTRICTED_STAFF_ROLES
+
+def _restricted_staff_path_allowed(path):
+    allowed_exact = {
+        '/staff/my-cases',
+        '/admin/aja-reconciliation',
+        '/logout',
+    }
+    if path in allowed_exact:
+        return True
+    if path.startswith('/static/'):
+        return True
+    allowed_api_prefixes = (
+        '/api/staff/my-cases',
+        '/api/admin/aja-reconciliation/',
+    )
+    return any(path.startswith(prefix) for prefix in allowed_api_prefixes)
+
+def _user_is_active(row_or_dict):
+    try:
+        value = row_or_dict['is_active']
+    except Exception:
+        value = 1
+    return int(value if value not in (None, '') else 1) == 1
 
 # ═══════════════════════════════════════════════════════════════
 # DUPLICATE DETECTION
@@ -14570,15 +15558,41 @@ def api_delete_record(rec_id, user):
 
 def api_users_list():
     db = get_db()
-    users = [dict(r) for r in db.execute("SELECT id, username, role, full_name, created_at FROM users").fetchall()]
+    users = [dict(r) for r in db.execute("""SELECT id, username, role, full_name, email, mobile_number,
+                                                   designation, department, show_contact_to_applicant,
+                                                   is_active, created_at
+                                            FROM users
+                                            ORDER BY username""").fetchall()]
     db.close()
     return users
 
 def api_create_user(data):
     db = get_db()
     try:
-        db.execute("INSERT INTO users (username, password_hash, password_plain, role, full_name) VALUES (?, ?, ?, ?, ?)",
-                   (data['username'], hash_pw(data['password']), encrypt_pw(data['password']), data.get('role', 'operator'), data.get('full_name', '')))
+        role = (data.get('role') or 'operator').strip()
+        if role not in WELFARE_CASE_ACCESS_ROLES | {'fee_collector', 'viewer', 'iraq_cwa', 'other'}:
+            db.close()
+            return {'success': False, 'error': 'Invalid role'}
+        show_contact = data.get('show_contact_to_applicant')
+        if show_contact is None:
+            show_contact = 1 if role == 'field_staff' else 0
+        db.execute("""INSERT INTO users
+                      (username, password_hash, password_plain, role, full_name, email, mobile_number,
+                       designation, department, show_contact_to_applicant, is_active)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (
+                       data['username'].strip(),
+                       hash_pw(data['password']),
+                       encrypt_pw(data['password']),
+                       role,
+                       (data.get('full_name') or '').strip(),
+                       (data.get('email') or '').strip(),
+                       (data.get('mobile_number') or data.get('mobile') or '').strip(),
+                       (data.get('designation') or '').strip(),
+                       (data.get('department') or '').strip(),
+                       1 if str(show_contact).lower() in ('1', 'true', 'yes', 'on') else 0,
+                       0 if str(data.get('is_active', 1)).lower() in ('0', 'false', 'no', 'inactive') else 1,
+                   ))
         db.commit(); db.close()
         return {'success': True}
     except sqlite3.IntegrityError:
@@ -19253,6 +20267,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not user:
             return 'https://cwakuwait.com'
         role = user.get('role') or ''
+        if role in RESTRICTED_STAFF_ROLES:
+            return '/staff/my-cases'
         if role == 'fee_collector':
             return '/fee-collection'
         if role == 'iraq_cwa':
@@ -19263,6 +20279,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         template_path = Path(__file__).resolve().parent / 'templates' / template_name
         try:
             html = template_path.read_text(encoding='utf-8')
+            self.send_html(html)
+            return True
+        except Exception:
+            return False
+
+    def render_template_with_context(self, template_name: str, context=None):
+        template_path = Path(__file__).resolve().parent / 'templates' / template_name
+        try:
+            html = template_path.read_text(encoding='utf-8')
+            for key, value in (context or {}).items():
+                html = html.replace(f'__{key}__', str(value or ''))
             self.send_html(html)
             return True
         except Exception:
@@ -19292,6 +20319,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header('Location', '/login')
             self.end_headers()
+            return None
+        path = urlparse(getattr(self, 'path', '')).path
+        if _is_restricted_staff_user(user) and not _restricted_staff_path_allowed(path):
+            if path.startswith('/api/'):
+                self.send_json({'success': False, 'error': 'Forbidden. Assigned cases only.'}, 403)
+            else:
+                self.send_redirect('/staff/my-cases')
             return None
         return user
 
@@ -19584,6 +20618,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_html(LOCATING_ASSISTANCE_PAGE)
         elif path == '/community-feedback':
             self.send_html(COMMUNITY_FEEDBACK_PAGE)
+        elif path == '/staff/my-cases':
+            user = self.require_auth()
+            if not user: return
+            if not _staff_cases_user_allowed(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            if not self.render_template_with_context('staff_my_cases.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
+                self.send_html('<html><body><h1>My Assigned Cases</h1><p>Staff case template is unavailable.</p><a href="/logout">Logout</a></body></html>')
+        elif path == '/admin/aja-reconciliation':
+            user = self.require_auth()
+            if not user: return
+            if not _aja_reconciliation_role_allowed(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            if not self.render_template_with_context('admin_aja_reconciliation.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
+                self.send_html('<html><body><h1>AJA Care Reconciliation</h1><p>Reconciliation template is unavailable.</p><a href="/logout">Logout</a></body></html>')
         elif path == '/admin/dashboard':
             user = self.require_auth()
             if not user: return
@@ -19784,6 +20832,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             self.send_json(api_admin_facility_matches(user))
+        elif path == '/api/admin/aja-reconciliation/queue':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_admin_aja_reconciliation_queue(params, user))
+        elif path == '/api/admin/aja-reconciliation/next':
+            user = self.require_auth()
+            if not user: return
+            db = get_db()
+            try:
+                next_id = _aja_reconciliation_next_id(
+                    db, user, params.get('after_id') or 0,
+                    params.get('status') or 'pending',
+                    params.get('assigned_to') or ('me' if user.get('role') in RESTRICTED_STAFF_ROLES else 'all')
+                )
+                self.send_json({'success': True, 'next_id': next_id})
+            finally:
+                db.close()
+        elif path == '/api/admin/aja-reconciliation/export.csv':
+            user = self.require_auth()
+            if not user: return
+            body, err = api_admin_aja_reconciliation_export(user)
+            if err:
+                self.send_json(err, 403); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="aja_reconciliation_{datetime.now().strftime("%Y%m%d")}.csv"')
+            self.send_header('Content-Length', len(body))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == '/api/staff/my-cases':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_staff_my_cases(params, user))
+        elif path == '/api/staff/my-cases/detail':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_staff_case_detail(params, user))
         elif path == '/api/admin/facility-occupancy':
             user = self.require_auth()
             if not user: return
@@ -20254,7 +21340,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 rows = db.execute("""SELECT id, username, COALESCE(full_name, username) AS display_name, role
                                      FROM users
-                                     WHERE role IN ('admin','operator','operator_special','welfare_officer','inspector_field','community_desk','senior_review','ambassador_review')
+                                     WHERE role IN ('admin','operator','operator_special','welfare_officer','inspector_field','community_desk','senior_review','ambassador_review','field_staff','nadra_staff','passport_staff')
                                      ORDER BY username ASC""").fetchall()
                 self.send_json({'success': True, 'items': [dict(r) for r in rows]})
             finally:
@@ -22531,6 +23617,37 @@ function printBoth(){{
             result = mark_monthly_checkin_no_response()
             self.send_json(result, 200 if result.get('success') else 400)
             return
+        elif path == '/api/admin/aja-reconciliation/update':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_aja_reconciliation_update(data, user)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/aja-reconciliation/assign':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_aja_reconciliation_assign(data, user)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path in ('/api/staff/my-cases/note', '/api/staff/my-cases/status', '/api/staff/my-cases/resolve'):
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            action = path.rsplit('/', 1)[-1]
+            result = api_staff_case_action(data, user, action)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
         elif path.startswith('/api/admin/facility-roster/'):
             user = self.require_auth()
             if not user: return
@@ -22744,7 +23861,9 @@ function printBoth(){{
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
                 comp = dict(comp_row)
                 complaint_ref = _nurse_complaint_reference(comp)
-                assignee = db.execute("SELECT id, username, COALESCE(full_name, username) as display_name FROM users WHERE username = ?", [assignee_username]).fetchone()
+                assignee = db.execute("""SELECT id, username, COALESCE(full_name, username) as display_name,
+                                                role, COALESCE(department,'') AS department
+                                         FROM users WHERE username = ?""", [assignee_username]).fetchone()
                 if not assignee:
                     self.send_json({'success': False, 'error': 'Assignee not found'}, 404); return
                 old_assigned = comp.get('assigned_to_username') or ''
@@ -22754,6 +23873,8 @@ function printBoth(){{
                     assigned_to_user_id = ?,
                     assigned_to_username = ?,
                     assigned_to_name = ?,
+                    assigned_role = ?,
+                    assigned_department = ?,
                     assigned_by = ?,
                     assigned_at = CURRENT_TIMESTAMP,
                     assignment_note = ?,
@@ -22763,7 +23884,8 @@ function printBoth(){{
                     updated_at = CURRENT_TIMESTAMP,
                     updated_by = ?
                     WHERE id = ?""",
-                    [str(assignee['id']), assignee['username'], assignee['display_name'], user['user'], assignment_note, new_status, new_status, user['user'], comp['id']])
+                    [str(assignee['id']), assignee['username'], assignee['display_name'], assignee['role'] or '',
+                     assignee['department'] or '', user['user'], assignment_note, new_status, new_status, user['user'], comp['id']])
                 _add_nurse_complaint_action(db, complaint_ref, 'Assigned' if not old_assigned else 'Reassigned',
                                             user['user'], user['role'], note=assignment_note, old_status=old_status, new_status=new_status,
                                             old_assigned_to=old_assigned, new_assigned_to=assignee['username'], visible_to_nurse=0)
@@ -22804,6 +23926,7 @@ function printBoth(){{
                         applicant_email=nurse.get('email') or '',
                         applicant_name=nurse.get('full_name') or 'Applicant',
                         status=new_status,
+                        public_note=_assignment_public_note_for_staff(assignee_username),
                         tracking_link='https://cwakuwait.com/nurses/login'
                     )
                 self.send_json({'success': True})
@@ -23087,16 +24210,20 @@ function printBoth(){{
                     note = (data.get('assignment_note') or '').strip()
                     if not assignee:
                         self.send_json({'ok': False, 'success': False, 'error': 'assigned_to_username required'}, 400); return
-                    a = db.execute("SELECT id, username, COALESCE(full_name, username) AS display_name FROM users WHERE username = ?", [assignee]).fetchone()
+                    a = db.execute("""SELECT id, username, COALESCE(full_name, username) AS display_name,
+                                             role, COALESCE(department,'') AS department
+                                      FROM users WHERE username = ?""", [assignee]).fetchone()
                     if not a:
                         self.send_json({'ok': False, 'success': False, 'error': 'Assignee not found'}, 404); return
                     new_status = old_status if old_status == 'In Progress' else 'Assigned'
                     old_assigned = rec.get('assigned_to_username') or ''
                     db.execute("""UPDATE legal_case_requests SET assigned_to_user_id=?, assigned_to_username=?,
-                                  assigned_to_name=?, assigned_by=?, assigned_at=CURRENT_TIMESTAMP,
+                                  assigned_to_name=?, assigned_role=?, assigned_department=?,
+                                  assigned_by=?, assigned_at=CURRENT_TIMESTAMP,
                                   assignment_note=?, status=?, last_action_at=CURRENT_TIMESTAMP,
                                   updated_at=CURRENT_TIMESTAMP, updated_by=? WHERE reference_id=?""",
-                               [str(a['id']), a['username'], a['display_name'], user['user'], note, new_status, user['user'], ref])
+                               [str(a['id']), a['username'], a['display_name'], a['role'] or '', a['department'] or '',
+                                user['user'], note, new_status, user['user'], ref])
                     _add_legal_case_action(db, ref, 'Assigned' if not old_assigned else 'Reassigned',
                                            user['user'], user['role'], note=note, old_status=old_status,
                                            new_status=new_status, old_assigned_to=old_assigned,
@@ -23174,6 +24301,7 @@ function printBoth(){{
                             applicant_email=rec.get('email') or '',
                             applicant_name=rec.get('full_name') or 'Applicant',
                             status='Assigned',
+                            public_note=_assignment_public_note_for_staff((data.get('assigned_to_username') or '').strip()),
                             tracking_link='https://cwakuwait.com/legal-cases/track'
                         )
                 elif path in ('/api/admin/legal-cases/status', '/api/legal-cases/status'):
@@ -23305,16 +24433,20 @@ function printBoth(){{
                     note = (data.get('assignment_note') or '').strip()
                     if not assignee:
                         self.send_json({'ok': False, 'success': False, 'error': 'assigned_to_username required'}, 400); return
-                    a = db.execute("SELECT id, username, COALESCE(full_name, username) AS display_name FROM users WHERE username = ?", [assignee]).fetchone()
+                    a = db.execute("""SELECT id, username, COALESCE(full_name, username) AS display_name,
+                                             role, COALESCE(department,'') AS department
+                                      FROM users WHERE username = ?""", [assignee]).fetchone()
                     if not a:
                         self.send_json({'ok': False, 'success': False, 'error': 'Assignee not found'}, 404); return
                     new_status = old_status if old_status == 'In Progress' else 'Assigned'
                     old_assigned = rec.get('assigned_to_username') or ''
                     db.execute("""UPDATE death_case_requests SET assigned_to_user_id=?, assigned_to_username=?,
-                                  assigned_to_name=?, assigned_by=?, assigned_at=CURRENT_TIMESTAMP,
+                                  assigned_to_name=?, assigned_role=?, assigned_department=?,
+                                  assigned_by=?, assigned_at=CURRENT_TIMESTAMP,
                                   assignment_note=?, status=?, last_action_at=CURRENT_TIMESTAMP,
                                   updated_at=CURRENT_TIMESTAMP, updated_by=? WHERE reference_id=?""",
-                               [str(a['id']), a['username'], a['display_name'], user['user'], note, new_status, user['user'], ref])
+                               [str(a['id']), a['username'], a['display_name'], a['role'] or '', a['department'] or '',
+                                user['user'], note, new_status, user['user'], ref])
                     _add_death_case_action(db, ref, 'Assigned' if not old_assigned else 'Reassigned',
                                            user['user'], user['role'], note=note, old_status=old_status,
                                            new_status=new_status, old_assigned_to=old_assigned,
@@ -23394,6 +24526,7 @@ function printBoth(){{
                             applicant_email=applicant_email,
                             applicant_name=applicant_name,
                             status='Assigned',
+                            public_note=_assignment_public_note_for_staff((data.get('assigned_to_username') or '').strip()),
                             tracking_link='https://cwakuwait.com/death-cases/track'
                         )
                 elif path in ('/api/admin/death-cases/status', '/api/death-cases/status'):
@@ -23467,13 +24600,19 @@ function printBoth(){{
             db = get_db()
             user = db.execute("SELECT * FROM users WHERE username = ?", [data.get('username', '')]).fetchone()
             db.close()
-            if user and user['password_hash'] == hash_pw(data.get('password', '')):
+            if user and not _user_is_active(user):
+                record_login_failure(client_ip)
+                self.send_json({'success': False, 'error': 'User account is inactive. Please contact the administrator.'}, 403)
+            elif user and user['password_hash'] == hash_pw(data.get('password', '')):
                 record_login_success(client_ip)
                 token = create_session(user['username'], user['role'])
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Set-Cookie', f'session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400')
-                redirect_url = '/dashboard' if user['role'] in ('fee_collector', 'iraq_cwa') else '/admin/dashboard'
+                if user['role'] in RESTRICTED_STAFF_ROLES:
+                    redirect_url = '/staff/my-cases'
+                else:
+                    redirect_url = '/dashboard' if user['role'] in ('fee_collector', 'iraq_cwa') else '/admin/dashboard'
                 resp = json.dumps({'success': True, 'user': user['username'], 'role': user['role'], 'redirect_url': redirect_url}).encode()
                 self.send_header('Content-Length', len(resp))
                 self.end_headers()
@@ -23725,6 +24864,15 @@ function printBoth(){{
                 updates.append("role = ?"); params.append(data['role'])
             if data.get('full_name') is not None:
                 updates.append("full_name = ?"); params.append(data['full_name'])
+            for field in ('email', 'mobile_number', 'designation', 'department'):
+                if data.get(field) is not None:
+                    updates.append(f"{field} = ?"); params.append((data.get(field) or '').strip())
+            if data.get('show_contact_to_applicant') is not None:
+                updates.append("show_contact_to_applicant = ?")
+                params.append(1 if str(data.get('show_contact_to_applicant')).lower() in ('1', 'true', 'yes', 'on') else 0)
+            if data.get('is_active') is not None:
+                updates.append("is_active = ?")
+                params.append(0 if str(data.get('is_active')).lower() in ('0', 'false', 'no', 'inactive') else 1)
             if data.get('new_password'):
                 updates.append("password_hash = ?"); params.append(hash_pw(data['new_password']))
                 updates.append("password_plain = ?"); params.append(encrypt_pw(data['new_password']))
@@ -29999,7 +31147,15 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Username</label><input id="nu_user"></div>
 <div class="fgp"><label>Password</label><input id="nu_pass" type="password"></div>
 <div class="fgp"><label>Full Name</label><input id="nu_name"></div>
-<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>operator_special</option><option>admin</option><option>fee_collector</option><option>viewer</option><option>iraq_cwa</option><option>welfare_officer</option><option>inspector_field</option><option>legal_officer</option><option>death_case_officer</option><option>community_desk</option><option>senior_review</option><option>ambassador_review</option><option>other</option></select></div>
+<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>operator_special</option><option>admin</option><option>fee_collector</option><option>viewer</option><option>iraq_cwa</option><option>welfare_officer</option><option>inspector_field</option><option>field_staff</option><option>nadra_staff</option><option>passport_staff</option><option>legal_officer</option><option>death_case_officer</option><option>community_desk</option><option>senior_review</option><option>ambassador_review</option><option>other</option></select></div>
+</div>
+<div class="fg" style="margin-bottom:14px">
+<div class="fgp"><label>Email</label><input id="nu_email" type="email"></div>
+<div class="fgp"><label>Mobile Number</label><input id="nu_mobile"></div>
+<div class="fgp"><label>Designation</label><input id="nu_designation"></div>
+<div class="fgp"><label>Department</label><input id="nu_department" placeholder="NADRA / Passport / Field"></div>
+<div class="fgp"><label>Show Contact to Applicant</label><select id="nu_show_contact"><option value="0">No</option><option value="1">Yes</option></select></div>
+<div class="fgp"><label>Active</label><select id="nu_active"><option value="1">Active</option><option value="0">Inactive</option></select></div>
 </div>
 <button class="btn btn-p" onclick="createUser()">Create User</button>
 <div style="margin-top:14px"><table id="usersTbl"></table></div>
@@ -31602,13 +32758,16 @@ document.getElementById('repContent').innerHTML=h}
 async function loadAdmin(){
 if(USER_ROLE!=='admin')return;
 const u=await api('/api/users');
-if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Contact</th><th>Department</th><th>Active</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
 u.forEach(x=>{
 h+=`<tr><td><strong>${x.username}</strong></td><td>${x.full_name||'-'}</td>
 <td><select onchange="updateUserRole(${x.id},this.value)" style="padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:.85em">
-<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='operator_special'?' selected':''}>operator_special</option><option${x.role==='fee_collector'?' selected':''}>fee_collector</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='welfare_officer'?' selected':''}>welfare_officer</option><option${x.role==='inspector_field'?' selected':''}>inspector_field</option><option${x.role==='legal_officer'?' selected':''}>legal_officer</option><option${x.role==='death_case_officer'?' selected':''}>death_case_officer</option><option${x.role==='community_desk'?' selected':''}>community_desk</option><option${x.role==='senior_review'?' selected':''}>senior_review</option><option${x.role==='ambassador_review'?' selected':''}>ambassador_review</option><option${x.role==='other'?' selected':''}>other</option></select></td>
+<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='operator_special'?' selected':''}>operator_special</option><option${x.role==='fee_collector'?' selected':''}>fee_collector</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='welfare_officer'?' selected':''}>welfare_officer</option><option${x.role==='inspector_field'?' selected':''}>inspector_field</option><option${x.role==='field_staff'?' selected':''}>field_staff</option><option${x.role==='nadra_staff'?' selected':''}>nadra_staff</option><option${x.role==='passport_staff'?' selected':''}>passport_staff</option><option${x.role==='legal_officer'?' selected':''}>legal_officer</option><option${x.role==='death_case_officer'?' selected':''}>death_case_officer</option><option${x.role==='community_desk'?' selected':''}>community_desk</option><option${x.role==='senior_review'?' selected':''}>senior_review</option><option${x.role==='ambassador_review'?' selected':''}>ambassador_review</option><option${x.role==='other'?' selected':''}>other</option></select></td>
+<td style="font-size:.8em">${x.email||'-'}<br>${x.mobile_number||'-'}${Number(x.show_contact_to_applicant||0)?'<br><span style="color:#2e7d32">contact visible</span>':''}</td>
+<td style="font-size:.8em">${x.department||'-'}<br>${x.designation||''}</td>
+<td>${Number(x.is_active||0)?'Yes':'No'}</td>
 <td style="font-size:.8em">${x.created_at}</td>
-<td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminResetPw(${x.id},'${x.username}')">Reset PW</button><button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="adminDeleteUser(${x.id},'${x.username}')">Delete</button></td></tr>`});
+<td><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminEditUser(${x.id})">Edit</button><button class="btn btn-i" style="padding:2px 8px;font-size:.75em;margin-right:4px" onclick="adminResetPw(${x.id},'${x.username}')">Reset PW</button><button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="adminDeleteUser(${x.id},'${x.username}')">Delete</button></td></tr>`});
 h+='</tbody>';document.getElementById('usersTbl').innerHTML=h}
 const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
@@ -31989,7 +33148,10 @@ const tb=document.getElementById('feeRepTbl'); if(tb)tb.innerHTML=h;
 }
 async function createUser(){
 const data={username:document.getElementById('nu_user').value,password:document.getElementById('nu_pass').value,
-full_name:document.getElementById('nu_name').value,role:document.getElementById('nu_role').value};
+full_name:document.getElementById('nu_name').value,role:document.getElementById('nu_role').value,
+email:document.getElementById('nu_email').value,mobile_number:document.getElementById('nu_mobile').value,
+designation:document.getElementById('nu_designation').value,department:document.getElementById('nu_department').value,
+show_contact_to_applicant:document.getElementById('nu_show_contact').value,is_active:document.getElementById('nu_active').value};
 if(!data.username||!data.password){toast('Username and password required');return}
 const r=await api('/api/user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 if(r?.success){toast('User created');loadAdmin()}else toast('Error: '+(r?.error||'unknown'))}
@@ -32018,6 +33180,16 @@ else toast('Error: '+(r?.error||'failed'))}
 async function updateUserRole(uid,role){
 const r=await api('/api/user/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:uid,role})});
 if(r?.success){toast('Role updated to '+role)}else{toast('Error: '+(r?.error||'failed'));loadAdmin()}}
+async function adminEditUser(uid){
+const users=await api('/api/users');const x=(users||[]).find(u=>Number(u.id)===Number(uid));if(!x){toast('User not found');return}
+const email=prompt('Email',x.email||''); if(email===null)return;
+const mobile=prompt('Mobile number',x.mobile_number||''); if(mobile===null)return;
+const designation=prompt('Designation',x.designation||''); if(designation===null)return;
+const department=prompt('Department',x.department||''); if(department===null)return;
+const show=confirm('Show contact to applicant where policy allows?');
+const active=confirm('Keep this user active?');
+const r=await api('/api/user/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:uid,email,mobile_number:mobile,designation,department,show_contact_to_applicant:show?1:0,is_active:active?1:0})});
+if(r?.success){toast('User updated');loadAdmin()}else toast('Error: '+(r?.error||'failed'))}
 async function adminResetPw(uid,uname){
 const pw=prompt('Enter new password for '+uname+':');
 if(!pw)return;

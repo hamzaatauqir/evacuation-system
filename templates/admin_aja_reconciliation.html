@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AJA Care Reconciliation</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+  <style>
+    .aja-shell{max-width:1440px;margin:0 auto;padding:18px}
+    .aja-top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}
+    .aja-title h1{margin:0;color:#15324a;font-size:24px}.aja-title p{margin:4px 0 0;color:#607182}
+    .aja-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:12px 0}
+    .kpi{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:12px}.kpi b{display:block;font-size:24px;color:#15324a}.kpi span{font-size:12px;color:#68798a}
+    .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tabs button{border:1px solid #d7e2ea;background:#fff;border-radius:6px;padding:9px 12px;font-weight:700;color:#29445b;cursor:pointer}.tabs button.active{background:#15324a;color:#fff}
+    .work{display:grid;grid-template-columns:minmax(320px,1fr) 390px;gap:14px}.card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:16px}
+    .person-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;border-bottom:1px solid #eef3f7;padding-bottom:12px;margin-bottom:12px}
+    .person-head h2{margin:0;color:#15324a;font-size:22px}.muted{color:#657789;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.field{padding:9px;border:1px solid #edf2f6;border-radius:7px}.field span{display:block;color:#6b7b88;font-size:11px}.field b{display:block;margin-top:3px;color:#172b3a}
+    .quick{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.quick a,.quick button{border:1px solid #cddce6;background:#f7fafc;border-radius:6px;padding:9px 12px;text-decoration:none;color:#17344c;font-weight:700;cursor:pointer}
+    .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.form-grid label{display:block;font-size:12px;color:#4f6374;font-weight:700}.form-grid input,.form-grid select,.form-grid textarea{width:100%;box-sizing:border-box;margin-top:5px;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.form-grid .full{grid-column:1/-1}
+    .outcomes{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin:10px 0}.outcomes label{display:flex;align-items:flex-start;gap:8px;border:1px solid #dce7ef;border-radius:8px;padding:10px;cursor:pointer}.outcomes input{margin-top:2px}
+    .savebar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.primary{background:#15324a!important;color:#fff!important;border-color:#15324a!important}.danger{background:#fff2f2!important;color:#9d1d1d!important;border-color:#f2caca!important}
+    .list table{width:100%;border-collapse:collapse}.list th,.list td{border-bottom:1px solid #eef3f7;padding:8px;text-align:left;font-size:12px}.list tr{cursor:pointer}.list tr:hover{background:#f7fafc}
+    @media(max-width:980px){.work{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}.aja-top{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body class="cwa-admin-body">
+  <main class="aja-shell">
+    <div class="aja-top">
+      <div class="aja-title">
+        <h1>AJA Care Reconciliation</h1>
+        <p>Call imported AJA Care roster records, update the official stay status, and move through the queue.</p>
+        <div class="muted">Signed in as __USER_NAME__ (__USER_ROLE__)</div>
+      </div>
+      <div class="aja-actions">
+        <a class="cwa-btn cwa-btn--light cwa-btn--sm admin-only" href="/admin/facility-roster">Facility Roster</a>
+        <a class="cwa-btn cwa-btn--light cwa-btn--sm admin-only" href="/admin/facility-occupancy">Facility Occupancy</a>
+        <a class="cwa-btn cwa-btn--navy cwa-btn--sm" href="/api/admin/aja-reconciliation/export.csv">Export Reconciliation Report</a>
+        <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/logout">Logout</a>
+      </div>
+    </div>
+    <section class="kpi-grid" id="kpis"></section>
+    <div class="tabs" id="tabs"></div>
+    <section class="work">
+      <div class="card" id="currentCard"><div class="cwa-empty">Loading queue...</div></div>
+      <div class="card list">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0;color:#15324a">Queue</h3>
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm admin-only" onclick="assignSelected()">Assign Selected</button>
+        </div>
+        <table>
+          <thead><tr><th></th><th>Ref</th><th>Name</th><th>Status</th><th>Assigned</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="5" class="cwa-empty">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+<script>
+const USER_NAME='__USER_NAME__', USER_ROLE='__USER_ROLE__';
+const restricted=['field_staff','nadra_staff','passport_staff'].includes(USER_ROLE);
+if(restricted) document.querySelectorAll('.admin-only').forEach(x=>x.style.display='none');
+const filters=[
+  ['pending','Pending'],['call_later','Call Later'],['no_answer','No Answer'],['needs_followup','Needs Follow-up'],
+  ['reconciled','Reconciled'],['left','Left / Not in AJA'],['needs_assistance','Needs Assistance'],['all','All']
+];
+let state={status:'pending',items:[],current:null};
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function val(id){return document.getElementById(id)?.value||''}
+async function api(url,opts){const r=await fetch(url,{credentials:'include',...(opts||{})});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}
+function digits(s){return String(s||'').replace(/\D/g,'')}
+function renderTabs(){document.getElementById('tabs').innerHTML=filters.map(([id,label])=>`<button class="${state.status===id?'active':''}" onclick="load('${id}')">${label}</button>`).join('')}
+function renderKpis(s){const cards=[['total_aja_records','Total AJA Records'],['pending_reconciliation','Pending'],['reconciled','Reconciled'],['confirmed_staying','Confirmed Staying'],['left_facility','Left AJA Care'],['private_self_arranged','Private'],['moh_arranged','MOH Arranged'],['moh_hotel','MOH Hotel'],['intends_to_leave','Intends to Leave'],['needs_assistance','Needs Assistance'],['no_answer','No Answer'],['call_later','Call Later'],['assigned_to_me','Assigned to Me']];
+document.getElementById('kpis').innerHTML=cards.map(([k,l])=>`<div class="kpi"><b>${Number(s[k]||0)}</b><span>${l}</span></div>`).join('')}
+function renderRows(){document.getElementById('rows').innerHTML=(state.items||[]).map(r=>`<tr onclick="select(${Number(r.id)})"><td><input type="checkbox" data-rid="${Number(r.id)}" onclick="event.stopPropagation()"></td><td><b>${esc(r.roster_reference||r.id)}</b></td><td>${esc(r.full_name||'-')}</td><td>${esc(r.reconciliation_status||r.current_status||'-')}</td><td>${esc(r.assigned_to||'Unassigned')}</td></tr>`).join('')||'<tr><td colspan="5" class="cwa-empty">No records in this filter.</td></tr>'}
+function field(label,value){return `<div class="field"><span>${label}</span><b>${esc(value||'-')}</b></div>`}
+function renderCurrent(r){
+ if(!r){document.getElementById('currentCard').innerHTML='<div class="cwa-empty">No record found in this queue.</div>';return}
+ const tel=digits(r.phone), wa=digits(r.whatsapp_full||r.phone);
+ document.getElementById('currentCard').innerHTML=`
+ <div class="person-head"><div><h2>${esc(r.full_name||'Unnamed nurse')}</h2><div class="muted">${esc(r.roster_reference||'')} ${r.nurse_reference?' | Nurse '+esc(r.nurse_reference):''}</div></div><span class="cwa-badge" data-type="processing">${esc(r.reconciliation_status||'Pending Reconciliation')}</span></div>
+ <div class="grid">
+ ${field('Phone',r.phone)}${field('WhatsApp',r.whatsapp_full)}${field('Email',r.email)}${field('Passport / Civil ID',[r.passport_number,r.civil_id].filter(Boolean).join(' / '))}
+ ${field('Vendor','AJA Care')}${field('Facility',r.facility_name||'AJA Care - To be confirmed')}${field('Current system status',r.current_status)}${field('Last call attempt',r.reconciliation_called_at)}
+ ${field('Assigned officer/staff',r.assigned_to)}${field('Source / remarks',r.source_file_remarks||r.remarks)}
+ </div>
+ <div class="quick">
+   ${tel?`<a href="tel:+${tel}">Call Phone</a>`:''}
+   ${wa?`<a target="_blank" rel="noopener" href="https://wa.me/${wa}">WhatsApp</a>`:''}
+   ${r.email?`<a href="mailto:${esc(r.email)}">Email</a>`:''}
+   <button onclick="markQuick('no_answer')">Mark No Answer</button>
+   <button onclick="markQuick('call_later')">Call Later</button>
+   <button onclick="skipNext()">Skip / Next</button>
+   <a class="admin-only" href="/admin/facility-roster?q=${encodeURIComponent(r.roster_reference||r.full_name||'')}">Open Full Record</a>
+ </div>
+ <h3 style="margin:14px 0 8px;color:#15324a">Call Outcome</h3>
+ <div class="outcomes">
+ ${['Confirmed Staying at AJA Care','Left AJA Care','Intends to Leave','Private Self Arranged','MOH Arranged','MOH Provided Hotel','Details Correction Required','Needs Embassy Assistance','Unable to Confirm'].map(x=>`<label><input type="radio" name="outcome" value="${esc(x)}"><span>${esc(x)}</span></label>`).join('')}
+ </div>
+ <div class="form-grid">
+   <label>Call result<select id="call_result"><option></option><option>Answered</option><option>No Answer</option><option>Wrong Number</option><option>Switched Off</option><option>WhatsApp Only</option><option>Asked to Call Later</option></select></label>
+   <label>Next follow-up<input id="next_followup_at" type="datetime-local"></label>
+   <label>Correct phone<input id="corrected_phone" placeholder="+965..."></label>
+   <label>Correct WhatsApp<input id="corrected_whatsapp" placeholder="+965..."></label>
+   <label>Correct email<input id="corrected_email" type="email"></label>
+   <label>Preferred contact<select id="preferred_contact_method"><option></option><option>Phone</option><option>WhatsApp</option><option>Email</option></select></label>
+   <label>Date shifted to AJA Care<input id="date_shifted_to_facility" type="date" value="${esc(r.date_shifted_to_facility||'')}"></label>
+   <label>Date left<input id="left_date" type="date"></label>
+   <label>Private/MOH area<input id="private_arrangement_area" placeholder="Area / facility"></label>
+   <label>MOH hotel name<input id="moh_hotel_name"></label>
+   <label>MOH hotel area<input id="moh_hotel_area"></label>
+   <label>MOH hotel start<input id="moh_hotel_start_date" type="date"></label>
+   <label>MOH hotel expected end<input id="moh_hotel_expected_end_date" type="date"></label>
+   <label class="full">Remarks<textarea id="remarks" rows="4" placeholder="Internal note for Embassy follow-up"></textarea></label>
+ </div>
+ <div class="savebar"><button class="quick primary" onclick="saveNext()">Save & Next</button><button class="quick" onclick="markQuick('call_later')">Call Later & Next</button><button class="quick danger" onclick="markQuick('no_answer')">No Answer & Next</button></div>`;
+ if(restricted) document.querySelectorAll('.admin-only').forEach(x=>x.style.display='none');
+}
+function currentOutcome(){return document.querySelector('input[name="outcome"]:checked')?.value||''}
+function payload(mode){return {roster_id:state.current?.id,mode,outcome:currentOutcome(),call_result:val('call_result'),remarks:val('remarks'),next_followup_at:val('next_followup_at'),corrected_phone:val('corrected_phone'),corrected_whatsapp:val('corrected_whatsapp'),corrected_email:val('corrected_email'),date_shifted_to_facility:val('date_shifted_to_facility'),left_date:val('left_date'),private_arrangement_area:val('private_arrangement_area'),moh_hotel_name:val('moh_hotel_name'),moh_hotel_area:val('moh_hotel_area'),moh_hotel_start_date:val('moh_hotel_start_date'),moh_hotel_expected_end_date:val('moh_hotel_expected_end_date'),preferred_contact_method:val('preferred_contact_method'),status:state.status}}
+async function saveNext(){if(!state.current)return;await api('/api/admin/aja-reconciliation/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload('save_next'))});await load(state.status)}
+async function markQuick(mode){if(!state.current)return;const p=payload(mode);if(mode==='no_answer')p.call_result='No Answer';if(mode==='call_later')p.call_result='Asked to Call Later';await api('/api/admin/aja-reconciliation/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});await load(state.status)}
+async function skipNext(){if(!state.current)return;await api('/api/admin/aja-reconciliation/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({roster_id:state.current.id,mode:'skip',status:state.status})});await load(state.status)}
+function select(id){state.current=(state.items||[]).find(x=>Number(x.id)===Number(id));renderCurrent(state.current)}
+async function assignSelected(){const ids=[...document.querySelectorAll('[data-rid]:checked')].map(x=>Number(x.dataset.rid));if(!ids.length){alert('Select one or more records first.');return}const assigned_to=prompt('Assign selected records to username');if(!assigned_to)return;const due_date=prompt('Due date (YYYY-MM-DD), optional')||'';const note=prompt('Assignment note, optional')||'';await api('/api/admin/aja-reconciliation/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({roster_ids:ids,assigned_to,due_date,note})});await load(state.status)}
+async function load(status){state.status=status||state.status;renderTabs();try{const p=new URLSearchParams({status:state.status,limit:'40'});if(restricted)p.set('assigned_to','me');const d=await api('/api/admin/aja-reconciliation/queue?'+p.toString());state.items=d.items||[];state.current=d.current||null;renderKpis(d.summary||{});renderRows();renderCurrent(state.current)}catch(e){document.getElementById('currentCard').innerHTML='<div class="cwa-empty">'+esc(e.message)+'</div>';}}
+renderTabs();load('pending');
+</script>
+</body>
+</html>
