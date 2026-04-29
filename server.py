@@ -1556,6 +1556,7 @@ def init_db():
             ('case_reference', "TEXT DEFAULT ''"),
             ('recipient_user_id', "TEXT DEFAULT ''"),
             ('event_type', "TEXT DEFAULT ''"),
+            ('assigned_staff_mobile_included', 'INTEGER DEFAULT 0'),
         ]:
             if col in existing_notification_cols:
                 continue
@@ -1712,6 +1713,7 @@ def init_db():
         ('department', "TEXT DEFAULT ''"),
         ('is_active', 'INTEGER DEFAULT 1'),
         ('show_contact_to_applicant', 'INTEGER DEFAULT 0'),
+        ('show_contact_to_applicant_explicit', 'INTEGER DEFAULT 0'),
     ]:
         try:
             db.execute(f"ALTER TABLE users ADD COLUMN {col} {coltype}")
@@ -1720,7 +1722,6 @@ def init_db():
             pass
     try:
         db.execute("UPDATE users SET is_active = 1 WHERE is_active IS NULL")
-        db.execute("UPDATE users SET show_contact_to_applicant = 1 WHERE role = 'field_staff' AND COALESCE(show_contact_to_applicant, 0) = 0")
         db.commit()
     except Exception:
         pass
@@ -4027,16 +4028,23 @@ FACILITY_CONFIRMATION_STATUSES = {
     'Reconciliation Required', 'Confirmed', 'Not Applicable'
 }
 FACILITY_STAFF_ROLES = {
-    'admin', 'operator', 'operator_special', 'welfare_officer',
-    'inspector_field', 'legal_officer', 'death_case_officer',
-    'community_desk', 'senior_review', 'ambassador_review', 'field_staff'
+    'admin', 'operator', 'operator_special',
+    'community_desk', 'field_staff', 'inspector_field', 'staff_opf'
 }
-RESTRICTED_STAFF_ROLES = {'field_staff', 'nadra_staff', 'passport_staff'}
-LIMITED_STAFF_CASE_ROLES = RESTRICTED_STAFF_ROLES | {'community_desk', 'inspector_field'}
+FULL_SYSTEM_ROLES = {'admin', 'operator', 'operator_special'}
+COMMUNITY_DESK_ROLES = {'community_desk'}
+LIMITED_ASSIGNED_CASE_ROLES = {
+    'field_staff', 'staff_opf', 'nadra_staff', 'passport_staff', 'inspector_field',
+    'legal_officer', 'death_case_officer', 'welfare_officer',
+    'senior_review', 'ambassador_review',
+}
+RESTRICTED_STAFF_ROLES = LIMITED_ASSIGNED_CASE_ROLES
+LIMITED_STAFF_CASE_ROLES = LIMITED_ASSIGNED_CASE_ROLES | COMMUNITY_DESK_ROLES
 AJA_RECONCILIATION_PAGE_ROLES = {
-    'admin', 'operator', 'welfare_officer', 'community_desk', 'inspector_field', 'field_staff'
+    *FULL_SYSTEM_ROLES, 'community_desk', 'welfare_officer', 'inspector_field',
+    'field_staff', 'staff_opf'
 }
-AJA_RECONCILIATION_ADMIN_ROLES = {'admin', 'operator', 'welfare_officer', 'community_desk'}
+AJA_RECONCILIATION_ADMIN_ROLES = FULL_SYSTEM_ROLES | COMMUNITY_DESK_ROLES
 AJA_RECONCILIATION_OUTCOMES = {
     'Confirmed Staying at AJA Care',
     'Left AJA Care',
@@ -4052,6 +4060,111 @@ STAFF_LIMITED_STATUSES = {
     'Seen by Staff', 'In Progress', 'Information Requested',
     'Follow-up Completed', 'Unable to Contact', 'Resolved by Staff'
 }
+
+
+def _role_name(role):
+    return (role or '').strip()
+
+
+def is_full_admin_role(role):
+    return _role_name(role) in FULL_SYSTEM_ROLES
+
+
+def is_community_desk_role(role):
+    return _role_name(role) in COMMUNITY_DESK_ROLES
+
+
+def is_limited_staff_role(role):
+    return _role_name(role) in LIMITED_ASSIGNED_CASE_ROLES
+
+
+def _default_redirect_for_role(role):
+    role = _role_name(role)
+    if is_full_admin_role(role):
+        return '/admin/dashboard'
+    if is_community_desk_role(role):
+        return '/admin/community-welfare'
+    if role == 'fee_collector':
+        return '/fee-collection'
+    if role == 'iraq_cwa':
+        return '/dashboard'
+    return '/staff/my-cases'
+
+
+def _staff_base_path_allowed(path):
+    if path in ('/staff/my-cases', '/logout', '/login'):
+        return True
+    if path.startswith('/static/'):
+        return True
+    if path.startswith('/api/staff/my-cases'):
+        return True
+    return False
+
+
+def can_access_admin_route(role, path):
+    role = _role_name(role)
+    path = (path or '').strip() or '/'
+    if path.startswith('/static/') or path in ('/logout', '/login'):
+        return True
+    if is_full_admin_role(role):
+        return True
+    if role == 'fee_collector':
+        return (
+            path in ('/fee-collection', '/dashboard')
+            or path.startswith('/api/fee-')
+            or path.startswith('/api/office-expense')
+        )
+    if role == 'iraq_cwa':
+        return path == '/dashboard' or path.startswith('/api/iraq')
+    if is_community_desk_role(role):
+        allowed_pages = {
+            '/admin/community-welfare',
+            '/admin/nurses',
+            '/admin/welfare-cases',
+            '/admin/my-cases',
+            '/admin/aja-reconciliation',
+            '/staff/my-cases',
+        }
+        if path in allowed_pages:
+            return True
+        return can_access_api_route(role, path) if path.startswith('/api/') else False
+    if _staff_base_path_allowed(path):
+        return True
+    if path == '/admin/aja-reconciliation' and role in AJA_RECONCILIATION_PAGE_ROLES:
+        return True
+    if path.startswith('/api/admin/aja-reconciliation/') and role in AJA_RECONCILIATION_PAGE_ROLES:
+        return True
+    return False
+
+
+def can_access_api_route(role, path):
+    role = _role_name(role)
+    path = (path or '').strip()
+    if not path.startswith('/api/'):
+        return can_access_admin_route(role, path)
+    if is_full_admin_role(role):
+        return True
+    if role == 'fee_collector':
+        return path.startswith('/api/fee-') or path.startswith('/api/office-expense')
+    if role == 'iraq_cwa':
+        return path.startswith('/api/iraq')
+    if is_community_desk_role(role):
+        allowed_prefixes = (
+            '/api/admin/community-welfare/',
+            '/api/admin/nurses/',
+            '/api/admin/welfare-cases',
+            '/api/admin/welfare-users',
+            '/api/admin/notification-counts',
+            '/api/admin/notifications',
+            '/api/admin/aja-reconciliation/',
+            '/api/staff/my-cases',
+        )
+        return any(path.startswith(prefix) for prefix in allowed_prefixes)
+    if path.startswith('/api/staff/my-cases'):
+        return True
+    if path.startswith('/api/admin/aja-reconciliation/') and role in AJA_RECONCILIATION_PAGE_ROLES:
+        return True
+    return False
 
 
 def _row_to_dict(row):
@@ -4652,32 +4765,43 @@ def send_notification_email(to_email, subject, body_text, body_html=None):
 
 def _insert_notification_log(case_type, case_reference, recipient_type, recipient_name, recipient_email,
                              recipient_user_id, channel, event_type, subject, message_body,
-                             status, error=''):
+                             status, error='', assigned_staff_mobile_included=0):
     try:
         db = get_db()
         try:
+            cols = _table_columns(db, 'notification_log')
+            column_names = [
+                'case_type', 'case_reference', 'recipient_type', 'recipient_name', 'recipient_email',
+                'recipient_user_id', 'recipient_reference', 'channel', 'event_type', 'message_type',
+                'subject', 'message_body', 'status', 'error', 'sent_at'
+            ]
+            values = [
+                case_type or '',
+                case_reference or '',
+                recipient_type or '',
+                recipient_name or '',
+                recipient_email or '',
+                recipient_user_id or '',
+                case_reference or '',
+                channel or 'email',
+                event_type or '',
+                event_type or '',
+                subject or '',
+                message_body or '',
+                status or '',
+                error or '',
+                None,
+            ]
+            if (status or '') == 'sent':
+                column_names[-1] = 'sent_at'
+                values[-1] = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            if 'assigned_staff_mobile_included' in cols:
+                column_names.append('assigned_staff_mobile_included')
+                values.append(1 if assigned_staff_mobile_included else 0)
+            placeholders = ', '.join(['?'] * len(column_names))
             db.execute(
-                """INSERT INTO notification_log
-                   (case_type, case_reference, recipient_type, recipient_name, recipient_email, recipient_user_id,
-                    recipient_reference, channel, event_type, message_type, subject, message_body, status, error, sent_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END)""",
-                [
-                    case_type or '',
-                    case_reference or '',
-                    recipient_type or '',
-                    recipient_name or '',
-                    recipient_email or '',
-                    recipient_user_id or '',
-                    case_reference or '',
-                    channel or 'email',
-                    event_type or '',
-                    event_type or '',
-                    subject or '',
-                    message_body or '',
-                    status or '',
-                    error or '',
-                    status or '',
-                ]
+                f"INSERT INTO notification_log ({', '.join(column_names)}) VALUES ({placeholders})",
+                values
             )
             db.commit()
         finally:
@@ -5009,12 +5133,45 @@ def _notification_staff_lookup(username):
     db = get_db()
     try:
         row = db.execute(
-            "SELECT id, username, COALESCE(full_name, username) AS display_name, COALESCE(email,'') AS email FROM users WHERE username = ? LIMIT 1",
+            """SELECT id, username, COALESCE(full_name, username) AS display_name,
+                      COALESCE(email,'') AS email, COALESCE(mobile_number,'') AS mobile_number,
+                      COALESCE(designation,'') AS designation, COALESCE(department,'') AS department,
+                      COALESCE(role,'') AS role, show_contact_to_applicant,
+                      COALESCE(show_contact_to_applicant_explicit, 0) AS show_contact_to_applicant_explicit
+               FROM users WHERE username = ? LIMIT 1""",
             [uname]
         ).fetchone()
         return dict(row) if row else None
     finally:
         db.close()
+
+
+def can_show_assigned_staff_contact(user):
+    user = user or {}
+    role = (user.get("role") or "").strip()
+    show_raw = user.get("show_contact_to_applicant")
+    explicit_raw = user.get("show_contact_to_applicant_explicit")
+    show_text = str(show_raw if show_raw is not None else "").strip().lower()
+    explicit_flag = str(explicit_raw if explicit_raw is not None else "").strip().lower() in ("1", "true", "yes", "on")
+    show_flag = show_text in ("1", "true", "yes", "on")
+
+    default_public_roles = {"field_staff", "community_desk", "inspector_field", "staff_opf"}
+    if role in default_public_roles:
+        if explicit_flag and show_text in ("0", "false", "no", "off"):
+            return False
+        return True
+
+    if role in ("nadra_staff", "passport_staff"):
+        return show_flag
+
+    officer_roles = {
+        "admin", "operator", "operator_special", "welfare_officer", "legal_officer",
+        "death_case_officer", "senior_review", "ambassador_review"
+    }
+    if role in officer_roles:
+        return show_flag
+
+    return show_flag
 
 
 def _assignment_public_note_for_staff(username):
@@ -5024,21 +5181,38 @@ def _assignment_public_note_for_staff(username):
     db = get_db()
     try:
         row = db.execute("""SELECT username, role, COALESCE(full_name, username) AS full_name,
+                                   COALESCE(email, '') AS email,
                                    COALESCE(mobile_number, '') AS mobile_number,
-                                   COALESCE(show_contact_to_applicant, 0) AS show_contact_to_applicant
+                                   COALESCE(designation, '') AS designation,
+                                   show_contact_to_applicant,
+                                   COALESCE(show_contact_to_applicant_explicit, 0) AS show_contact_to_applicant_explicit
                             FROM users WHERE username = ? LIMIT 1""", [uname]).fetchone()
         if not row:
             return "The assigned officer/staff member may contact you if further information is required."
-        role = row['role'] or ''
-        mobile = row['mobile_number'] or ''
-        show_mobile = bool(mobile and (role == 'field_staff' or int(row['show_contact_to_applicant'] or 0) == 1))
-        if show_mobile:
+        staff = dict(row)
+        role = staff.get('role') or ''
+        mobile = staff.get('mobile_number') or ''
+        designation = staff.get('designation') or role.replace('_', ' ').title() or 'Assigned Staff'
+        name = staff.get('full_name') or staff.get('username') or 'Assigned Staff'
+        email = staff.get('email') or ''
+        if mobile and can_show_assigned_staff_contact(staff):
+            email_line = f"\nEmail: {email}" if email else ""
             return (
                 "Your request has been assigned for follow-up. The assigned staff member may contact you "
-                "to obtain further information. You may also contact them during working hours quoting your "
-                f"reference number. Assigned staff contact: {mobile}"
+                "to obtain further information or to process your request. You may also contact the assigned "
+                "staff member during working hours, quoting your reference number.\n\n"
+                "Assigned Staff:\n"
+                f"Name: {name}\n"
+                f"Designation: {designation}"
+                f"{email_line}\n"
+                f"Mobile/WhatsApp: {mobile}"
             )
-        return "The assigned officer/staff member may contact you if further information is required."
+        return (
+            "Assigned Officer/Staff:\n"
+            f"Name: {name}\n"
+            f"Designation: {designation}\n\n"
+            "The assigned officer/staff member may contact you if further information is required."
+        )
     except Exception:
         return "The assigned officer/staff member may contact you if further information is required."
     finally:
@@ -5118,16 +5292,17 @@ def notify_case_event(case_type, case_reference, event_type, applicant_email=Non
         if event_type in applicant_events:
             to_email = (applicant_email or '').strip()
             subject, body = _applicant_payload()
+            mobile_included = 1 if event_type == 'assigned_for_followup' and 'Mobile/WhatsApp:' in body else 0
             if not to_email:
-                _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, '', '', 'email', event_type, subject, body, 'skipped_no_email', 'missing_applicant_email')
+                _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, '', '', 'email', event_type, subject, body, 'skipped_no_email', 'missing_applicant_email', mobile_included)
             else:
                 send_res = send_notification_email(to_email, subject, body)
                 if send_res.get('ok'):
-                    _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, 'sent', '')
+                    _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, 'sent', '', mobile_included)
                 else:
                     reason = send_res.get('reason') or 'send_failed'
                     status_key = 'skipped_smtp_missing' if reason == 'smtp_not_configured' else 'failed'
-                    _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, status_key, reason)
+                    _insert_notification_log(case_type, case_reference, 'applicant', applicant_name, to_email, '', 'email', event_type, subject, body, status_key, reason, mobile_included)
 
         if event_type in staff_events:
             staff = _notification_staff_lookup(staff_username) if staff_username else None
@@ -7637,11 +7812,11 @@ WELFARE_STATUSES = {
 }
 WELFARE_PRIORITIES = {'Normal', 'High', 'Urgent'}
 WELFARE_ESCALATION_LEVELS = {'normal', 'senior_review', 'ambassador_review'}
-WELFARE_ADMIN_ROLES = {'admin', 'operator', 'operator_special'}
+WELFARE_ADMIN_ROLES = FULL_SYSTEM_ROLES | COMMUNITY_DESK_ROLES
 WELFARE_CASE_ACCESS_ROLES = {
     'admin', 'operator', 'operator_special', 'welfare_officer', 'inspector_field', 'legal_officer',
     'death_case_officer', 'community_desk', 'senior_review', 'ambassador_review',
-    'field_staff', 'nadra_staff', 'passport_staff'
+    'field_staff', 'staff_opf', 'nadra_staff', 'passport_staff'
 }
 WELFARE_ASSIGNABLE_ROLES = tuple(sorted(WELFARE_CASE_ACCESS_ROLES))
 
@@ -7969,7 +8144,8 @@ def api_admin_welfare_users():
 
 
 def api_admin_notifications(params, user):
-    if (user or {}).get('role') not in ('admin', 'operator', 'operator_special', 'welfare'):
+    role = (user or {}).get('role')
+    if not (is_full_admin_role(role) or is_community_desk_role(role)):
         return {'success': False, 'notifications': [], 'items': [], 'error': 'Unauthorized'}
     db = None
     try:
@@ -7981,6 +8157,13 @@ def api_admin_notifications(params, user):
             return {'success': True, 'notifications': [], 'items': [], 'total': 0}
         where = ['1=1']
         vals = []
+        if is_community_desk_role(role):
+            allowed_case_types = (
+                'welfare', 'general_welfare', 'locating_assistance', 'community_feedback',
+                'nurse', 'nurse_complaint', 'facility', 'stay_arrangement'
+            )
+            where.append(f"COALESCE(case_type, '') IN ({','.join(['?'] * len(allowed_case_types))})")
+            vals.extend(allowed_case_types)
         for field in ('status', 'event_type', 'case_type'):
             value = _clean_text((params or {}).get(field), 120)
             if value:
@@ -8042,7 +8225,7 @@ def api_admin_welfare_assign(data, user):
         note = _clean_text(data.get('note'), 2000)
         if not assigned_to:
             return {'success': False, 'error': 'Assignee is required'}
-        assignee = db.execute("SELECT username, full_name, role, COALESCE(department,'') AS department FROM users WHERE username = ?", [assigned_to]).fetchone()
+        assignee = db.execute("SELECT username, full_name, role, COALESCE(email,'') AS email, COALESCE(department,'') AS department FROM users WHERE username = ?", [assigned_to]).fetchone()
         if not assignee:
             return {'success': False, 'error': 'Assignee not found'}
         assigned_role = assigned_role or assignee['role'] or ''
@@ -9234,6 +9417,34 @@ def _staff_department_match(user, item):
     return True
 
 
+def _staff_module_allowed_for_role(user, item):
+    role = ((user or {}).get('role') or '').strip()
+    module = (item.get('module') or '').strip()
+    haystack = ' '.join(str(item.get(k) or '') for k in (
+        'module', 'case_type', 'category', 'subject', 'details', 'latest_note_summary',
+        'assigned_department'
+    )).lower()
+    if role in COMMUNITY_DESK_ROLES:
+        return module in ('welfare', 'nurse_complaint', 'facility_reconciliation')
+    if role == 'legal_officer':
+        return module == 'legal'
+    if role == 'death_case_officer':
+        return module == 'death'
+    if role == 'welfare_officer':
+        return module == 'welfare'
+    if role == 'staff_opf':
+        return module in ('welfare', 'legal', 'nurse_complaint')
+    if role in ('field_staff', 'inspector_field'):
+        return module in ('facility_reconciliation', 'welfare', 'nurse_complaint')
+    if role == 'nadra_staff':
+        return module in ('welfare', 'legal', 'nurse_complaint')
+    if role == 'passport_staff':
+        return module in ('welfare', 'legal', 'nurse_complaint')
+    if role in ('senior_review', 'ambassador_review'):
+        return module == 'welfare'
+    return role in WELFARE_CASE_ACCESS_ROLES
+
+
 def _staff_item(module, source_id, reference, case_type='', applicant_name='', phone='', whatsapp='', email='',
                 subject='', status='', priority='', assigned_at='', due_date='', latest_note_summary='',
                 action_required='', assigned_department='', category='', details=''):
@@ -9351,7 +9562,7 @@ def api_staff_my_cases(params, user):
                 d.get('assigned_at'), d.get('due_date'), d.get('internal_notes') or d.get('public_response'),
                 '', d.get('assigned_department'), 'Death Case', d.get('description')
             ))
-        items = [i for i in items if _staff_department_match(user, i)]
+        items = [i for i in items if _staff_module_allowed_for_role(user, i) and _staff_department_match(user, i)]
         status_filter = _clean_text(params.get('status'), 60).lower()
         if status_filter:
             if status_filter == 'pending':
@@ -9417,7 +9628,7 @@ def _staff_load_case(db, user, module, ident):
         return None, [], {'success': False, 'error': 'Forbidden or not found'}
     record = dict(row)
     probe = _staff_item(module, record.get('id'), record.get('case_reference') or record.get('complaint_id') or record.get('roster_reference') or record.get('reference_id'), details=json.dumps(record, default=str), assigned_department=record.get('assigned_department') or '')
-    if not _staff_department_match(user, probe):
+    if not _staff_module_allowed_for_role(user, probe) or not _staff_department_match(user, probe):
         return None, [], {'success': False, 'error': 'Forbidden'}
     return record, actions, None
 
@@ -9463,7 +9674,7 @@ def api_staff_case_action(data, user, action):
             return err
         role = user.get('role') or ''
         visible_requested = str(data.get('visible_to_applicant') or data.get('visible_to_nurse') or '').lower() in ('1', 'true', 'yes', 'on')
-        visible = visible_requested and role in ('field_staff', 'community_desk', 'inspector_field')
+        visible = visible_requested and role in ('field_staff', 'community_desk', 'inspector_field', 'staff_opf')
         reference = record.get('case_reference') or record.get('complaint_id') or record.get('roster_reference') or record.get('reference_id') or str(record.get('id'))
         old_status = record.get('status') or record.get('complaint_status') or record.get('reconciliation_status') or ''
         new_status = requested_status
@@ -10136,6 +10347,7 @@ def api_admin_community_welfare_summary(user):
             except Exception:
                 return 0
         username = (user or {}).get('user', '') or ''
+        community_scope = is_community_desk_role((user or {}).get('role', ''))
         # Per-module counts (degrade to 0 if table missing)
         nurse_complaints_total = _count("SELECT COUNT(*) c FROM nurse_complaints")
         nurse_complaints_pending = _count("SELECT COUNT(*) c FROM nurse_complaints WHERE complaint_status IN ('Submitted','Seen','Pending')")
@@ -10146,23 +10358,27 @@ def api_admin_community_welfare_summary(user):
         nurse_complaints_urgent = _count("SELECT COUNT(*) c FROM nurse_complaints WHERE LOWER(IFNULL(priority,''))='urgent' AND complaint_status NOT IN ('Resolved','Closed')")
         nurse_complaints_mine = _count("SELECT COUNT(*) c FROM nurse_complaints WHERE assigned_to_username=? AND complaint_status NOT IN ('Resolved','Closed')", (username,))
 
-        legal_total = _count("SELECT COUNT(*) c FROM legal_case_requests")
-        legal_pending = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('Submitted','Seen by Admin')")
-        legal_progress = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('Assigned','In Progress')")
-        legal_resolved_week = _count(
-            "SELECT COUNT(*) c FROM legal_case_requests WHERE status='Resolved' "
-            "AND date(IFNULL(updated_at,created_at)) >= date('now','-7 days')")
-        legal_urgent = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
-        legal_mine = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE assigned_to_username=? AND status NOT IN ('Resolved','Closed')", (username,))
+        if community_scope:
+            legal_total = legal_pending = legal_progress = legal_resolved_week = legal_urgent = legal_mine = 0
+            death_total = death_pending = death_progress = death_resolved_week = death_urgent = death_mine = 0
+        else:
+            legal_total = _count("SELECT COUNT(*) c FROM legal_case_requests")
+            legal_pending = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('Submitted','Seen by Admin')")
+            legal_progress = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('Assigned','In Progress')")
+            legal_resolved_week = _count(
+                "SELECT COUNT(*) c FROM legal_case_requests WHERE status='Resolved' "
+                "AND date(IFNULL(updated_at,created_at)) >= date('now','-7 days')")
+            legal_urgent = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
+            legal_mine = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE assigned_to_username=? AND status NOT IN ('Resolved','Closed')", (username,))
 
-        death_total = _count("SELECT COUNT(*) c FROM death_case_requests")
-        death_pending = _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('Submitted','Seen by Admin')")
-        death_progress = _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('Assigned','In Progress')")
-        death_resolved_week = _count(
-            "SELECT COUNT(*) c FROM death_case_requests WHERE status='Resolved' "
-            "AND date(IFNULL(updated_at,created_at)) >= date('now','-7 days')")
-        death_urgent = _count("SELECT COUNT(*) c FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
-        death_mine = _count("SELECT COUNT(*) c FROM death_case_requests WHERE assigned_to_username=? AND status NOT IN ('Resolved','Closed')", (username,))
+            death_total = _count("SELECT COUNT(*) c FROM death_case_requests")
+            death_pending = _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('Submitted','Seen by Admin')")
+            death_progress = _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('Assigned','In Progress')")
+            death_resolved_week = _count(
+                "SELECT COUNT(*) c FROM death_case_requests WHERE status='Resolved' "
+                "AND date(IFNULL(updated_at,created_at)) >= date('now','-7 days')")
+            death_urgent = _count("SELECT COUNT(*) c FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' AND status NOT IN ('Resolved','Closed')")
+            death_mine = _count("SELECT COUNT(*) c FROM death_case_requests WHERE assigned_to_username=? AND status NOT IN ('Resolved','Closed')", (username,))
 
         # Build urgent_list from the three tables (top 6 most recent urgent unresolved)
         urgent_list = []
@@ -10178,29 +10394,30 @@ def api_admin_community_welfare_summary(user):
                 d = dict(r); d['module'] = 'nurses'; urgent_list.append(d)
         except Exception:
             pass
-        try:
-            for r in db.execute(
-                "SELECT reference_id AS reference, full_name AS applicant, "
-                "case_type AS type, status AS status, "
-                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
-                "FROM legal_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' "
-                "AND status NOT IN ('Resolved','Closed') "
-                "ORDER BY IFNULL(updated_at,created_at) DESC LIMIT 3").fetchall():
-                d = dict(r); d['module'] = 'legal'; urgent_list.append(d)
-        except Exception:
-            pass
-        try:
-            for r in db.execute(
-                "SELECT reference_id AS reference, deceased_name AS applicant, "
-                "'Death Case' AS type, status AS status, "
-                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
-                "FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' "
-                "AND status NOT IN ('Resolved','Closed') "
-                "ORDER BY IFNULL(updated_at,created_at) DESC LIMIT 3").fetchall():
-                d = dict(r); d['module'] = 'death'; urgent_list.append(d)
-        except Exception:
-            pass
-
+        if not community_scope:
+            try:
+                for r in db.execute(
+                    "SELECT reference_id AS reference, full_name AS applicant, "
+                    "case_type AS type, status AS status, "
+                    "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                    "FROM legal_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' "
+                    "AND status NOT IN ('Resolved','Closed') "
+                    "ORDER BY IFNULL(updated_at,created_at) DESC LIMIT 3").fetchall():
+                    d = dict(r); d['module'] = 'legal'; urgent_list.append(d)
+            except Exception:
+                pass
+        if not community_scope:
+            try:
+                for r in db.execute(
+                    "SELECT reference_id AS reference, deceased_name AS applicant, "
+                    "'Death Case' AS type, status AS status, "
+                    "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                    "FROM death_case_requests WHERE LOWER(IFNULL(priority,''))='urgent' "
+                    "AND status NOT IN ('Resolved','Closed') "
+                    "ORDER BY IFNULL(updated_at,created_at) DESC LIMIT 3").fetchall():
+                    d = dict(r); d['module'] = 'death'; urgent_list.append(d)
+            except Exception:
+                pass
         return {
             'success': True,
             'user_display': (user or {}).get('user', 'Officer'),
@@ -10227,11 +10444,12 @@ def api_admin_community_welfare_summary(user):
         db.close()
 
 
-def api_admin_community_welfare_recent(limit=10):
+def api_admin_community_welfare_recent(limit=10, user=None):
     """Combined recent activity feed across nurses/legal/death."""
     db = get_db()
     try:
         rows = []
+        community_scope = is_community_desk_role((user or {}).get('role', ''))
         try:
             for r in db.execute(
                 "SELECT complaint_id AS reference, nurse_full_name AS applicant, "
@@ -10243,26 +10461,27 @@ def api_admin_community_welfare_recent(limit=10):
                 d = dict(r); d['module'] = 'nurses'; rows.append(d)
         except Exception:
             pass
-        try:
-            for r in db.execute(
-                "SELECT reference_id AS reference, full_name AS applicant, "
-                "case_type AS type, status AS status, "
-                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
-                "FROM legal_case_requests ORDER BY IFNULL(updated_at,created_at) DESC LIMIT ?",
-                (limit,)).fetchall():
-                d = dict(r); d['module'] = 'legal'; rows.append(d)
-        except Exception:
-            pass
-        try:
-            for r in db.execute(
-                "SELECT reference_id AS reference, deceased_name AS applicant, "
-                "'Death Case' AS type, status AS status, "
-                "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
-                "FROM death_case_requests ORDER BY IFNULL(updated_at,created_at) DESC LIMIT ?",
-                (limit,)).fetchall():
-                d = dict(r); d['module'] = 'death'; rows.append(d)
-        except Exception:
-            pass
+        if not community_scope:
+            try:
+                for r in db.execute(
+                    "SELECT reference_id AS reference, full_name AS applicant, "
+                    "case_type AS type, status AS status, "
+                    "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                    "FROM legal_case_requests ORDER BY IFNULL(updated_at,created_at) DESC LIMIT ?",
+                    (limit,)).fetchall():
+                    d = dict(r); d['module'] = 'legal'; rows.append(d)
+            except Exception:
+                pass
+            try:
+                for r in db.execute(
+                    "SELECT reference_id AS reference, deceased_name AS applicant, "
+                    "'Death Case' AS type, status AS status, "
+                    "IFNULL(updated_at,created_at) AS time, assigned_to_username AS assigned "
+                    "FROM death_case_requests ORDER BY IFNULL(updated_at,created_at) DESC LIMIT ?",
+                    (limit,)).fetchall():
+                    d = dict(r); d['module'] = 'death'; rows.append(d)
+            except Exception:
+                pass
         # Sort merged feed by time desc and trim
         def _key(r):
             return r.get('time') or ''
@@ -10284,8 +10503,9 @@ def api_admin_notification_counts(user):
 
         role = (user or {}).get('role') or ''
         username = (user or {}).get('user') or ''
-        can_welfare = role in WELFARE_CASE_ACCESS_ROLES or role in ('admin', 'operator', 'operator_special', 'welfare')
-        can_facility = _facility_user_can_access(user)
+        community_scope = is_community_desk_role(role)
+        can_welfare = role in WELFARE_CASE_ACCESS_ROLES or is_full_admin_role(role)
+        can_facility = _facility_user_can_access(user) and not community_scope
 
         nurses = (
             _count("SELECT COUNT(*) c FROM nurse_registrations WHERE registration_status IN ('Pending', 'Pending Review', 'Pending Review by Embassy')")
@@ -10296,14 +10516,14 @@ def api_admin_notification_counts(user):
             + _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND notice_period_start_date != '' AND date(notice_period_start_date) <= date('now') AND current_status NOT IN ('Leaving Notice Submitted', 'Left Facility', 'Closed / Archived', 'Inactive')")
             + _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND reconciliation_status = 'Reconciliation Required'")
         )
-        legal_cases = _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('New', 'Submitted', 'Under Review', 'Seen by Admin') OR COALESCE(assigned_to_username, '') = ''")
-        death_cases = _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('New', 'Urgent Review', 'Documentation Pending', 'Submitted', 'Seen by Admin') OR COALESCE(assigned_to_username, '') = ''")
+        legal_cases = 0 if community_scope else _count("SELECT COUNT(*) c FROM legal_case_requests WHERE status IN ('New', 'Submitted', 'Under Review', 'Seen by Admin') OR COALESCE(assigned_to_username, '') = ''")
+        death_cases = 0 if community_scope else _count("SELECT COUNT(*) c FROM death_case_requests WHERE status IN ('New', 'Urgent Review', 'Documentation Pending', 'Submitted', 'Seen by Admin') OR COALESCE(assigned_to_username, '') = ''")
         welfare_cases = _count("SELECT COUNT(*) c FROM welfare_cases WHERE status IN ('New', 'Assigned', 'Field Verification Required', 'Awaiting Applicant', 'Awaiting Requester Response') AND status NOT IN ('Resolved', 'Closed')") if can_welfare else 0
         my_cases = _count(
             "SELECT COUNT(*) c FROM welfare_cases WHERE assigned_to = ? AND status NOT IN ('Resolved', 'Closed') AND (COALESCE(action_required, '') != '' OR (COALESCE(due_date, '') != '' AND date(due_date) < date('now')))",
             (username,)
         ) if (can_welfare and username) else 0
-        ambassador_review = _count("SELECT COUNT(*) c FROM welfare_cases WHERE escalation_level = 'ambassador_review' AND status NOT IN ('Resolved', 'Closed')") if can_welfare else 0
+        ambassador_review = 0 if community_scope else (_count("SELECT COUNT(*) c FROM welfare_cases WHERE escalation_level = 'ambassador_review' AND status NOT IN ('Resolved', 'Closed')") if can_welfare else 0)
         facility_occupancy = (
             _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND confirmation_status = 'Pending Nurse Confirmation'")
             + _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND notice_period_start_date != '' AND date(notice_period_start_date) <= date('now') AND current_status NOT IN ('Leaving Notice Submitted', 'Left Facility', 'Closed / Archived', 'Inactive')")
@@ -10378,23 +10598,10 @@ def get_session(cookie_str):
     return None
 
 def _is_restricted_staff_user(user):
-    return bool(user) and (user.get('role') or '') in RESTRICTED_STAFF_ROLES
+    return bool(user) and is_limited_staff_role(user.get('role') or '')
 
 def _restricted_staff_path_allowed(path):
-    allowed_exact = {
-        '/staff/my-cases',
-        '/admin/aja-reconciliation',
-        '/logout',
-    }
-    if path in allowed_exact:
-        return True
-    if path.startswith('/static/'):
-        return True
-    allowed_api_prefixes = (
-        '/api/staff/my-cases',
-        '/api/admin/aja-reconciliation/',
-    )
-    return any(path.startswith(prefix) for prefix in allowed_api_prefixes)
+    return _staff_base_path_allowed(path) or path == '/admin/aja-reconciliation' or path.startswith('/api/admin/aja-reconciliation/')
 
 def _user_is_active(row_or_dict):
     try:
@@ -15574,12 +15781,15 @@ def api_create_user(data):
             db.close()
             return {'success': False, 'error': 'Invalid role'}
         show_contact = data.get('show_contact_to_applicant')
-        if show_contact is None:
-            show_contact = 1 if role == 'field_staff' else 0
+        explicit_contact = 0
+        if show_contact in (None, ''):
+            show_contact = 1 if role in ('field_staff', 'community_desk', 'inspector_field', 'staff_opf') else 0
+        else:
+            explicit_contact = 1
         db.execute("""INSERT INTO users
                       (username, password_hash, password_plain, role, full_name, email, mobile_number,
-                       designation, department, show_contact_to_applicant, is_active)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       designation, department, show_contact_to_applicant, show_contact_to_applicant_explicit, is_active)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                    (
                        data['username'].strip(),
                        hash_pw(data['password']),
@@ -15591,6 +15801,7 @@ def api_create_user(data):
                        (data.get('designation') or '').strip(),
                        (data.get('department') or '').strip(),
                        1 if str(show_contact).lower() in ('1', 'true', 'yes', 'on') else 0,
+                       explicit_contact,
                        0 if str(data.get('is_active', 1)).lower() in ('0', 'false', 'no', 'inactive') else 1,
                    ))
         db.commit(); db.close()
@@ -20267,13 +20478,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not user:
             return 'https://cwakuwait.com'
         role = user.get('role') or ''
-        if role in RESTRICTED_STAFF_ROLES:
-            return '/staff/my-cases'
-        if role == 'fee_collector':
-            return '/fee-collection'
-        if role == 'iraq_cwa':
-            return '/dashboard'
-        return '/admin/dashboard'
+        return _default_redirect_for_role(role)
 
     def render_template(self, template_name: str):
         template_path = Path(__file__).resolve().parent / 'templates' / template_name
@@ -20321,11 +20526,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return None
         path = urlparse(getattr(self, 'path', '')).path
-        if _is_restricted_staff_user(user) and not _restricted_staff_path_allowed(path):
+        role = user.get('role') or ''
+        allowed = can_access_api_route(role, path) if path.startswith('/api/') else can_access_admin_route(role, path)
+        if not allowed:
             if path.startswith('/api/'):
-                self.send_json({'success': False, 'error': 'Forbidden. Assigned cases only.'}, 403)
+                self.send_json({'success': False, 'error': 'Access denied'}, 403)
             else:
-                self.send_redirect('/staff/my-cases')
+                self.send_redirect(_default_redirect_for_role(role))
             return None
         return user
 
@@ -20655,21 +20862,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/admin/community-welfare':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            if not self.render_template('admin_community_welfare.html'):
+            if not self.render_template_with_context('admin_community_welfare.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
                 self.send_html(ADMIN_COMMUNITY_WELFARE_FALLBACK_PAGE)
         elif path == '/admin/nurses':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            if not self.render_template('admin_nurses.html'):
+            if not self.render_template_with_context('admin_nurses.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
                 self.send_html(ADMIN_NURSES_PAGE)
         elif path == '/admin/nurses/my-complaints':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_html(ADMIN_NURSES_PAGE)
         elif path == '/admin/facility-roster':
@@ -20775,23 +20982,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/community-welfare/summary':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_community_welfare_summary(user))
         elif path == '/api/admin/community-welfare/recent':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 limit = max(1, min(50, int(params.get('limit', 10))))
             except Exception:
                 limit = 10
-            self.send_json(api_admin_community_welfare_recent(limit=limit))
+            self.send_json(api_admin_community_welfare_recent(limit=limit, user=user))
         elif path == '/api/admin/notification-counts':
             user = self.require_auth()
             if not user: return
-            if user.get('role') not in ('admin', 'operator', 'operator_special', 'welfare'):
+            if not (is_full_admin_role(user.get('role')) or is_community_desk_role(user.get('role'))):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_notification_counts(user))
         elif path == '/api/admin/notifications':
@@ -20801,7 +21008,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/welfare-users':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in WELFARE_ADMIN_ROLES:
+            if not (user['role'] in WELFARE_ADMIN_ROLES or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_welfare_users())
         elif path == '/api/admin/welfare-cases':
@@ -20913,13 +21120,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/nurses/summary':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_nurses_summary(user))
         elif path == '/api/admin/nurses/registrations':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             page = _nurse_int(params.get('page', 1), 1, 1, 100000)
             page_size = _nurse_int(params.get('page_size', 20), 20, 1, 200)
@@ -21069,7 +21276,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path in ('/api/admin/nurses/registration', '/api/admin/nurses/registration/detail'):
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             ident = (params.get('id') or params.get('nurse_reference_id') or params.get('reference_id') or '').strip()
             if not ident:
@@ -21145,7 +21352,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/nurses/accommodation':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             page = _nurse_int(params.get('page', 1), 1, 1, 100000)
             page_size = _nurse_int(params.get('page_size', 20), 20, 1, 200)
@@ -21160,7 +21367,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/nurses/complaints':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             page = _nurse_int(params.get('page', 1), 1, 1, 100000)
             page_size = _nurse_int(params.get('page_size', 20), 20, 1, 200)
@@ -21177,7 +21384,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 where = ["1=1"]
                 vals = []
-                if user['role'] != 'admin':
+                if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                     where.append("assigned_to_username = ?")
                     vals.append(user['user'])
                 if search:
@@ -21248,7 +21455,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/nurses/my-complaints':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             page = _nurse_int(params.get('page', 1), 1, 1, 100000)
             page_size = _nurse_int(params.get('page_size', 20), 20, 1, 200)
@@ -21276,7 +21483,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path in ('/api/admin/nurses/complaint', '/api/admin/nurses/complaint/detail'):
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             complaint_key = _complaint_identifier_from(params)
             if not complaint_key:
@@ -21289,11 +21496,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_json({'success': False, 'error': 'Complaint/request not found.'}, 404); return
                 comp = dict(row)
                 complaint_ref = _nurse_complaint_reference(comp)
-                if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
+                if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])) and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 actions = _nurse_complaint_actions(db, comp)
                 cur_status = comp.get('status') or comp.get('complaint_status') or ''
-                if user['role'] == 'admin' and cur_status == 'Submitted':
+                if is_full_admin_role(user['role']) and cur_status == 'Submitted':
                     update_cols = _table_columns(db, 'nurse_complaints')
                     assignments = []
                     vals = []
@@ -21334,13 +21541,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/nurses/complaint-assignees':
             user = self.require_auth()
             if not user: return
-            if user['role'] != 'admin':
+            if not (user['role'] == 'admin' or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             db = get_db()
             try:
                 rows = db.execute("""SELECT id, username, COALESCE(full_name, username) AS display_name, role
                                      FROM users
-                                     WHERE role IN ('admin','operator','operator_special','welfare_officer','inspector_field','community_desk','senior_review','ambassador_review','field_staff','nadra_staff','passport_staff')
+                                     WHERE role IN ('admin','operator','operator_special','welfare_officer','inspector_field','community_desk','senior_review','ambassador_review','field_staff','staff_opf','nadra_staff','passport_staff','legal_officer','death_case_officer')
                                      ORDER BY username ASC""").fetchall()
                 self.send_json({'success': True, 'items': [dict(r) for r in rows]})
             finally:
@@ -21379,7 +21586,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/admin/nurses/leave-notices':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             page = _nurse_int(params.get('page', 1), 1, 1, 100000)
             page_size = _nurse_int(params.get('page_size', 20), 20, 1, 200)
@@ -23637,7 +23844,7 @@ function printBoth(){{
             result = api_admin_aja_reconciliation_assign(data, user)
             self.send_json(result, 200 if result.get('success') else 400)
             return
-        elif path in ('/api/staff/my-cases/note', '/api/staff/my-cases/status', '/api/staff/my-cases/resolve'):
+        elif path in ('/api/staff/my-cases/note', '/api/staff/my-cases/status', '/api/staff/my-cases/resolve', '/api/staff/my-cases/complete'):
             user = self.require_auth()
             if not user: return
             try:
@@ -23645,6 +23852,8 @@ function printBoth(){{
             except json.JSONDecodeError:
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             action = path.rsplit('/', 1)[-1]
+            if action == 'complete':
+                action = 'resolve'
             result = api_staff_case_action(data, user, action)
             self.send_json(result, 200 if result.get('success') else 400)
             return
@@ -23678,7 +23887,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/registration/status':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body) if body else {}
@@ -23736,7 +23945,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/registration/note':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             try:
                 data = json.loads(body) if body else {}
@@ -23783,7 +23992,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/registration/update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
             rec_id = int(data.get('id', 0) or 0)
@@ -23821,7 +24030,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/complaint/update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
             rec_id = int(data.get('id', 0) or 0)
@@ -23846,7 +24055,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/complaint/assign':
             user = self.require_auth()
             if not user: return
-            if user['role'] != 'admin':
+            if not (user['role'] == 'admin' or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
             complaint_id = _complaint_identifier_from(data)
@@ -23912,12 +24121,7 @@ function printBoth(){{
                     status=new_status,
                     priority=(comp.get('priority') or 'Normal')
                 )
-                should_notify = _should_notify_applicant_status(
-                    status=new_status,
-                    public_note='',
-                    visible_to_applicant=False,
-                    safe_statuses={'Awaiting Nurse Response', 'Resolved', 'Closed', 'Reopened'}
-                )
+                should_notify = True
                 if nurse and nurse.get('email') and should_notify:
                     notify_case_event(
                         case_type='nurse',
@@ -23936,7 +24140,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/complaint/status':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
             complaint_id = _complaint_identifier_from(data)
@@ -23951,9 +24155,9 @@ function printBoth(){{
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
                 comp = dict(comp_row)
                 complaint_ref = _nurse_complaint_reference(comp)
-                if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
+                if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])) and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
-                if user['role'] != 'admin' and not _complaint_status_allowed_for_staff(new_status):
+                if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])) and not _complaint_status_allowed_for_staff(new_status):
                     self.send_json({'error': 'Status change not allowed'}, 403); return
                 old_status = comp.get('status') or comp.get('complaint_status') or ''
                 db.execute("""UPDATE nurse_complaints SET
@@ -23976,7 +24180,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/complaint/note':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
             complaint_id = _complaint_identifier_from(data)
@@ -23991,7 +24195,7 @@ function printBoth(){{
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
                 comp = dict(comp_row)
                 complaint_ref = _nurse_complaint_reference(comp)
-                if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
+                if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])) and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 visible_note = note_type in ('public', 'nurse') or str(data.get('visible_to_nurse') or '').lower() in ('1', 'true', 'yes', 'on')
                 if visible_note:
@@ -24027,7 +24231,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/complaint/resolve':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
             complaint_id = _complaint_identifier_from(data)
@@ -24039,7 +24243,7 @@ function printBoth(){{
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
                 comp = dict(comp_row)
                 complaint_ref = _nurse_complaint_reference(comp)
-                if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
+                if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])) and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 old_status = comp.get('status') or comp.get('complaint_status') or ''
                 db.execute("""UPDATE nurse_complaints SET
@@ -24122,7 +24326,7 @@ function printBoth(){{
         elif path == '/api/admin/nurses/leave-notice/update':
             user = self.require_auth()
             if not user: return
-            if user['role'] not in ('admin', 'operator', 'operator_special'):
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
             rec_id = int(data.get('id', 0) or 0)
@@ -24609,10 +24813,7 @@ function printBoth(){{
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Set-Cookie', f'session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400')
-                if user['role'] in RESTRICTED_STAFF_ROLES:
-                    redirect_url = '/staff/my-cases'
-                else:
-                    redirect_url = '/dashboard' if user['role'] in ('fee_collector', 'iraq_cwa') else '/admin/dashboard'
+                redirect_url = _default_redirect_for_role(user['role'])
                 resp = json.dumps({'success': True, 'user': user['username'], 'role': user['role'], 'redirect_url': redirect_url}).encode()
                 self.send_header('Content-Length', len(resp))
                 self.end_headers()
@@ -24861,6 +25062,8 @@ function printBoth(){{
             db = get_db()
             updates, params = [], []
             if data.get('role'):
+                if data['role'] not in WELFARE_CASE_ACCESS_ROLES | {'fee_collector', 'viewer', 'iraq_cwa', 'other'}:
+                    self.send_json({'error': 'Invalid role'}, 400); db.close(); return
                 updates.append("role = ?"); params.append(data['role'])
             if data.get('full_name') is not None:
                 updates.append("full_name = ?"); params.append(data['full_name'])
@@ -24870,6 +25073,7 @@ function printBoth(){{
             if data.get('show_contact_to_applicant') is not None:
                 updates.append("show_contact_to_applicant = ?")
                 params.append(1 if str(data.get('show_contact_to_applicant')).lower() in ('1', 'true', 'yes', 'on') else 0)
+                updates.append("show_contact_to_applicant_explicit = 1")
             if data.get('is_active') is not None:
                 updates.append("is_active = ?")
                 params.append(0 if str(data.get('is_active')).lower() in ('0', 'false', 'no', 'inactive') else 1)
@@ -31147,14 +31351,14 @@ No deterioration in ground security situation so far.</textarea>
 <div class="fgp"><label>Username</label><input id="nu_user"></div>
 <div class="fgp"><label>Password</label><input id="nu_pass" type="password"></div>
 <div class="fgp"><label>Full Name</label><input id="nu_name"></div>
-<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>operator_special</option><option>admin</option><option>fee_collector</option><option>viewer</option><option>iraq_cwa</option><option>welfare_officer</option><option>inspector_field</option><option>field_staff</option><option>nadra_staff</option><option>passport_staff</option><option>legal_officer</option><option>death_case_officer</option><option>community_desk</option><option>senior_review</option><option>ambassador_review</option><option>other</option></select></div>
+<div class="fgp"><label>Role</label><select id="nu_role"><option>operator</option><option>operator_special</option><option>admin</option><option>fee_collector</option><option>viewer</option><option>iraq_cwa</option><option>welfare_officer</option><option>inspector_field</option><option>field_staff</option><option>staff_opf</option><option>nadra_staff</option><option>passport_staff</option><option>legal_officer</option><option>death_case_officer</option><option>community_desk</option><option>senior_review</option><option>ambassador_review</option><option>other</option></select></div>
 </div>
 <div class="fg" style="margin-bottom:14px">
 <div class="fgp"><label>Email</label><input id="nu_email" type="email"></div>
 <div class="fgp"><label>Mobile Number</label><input id="nu_mobile"></div>
 <div class="fgp"><label>Designation</label><input id="nu_designation"></div>
 <div class="fgp"><label>Department</label><input id="nu_department" placeholder="NADRA / Passport / Field"></div>
-<div class="fgp"><label>Show Contact to Applicant</label><select id="nu_show_contact"><option value="0">No</option><option value="1">Yes</option></select></div>
+<div class="fgp"><label>Show Contact to Applicant</label><select id="nu_show_contact"><option value="">Policy default</option><option value="0">No</option><option value="1">Yes</option></select></div>
 <div class="fgp"><label>Active</label><select id="nu_active"><option value="1">Active</option><option value="0">Inactive</option></select></div>
 </div>
 <button class="btn btn-p" onclick="createUser()">Create User</button>
@@ -32762,7 +32966,7 @@ if(u&&!u.error){let h='<thead><tr><th>Username</th><th>Full Name</th><th>Role</t
 u.forEach(x=>{
 h+=`<tr><td><strong>${x.username}</strong></td><td>${x.full_name||'-'}</td>
 <td><select onchange="updateUserRole(${x.id},this.value)" style="padding:4px 8px;border-radius:4px;border:1px solid #ddd;font-size:.85em">
-<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='operator_special'?' selected':''}>operator_special</option><option${x.role==='fee_collector'?' selected':''}>fee_collector</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='welfare_officer'?' selected':''}>welfare_officer</option><option${x.role==='inspector_field'?' selected':''}>inspector_field</option><option${x.role==='field_staff'?' selected':''}>field_staff</option><option${x.role==='nadra_staff'?' selected':''}>nadra_staff</option><option${x.role==='passport_staff'?' selected':''}>passport_staff</option><option${x.role==='legal_officer'?' selected':''}>legal_officer</option><option${x.role==='death_case_officer'?' selected':''}>death_case_officer</option><option${x.role==='community_desk'?' selected':''}>community_desk</option><option${x.role==='senior_review'?' selected':''}>senior_review</option><option${x.role==='ambassador_review'?' selected':''}>ambassador_review</option><option${x.role==='other'?' selected':''}>other</option></select></td>
+<option${x.role==='admin'?' selected':''}>admin</option><option${x.role==='operator'?' selected':''}>operator</option><option${x.role==='operator_special'?' selected':''}>operator_special</option><option${x.role==='fee_collector'?' selected':''}>fee_collector</option><option${x.role==='viewer'?' selected':''}>viewer</option><option${x.role==='iraq_cwa'?' selected':''}>iraq_cwa</option><option${x.role==='welfare_officer'?' selected':''}>welfare_officer</option><option${x.role==='inspector_field'?' selected':''}>inspector_field</option><option${x.role==='field_staff'?' selected':''}>field_staff</option><option${x.role==='staff_opf'?' selected':''}>staff_opf</option><option${x.role==='nadra_staff'?' selected':''}>nadra_staff</option><option${x.role==='passport_staff'?' selected':''}>passport_staff</option><option${x.role==='legal_officer'?' selected':''}>legal_officer</option><option${x.role==='death_case_officer'?' selected':''}>death_case_officer</option><option${x.role==='community_desk'?' selected':''}>community_desk</option><option${x.role==='senior_review'?' selected':''}>senior_review</option><option${x.role==='ambassador_review'?' selected':''}>ambassador_review</option><option${x.role==='other'?' selected':''}>other</option></select></td>
 <td style="font-size:.8em">${x.email||'-'}<br>${x.mobile_number||'-'}${Number(x.show_contact_to_applicant||0)?'<br><span style="color:#2e7d32">contact visible</span>':''}</td>
 <td style="font-size:.8em">${x.department||'-'}<br>${x.designation||''}</td>
 <td>${Number(x.is_active||0)?'Yes':'No'}</td>

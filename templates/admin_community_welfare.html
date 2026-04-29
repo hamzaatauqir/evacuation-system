@@ -27,7 +27,7 @@
           <div class="cwa-admin-header__user-role" id="userRole">—</div>
         </div>
       </div>
-      <a class="cwa-admin-header__logout" href="/admin/dashboard">Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/admin/dashboard" data-community-hide>Main Dashboard</a>
       <a class="cwa-admin-header__logout" href="/logout">Logout</a>
     </div>
   </header>
@@ -42,10 +42,10 @@
         <a href="/admin/nurses">
           <span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span>
         </a>
-        <a href="/admin/legal-cases">
+        <a href="/admin/legal-cases" data-community-hide>
           <span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span>
         </a>
-        <a href="/admin/death-cases">
+        <a href="/admin/death-cases" data-community-hide>
           <span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span>
         </a>
         <a href="/admin/welfare-cases">
@@ -54,23 +54,23 @@
         <a href="/admin/my-cases">
           <span class="cwa-admin-sidebar__icon">★</span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span>
         </a>
-        <a href="/admin/ambassador-review">
+        <a href="/admin/ambassador-review" data-community-hide>
           <span class="cwa-admin-sidebar__icon">◆</span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span>
         </a>
-        <a href="/admin/facility-occupancy">
+        <a href="/admin/facility-occupancy" data-community-hide>
           <span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span><span class="badge-count hidden" data-badge="facility_occupancy"></span>
         </a>
-        <a href="/admin/facility-roster">
+        <a href="/admin/facility-roster" data-community-hide>
           <span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span><span class="badge-count hidden" data-badge="facility_roster"></span>
         </a>
-        <a href="/admin/alternative-facilities">
+        <a href="/admin/alternative-facilities" data-community-hide>
           <span class="cwa-admin-sidebar__icon">AF</span><span>Alternative Facilities</span><span class="badge-count hidden" data-badge="alternative_facilities"></span>
         </a>
       </div>
       <div class="cwa-admin-sidebar__divider"></div>
       <div class="cwa-admin-sidebar__group">
         <div class="cwa-admin-sidebar__section-title">Quick Access</div>
-        <a href="/admin/dashboard"><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
+        <a href="/admin/dashboard" data-community-hide><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
         <a href="/" target="_blank"><span class="cwa-admin-sidebar__icon">↗</span><span>Public Portal</span></a>
       </div>
     </aside>
@@ -83,8 +83,8 @@
         </div>
         <div style="display:flex;gap:10px">
           <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/nurses">Nurses</a>
-          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/legal-cases">Legal Cases</a>
-          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/death-cases">Death Cases</a>
+          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/legal-cases" data-community-hide>Legal Cases</a>
+          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/death-cases" data-community-hide>Death Cases</a>
           <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/welfare-cases">Welfare Cases</a>
         </div>
       </div>
@@ -123,12 +123,12 @@
               <div style="flex:1"><div class="cwa-module__title">Nurses</div><div class="cwa-module__sub" id="modNurses">—</div></div>
               <div class="cwa-module__chev">›</div>
             </a>
-            <a class="cwa-module" href="/admin/legal-cases">
+            <a class="cwa-module" href="/admin/legal-cases" data-community-hide>
               <div class="cwa-module__icon" style="background:#eff6ff;color:var(--cwa-blue)">⚖</div>
               <div style="flex:1"><div class="cwa-module__title">Legal Cases</div><div class="cwa-module__sub" id="modLegal">—</div></div>
               <div class="cwa-module__chev">›</div>
             </a>
-            <a class="cwa-module" href="/admin/death-cases">
+            <a class="cwa-module" href="/admin/death-cases" data-community-hide>
               <div class="cwa-module__icon" style="background:#f5f3ff;color:var(--cwa-purple)">♥</div>
               <div style="flex:1"><div class="cwa-module__title">Death Cases</div><div class="cwa-module__sub" id="modDeath">—</div></div>
               <div class="cwa-module__chev">›</div>
@@ -152,6 +152,7 @@
 </div>
 
 <script>
+const USER_ROLE='__USER_ROLE__';
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function fmtTime(s){if(!s)return '';try{const d=new Date(s.replace(' ','T')+'Z');const ms=Date.now()-d.getTime();const min=Math.round(ms/60000);if(min<1)return 'just now';if(min<60)return min+'m ago';const h=Math.round(min/60);if(h<24)return h+'h ago';const dd=Math.round(h/24);return dd+'d ago';}catch(e){return s.slice(0,16);}}
 function statusType(s){const x=(s||'').toLowerCase();if(x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('assign'))return 'assigned';if(x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await'))return 'awaiting';return 'pending';}
@@ -171,7 +172,14 @@ function setKuwaitDate(){
   document.getElementById('dateLine').textContent=d.toLocaleDateString('en-GB',opts)+' — '+d.toLocaleTimeString('en-GB',tOpts)+' Kuwait Time';
 }
 
+function applyRoleScope(){
+  if(USER_ROLE==='community_desk'){
+    document.querySelectorAll('[data-community-hide]').forEach(el=>{el.style.display='none';});
+  }
+}
+
 async function loadAll(){
+  applyRoleScope();
   setKuwaitDate();
   let summary={};
   try { summary = await api('/api/admin/community-welfare/summary'); } catch(e) { summary={success:false,error:e.message}; }

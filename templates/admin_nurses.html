@@ -20,7 +20,7 @@
       </div>
     </div>
     <div class="cwa-admin-header__actions">
-      <a class="cwa-admin-header__logout" href="/admin/dashboard">Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/admin/dashboard" data-community-hide>Main Dashboard</a>
       <a class="cwa-admin-header__logout" href="/logout">Logout</a>
     </div>
   </header>
@@ -31,19 +31,19 @@
         <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
         <a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">▢</span><span>Overview</span><span class="badge-count hidden" data-badge="community_welfare"></span></a>
         <a href="/admin/nurses" class="is-active"><span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span></a>
-        <a href="/admin/legal-cases"><span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></a>
-        <a href="/admin/death-cases"><span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></a>
-        <a href="/admin/facility-roster"><span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span><span class="badge-count hidden" data-badge="facility_roster"></span></a>
-        <a href="/admin/facility-occupancy"><span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span><span class="badge-count hidden" data-badge="facility_occupancy"></span></a>
+        <a href="/admin/legal-cases" data-community-hide><span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></a>
+        <a href="/admin/death-cases" data-community-hide><span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></a>
+        <a href="/admin/facility-roster" data-community-hide><span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span><span class="badge-count hidden" data-badge="facility_roster"></span></a>
+        <a href="/admin/facility-occupancy" data-community-hide><span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span><span class="badge-count hidden" data-badge="facility_occupancy"></span></a>
         <a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">▣</span><span>Welfare Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span></a>
         <a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">★</span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span></a>
-        <a href="/admin/ambassador-review"><span class="cwa-admin-sidebar__icon">◆</span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></a>
-        <a href="/admin/alternative-facilities"><span class="cwa-admin-sidebar__icon">AF</span><span>Alternative Facilities</span><span class="badge-count hidden" data-badge="alternative_facilities"></span></a>
+        <a href="/admin/ambassador-review" data-community-hide><span class="cwa-admin-sidebar__icon">◆</span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></a>
+        <a href="/admin/alternative-facilities" data-community-hide><span class="cwa-admin-sidebar__icon">AF</span><span>Alternative Facilities</span><span class="badge-count hidden" data-badge="alternative_facilities"></span></a>
       </div>
       <div class="cwa-admin-sidebar__divider"></div>
       <div class="cwa-admin-sidebar__group">
         <div class="cwa-admin-sidebar__section-title">Quick Access</div>
-        <a href="/admin/dashboard"><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
+        <a href="/admin/dashboard" data-community-hide><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
         <a href="/admin/nurses/my-complaints"><span class="cwa-admin-sidebar__icon">★</span><span>My Assigned</span></a>
       </div>
     </aside>
@@ -55,7 +55,7 @@
           <p id="totalLine">Loading…</p>
         </div>
         <div style="display:flex;gap:10px">
-          <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="exportCsv()">⤓ Export</button>
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="exportCsv()" data-community-hide>⤓ Export</button>
         </div>
       </div>
 
@@ -127,6 +127,7 @@
 <div id="toastHost"></div>
 
 <script>
+const USER_ROLE='__USER_ROLE__';
 const TABS = [
   { key: 'all',          label: 'All Health Workers', endpoint: 'registrations',  params: {} },
   { key: 'pending',      label: 'Pending Review',     endpoint: 'registrations',  params: { registration_status: 'Pending Review' } },
@@ -153,6 +154,12 @@ let activeTab = 'all';
 let activeRows = [];
 let summary = {};
 let assignees = [];
+
+function applyRoleScope(){
+  if(USER_ROLE==='community_desk'){
+    document.querySelectorAll('[data-community-hide]').forEach(el=>{el.style.display='none';});
+  }
+}
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function statusType(s){const x=(s||'').toLowerCase();if(x.includes('approved')||x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('reject'))return 'rejected';if(x.includes('assign'))return 'assigned';if(x.includes('review')||x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await')||x.includes('needs'))return 'awaiting';return 'pending';}
@@ -543,6 +550,7 @@ function doResolve(ref){const n=document.getElementById('dwResolveNote').value;p
 function doClose(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/nurses/complaint/close',{complaint_id:ref,note:n},'Closed');}
 function doRegStatus(id){const s=document.getElementById('dwRegStatus').value;const n=document.getElementById('dwRegNote').value;const v=document.getElementById('dwRegVisible').checked;postAction('/api/admin/nurses/registration/status',{id:id,status:s,note:n,visible_to_nurse:v},'Registration updated');}
 
+applyRoleScope();
 renderTabs();
 loadAssignees().then(()=>{loadSummary();loadList();});
 
