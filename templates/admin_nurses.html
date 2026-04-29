@@ -466,6 +466,9 @@ function showDrawer(d){
           <div class="cwa-drawer__title">${esc(d.title)}</div>
           <div class="cwa-drawer__sub">${esc(d.sub||'')}</div>
         </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          ${d.canAct?`<button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="window.open('/admin/print/case?module=nurse_complaint&reference='+encodeURIComponent('${esc(d.ref)}'),'_blank','noopener')">Print Case Summary</button>`:''}
+        </div>
         <button class="cwa-drawer__close" onclick="closeDrawer()" aria-label="Close">×</button>
       </div>
       <div class="cwa-drawer__accent"></div>

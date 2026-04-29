@@ -4040,6 +4040,8 @@ LIMITED_ASSIGNED_CASE_ROLES = {
 }
 RESTRICTED_STAFF_ROLES = LIMITED_ASSIGNED_CASE_ROLES
 LIMITED_STAFF_CASE_ROLES = LIMITED_ASSIGNED_CASE_ROLES | COMMUNITY_DESK_ROLES
+AMBASSADOR_PRINT_GLOBAL_ROLES = FULL_SYSTEM_ROLES | COMMUNITY_DESK_ROLES | {'senior_review', 'ambassador_review'}
+AMBASSADOR_PRINT_CASE_ROLES = AMBASSADOR_PRINT_GLOBAL_ROLES | LIMITED_ASSIGNED_CASE_ROLES
 AJA_RECONCILIATION_PAGE_ROLES = {
     *FULL_SYSTEM_ROLES, 'community_desk', 'welfare_officer', 'inspector_field',
     'field_staff', 'staff_opf'
@@ -4118,6 +4120,12 @@ def can_access_admin_route(role, path):
         )
     if role == 'iraq_cwa':
         return path == '/dashboard' or path.startswith('/api/iraq')
+    if path.startswith('/admin/print/'):
+        if role in AMBASSADOR_PRINT_GLOBAL_ROLES:
+            return True
+        return path == '/admin/print/case' and role in AMBASSADOR_PRINT_CASE_ROLES
+    if path in ('/admin/welfare-cases', '/admin/my-cases', '/admin/ambassador-review') and role in AMBASSADOR_PRINT_CASE_ROLES:
+        return True
     if is_community_desk_role(role):
         allowed_pages = {
             '/admin/community-welfare',
@@ -4163,6 +4171,10 @@ def can_access_api_route(role, path):
         )
         return any(path.startswith(prefix) for prefix in allowed_prefixes)
     if path.startswith('/api/staff/my-cases'):
+        return True
+    if path.startswith('/api/admin/welfare-cases') and role in AMBASSADOR_PRINT_CASE_ROLES:
+        return True
+    if path.startswith('/api/admin/welfare-users') and role in AMBASSADOR_PRINT_GLOBAL_ROLES:
         return True
     if path.startswith('/api/admin/aja-reconciliation/') and role in AJA_RECONCILIATION_PAGE_ROLES:
         return True
@@ -8428,6 +8440,1074 @@ def api_admin_welfare_resolve(data, user):
         return {'success': False, 'error': str(e)}
     finally:
         db.close()
+
+
+AMBASSADOR_PENDING_STATUS_KEYS = {
+    'submitted', 'new', 'pending review', 'assigned', 'in progress',
+    'follow up completed', 'followup completed', 'pending admin review',
+    'completed by staff', 'ambassador review required',
+    'more information required', 'information requested',
+    'field verification required', 'awaiting requester response',
+    'awaiting applicant response', 'awaiting family response',
+    'seen', 'seen by admin', 'seen by staff', 'under review'
+}
+AMBASSADOR_CLOSED_STATUS_KEYS = {
+    'resolved', 'closed', 'rejected', 'archived', 'closed archived',
+    'inactive', 'approved'
+}
+AMBASSADOR_PACK_LABELS = {
+    'daily': 'Daily New / Updated Cases',
+    'pending': 'Pending Review',
+    'open': 'All Open Cases',
+    'ambassador_review': 'Ambassador Review Queue',
+    'resolved_today': 'Resolved Today',
+    'selected': 'Selected Cases',
+    'case': 'Specific Case Summary',
+}
+AMBASSADOR_MARKING_OPTIONS = (
+    'Approved / Noted', 'Call Applicant', 'Seek Report', 'Refer to Section',
+    'Expedite', 'Put up Again', 'Other'
+)
+
+
+def _ambassador_status_key(value):
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower())).strip()
+
+
+def _ambassador_date_part(value):
+    text = str(value or '').strip()
+    return text[:10] if len(text) >= 10 else ''
+
+
+def _ambassador_datetime(value):
+    text = str(value or '').strip()
+    return text[:16].replace('T', ' ') if text else ''
+
+
+def _ambassador_mask_identifier(value, kind='id'):
+    text = re.sub(r'\s+', '', str(value or '').strip())
+    if not text:
+        return ''
+    if kind == 'passport':
+        return 'XX' + text[-4:] if len(text) > 4 else '****'
+    if kind == 'cnic':
+        return '****-*******-' + text[-1:]
+    if kind == 'civil':
+        return '****' + text[-4:] if len(text) > 4 else '****'
+    return '****' + text[-4:] if len(text) > 4 else '****'
+
+
+def _ambassador_clip(value, max_len=1400):
+    text = _clean_text(value, max_len + 1)
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + '...'
+    return text
+
+
+def _ambassador_marking_html():
+    return '<br>'.join('[ ] ' + esc(option) for option in AMBASSADOR_MARKING_OPTIONS)
+
+
+def _ambassador_action_rows(db, table_name, where_col, where_value, limit=200):
+    if not where_value or not _table_columns(db, table_name):
+        return []
+    try:
+        return [dict(r) for r in db.execute(
+            f"SELECT * FROM {table_name} WHERE {where_col} = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
+            [where_value, int(limit)]
+        ).fetchall()]
+    except Exception:
+        return []
+
+
+def _ambassador_latest_note(actions, visible_col=None, visible_value=None, internal=False):
+    for action in actions or []:
+        if visible_col:
+            flag = int(action.get(visible_col) or 0)
+            if internal and flag:
+                continue
+            if not internal and flag != int(visible_value or 0):
+                continue
+        actor = (action.get('actor_username') or '').strip().lower()
+        note = _first_value(action.get('note'), action.get('new_status'), action.get('new_value'), action.get('action_type'))
+        if not note:
+            continue
+        if internal and actor == 'public':
+            continue
+        return {
+            'date': action.get('created_at') or '',
+            'note': note,
+            'status': _first_value(action.get('new_status'), action.get('new_value'), action.get('action_type')),
+            'actor': action.get('actor_username') or 'system',
+        }
+    return {'date': '', 'note': '', 'status': '', 'actor': ''}
+
+
+def _ambassador_action_summary(actions):
+    pieces = []
+    for action in (actions or [])[:4]:
+        label = _first_value(action.get('action_type'), action.get('new_status'), action.get('new_value'))
+        stamp = _ambassador_datetime(action.get('created_at'))
+        if label:
+            pieces.append(f"{stamp}: {label}".strip(': '))
+    return '; '.join(pieces)
+
+
+def _ambassador_service_label(module, row):
+    if module == 'welfare':
+        case_type = (row.get('case_type') or '').strip()
+        category = (row.get('category') or '').strip()
+        labels = {
+            'locating_assistance': 'Locating / Contacting Assistance',
+            'community_feedback': 'Community Feedback / Complaint',
+            'general_welfare': 'Community Welfare Case',
+            'nurse': 'Health Worker Welfare Request',
+            'legal': 'Legal / OPF Welfare Case',
+            'death': 'Death Case Welfare Support',
+        }
+        return category or labels.get(case_type, 'Community Welfare Case')
+    if module == 'legal':
+        return 'Legal / OPF Request'
+    if module == 'death':
+        return 'Death Case Request'
+    if module == 'nurse_complaint':
+        return 'Nurse / Health Worker Welfare Request'
+    if module == 'facility':
+        return 'Facility Follow-up / AJA Care Welfare Action'
+    return 'Community Welfare Request'
+
+
+def _ambassador_case_group(module, row):
+    if module == 'welfare':
+        case_type = (row.get('case_type') or '').strip()
+        if case_type == 'locating_assistance':
+            return 'locating'
+        if case_type == 'community_feedback':
+            return 'feedback'
+        return 'welfare'
+    if module == 'nurse_complaint':
+        return 'nurse'
+    return module
+
+
+def _ambassador_base_case(module, row, actions, reference, service_type, applicant, subject,
+                          priority, status, assigned_to, assigned_username, created_at,
+                          updated_at, summary, contact='', email='', action_required='',
+                          escalation_level='', resolved_at='', closed_at='', extra=None):
+    latest_public = _ambassador_latest_note(
+        actions,
+        'visible_to_requester' if module == 'welfare' else (
+            'visible_to_applicant' if module == 'legal' else (
+                'visible_to_reporter' if module == 'death' else 'visible_to_nurse'
+            )
+        ),
+        1,
+        internal=False
+    )
+    latest_internal = _ambassador_latest_note(
+        actions,
+        'visible_to_requester' if module == 'welfare' else (
+            'visible_to_applicant' if module == 'legal' else (
+                'visible_to_reporter' if module == 'death' else 'visible_to_nurse'
+            )
+        ),
+        0,
+        internal=True
+    )
+    last_action_at = (actions[0].get('created_at') if actions else '') or updated_at or created_at
+    service_key = _ambassador_case_group(module, row)
+    return {
+        'module': module,
+        'service_key': service_key,
+        'reference': reference or '',
+        'service_type': service_type or 'Community Welfare Request',
+        'applicant': applicant or subject or 'Applicant',
+        'subject': subject or applicant or '',
+        'priority': priority or 'Normal',
+        'status': status or 'Submitted',
+        'assigned_to': assigned_to or 'Unassigned',
+        'assigned_username': assigned_username or '',
+        'submitted_at': created_at or '',
+        'updated_at': updated_at or created_at or '',
+        'last_action_at': last_action_at,
+        'resolved_at': resolved_at or '',
+        'closed_at': closed_at or '',
+        'contact': contact or '',
+        'email': email or '',
+        'nationality': 'Pakistani',
+        'summary': _ambassador_clip(summary, 1800),
+        'latest_public_note': latest_public,
+        'latest_internal_note': latest_internal,
+        'action_taken': _ambassador_action_summary(actions) or 'Initial request recorded.',
+        'pending_action': action_required or _ambassador_pending_text(status),
+        'recommended_next_step': _ambassador_recommended_next_step(status, priority, escalation_level),
+        'action_required': action_required or _ambassador_pending_text(status),
+        'escalation_level': escalation_level or '',
+        'actions': actions,
+        'extra': extra or {},
+    }
+
+
+def _ambassador_pending_text(status):
+    key = _ambassador_status_key(status)
+    if key in ('resolved', 'closed'):
+        return 'Final review / record closure as applicable.'
+    if 'awaiting' in key or 'information' in key:
+        return 'Await requested information and review applicant response.'
+    if 'assigned' in key or 'progress' in key:
+        return 'Review latest follow-up and mark further direction if required.'
+    if 'follow' in key and 'completed' in key:
+        return 'Review staff follow-up and approve next administrative action.'
+    return 'Review and mark directions.'
+
+
+def _ambassador_recommended_next_step(status, priority, escalation_level=''):
+    key = _ambassador_status_key(status)
+    if escalation_level == 'ambassador_review' or 'ambassador' in key:
+        return 'Await Ambassador / senior officer directions.'
+    if key in ('new', 'submitted', 'pending review', 'seen by admin'):
+        return 'Screen request, assign responsible section or officer, and set follow-up priority.'
+    if 'assigned' in key:
+        return 'Assigned officer to submit brief follow-up report.'
+    if 'progress' in key:
+        return 'Continue follow-up and place updated note before senior review if required.'
+    if 'information' in key or 'awaiting' in key:
+        return 'Contact applicant / family for required information.'
+    if 'follow' in key and 'completed' in key:
+        return 'Place before admin/senior officer for final review.'
+    if key == 'resolved':
+        return 'Confirm applicant communication and close record if no further action remains.'
+    if key == 'closed':
+        return 'No further action unless reopened.'
+    if _ambassador_status_key(priority) == 'urgent':
+        return 'Expedite follow-up and seek immediate report.'
+    return 'Mark directions and next responsible section.'
+
+
+def _ambassador_collect_welfare_cases(db):
+    rows = db.execute("SELECT * FROM welfare_cases ORDER BY datetime(created_at) DESC, id DESC").fetchall()
+    cases = []
+    for row in rows:
+        d = dict(row)
+        actions = _ambassador_action_rows(db, 'welfare_case_actions', 'case_id', d.get('id'))
+        subject = _first_value(d.get('subject_name'), d.get('concern_summary'), d.get('category'))
+        summary = '\n'.join(x for x in [
+            d.get('concern_summary') or '',
+            d.get('details') or '',
+            f"Police / authority reference: {d.get('police_reference')}" if d.get('police_reference') else ''
+        ] if x)
+        extra = {
+            'Masked Passport': _ambassador_mask_identifier(d.get('subject_passport'), 'passport'),
+            'Masked CNIC': _ambassador_mask_identifier(d.get('subject_cnic'), 'cnic'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('subject_civil_id'), 'civil'),
+            'Requester Relationship': d.get('requester_relationship') or '',
+            'Last Known Contact': d.get('last_contact_date') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'welfare', d, actions, d.get('case_reference'),
+            _ambassador_service_label('welfare', d),
+            d.get('requester_name'), subject,
+            d.get('priority') or 'Normal', d.get('status') or 'New',
+            d.get('assigned_to') or '', d.get('assigned_to') or '',
+            d.get('created_at') or '', d.get('updated_at') or '',
+            summary, contact=d.get('requester_phone') or '', email=d.get('requester_email') or '',
+            action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            escalation_level=d.get('escalation_level') or '',
+            resolved_at=d.get('resolved_at') or '', closed_at=d.get('closed_at') or '',
+            extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_legal_cases(db):
+    rows = db.execute("SELECT * FROM legal_case_requests ORDER BY datetime(created_at) DESC, id DESC").fetchall()
+    cases = []
+    for row in rows:
+        d = dict(row)
+        actions = _ambassador_action_rows(db, 'legal_case_actions', 'reference_id', d.get('reference_id'))
+        summary = '\n'.join(x for x in [
+            d.get('subject') or '',
+            d.get('description') or '',
+            f"Case type: {d.get('case_type')}" if d.get('case_type') else '',
+            f"Next hearing: {d.get('next_hearing_date')}" if d.get('next_hearing_date') else ''
+        ] if x)
+        public_note = d.get('public_response') or ''
+        internal_note = d.get('internal_notes') or ''
+        if public_note:
+            actions = [{'note': public_note, 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_applicant': 1, 'action_type': 'Public Response'}] + actions
+        if internal_note:
+            actions = [{'note': internal_note, 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_applicant': 0, 'actor_username': d.get('updated_by') or '', 'action_type': 'Internal Note'}] + actions
+        extra = {
+            'Masked Passport': _ambassador_mask_identifier(d.get('passport_number'), 'passport'),
+            'Masked CNIC': _ambassador_mask_identifier(d.get('cnic'), 'cnic'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('civil_id'), 'civil'),
+            'Legal Type': d.get('case_type') or '',
+            'Court Case No.': d.get('kuwaiti_court_case_no') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'legal', d, actions, d.get('reference_id'), _ambassador_service_label('legal', d),
+            d.get('full_name'), d.get('subject'), d.get('priority') or 'Normal', d.get('status') or 'Submitted',
+            d.get('assigned_to_name') or d.get('assigned_to_username') or '',
+            d.get('assigned_to_username') or '',
+            d.get('created_at') or '', d.get('updated_at') or d.get('last_action_at') or '',
+            summary, contact=d.get('mobile') or '', email=d.get('email') or '',
+            action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            resolved_at=d.get('resolved_at') or '', closed_at=d.get('closed_at') or '',
+            extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_death_cases(db):
+    rows = db.execute("SELECT * FROM death_case_requests ORDER BY datetime(created_at) DESC, id DESC").fetchall()
+    cases = []
+    for row in rows:
+        d = dict(row)
+        actions = _ambassador_action_rows(db, 'death_case_actions', 'reference_id', d.get('reference_id'))
+        summary = '\n'.join(x for x in [
+            f"Respectful assistance request concerning {d.get('deceased_name') or 'the deceased'}." if d.get('deceased_name') else '',
+            d.get('description') or '',
+            f"Date of death: {d.get('date_of_death')}" if d.get('date_of_death') else '',
+            f"Repatriation requested: {d.get('repatriation_required')}" if d.get('repatriation_required') else ''
+        ] if x)
+        public_note = d.get('public_response') or ''
+        internal_note = d.get('internal_notes') or ''
+        if public_note:
+            actions = [{'note': public_note, 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_reporter': 1, 'action_type': 'Public Response'}] + actions
+        if internal_note:
+            actions = [{'note': internal_note, 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_reporter': 0, 'actor_username': d.get('updated_by') or '', 'action_type': 'Internal Note'}] + actions
+        extra = {
+            'Masked Passport': _ambassador_mask_identifier(d.get('deceased_passport'), 'passport'),
+            'Masked CNIC': _ambassador_mask_identifier(d.get('deceased_cnic'), 'cnic'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('deceased_civil_id'), 'civil'),
+            'Date of Death': d.get('date_of_death') or '',
+            'Repatriation Required': d.get('repatriation_required') or '',
+            'Next of Kin': d.get('next_of_kin_name') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'death', d, actions, d.get('reference_id'), _ambassador_service_label('death', d),
+            d.get('reporter_name'), d.get('deceased_name'), d.get('priority') or 'Normal', d.get('status') or 'Submitted',
+            d.get('assigned_to_name') or d.get('assigned_to_username') or '',
+            d.get('assigned_to_username') or '',
+            d.get('created_at') or '', d.get('updated_at') or d.get('last_action_at') or '',
+            summary, contact=d.get('reporter_mobile') or d.get('next_of_kin_mobile') or '',
+            email=d.get('reporter_email') or d.get('next_of_kin_email') or '',
+            action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            resolved_at=d.get('resolved_at') or '', closed_at=d.get('closed_at') or '',
+            extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_nurse_complaints(db):
+    rows = db.execute("SELECT * FROM nurse_complaints ORDER BY datetime(created_at) DESC, id DESC").fetchall()
+    cases = []
+    for row in rows:
+        d = dict(row)
+        reference = _nurse_complaint_reference(d) or d.get('complaint_id') or f"NCMP-{int(d.get('id') or 0):05d}"
+        actions = _ambassador_action_rows(db, 'nurse_complaint_actions', 'complaint_id', reference)
+        public_note = d.get('public_response') or ''
+        internal_note = d.get('internal_notes') or d.get('admin_remarks') or ''
+        if public_note:
+            actions = [{'note': public_note, 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_nurse': 1, 'action_type': 'Public Response'}] + actions
+        if internal_note:
+            actions = [{'note': internal_note, 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_nurse': 0, 'actor_username': d.get('updated_by') or '', 'action_type': 'Internal Note'}] + actions
+        summary = _first_value(d.get('description'), d.get('details'), d.get('message'), d.get('complaint_text'))
+        category = _first_value(d.get('category'), d.get('complaint_category'), 'Nurse Welfare Request')
+        extra = {
+            'Nurse Reference': d.get('nurse_reference_id') or '',
+            'Masked Passport': _ambassador_mask_identifier(d.get('passport_number'), 'passport'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('civil_id'), 'civil'),
+            'Category': category,
+        }
+        cases.append(_ambassador_base_case(
+            'nurse_complaint', d, actions, reference, _ambassador_service_label('nurse_complaint', d),
+            _first_value(d.get('nurse_full_name'), d.get('nurse_name')), d.get('subject') or category,
+            d.get('priority') or 'Normal', _first_value(d.get('status'), d.get('complaint_status'), 'Seen'),
+            d.get('assigned_to_name') or d.get('assigned_to_username') or '',
+            d.get('assigned_to_username') or '',
+            d.get('created_at') or '', d.get('updated_at') or d.get('last_action_at') or '',
+            summary, contact=_first_value(d.get('phone'), d.get('mobile')), email=d.get('email') or '',
+            action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            resolved_at=d.get('resolved_at') or '', closed_at=d.get('closed_at') or '',
+            extra=extra
+        ))
+    return cases
+
+
+def _ambassador_facility_requires_welfare(d):
+    status = _ambassador_status_key(_first_value(d.get('current_status'), d.get('confirmation_status'), d.get('reconciliation_status')))
+    action = _ambassador_status_key(d.get('action_required'))
+    return bool(
+        int(d.get('welfare_followup_required') or 0)
+        or int(d.get('alternative_stay_review_required') or 0)
+        or action
+        or 'reconciliation required' in status
+        or 'field follow up required' in status
+        or 'needs embassy assistance' in status
+    )
+
+
+def _ambassador_collect_facility_cases(db, include_all=False):
+    rows = db.execute("SELECT * FROM facility_roster ORDER BY datetime(updated_at) DESC, id DESC").fetchall()
+    cases = []
+    for row in rows:
+        d = dict(row)
+        if not include_all and not _ambassador_facility_requires_welfare(d):
+            continue
+        reference = d.get('roster_reference') or f"FAC-{int(d.get('id') or 0):05d}"
+        actions = _ambassador_action_rows(db, 'facility_roster_actions', 'roster_id', d.get('id'))
+        summary = '\n'.join(x for x in [
+            f"Facility: {d.get('facility_name') or ''} {d.get('area') or d.get('facility_area') or ''}".strip(),
+            f"Current status: {_first_value(d.get('current_status'), d.get('confirmation_status'))}",
+            d.get('remarks') or '',
+            d.get('action_required') or '',
+        ] if x)
+        extra = {
+            'Roster Reference': reference,
+            'Masked Passport': _ambassador_mask_identifier(d.get('passport_number'), 'passport'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('civil_id'), 'civil'),
+            'Facility': d.get('facility_name') or '',
+            'Area': d.get('area') or d.get('facility_area') or '',
+            'Vendor': d.get('vendor_name') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'facility', d, actions, reference, _ambassador_service_label('facility', d),
+            d.get('full_name'), d.get('workplace') or d.get('facility_name'),
+            'Urgent' if int(d.get('welfare_followup_required') or 0) else 'Normal',
+            _first_value(d.get('current_status'), d.get('confirmation_status'), d.get('reconciliation_status'), 'Assigned'),
+            d.get('assigned_to') or '', d.get('assigned_to') or '',
+            d.get('created_at') or '', d.get('updated_at') or '',
+            summary, contact=d.get('phone') or '', email=d.get('email') or '',
+            action_required=d.get('action_required') or '',
+            extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_all_cases(db):
+    cases = []
+    for collector in (
+        _ambassador_collect_welfare_cases,
+        _ambassador_collect_legal_cases,
+        _ambassador_collect_death_cases,
+        _ambassador_collect_nurse_complaints,
+        _ambassador_collect_facility_cases,
+    ):
+        try:
+            cases.extend(collector(db))
+        except Exception as exc:
+            print(f"[AmbassadorPrint] collector failed: {exc}", flush=True)
+    return cases
+
+
+def _ambassador_case_is_open(case):
+    key = _ambassador_status_key(case.get('status'))
+    return key not in AMBASSADOR_CLOSED_STATUS_KEYS and not any(x in key for x in ('resolved', 'closed', 'rejected', 'archived'))
+
+
+def _ambassador_case_is_pending(case):
+    if not _ambassador_case_is_open(case):
+        return False
+    key = _ambassador_status_key(case.get('status'))
+    return (
+        key in AMBASSADOR_PENDING_STATUS_KEYS
+        or 'pending' in key
+        or 'assigned' in key
+        or 'progress' in key
+        or 'information' in key
+        or ('follow' in key and 'completed' in key)
+    )
+
+
+def _ambassador_case_is_ambassador_queue(case):
+    key = _ambassador_status_key(case.get('status'))
+    return (
+        case.get('escalation_level') == 'ambassador_review'
+        or ('ambassador' in key and 'review' in key)
+        or str(case.get('extra', {}).get('Ambassador Review Required') or '').strip() == '1'
+    )
+
+
+def _ambassador_case_matches_pack(case, pack_type, selected_date):
+    pack_type = pack_type or 'daily'
+    if pack_type == 'daily':
+        dates = [
+            _ambassador_date_part(case.get('submitted_at')),
+            _ambassador_date_part(case.get('updated_at')),
+            _ambassador_date_part(case.get('last_action_at')),
+        ]
+        return selected_date in dates
+    if pack_type == 'pending':
+        return _ambassador_case_is_pending(case)
+    if pack_type == 'open':
+        return _ambassador_case_is_open(case)
+    if pack_type == 'ambassador_review':
+        return _ambassador_case_is_ambassador_queue(case)
+    if pack_type == 'resolved_today':
+        key = _ambassador_status_key(case.get('status'))
+        dates = [
+            _ambassador_date_part(case.get('resolved_at')),
+            _ambassador_date_part(case.get('closed_at')),
+            _ambassador_date_part(case.get('updated_at')),
+            _ambassador_date_part(case.get('last_action_at')),
+        ]
+        return key in ('resolved', 'closed') and selected_date in dates
+    return True
+
+
+def _ambassador_case_matches_filters(case, params):
+    ctype = (params.get('case_type') or params.get('module') or '').strip().lower()
+    priority = (params.get('priority') or '').strip().lower()
+    assigned = (params.get('assigned_to') or '').strip()
+    if ctype and ctype != 'all':
+        service_key = (case.get('service_key') or '').lower()
+        module = (case.get('module') or '').lower()
+        if ctype in ('welfare', 'community_welfare'):
+            ok = service_key in ('welfare', 'feedback', 'locating') or module == 'facility'
+        elif ctype in ('legal', 'opf', 'legal_opf'):
+            ok = module == 'legal'
+        elif ctype in ('death', 'death_cases'):
+            ok = module == 'death'
+        elif ctype in ('nurse', 'health_worker', 'health_workers'):
+            ok = module in ('nurse_complaint', 'facility')
+        elif ctype in ('locating', 'locating_assistance'):
+            ok = service_key == 'locating'
+        elif ctype in ('feedback', 'complaint', 'community_feedback'):
+            ok = service_key == 'feedback'
+        elif ctype in ('facility', 'aja'):
+            ok = module == 'facility'
+        else:
+            ok = ctype in (service_key, module)
+        if not ok:
+            return False
+    if priority and priority != 'all':
+        pkey = _ambassador_status_key(case.get('priority'))
+        if priority == 'urgent':
+            if pkey not in ('urgent', 'high', 'important'):
+                return False
+        elif pkey != priority:
+            return False
+    if assigned and assigned != 'all':
+        assigned_key = (case.get('assigned_username') or case.get('assigned_to') or '').strip()
+        if assigned == 'unassigned':
+            if assigned_key and assigned_key.lower() != 'unassigned':
+                return False
+        elif assigned not in (case.get('assigned_username') or '', case.get('assigned_to') or ''):
+            return False
+    return True
+
+
+def _ambassador_user_can_print_case(user, case):
+    role = (user or {}).get('role') or ''
+    if role in AMBASSADOR_PRINT_GLOBAL_ROLES:
+        return True
+    if role not in AMBASSADOR_PRINT_CASE_ROLES:
+        return False
+    assigned = (case.get('assigned_username') or '').strip()
+    return bool(assigned and assigned == (user or {}).get('user'))
+
+
+def _ambassador_find_case_by_reference(db, reference, module=''):
+    ref = (reference or '').strip()
+    if not ref:
+        return None
+    ref_upper = ref.upper()
+    module = (module or '').strip().lower()
+    if module in ('', 'welfare', 'community_welfare'):
+        row = db.execute("SELECT * FROM welfare_cases WHERE UPPER(TRIM(case_reference)) = ? ORDER BY id DESC LIMIT 1", [ref_upper]).fetchone()
+        if row:
+            return _ambassador_collect_welfare_case_from_row(db, row)
+        if module:
+            return None
+    if module in ('', 'legal', 'opf'):
+        row = db.execute("SELECT * FROM legal_case_requests WHERE UPPER(TRIM(reference_id)) = ? ORDER BY id DESC LIMIT 1", [ref_upper]).fetchone()
+        if row:
+            return _ambassador_collect_legal_case_from_row(db, row)
+        if module:
+            return None
+    if module in ('', 'death'):
+        row = db.execute("SELECT * FROM death_case_requests WHERE UPPER(TRIM(reference_id)) = ? ORDER BY id DESC LIMIT 1", [ref_upper]).fetchone()
+        if row:
+            return _ambassador_collect_death_case_from_row(db, row)
+        if module:
+            return None
+    if module in ('', 'nurse', 'nurse_complaint', 'health_worker'):
+        row = db.execute("""SELECT * FROM nurse_complaints
+                            WHERE UPPER(TRIM(COALESCE(complaint_id, ''))) = ?
+                               OR UPPER(TRIM(COALESCE(nurse_reference_id, ''))) = ?
+                            ORDER BY id DESC LIMIT 1""", [ref_upper, ref_upper]).fetchone()
+        if row:
+            return _ambassador_collect_nurse_case_from_row(db, row)
+        if module:
+            return None
+    if module in ('', 'facility', 'aja'):
+        row = db.execute("SELECT * FROM facility_roster WHERE UPPER(TRIM(COALESCE(roster_reference, ''))) = ? ORDER BY id DESC LIMIT 1", [ref_upper]).fetchone()
+        if row:
+            return _ambassador_collect_facility_case_from_row(db, row, include_any=True)
+    return None
+
+
+def _ambassador_collect_welfare_case_from_row(db, row):
+    return _ambassador_collect_welfare_cases_from_rows(db, [row])[0]
+
+
+def _ambassador_collect_legal_case_from_row(db, row):
+    return _ambassador_collect_legal_cases_from_rows(db, [row])[0]
+
+
+def _ambassador_collect_death_case_from_row(db, row):
+    return _ambassador_collect_death_cases_from_rows(db, [row])[0]
+
+
+def _ambassador_collect_nurse_case_from_row(db, row):
+    return _ambassador_collect_nurse_complaints_from_rows(db, [row])[0]
+
+
+def _ambassador_collect_facility_case_from_row(db, row, include_any=False):
+    return _ambassador_collect_facility_cases_from_rows(db, [row], include_any=include_any)[0]
+
+
+def _ambassador_collect_welfare_cases_from_rows(db, rows):
+    cases = []
+    for row in rows:
+        d = dict(row)
+        actions = _ambassador_action_rows(db, 'welfare_case_actions', 'case_id', d.get('id'))
+        subject = _first_value(d.get('subject_name'), d.get('concern_summary'), d.get('category'))
+        summary = '\n'.join(x for x in [d.get('concern_summary') or '', d.get('details') or ''] if x)
+        extra = {
+            'Masked Passport': _ambassador_mask_identifier(d.get('subject_passport'), 'passport'),
+            'Masked CNIC': _ambassador_mask_identifier(d.get('subject_cnic'), 'cnic'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('subject_civil_id'), 'civil'),
+            'Requester Relationship': d.get('requester_relationship') or '',
+            'Last Known Contact': d.get('last_contact_date') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'welfare', d, actions, d.get('case_reference'), _ambassador_service_label('welfare', d),
+            d.get('requester_name'), subject, d.get('priority') or 'Normal', d.get('status') or 'New',
+            d.get('assigned_to') or '', d.get('assigned_to') or '', d.get('created_at') or '',
+            d.get('updated_at') or '', summary, contact=d.get('requester_phone') or '',
+            email=d.get('requester_email') or '', action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            escalation_level=d.get('escalation_level') or '', resolved_at=d.get('resolved_at') or '',
+            closed_at=d.get('closed_at') or '', extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_legal_cases_from_rows(db, rows):
+    cases = []
+    for row in rows:
+        d = dict(row)
+        actions = _ambassador_action_rows(db, 'legal_case_actions', 'reference_id', d.get('reference_id'))
+        if d.get('public_response'):
+            actions = [{'note': d.get('public_response'), 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_applicant': 1, 'action_type': 'Public Response'}] + actions
+        if d.get('internal_notes'):
+            actions = [{'note': d.get('internal_notes'), 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_applicant': 0, 'actor_username': d.get('updated_by') or '', 'action_type': 'Internal Note'}] + actions
+        summary = '\n'.join(x for x in [d.get('subject') or '', d.get('description') or ''] if x)
+        extra = {
+            'Masked Passport': _ambassador_mask_identifier(d.get('passport_number'), 'passport'),
+            'Masked CNIC': _ambassador_mask_identifier(d.get('cnic'), 'cnic'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('civil_id'), 'civil'),
+            'Legal Type': d.get('case_type') or '',
+            'Court Case No.': d.get('kuwaiti_court_case_no') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'legal', d, actions, d.get('reference_id'), _ambassador_service_label('legal', d),
+            d.get('full_name'), d.get('subject'), d.get('priority') or 'Normal', d.get('status') or 'Submitted',
+            d.get('assigned_to_name') or d.get('assigned_to_username') or '', d.get('assigned_to_username') or '',
+            d.get('created_at') or '', d.get('updated_at') or d.get('last_action_at') or '', summary,
+            contact=d.get('mobile') or '', email=d.get('email') or '',
+            action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            resolved_at=d.get('resolved_at') or '', closed_at=d.get('closed_at') or '', extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_death_cases_from_rows(db, rows):
+    cases = []
+    for row in rows:
+        d = dict(row)
+        actions = _ambassador_action_rows(db, 'death_case_actions', 'reference_id', d.get('reference_id'))
+        if d.get('public_response'):
+            actions = [{'note': d.get('public_response'), 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_reporter': 1, 'action_type': 'Public Response'}] + actions
+        if d.get('internal_notes'):
+            actions = [{'note': d.get('internal_notes'), 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_reporter': 0, 'actor_username': d.get('updated_by') or '', 'action_type': 'Internal Note'}] + actions
+        summary = '\n'.join(x for x in [
+            f"Respectful assistance request concerning {d.get('deceased_name') or 'the deceased'}." if d.get('deceased_name') else '',
+            d.get('description') or '',
+            f"Date of death: {d.get('date_of_death')}" if d.get('date_of_death') else '',
+            f"Repatriation requested: {d.get('repatriation_required')}" if d.get('repatriation_required') else ''
+        ] if x)
+        extra = {
+            'Masked Passport': _ambassador_mask_identifier(d.get('deceased_passport'), 'passport'),
+            'Masked CNIC': _ambassador_mask_identifier(d.get('deceased_cnic'), 'cnic'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('deceased_civil_id'), 'civil'),
+            'Date of Death': d.get('date_of_death') or '',
+            'Repatriation Required': d.get('repatriation_required') or '',
+            'Next of Kin': d.get('next_of_kin_name') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'death', d, actions, d.get('reference_id'), _ambassador_service_label('death', d),
+            d.get('reporter_name'), d.get('deceased_name'), d.get('priority') or 'Normal', d.get('status') or 'Submitted',
+            d.get('assigned_to_name') or d.get('assigned_to_username') or '', d.get('assigned_to_username') or '',
+            d.get('created_at') or '', d.get('updated_at') or d.get('last_action_at') or '', summary,
+            contact=d.get('reporter_mobile') or d.get('next_of_kin_mobile') or '',
+            email=d.get('reporter_email') or d.get('next_of_kin_email') or '',
+            action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            resolved_at=d.get('resolved_at') or '', closed_at=d.get('closed_at') or '', extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_nurse_complaints_from_rows(db, rows):
+    cases = []
+    for row in rows:
+        d = dict(row)
+        reference = _nurse_complaint_reference(d) or d.get('complaint_id') or f"NCMP-{int(d.get('id') or 0):05d}"
+        actions = _ambassador_action_rows(db, 'nurse_complaint_actions', 'complaint_id', reference)
+        if d.get('public_response'):
+            actions = [{'note': d.get('public_response'), 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_nurse': 1, 'action_type': 'Public Response'}] + actions
+        internal_note = d.get('internal_notes') or d.get('admin_remarks') or ''
+        if internal_note:
+            actions = [{'note': internal_note, 'created_at': d.get('last_action_at') or d.get('updated_at'), 'visible_to_nurse': 0, 'actor_username': d.get('updated_by') or '', 'action_type': 'Internal Note'}] + actions
+        category = _first_value(d.get('category'), d.get('complaint_category'), 'Nurse Welfare Request')
+        summary = _first_value(d.get('description'), d.get('details'), d.get('message'), d.get('complaint_text'))
+        extra = {
+            'Nurse Reference': d.get('nurse_reference_id') or '',
+            'Masked Passport': _ambassador_mask_identifier(d.get('passport_number'), 'passport'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('civil_id'), 'civil'),
+            'Category': category,
+        }
+        cases.append(_ambassador_base_case(
+            'nurse_complaint', d, actions, reference, _ambassador_service_label('nurse_complaint', d),
+            _first_value(d.get('nurse_full_name'), d.get('nurse_name')), d.get('subject') or category,
+            d.get('priority') or 'Normal', _first_value(d.get('status'), d.get('complaint_status'), 'Seen'),
+            d.get('assigned_to_name') or d.get('assigned_to_username') or '', d.get('assigned_to_username') or '',
+            d.get('created_at') or '', d.get('updated_at') or d.get('last_action_at') or '', summary,
+            contact=_first_value(d.get('phone'), d.get('mobile')), email=d.get('email') or '',
+            action_required=d.get('due_date') and f"Follow up by {d.get('due_date')}" or '',
+            resolved_at=d.get('resolved_at') or '', closed_at=d.get('closed_at') or '', extra=extra
+        ))
+    return cases
+
+
+def _ambassador_collect_facility_cases_from_rows(db, rows, include_any=False):
+    cases = []
+    for row in rows:
+        d = dict(row)
+        if not include_any and not _ambassador_facility_requires_welfare(d):
+            continue
+        reference = d.get('roster_reference') or f"FAC-{int(d.get('id') or 0):05d}"
+        actions = _ambassador_action_rows(db, 'facility_roster_actions', 'roster_id', d.get('id'))
+        summary = '\n'.join(x for x in [
+            f"Facility: {d.get('facility_name') or ''} {d.get('area') or d.get('facility_area') or ''}".strip(),
+            f"Current status: {_first_value(d.get('current_status'), d.get('confirmation_status'))}",
+            d.get('remarks') or '',
+            d.get('action_required') or '',
+        ] if x)
+        extra = {
+            'Roster Reference': reference,
+            'Masked Passport': _ambassador_mask_identifier(d.get('passport_number'), 'passport'),
+            'Masked Civil ID': _ambassador_mask_identifier(d.get('civil_id'), 'civil'),
+            'Facility': d.get('facility_name') or '',
+            'Area': d.get('area') or d.get('facility_area') or '',
+            'Vendor': d.get('vendor_name') or '',
+        }
+        cases.append(_ambassador_base_case(
+            'facility', d, actions, reference, _ambassador_service_label('facility', d),
+            d.get('full_name'), d.get('workplace') or d.get('facility_name'),
+            'Urgent' if int(d.get('welfare_followup_required') or 0) else 'Normal',
+            _first_value(d.get('current_status'), d.get('confirmation_status'), d.get('reconciliation_status'), 'Assigned'),
+            d.get('assigned_to') or '', d.get('assigned_to') or '', d.get('created_at') or '', d.get('updated_at') or '',
+            summary, contact=d.get('phone') or '', email=d.get('email') or '',
+            action_required=d.get('action_required') or '', extra=extra
+        ))
+    return cases
+
+
+def _ambassador_pack_cases(params, user):
+    pack_type = (params.get('type') or 'daily').strip().lower()
+    if pack_type not in AMBASSADOR_PACK_LABELS:
+        pack_type = 'daily'
+    selected_date = (params.get('date') or datetime.now().strftime('%Y-%m-%d')).strip()[:10]
+    db = get_db()
+    try:
+        cases = _ambassador_collect_all_cases(db)
+    finally:
+        db.close()
+    cases = [
+        case for case in cases
+        if _ambassador_case_matches_pack(case, pack_type, selected_date)
+        and _ambassador_case_matches_filters(case, params)
+    ]
+    cases.sort(key=lambda c: (c.get('updated_at') or c.get('submitted_at') or '', c.get('reference') or ''), reverse=True)
+    return cases, {
+        'pack_type': pack_type,
+        'pack_label': AMBASSADOR_PACK_LABELS.get(pack_type, pack_type.title()),
+        'selected_date': selected_date,
+        'generated_by': (user or {}).get('user') or 'system',
+        'generated_role': (user or {}).get('role') or '',
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
+
+
+def _ambassador_selected_cases(params, user):
+    refs = []
+    for part in re.split(r'[,\n]+', params.get('refs') or ''):
+        ref = part.strip()
+        if ref:
+            refs.append(ref)
+    db = get_db()
+    try:
+        cases = []
+        seen = set()
+        for ref in refs:
+            case = _ambassador_find_case_by_reference(db, ref)
+            if case and case.get('reference') not in seen and _ambassador_user_can_print_case(user, case):
+                cases.append(case)
+                seen.add(case.get('reference'))
+    finally:
+        db.close()
+    return cases, {
+        'pack_type': 'selected',
+        'pack_label': AMBASSADOR_PACK_LABELS['selected'],
+        'selected_date': '',
+        'generated_by': (user or {}).get('user') or 'system',
+        'generated_role': (user or {}).get('role') or '',
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
+
+
+def _ambassador_specific_case(params, user):
+    db = get_db()
+    try:
+        case = _ambassador_find_case_by_reference(db, params.get('reference') or '', params.get('module') or '')
+    finally:
+        db.close()
+    if not case:
+        return None, {'success': False, 'error': 'Case not found'}
+    if not _ambassador_user_can_print_case(user, case):
+        return None, {'success': False, 'error': 'Unauthorized'}
+    return case, None
+
+
+def _ambassador_pack_counts(cases):
+    return {
+        'total': len(cases),
+        'welfare': sum(1 for c in cases if c.get('service_key') in ('welfare', 'feedback', 'locating') or c.get('module') == 'facility'),
+        'legal': sum(1 for c in cases if c.get('module') == 'legal'),
+        'death': sum(1 for c in cases if c.get('module') == 'death'),
+        'nurse': sum(1 for c in cases if c.get('module') in ('nurse_complaint', 'facility')),
+        'urgent': sum(1 for c in cases if _ambassador_status_key(c.get('priority')) in ('urgent', 'high', 'important')),
+    }
+
+
+def _ambassador_field(label, value):
+    if not value:
+        return ''
+    return f"<div class=\"field\"><span>{esc(label)}</span><strong>{esc(value)}</strong></div>"
+
+
+def _ambassador_brief_html(case, idx, include_internal_notes=True):
+    extra_fields = ''.join(_ambassador_field(k, v) for k, v in (case.get('extra') or {}).items() if v)
+    public_note = case.get('latest_public_note') or {}
+    internal_note = case.get('latest_internal_note') or {}
+    internal_html = ''
+    if include_internal_notes:
+        internal_html = f"""
+        <section><h3>Latest Internal Staff Note</h3>
+          <p>{esc(internal_note.get('note') or 'No internal staff note recorded.')}</p>
+          <div class="small">{esc(_ambassador_datetime(internal_note.get('date')))}</div>
+        </section>"""
+    return f"""
+    <article class="case-page">
+      <div class="doc-head">
+        <div>Embassy of Pakistan, Kuwait</div>
+        <strong>Community Welfare Wing</strong>
+        <span>Case Brief for Review</span>
+      </div>
+      <div class="case-title">
+        <div><span>Case {idx}</span><h2>{esc(case.get('reference'))}</h2></div>
+        <div class="status-box">{esc(case.get('status'))}</div>
+      </div>
+      <div class="field-grid">
+        {_ambassador_field('Reference Number', case.get('reference'))}
+        {_ambassador_field('Service Type', case.get('service_type'))}
+        {_ambassador_field('Priority', case.get('priority'))}
+        {_ambassador_field('Current Status', case.get('status'))}
+        {_ambassador_field('Submitted Date', _ambassador_datetime(case.get('submitted_at')))}
+        {_ambassador_field('Last Updated', _ambassador_datetime(case.get('updated_at')))}
+        {_ambassador_field('Assigned Officer / Staff', case.get('assigned_to'))}
+        {_ambassador_field('Applicant / Requester Name', case.get('applicant'))}
+        {_ambassador_field('Contact Number / Email', ' / '.join(x for x in [case.get('contact'), case.get('email')] if x))}
+        {_ambassador_field('Nationality', case.get('nationality'))}
+        {extra_fields}
+      </div>
+      <section><h3>Request / Issue Summary</h3><p>{esc(case.get('summary') or 'No summary recorded.')}</p></section>
+      <section><h3>Latest Public Note / Applicant Message</h3>
+        <p>{esc(public_note.get('note') or 'No applicant-visible note recorded.')}</p>
+        <div class="small">{esc(_ambassador_datetime(public_note.get('date')))}</div>
+      </section>
+      {internal_html}
+      <section><h3>Action Taken So Far</h3><p>{esc(case.get('action_taken') or 'Initial request recorded.')}</p></section>
+      <section><h3>Pending Action</h3><p>{esc(case.get('pending_action') or 'Review and mark directions.')}</p></section>
+      <section><h3>Recommended Next Step</h3><p>{esc(case.get('recommended_next_step') or 'Mark directions and next responsible section.')}</p></section>
+      <section class="directions">
+        <h3>Ambassador Directions / Remarks</h3>
+        <div class="lined-area"></div>
+        <div class="check-grid">
+          <div><strong>Marked To</strong><br>[ ] Community Welfare Wing<br>[ ] Legal Section<br>[ ] OPF / NADRA / Passport Desk<br>[ ] Field Staff<br>[ ] Senior Review<br>[ ] Other</div>
+          <div><strong>Priority</strong><br>[ ] Normal<br>[ ] Urgent<br>[ ] Immediate</div>
+          <div><strong>Signature / Initials</strong><div class="signature-line"></div><strong>Date</strong><div class="signature-line small-line"></div></div>
+        </div>
+      </section>
+    </article>
+    """
+
+
+def _ambassador_print_html(cases, meta, include_cover=True, include_internal_notes=True):
+    counts = _ambassador_pack_counts(cases)
+    selected_date = meta.get('selected_date') or 'Not applicable'
+    summary_rows = ''.join(
+        f"""<tr>
+          <td>{i}</td><td><strong>{esc(c.get('reference'))}</strong></td>
+          <td>{esc(c.get('service_type'))}</td><td>{esc(c.get('applicant'))}</td>
+          <td>{esc(c.get('priority'))}</td><td>{esc(c.get('status'))}</td>
+          <td>{esc(c.get('assigned_to'))}</td><td>{esc(_ambassador_datetime(c.get('submitted_at')))}</td>
+          <td>{esc(_ambassador_datetime(c.get('updated_at')))}</td>
+          <td>{esc(c.get('action_required') or c.get('pending_action'))}</td>
+          <td class="marking">{_ambassador_marking_html()}</td>
+        </tr>"""
+        for i, c in enumerate(cases, 1)
+    ) or '<tr><td colspan="11" class="empty-row">No cases matched this pack.</td></tr>'
+    cover_html = ''
+    if include_cover:
+        cover_html = f"""
+        <section class="cover-page">
+          <div class="embassy-title">Embassy of Pakistan, Kuwait</div>
+          <div class="wing-title">Community Welfare Wing</div>
+          <h1>Ambassador Review Pack</h1>
+          <table class="cover-table">
+            <tr><th>Pack Type</th><td>{esc(meta.get('pack_label'))}</td></tr>
+            <tr><th>Date Generated</th><td>{esc(meta.get('generated_at'))}</td></tr>
+            <tr><th>Selected Date / Date Range</th><td>{esc(selected_date)}</td></tr>
+            <tr><th>Generated By</th><td>{esc(meta.get('generated_by'))} ({esc(meta.get('generated_role'))})</td></tr>
+            <tr><th>Total Cases</th><td>{counts['total']}</td></tr>
+            <tr><th>Welfare Cases</th><td>{counts['welfare']}</td></tr>
+            <tr><th>Legal / OPF Cases</th><td>{counts['legal']}</td></tr>
+            <tr><th>Death Cases</th><td>{counts['death']}</td></tr>
+            <tr><th>Nurse / Health Worker Cases</th><td>{counts['nurse']}</td></tr>
+            <tr><th>Urgent Cases</th><td>{counts['urgent']}</td></tr>
+          </table>
+          <p class="official-note">This review pack contains case summaries prepared for senior review and directions. Detailed records remain available in the Community Welfare digital portal.</p>
+        </section>
+        <section class="summary-page">
+          <h2>Summary Table</h2>
+          <table class="summary-table">
+            <thead><tr><th>Sr.</th><th>Reference</th><th>Service Type</th><th>Applicant / Subject</th><th>Priority</th><th>Current Status</th><th>Assigned To</th><th>Submitted Date</th><th>Last Updated</th><th>Action Required</th><th>Ambassador Marking</th></tr></thead>
+            <tbody>{summary_rows}</tbody>
+          </table>
+        </section>
+        """
+    briefs = ''.join(_ambassador_brief_html(c, i, include_internal_notes=include_internal_notes) for i, c in enumerate(cases, 1))
+    if not briefs:
+        briefs = '<section class="case-page"><h2>No Cases Found</h2><p>No cases matched the selected print criteria.</p></section>'
+    decision_sheet = ''
+    if include_cover:
+        decision_sheet = f"""
+        <section class="decision-page">
+          <h2>Ambassador Decision / Directions Sheet</h2>
+          <p>Total cases in pack: <strong>{counts['total']}</strong></p>
+          <div class="lined-area tall"></div>
+          <div class="check-grid">
+            <div><strong>Overall Direction</strong><br>[ ] Approved / Noted<br>[ ] Expedite urgent cases<br>[ ] Seek section-wise report<br>[ ] Put up again with updates<br>[ ] Other</div>
+            <div><strong>Signature / Initials</strong><div class="signature-line"></div><strong>Date</strong><div class="signature-line small-line"></div></div>
+          </div>
+        </section>
+        """
+    title = meta.get('pack_label') or 'Ambassador Review Pack'
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{esc(title)} - Community Welfare Wing</title>
+    <style>
+      *{{box-sizing:border-box}}
+      body{{margin:0;background:#f3f4f6;color:#111827;font-family:Georgia,'Times New Roman',serif;font-size:12px;line-height:1.45}}
+      .print-toolbar{{position:sticky;top:0;background:#10253f;color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;font-family:Arial,sans-serif;z-index:5}}
+      .print-toolbar button{{border:0;border-radius:6px;background:#2f7d4e;color:white;padding:8px 12px;font-weight:700;cursor:pointer}}
+      main{{max-width:210mm;margin:0 auto;background:white;min-height:100vh;padding:12mm}}
+      .cover-page,.summary-page,.case-page,.decision-page{{page-break-after:always;padding:4mm 0}}
+      .embassy-title,.doc-head{{text-align:center;text-transform:uppercase;letter-spacing:.04em}}
+      .embassy-title{{font-size:20px;font-weight:700;margin-top:28mm}}
+      .wing-title{{text-align:center;font-size:15px;margin-top:2mm}}
+      h1{{text-align:center;font-size:25px;margin:18mm 0 14mm;text-transform:uppercase;letter-spacing:.05em}}
+      h2{{font-size:18px;margin:0 0 8mm;color:#111827}}
+      h3{{font-size:13px;margin:0 0 3mm;text-transform:uppercase;letter-spacing:.04em}}
+      .cover-table,.summary-table{{width:100%;border-collapse:collapse}}
+      .cover-table th,.cover-table td,.summary-table th,.summary-table td{{border:1px solid #222;padding:5px 6px;vertical-align:top}}
+      .cover-table th{{width:42%;text-align:left;background:#f3f4f6}}
+      .summary-table th{{background:#f3f4f6;text-align:left;font-size:10px}}
+      .summary-table td{{font-size:10px}}
+      .official-note{{border:1px solid #222;padding:8px;margin-top:10mm;text-align:center}}
+      .doc-head{{border-bottom:2px solid #111;padding-bottom:4mm;margin-bottom:6mm}}
+      .doc-head div{{font-size:15px;font-weight:700}}
+      .doc-head strong{{display:block;font-size:13px}}
+      .doc-head span{{display:block;font-size:12px;margin-top:1mm}}
+      .case-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:8mm;border-bottom:1px solid #9ca3af;padding-bottom:4mm;margin-bottom:5mm}}
+      .case-title span{{font-family:Arial,sans-serif;font-size:10px;text-transform:uppercase;color:#4b5563}}
+      .case-title h2{{margin:0;font-size:19px}}
+      .status-box{{border:1px solid #111;padding:5px 8px;font-weight:700;min-width:42mm;text-align:center}}
+      .field-grid{{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #111;border-left:1px solid #111;margin-bottom:5mm}}
+      .field{{border-right:1px solid #111;border-bottom:1px solid #111;padding:4px 6px;min-height:28px}}
+      .field span{{display:block;font-family:Arial,sans-serif;font-size:9px;text-transform:uppercase;color:#4b5563}}
+      .field strong{{display:block;font-size:12px;font-weight:700;word-break:break-word}}
+      section{{margin-bottom:5mm}}
+      section p{{white-space:pre-wrap;border:1px solid #d1d5db;padding:6px;margin:0;min-height:14mm}}
+      .small{{font-family:Arial,sans-serif;color:#4b5563;font-size:10px;margin-top:2px}}
+      .directions{{border:1px solid #111;padding:6px;margin-top:6mm}}
+      .lined-area{{height:36mm;background:repeating-linear-gradient(to bottom, transparent 0, transparent 8mm, #9ca3af 8.2mm)}}
+      .lined-area.tall{{height:80mm}}
+      .check-grid{{display:grid;grid-template-columns:1.25fr .8fr .8fr;gap:8mm;margin-top:6mm;font-size:12px}}
+      .signature-line{{border-bottom:1px solid #111;height:16mm;margin:3mm 0 5mm}}
+      .signature-line.small-line{{height:10mm}}
+      .marking{{line-height:1.55;white-space:nowrap}}
+      .empty-row{{text-align:center;padding:14px!important}}
+      @media print{{
+        @page{{size:A4;margin:14mm}}
+        body{{background:white;color:#111}}
+        main{{max-width:none;margin:0;padding:0}}
+        .no-print,.print-toolbar{{display:none!important}}
+        .cover-page,.summary-page,.case-page,.decision-page{{break-after:page;page-break-after:always}}
+        .summary-table th,.summary-table td{{font-size:9px;padding:4px}}
+      }}
+    </style></head><body>
+    <div class="print-toolbar no-print"><strong>{esc(title)}</strong><button onclick="window.print()">Print</button></div>
+    <main>{cover_html}{briefs}{decision_sheet}</main>
+    </body></html>"""
+
+
+def ambassador_review_pack_html(params, user):
+    cases, meta = _ambassador_pack_cases(params, user)
+    return _ambassador_print_html(cases, meta, include_cover=True, include_internal_notes=True)
+
+
+def ambassador_selected_cases_html(params, user):
+    cases, meta = _ambassador_selected_cases(params, user)
+    return _ambassador_print_html(cases, meta, include_cover=True, include_internal_notes=True)
+
+
+def ambassador_specific_case_html(params, user):
+    case, err = _ambassador_specific_case(params, user)
+    if err:
+        return None, err
+    include_internal = (user or {}).get('role') in AMBASSADOR_PRINT_GLOBAL_ROLES
+    meta = {
+        'pack_type': 'case',
+        'pack_label': f"Case Summary - {case.get('reference')}",
+        'selected_date': '',
+        'generated_by': (user or {}).get('user') or 'system',
+        'generated_role': (user or {}).get('role') or '',
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
+    return _ambassador_print_html([case], meta, include_cover=False, include_internal_notes=include_internal), None
 
 
 def _facility_user_can_access(user):
@@ -21143,6 +22223,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
             self.send_html(app_html)
+        elif path == '/admin/print/ambassador-review-pack':
+            user = self.require_auth()
+            if not user: return
+            if user.get('role') not in AMBASSADOR_PRINT_GLOBAL_ROLES:
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_html(ambassador_review_pack_html(params, user))
+        elif path == '/admin/print/selected-cases':
+            user = self.require_auth()
+            if not user: return
+            if user.get('role') not in AMBASSADOR_PRINT_GLOBAL_ROLES:
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_html(ambassador_selected_cases_html(params, user))
+        elif path == '/admin/print/case':
+            user = self.require_auth()
+            if not user: return
+            html, err = ambassador_specific_case_html(params, user)
+            if err:
+                self.send_json(err, 403 if err.get('error') == 'Unauthorized' else 404); return
+            self.send_html(html)
         elif path == '/dashboard':
             user = self.require_auth()
             if not user: return
@@ -27254,9 +28353,111 @@ WELFARE_CASES_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset
 <style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f2f7fa;color:#172033}.top{height:58px;background:white;border-bottom:1px solid #dbe5ea;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.shell{display:flex}.side{width:230px;min-height:calc(100vh - 58px);background:#10253f;color:white;padding:18px 10px}.side h3{font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em;text-transform:uppercase;padding:0 10px}.side a{display:block;color:rgba(255,255,255,.68);text-decoration:none;font-weight:700;font-size:13px;padding:10px 12px;border-radius:8px;margin:2px}.side a.active,.side a:hover{background:rgba(255,255,255,.1);color:white}.badge-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:12px;font-weight:700;margin-left:auto}.badge-count.hidden{display:none}.main{flex:1;min-width:0}.head{background:white;border-bottom:1px solid #dbe5ea;padding:18px 24px}.head h1{font-size:22px;margin:0;color:#10253f}.head p{font-size:12px;color:#64748b;margin:4px 0 0}.content{padding:20px 24px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:white;border:1px solid #dbe5ea;border-radius:8px;padding:14px}.kpi b{display:block;font-size:24px;color:#10253f}.kpi span{font-size:11px;color:#64748b;font-weight:800;text-transform:uppercase}.panel{background:white;border:1px solid #dbe5ea;border-radius:8px;overflow:hidden}.filters{display:flex;gap:10px;flex-wrap:wrap;padding:14px;border-bottom:1px solid #e2e8f0}input,select,textarea{border:1px solid #cbd5e1;border-radius:7px;padding:9px 10px;font:inherit;font-size:13px}button{border:0;border-radius:7px;background:#2f7d4e;color:white;padding:9px 12px;font-weight:800;cursor:pointer}.btn2{background:#e2e8f0;color:#10253f}.btn3{background:#2d4a6b}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;background:#f8fafc;color:#64748b;font-size:11px;text-transform:uppercase;padding:10px;border-bottom:1px solid #e2e8f0}td{padding:11px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#e2e8f0;color:#334155}.New{background:#eff6ff;color:#1d4ed8}.Assigned{background:#ecfdf5;color:#047857}.High,.Urgent{background:#fef2f2;color:#b91c1c}.Resolved{background:#f0fdf4;color:#166534}.drawer{position:fixed;right:0;top:0;width:min(560px,100%);height:100vh;background:white;box-shadow:-24px 0 60px rgba(15,23,42,.2);display:none;z-index:5;overflow:auto}.drawer.open{display:block}.drawerHead{background:#2d4a6b;color:white;padding:20px}.drawerBody{padding:18px}.row{display:grid;grid-template-columns:150px 1fr;gap:8px;margin-bottom:8px;font-size:13px}.row span{color:#64748b}.timeline{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}.act{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px}.err{color:#b91c1c;font-weight:800;margin:10px 0}</style></head><body>
 <div class="top"><div><b>Embassy of Pakistan, Kuwait</b><div style="font-size:11px;color:#64748b">Community Welfare Wing</div></div><div style="font-size:12px;color:#64748b">__USER_NAME__ · __USER_ROLE__</div></div>
 <div class="shell"><aside class="side"><h3>Main Dashboard</h3><a href="/admin/dashboard">Dashboard</a><h3>Community Welfare</h3><a href="/admin/community-welfare">CWA Overview <span class="badge-count hidden" data-badge="community_welfare"></span></a><a href="/admin/nurses">Nurses <span class="badge-count hidden" data-badge="nurses"></span></a><a href="/admin/legal-cases">Legal Cases <span class="badge-count hidden" data-badge="legal_cases"></span></a><a href="/admin/death-cases">Death Cases <span class="badge-count hidden" data-badge="death_cases"></span></a><a href="/admin/welfare-cases" data-nav="all">Welfare Cases <span class="badge-count hidden" data-badge="welfare_cases"></span></a><a href="/admin/my-cases" data-nav="my">My Assigned Cases <span class="badge-count hidden" data-badge="my_cases"></span></a><a href="/admin/ambassador-review" data-nav="ambassador">Ambassador Review <span class="badge-count hidden" data-badge="ambassador_review"></span></a></aside>
-<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div></div></main></div>
+<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel" style="margin-bottom:14px"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Review Print Pack</strong><input id="printDate" type="date"><select id="printPackType"><option value="daily">Today’s New / Updated Cases</option><option value="pending">Pending Review</option><option value="open">All Open Cases</option><option value="ambassador_review">Ambassador Review Queue</option><option value="resolved_today">Resolved Today</option></select><select id="printCaseType"><option value="all">All Case Types</option><option value="welfare">Welfare</option><option value="legal">Legal / OPF</option><option value="death">Death Cases</option><option value="nurse">Nurse / Health Worker</option><option value="locating">Locating Assistance</option><option value="feedback">Feedback / Complaints</option></select><select id="printPriority"><option value="all">All Priorities</option><option value="urgent">Urgent</option><option value="normal">Normal</option></select><select id="printAssigned"><option value="all">All Assignees</option><option value="unassigned">Unassigned</option></select><button onclick="generatePrintPack()">Generate Print Pack</button><button class="btn3" onclick="printSelectedCases()">Print Selected Cases</button></div></div><div class="panel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table id="caseTable"><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div></div></main></div>
 <div class="drawer" id="drawer"><div class="drawerHead"><button class="btn2" style="float:right" onclick="closeDrawer()">Close</button><h2 id="dRef"></h2><div id="dType"></div></div><div class="drawerBody"><div id="details"></div><h3>Assignment</h3><select id="assignee"></select><input id="assignNote" placeholder="Assignment note"><button onclick="assignCase()">Assign</button><h3>Status</h3><select id="newStatus"><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><input id="statusNote" placeholder="Status note"><button class="btn3" onclick="statusCase()">Update Status</button><h3>Escalation</h3><select id="escLevel"><option value="normal">Normal</option><option value="senior_review">Senior Review</option><option value="ambassador_review">Ambassador Review</option></select><input id="escNote" placeholder="Escalation note"><button class="btn3" onclick="escalateCase()">Escalate</button><h3>Notes</h3><textarea id="noteText" placeholder="Internal note or requester-visible message"></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="visibleNote" type="checkbox"> Visible to requester</label><button onclick="addNote()">Add Note</button><button class="btn3" onclick="resolveCase()">Mark Resolved</button><div class="timeline" id="timeline"></div></div></div>
 <script>const PAGE_MODE='__PAGE_MODE__';let current=null,users=[];document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}async function loadCases(){try{document.getElementById('err').textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};document.getElementById('kpis').innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');document.getElementById('rows').innerHTML=(data.items||[]).map(c=>'<tr><td><b>'+c.case_reference+'</b></td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>'}catch(e){document.getElementById('err').textContent=e.message}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;document.getElementById('details').innerHTML=rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}async function statusCase(){await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:document.getElementById('newStatus').value,note:document.getElementById('statusNote').value});await refresh()}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:document.getElementById('noteText').value});await refresh()}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}loadUsers();loadCases();refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html>"""
+
+WELFARE_CASES_PRINT_SCRIPT = """
+<script>
+function cwaPrintTodayIso(){
+  const d=new Date();
+  const tz=new Date(d.toLocaleString('en-US',{timeZone:'Asia/Kuwait'}));
+  return tz.toISOString().slice(0,10);
+}
+async function cwaLoadPrintAssignees(){
+  const sel=document.getElementById('printAssigned');
+  if(!sel) return;
+  const date=document.getElementById('printDate');
+  if(date && !date.value) date.value=cwaPrintTodayIso();
+  try{
+    const d=await jget('/api/admin/welfare-users');
+    sel.innerHTML='<option value="all">All Assignees</option><option value="unassigned">Unassigned</option>'+(d.users||[]).map(u=>'<option value="'+u.username+'">'+(u.full_name||u.username)+' ('+u.username+')</option>').join('');
+  }catch(_e){}
+}
+function generatePrintPack(){
+  const p=new URLSearchParams();
+  p.set('type',document.getElementById('printPackType').value||'daily');
+  const d=document.getElementById('printDate').value;
+  if(d) p.set('date',d);
+  const ct=document.getElementById('printCaseType').value;
+  if(ct&&ct!=='all') p.set('case_type',ct);
+  const pr=document.getElementById('printPriority').value;
+  if(pr&&pr!=='all') p.set('priority',pr);
+  const asg=document.getElementById('printAssigned').value;
+  if(asg&&asg!=='all') p.set('assigned_to',asg);
+  window.open('/admin/print/ambassador-review-pack?'+p.toString(),'_blank','noopener');
+}
+function printCaseSummary(module,ref){
+  if(!ref) return;
+  window.open('/admin/print/case?module='+encodeURIComponent(module||'welfare')+'&reference='+encodeURIComponent(ref),'_blank','noopener');
+}
+function printSelectedCases(){
+  const refs=[...document.querySelectorAll('.case-check:checked')].map(x=>x.value).filter(Boolean);
+  if(!refs.length){alert('Select at least one case to print.');return;}
+  window.open('/admin/print/selected-cases?refs='+encodeURIComponent(refs.join(',')),'_blank','noopener');
+}
+function toggleAllCaseChecks(box){
+  document.querySelectorAll('.case-check').forEach(x=>{x.checked=box.checked;});
+}
+function enhancePrintRows(){
+  const table=document.getElementById('caseTable');
+  if(!table) return;
+  const hr=table.tHead&&table.tHead.rows[0];
+  if(hr&&!hr.dataset.printSelect){
+    const th=document.createElement('th');
+    th.innerHTML='<input type="checkbox" onclick="toggleAllCaseChecks(this)">';
+    hr.insertBefore(th,hr.firstChild);
+    hr.dataset.printSelect='1';
+  }
+  document.querySelectorAll('#rows tr').forEach(tr=>{
+    if(tr.dataset.printEnhanced||tr.cells.length<3) return;
+    const ref=(tr.cells[0].textContent||'').trim();
+    if(!ref||ref==='No cases found.') return;
+    const td=document.createElement('td');
+    const cb=document.createElement('input');
+    cb.type='checkbox';
+    cb.className='case-check';
+    cb.value=ref;
+    td.appendChild(cb);
+    tr.insertBefore(td,tr.firstChild);
+    const last=tr.cells[tr.cells.length-1];
+    if(last){
+      const btn=document.createElement('button');
+      btn.className='btn3';
+      btn.textContent='Print';
+      btn.onclick=function(ev){ev.stopPropagation();printCaseSummary('welfare',ref);};
+      last.appendChild(document.createTextNode(' '));
+      last.appendChild(btn);
+    }
+    tr.dataset.printEnhanced='1';
+  });
+}
+function addDrawerPrintButton(){
+  const head=document.querySelector('#drawer .drawerHead');
+  if(!head||!current) return;
+  const old=document.getElementById('drawerPrintBtn');
+  if(old) old.remove();
+  const btn=document.createElement('button');
+  btn.id='drawerPrintBtn';
+  btn.className='btn2';
+  btn.style.cssText='float:right;margin-right:8px';
+  btn.textContent='Print Case Summary';
+  btn.onclick=function(){printCaseSummary('welfare',current.case_reference);};
+  head.insertBefore(btn,head.firstChild);
+}
+if(typeof loadCases==='function'){
+  const baseLoadCases=loadCases;
+  loadCases=async function(){await baseLoadCases();enhancePrintRows();};
+}
+if(typeof openCase==='function'){
+  const baseOpenCase=openCase;
+  openCase=async function(id){await baseOpenCase(id);addDrawerPrintButton();};
+}
+cwaLoadPrintAssignees();
+enhancePrintRows();
+</script>
+"""
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + "</body></html>")
 
 PUBLIC_HOME_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Welfare Wing Digital Services</title>
@@ -28100,6 +29301,55 @@ fillSelect(document.getElementById('f_status'),STATUSES,'All Status');
 loadAssignees().then(()=>{loadKpi();loadList(1);});
 </script>
 """)
+
+ADMIN_LEGAL_PRINT_SCRIPT = """
+<script>
+function legalPrintCaseSummary(ref){
+  if(!ref) return;
+  window.open('/admin/print/case?module=legal&reference='+encodeURIComponent(ref),'_blank','noopener');
+}
+if(typeof openDetail==='function'){
+  const legalBaseOpenDetail=openDetail;
+  openDetail=async function(ref){
+    await legalBaseOpenDetail(ref);
+    const box=document.getElementById('modalBox');
+    const head=box&&box.querySelector('.flex');
+    if(!head||document.getElementById('legalPrintBtn')) return;
+    const btn=document.createElement('button');
+    btn.id='legalPrintBtn';
+    btn.className='secondary';
+    btn.textContent='Print Case Summary';
+    btn.onclick=function(){legalPrintCaseSummary(ref);};
+    head.insertBefore(btn, head.lastElementChild);
+  };
+}
+</script>
+"""
+ADMIN_DEATH_PRINT_SCRIPT = """
+<script>
+function deathPrintCaseSummary(ref){
+  if(!ref) return;
+  window.open('/admin/print/case?module=death&reference='+encodeURIComponent(ref),'_blank','noopener');
+}
+if(typeof openDetail==='function'){
+  const deathBaseOpenDetail=openDetail;
+  openDetail=async function(ref){
+    await deathBaseOpenDetail(ref);
+    const box=document.getElementById('modalBox');
+    const head=box&&box.querySelector('.flex');
+    if(!head||document.getElementById('deathPrintBtn')) return;
+    const btn=document.createElement('button');
+    btn.id='deathPrintBtn';
+    btn.className='secondary';
+    btn.textContent='Print Case Summary';
+    btn.onclick=function(){deathPrintCaseSummary(ref);};
+    head.insertBefore(btn, head.lastElementChild);
+  };
+}
+</script>
+"""
+ADMIN_LEGAL_OPF_COMING_SOON_PAGE = ADMIN_LEGAL_OPF_COMING_SOON_PAGE.replace("</body></html>", ADMIN_LEGAL_PRINT_SCRIPT + "</body></html>")
+ADMIN_DEATH_CASES_COMING_SOON_PAGE = ADMIN_DEATH_CASES_COMING_SOON_PAGE.replace("</body></html>", ADMIN_DEATH_PRINT_SCRIPT + "</body></html>")
 
 LEGAL_CASE_PUBLIC_PAGE = nurse_simple_page("Legal Assistance / OPF Cards Request", """
 <h2>Legal Assistance and OPF Cards Request</h2>

@@ -100,6 +100,44 @@
           <div class="cwa-kpi" data-accent="purple"><div><div class="cwa-kpi__label">Assigned to Me</div><div class="cwa-kpi__value" id="kpiMine">—</div><div class="cwa-kpi__sub" id="kpiMineSub">—</div></div><div class="cwa-kpi__icon">◈</div></div>
         </div>
 
+        <div class="cwa-card" data-accent-top="navy">
+          <div class="cwa-card__head">
+            <div>
+              <div class="cwa-card__title">Ambassador Review Print Pack</div>
+              <div style="font-size:12px;color:var(--cwa-muted);margin-top:3px">Generate print-ready case summaries for senior review and paper directions.</div>
+            </div>
+          </div>
+          <div class="cwa-form-row cwa-print-pack-row">
+            <input id="printDate" class="cwa-input" type="date" style="width:170px">
+            <select id="printPackType" class="cwa-select" style="width:240px">
+              <option value="daily">Today’s New / Updated Cases</option>
+              <option value="pending">Pending Review</option>
+              <option value="open">All Open Cases</option>
+              <option value="ambassador_review">Ambassador Review Queue</option>
+              <option value="resolved_today">Resolved Today</option>
+            </select>
+            <select id="printCaseType" class="cwa-select" style="width:210px">
+              <option value="all">All Case Types</option>
+              <option value="welfare">Welfare</option>
+              <option value="legal">Legal / OPF</option>
+              <option value="death">Death Cases</option>
+              <option value="nurse">Nurse / Health Worker</option>
+              <option value="locating">Locating Assistance</option>
+              <option value="feedback">Feedback / Complaints</option>
+            </select>
+            <select id="printPriority" class="cwa-select" style="width:150px">
+              <option value="all">All Priorities</option>
+              <option value="urgent">Urgent</option>
+              <option value="normal">Normal</option>
+            </select>
+            <select id="printAssigned" class="cwa-select" style="width:200px">
+              <option value="all">All Assignees</option>
+              <option value="unassigned">Unassigned</option>
+            </select>
+            <button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="generatePrintPack()">Generate Print Pack</button>
+          </div>
+        </div>
+
         <div class="cwa-grid-2col">
           <div class="cwa-card">
             <div class="cwa-card__head">
@@ -178,9 +216,43 @@ function applyRoleScope(){
   }
 }
 
+function todayIso(){
+  const d=new Date();
+  const tz=new Date(d.toLocaleString('en-US',{timeZone:'Asia/Kuwait'}));
+  return tz.toISOString().slice(0,10);
+}
+
+async function loadPrintAssignees(){
+  const sel=document.getElementById('printAssigned');
+  if(!sel) return;
+  try{
+    const d=await api('/api/admin/welfare-users');
+    const current=sel.value||'all';
+    sel.innerHTML='<option value="all">All Assignees</option><option value="unassigned">Unassigned</option>'+(d.users||[]).map(u=>'<option value="'+esc(u.username)+'">'+esc(u.full_name||u.username)+' ('+esc(u.username)+')</option>').join('');
+    sel.value=current;
+  }catch(_e){}
+}
+
+function generatePrintPack(){
+  const p=new URLSearchParams();
+  const type=document.getElementById('printPackType').value||'daily';
+  p.set('type',type);
+  const date=document.getElementById('printDate').value;
+  if(date) p.set('date',date);
+  const caseType=document.getElementById('printCaseType').value;
+  if(caseType&&caseType!=='all') p.set('case_type',caseType);
+  const priority=document.getElementById('printPriority').value;
+  if(priority&&priority!=='all') p.set('priority',priority);
+  const assigned=document.getElementById('printAssigned').value;
+  if(assigned&&assigned!=='all') p.set('assigned_to',assigned);
+  window.open('/admin/print/ambassador-review-pack?'+p.toString(),'_blank','noopener');
+}
+
 async function loadAll(){
   applyRoleScope();
   setKuwaitDate();
+  const printDate=document.getElementById('printDate');
+  if(printDate && !printDate.value) printDate.value=todayIso();
   let summary={};
   try { summary = await api('/api/admin/community-welfare/summary'); } catch(e) { summary={success:false,error:e.message}; }
   const t=summary.totals||{};
@@ -226,6 +298,7 @@ async function loadAll(){
 }
 
 loadAll();
+loadPrintAssignees();
 setInterval(loadAll, 60000);
 
 async function refreshNotificationBadges(){
