@@ -5040,13 +5040,41 @@ def _monthly_checkin_email_body(name, reference, confirmation_link):
         f"Dear {name or 'Health Worker'},\n\n"
         "The Community Welfare Wing, Embassy of Pakistan, Kuwait, is updating welfare records for Pakistani nurses linked to Embassy-facilitated stay arrangements through approved service providers.\n\n"
         "Please confirm your current stay arrangement and let us know if any welfare follow-up is required.\n\n"
-        f"Secure link:\n{confirmation_link}\n\n"
+        "Available stay arrangement options on the confirmation page:\n"
+        "- I am still staying at the listed facility\n"
+        "- I intend to leave / change my stay arrangement\n"
+        "- I have already left the facility\n"
+        "- My facility details need correction\n\n"
+        f"Confirm My Stay Arrangement:\n{confirmation_link}\n\n"
         f"Reference: {reference or 'N/A'}\n\n"
         "This link is valid for 14 days.\n\n"
         "Regards,\n"
         "Community Welfare Wing\n"
         "Embassy of Pakistan, Kuwait"
     )
+
+
+def _monthly_checkin_email_html(name, reference, confirmation_link):
+    safe_name = esc(name or 'Health Worker')
+    safe_ref = esc(reference or 'N/A')
+    safe_link = esc(confirmation_link or '#')
+    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#f6f9fc;font-family:Arial,sans-serif;color:#172033">
+<div style="max-width:640px;margin:0 auto;padding:24px 16px">
+  <div style="background:#ffffff;border:1px solid #dbe5ea;border-radius:10px;padding:22px">
+    <p style="margin:0 0 14px">Dear {safe_name},</p>
+    <p style="margin:0 0 14px;line-height:1.55">The Community Welfare Wing, Embassy of Pakistan, Kuwait, is updating welfare records for Pakistani nurses linked to Embassy-facilitated stay arrangements through approved service providers.</p>
+    <p style="margin:0 0 16px;line-height:1.55">Please confirm your current stay arrangement and let us know if any welfare follow-up is required.</p>
+    <div style="margin:0 0 18px;padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px">
+      <p style="margin:0 0 8px;font-weight:700">Available options on the confirmation page:</p>
+      <p style="margin:0;line-height:1.6">I am still staying at the listed facility<br>I intend to leave / change my stay arrangement<br>I have already left the facility<br>My facility details need correction</p>
+    </div>
+    <p style="margin:0 0 18px"><a href="{safe_link}" style="display:block;text-align:center;background:#2f7d4e;color:#ffffff;text-decoration:none;border-radius:8px;padding:14px 16px;font-weight:800">Confirm My Stay Arrangement</a></p>
+    <p style="margin:0 0 10px;color:#475569">Reference: {safe_ref}</p>
+    <p style="margin:0 0 18px;color:#475569">This link is valid for 14 days.</p>
+    <p style="margin:0;line-height:1.5">Regards,<br>Community Welfare Wing<br>Embassy of Pakistan, Kuwait</p>
+  </div>
+</div>
+</body></html>"""
 
 
 def _monthly_checkin_whatsapp_body(name, confirmation_link):
@@ -5128,12 +5156,13 @@ def _run_monthly_welfare_campaign(vendor=FACILITY_VENDOR_DEFAULT, facility_name=
             send_status = 'failed'
             error = ''
             body = _monthly_checkin_email_body(person.get('full_name') or '', reference, link)
+            body_html = _monthly_checkin_email_html(person.get('full_name') or '', reference, link)
             if channel == 'email':
                 if not email:
                     send_status = 'skipped_no_email'
                     error = 'missing_email'
                 else:
-                    send_res = send_notification_email(email, subject, body)
+                    send_res = send_notification_email(email, subject, body, body_html)
                     if send_res.get('ok'):
                         send_status = 'sent'
                     else:
@@ -5403,20 +5432,26 @@ def stay_confirmation_page_html(token):
             f"<div><span>Approved Vendor / Service Provider</span><b>{esc(vendor)}</b></div>",
         ])
         html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Monthly Welfare Check-in</title>
-<style>*{{box-sizing:border-box}}body{{font-family:Arial,sans-serif;background:#f6f9fc;color:#172033;margin:0}}.wrap{{max-width:760px;margin:0 auto;padding:28px 16px}}.card{{background:#fff;border:1px solid #dbe5ea;border-radius:10px;padding:22px;box-shadow:0 8px 24px rgba(15,23,42,.08)}}h1{{color:#15324a;margin:0 0 10px;font-size:26px}}h2{{font-size:16px;color:#15324a;margin:20px 0 10px}}p{{line-height:1.55;color:#475569}}.ctx{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:14px 0}}.ctx div{{border:1px solid #e2e8f0;border-radius:8px;padding:10px;background:#f8fafc}}.ctx span{{display:block;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:4px}}.ctx b{{font-size:13px}}label.opt{{display:block;border:1px solid #dbe5ea;border-radius:8px;padding:11px;margin-bottom:8px;cursor:pointer}}label.opt:has(input:checked){{border-color:#2f7d4e;background:#f0fdf4}}textarea,input,select{{width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:10px;font:inherit}}button{{border:0;border-radius:8px;background:#2f7d4e;color:white;padding:11px 14px;font-weight:800;cursor:pointer;width:100%;margin-top:14px}}.msg{{display:none;border-radius:8px;padding:12px;margin-top:14px}}.ok{{display:block;background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}}.err{{display:block;background:#fff4f4;color:#991b1b;border:1px solid #fecaca}}@media(max-width:520px){{.card{{padding:18px}}h1{{font-size:22px}}}}</style></head>
+<style>*{{box-sizing:border-box}}body{{font-family:Arial,sans-serif;background:#f6f9fc;color:#172033;margin:0}}.wrap{{max-width:760px;margin:0 auto;padding:28px 16px}}.card{{background:#fff;border:1px solid #dbe5ea;border-radius:10px;padding:22px;box-shadow:0 8px 24px rgba(15,23,42,.08)}}h1{{color:#15324a;margin:0 0 10px;font-size:26px}}h2{{font-size:17px;color:#15324a;margin:24px 0 8px}}p{{line-height:1.55;color:#475569}}.section-note{{margin:0 0 12px;color:#64748b;font-size:14px}}.ctx{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:14px 0 18px}}.ctx div{{border:1px solid #e2e8f0;border-radius:8px;padding:10px;background:#f8fafc}}.ctx span{{display:block;font-size:11px;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:4px}}.ctx b{{font-size:13px}}.option-list{{display:grid;gap:12px}}label.opt{{display:block;position:relative;cursor:pointer}}label.opt input[type=radio]{{position:absolute;opacity:0;pointer-events:none}}.opt-body{{display:block;min-height:62px;border:2px solid #dbe5ea;border-radius:8px;padding:15px 16px;background:#fff;box-shadow:0 1px 0 rgba(15,23,42,.03)}}.opt-title{{display:block;font-size:16px;font-weight:800;color:#172033;line-height:1.35}}.opt-help{{display:block;margin-top:4px;color:#64748b;font-size:13px;line-height:1.35}}label.opt input:checked+.opt-body{{border-color:#2f7d4e;background:#f0fdf4;box-shadow:0 0 0 3px rgba(47,125,78,.12)}}label.opt input:focus+.opt-body{{outline:3px solid rgba(47,125,78,.22)}}textarea,input,select{{width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:10px;font:inherit}}textarea{{margin-top:6px}}button{{border:0;border-radius:8px;background:#2f7d4e;color:white;padding:14px 16px;font-weight:800;cursor:pointer;width:100%;margin-top:16px;font-size:16px}}.msg{{display:none;border-radius:8px;padding:12px;margin-top:14px}}.ok{{display:block;background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}}.err{{display:block;background:#fff4f4;color:#991b1b;border:1px solid #fecaca}}@media(max-width:520px){{.wrap{{padding:16px 10px}}.card{{padding:16px}}h1{{font-size:22px}}.opt-body{{min-height:68px;padding:14px}}.opt-title{{font-size:15px}}}}</style></head>
 <body><main class="wrap"><section class="card"><h1>Monthly Welfare Check-in</h1><p>Please confirm your current stay arrangement so the Community Welfare Wing can maintain accurate welfare records and provide timely assistance where required.</p><div class="ctx">{safe_context}</div>
 <form id="checkinForm">
 <h2>Current Stay Arrangement</h2>
-<label class="opt"><input type="radio" name="stay_action" value="confirmed_staying" required> I am still staying at the listed facility</label>
-<label class="opt"><input type="radio" name="stay_action" value="intends_to_leave"> I intend to leave / change my stay arrangement</label>
-<label class="opt"><input type="radio" name="stay_action" value="left_facility"> I have already left the facility</label>
-<label class="opt"><input type="radio" name="stay_action" value="details_correction"> My facility details need correction</label>
+<p class="section-note">Choose one option.</p>
+<div class="option-list">
+<label class="opt"><input type="radio" name="stay_action" value="confirmed_staying" required><span class="opt-body"><span class="opt-title">I am still staying at the listed facility</span><span class="opt-help">Select this if your current stay arrangement is correct.</span></span></label>
+<label class="opt"><input type="radio" name="stay_action" value="intends_to_leave"><span class="opt-body"><span class="opt-title">I intend to leave / change my stay arrangement</span><span class="opt-help">Select this if you plan to move or need guidance.</span></span></label>
+<label class="opt"><input type="radio" name="stay_action" value="left_facility"><span class="opt-body"><span class="opt-title">I have already left the facility</span><span class="opt-help">Select this if you are no longer staying there.</span></span></label>
+<label class="opt"><input type="radio" name="stay_action" value="details_correction"><span class="opt-body"><span class="opt-title">My facility details need correction</span><span class="opt-help">Select this if the listed facility or area is not correct.</span></span></label>
+</div>
 <div id="conditionalFields" style="display:grid;gap:8px;margin:10px 0"></div>
 <h2>Welfare Check-in</h2>
-<label class="opt"><input type="radio" name="welfare_response" value="no_followup" required> I am okay and no follow-up is required</label>
-<label class="opt"><input type="radio" name="welfare_response" value="needs_assistance"> I need Embassy welfare assistance</label>
-<label class="opt"><input type="radio" name="welfare_response" value="callback_requested"> I would like a callback / meeting</label>
-<label class="opt"><input type="radio" name="welfare_response" value="service_difficulty"> I want to share a service difficulty</label>
+<p class="section-note">Tell us if any welfare follow-up is needed.</p>
+<div class="option-list">
+<label class="opt"><input type="radio" name="welfare_response" value="no_followup" required><span class="opt-body"><span class="opt-title">I am okay and no follow-up is required</span></span></label>
+<label class="opt"><input type="radio" name="welfare_response" value="needs_assistance"><span class="opt-body"><span class="opt-title">I need Embassy welfare assistance</span></span></label>
+<label class="opt"><input type="radio" name="welfare_response" value="callback_requested"><span class="opt-body"><span class="opt-title">I would like a callback / meeting</span></span></label>
+<label class="opt"><input type="radio" name="welfare_response" value="service_difficulty"><span class="opt-body"><span class="opt-title">I want to share a service difficulty</span></span></label>
+</div>
 <label style="display:block;margin-top:12px">Remarks / details for Embassy follow-up<textarea name="remarks" rows="4"></textarea></label>
 <label style="display:block;margin-top:12px">Preferred contact method<select name="preferred_contact_method"><option>WhatsApp</option><option>Phone Call</option><option>Email</option></select></label>
 <button id="submitBtn" type="submit">Submit Monthly Welfare Check-in</button>
@@ -8482,7 +8517,8 @@ def api_admin_stay_confirmation_resend(data, user):
             name = nr['full_name'] if nr else ''
         subject = 'Community Welfare Wing – Monthly Welfare Check-in'
         body = _monthly_checkin_email_body(name, d.get('nurse_reference') or d.get('roster_reference') or '', link)
-        send_res = send_notification_email(email, subject, body)
+        body_html = _monthly_checkin_email_html(name, d.get('nurse_reference') or d.get('roster_reference') or '', link)
+        send_res = send_notification_email(email, subject, body, body_html)
         status = 'sent' if send_res.get('ok') else ('skipped_smtp_missing' if send_res.get('reason') == 'smtp_not_configured' else 'failed')
         db.execute(
             """UPDATE stay_confirmation_tokens
