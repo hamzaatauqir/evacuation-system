@@ -369,7 +369,21 @@ async function openDetail(ref, kind){
   }
   // complaint
   const d=await api('/api/admin/nurses/complaint/detail?id='+encodeURIComponent(ref)).catch(e=>({success:false,error:e.message}));
-  if(!d.success){ toast(d.error||'Unable to load full complaint details. Please refresh or check the complaint reference.','error'); return; }
+  if(!d.success){
+    showDrawer({
+      ref,
+      title: 'Request details unavailable',
+      sub: 'Recent Nurse Requests / Welfare Issues',
+      status: 'Unable to load',
+      priority: '',
+      profile: [['Reference', ref]],
+      requestDetails: [['Message', 'Unable to load full complaint details. Please refresh or check the complaint reference.']],
+      actions: [],
+      timeline: [],
+      fallbackMessage: 'Unable to load full complaint details. Please refresh or check the complaint reference.'
+    });
+    return;
+  }
   const r=d.record||d.complaint||{};
   const acts=d.actions||[];
   showDrawer({
@@ -382,8 +396,8 @@ async function openDetail(ref, kind){
       ['Nurse Reference', r.nurse_reference||r.nurse_reference_id||'—'],
       ['Passport', r.passport_number||''],
       ['Civil ID', r.civil_id||'—'],
-      ['Primary Mobile', r.phone||r.mobile||'—'],
-      ['WhatsApp', r.whatsapp||'—'],
+      ['Primary Mobile', r.mobile_full||r.phone||r.mobile||'—'],
+      ['WhatsApp', r.whatsapp_full||r.whatsapp||'—'],
       ['Email', r.email||'—'],
       ['Email Status', r.email_status||'Verification Pending'],
       ['Workplace / Hospital', r.workplace||r.hospital||'—'],
@@ -392,9 +406,12 @@ async function openDetail(ref, kind){
       ['Area', r.facility_area||'—'],
     ],
     requestDetails: [
+      ['Reference', r.complaint_id||r.complaint_reference||r.reference||ref],
       ['Category', r.category||r.complaint_category||'—'],
       ['Subject', r.subject||'—'],
       ['Details / Message', r.description||r.details||'—'],
+      ['Status', r.status||r.complaint_status||'—'],
+      ['Priority', r.priority||'Normal'],
       ['Preferred Contact Method', r.preferred_contact_method||'—'],
       ['Submitted At', fmtTime(r.created_at)],
     ],

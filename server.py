@@ -3632,6 +3632,184 @@ def _add_nurse_complaint_action(db, complaint_id, action_type, actor_username, a
         [complaint_id, action_type, old_status, new_status, old_assigned_to, new_assigned_to, note, int(visible_to_nurse), actor_username, actor_role])
 
 
+def _table_columns(db, table_name):
+    try:
+        return {c['name'] if isinstance(c, sqlite3.Row) else c[1] for c in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _first_value(*values):
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ''
+
+
+def _complaint_identifier_from(data):
+    data = data or {}
+    return _first_value(
+        data.get('complaint_id'),
+        data.get('id'),
+        data.get('reference'),
+        data.get('complaint_reference'),
+        data.get('case_reference'),
+        data.get('nurse_complaint_id'),
+    )
+
+
+def _nurse_complaint_reference(complaint):
+    d = dict(complaint or {})
+    return _first_value(d.get('complaint_id'), d.get('complaint_reference'), d.get('case_reference'), d.get('reference'), d.get('id'))
+
+
+def _find_nurse_complaint(db, identifier='', reference=''):
+    value = _first_value(identifier, reference)
+    if not value:
+        return None
+    cols = _table_columns(db, 'nurse_complaints')
+    where = []
+    vals = []
+    if value.isdigit() and 'id' in cols:
+        where.append('id = ?')
+        vals.append(int(value))
+    for col in ('complaint_id', 'complaint_reference', 'case_reference', 'reference', 'nurse_complaint_id'):
+        if col in cols:
+            where.append(f"UPPER(TRIM(COALESCE({col}, ''))) = UPPER(TRIM(?))")
+            vals.append(value)
+    if not where:
+        return None
+    return db.execute(
+        f"SELECT * FROM nurse_complaints WHERE {' OR '.join(where)} ORDER BY id DESC LIMIT 1",
+        vals
+    ).fetchone()
+
+
+def _find_nurse_for_complaint(db, complaint):
+    comp = dict(complaint or {})
+    cols = _table_columns(db, 'nurse_registrations')
+    where = []
+    vals = []
+    if 'id' in cols and _first_value(comp.get('nurse_registration_id')).isdigit():
+        where.append('id = ?')
+        vals.append(int(_first_value(comp.get('nurse_registration_id'))))
+    if 'reference_id' in cols and _first_value(comp.get('nurse_reference_id'), comp.get('nurse_reference')):
+        where.append("UPPER(TRIM(COALESCE(reference_id, ''))) = UPPER(TRIM(?))")
+        vals.append(_first_value(comp.get('nurse_reference_id'), comp.get('nurse_reference')))
+    if 'passport_number' in cols and _first_value(comp.get('passport_number')):
+        where.append("UPPER(TRIM(COALESCE(passport_number, ''))) = UPPER(TRIM(?))")
+        vals.append(_first_value(comp.get('passport_number')))
+    if not where:
+        return None
+    return db.execute(
+        f"SELECT * FROM nurse_registrations WHERE {' OR '.join(where)} ORDER BY id DESC LIMIT 1",
+        vals
+    ).fetchone()
+
+
+def _find_roster_for_complaint(db, complaint, nurse):
+    comp = dict(complaint or {})
+    nurse_d = dict(nurse or {})
+    cols = _table_columns(db, 'facility_roster')
+    where = []
+    vals = []
+    nurse_id = _first_value(nurse_d.get('id'), comp.get('nurse_registration_id'))
+    if 'nurse_registration_id' in cols and nurse_id.isdigit():
+        where.append('nurse_registration_id = ?')
+        vals.append(int(nurse_id))
+    if 'passport_number' in cols and _first_value(comp.get('passport_number'), nurse_d.get('passport_number')):
+        where.append("UPPER(TRIM(COALESCE(passport_number, ''))) = UPPER(TRIM(?))")
+        vals.append(_first_value(comp.get('passport_number'), nurse_d.get('passport_number')))
+    if 'civil_id' in cols and _first_value(nurse_d.get('civil_id')):
+        where.append("TRIM(COALESCE(civil_id, '')) = TRIM(?)")
+        vals.append(_first_value(nurse_d.get('civil_id')))
+    if not where:
+        return None
+    return db.execute(
+        f"""SELECT * FROM facility_roster
+            WHERE {' OR '.join(where)}
+            ORDER BY active DESC, id DESC LIMIT 1""",
+        vals
+    ).fetchone()
+
+
+def _nurse_complaint_actions(db, complaint):
+    ref = _nurse_complaint_reference(complaint)
+    comp_id = _first_value(dict(complaint or {}).get('id'))
+    keys = [x for x in (ref, comp_id) if x]
+    if not keys or 'complaint_id' not in _table_columns(db, 'nurse_complaint_actions'):
+        return []
+    placeholders = ','.join(['?'] * len(keys))
+    return [dict(a) for a in db.execute(
+        f"""SELECT * FROM nurse_complaint_actions
+            WHERE complaint_id IN ({placeholders})
+            ORDER BY id DESC LIMIT 200""",
+        keys
+    ).fetchall()]
+
+
+def _nurse_complaint_detail_payload(db, complaint_row):
+    comp = dict(complaint_row or {})
+    nurse = _find_nurse_for_complaint(db, comp)
+    nurse_d = dict(nurse or {})
+    roster = _find_roster_for_complaint(db, comp, nurse_d)
+    roster_d = dict(roster or {})
+    reference = _nurse_complaint_reference(comp)
+    details = _first_value(comp.get('details'), comp.get('description'), comp.get('message'), comp.get('complaint_text'))
+    category = _first_value(comp.get('category'), comp.get('complaint_category'), comp.get('complaint_type'))
+    status = _first_value(comp.get('status'), comp.get('complaint_status'), 'Submitted')
+    payload = {
+        'id': comp.get('id') or '',
+        'reference': reference,
+        'complaint_reference': reference,
+        'case_reference': reference,
+        'complaint_id': reference,
+        'nurse_registration_id': _first_value(nurse_d.get('id'), comp.get('nurse_registration_id')),
+        'nurse_reference': _first_value(comp.get('nurse_reference_id'), comp.get('nurse_reference'), nurse_d.get('reference_id')),
+        'nurse_reference_id': _first_value(comp.get('nurse_reference_id'), comp.get('nurse_reference'), nurse_d.get('reference_id')),
+        'nurse_name': _first_value(comp.get('nurse_full_name'), comp.get('nurse_name'), nurse_d.get('full_name')),
+        'nurse_full_name': _first_value(comp.get('nurse_full_name'), comp.get('nurse_name'), nurse_d.get('full_name')),
+        'passport_number': _first_value(comp.get('passport_number'), nurse_d.get('passport_number'), roster_d.get('passport_number')),
+        'civil_id': _first_value(comp.get('civil_id'), nurse_d.get('civil_id'), roster_d.get('civil_id')),
+        'email': _first_value(comp.get('email'), nurse_d.get('email'), roster_d.get('email')),
+        'phone': _first_value(comp.get('phone'), comp.get('mobile'), nurse_d.get('mobile_full'), nurse_d.get('mobile'), roster_d.get('phone')),
+        'mobile': _first_value(comp.get('mobile'), nurse_d.get('mobile'), roster_d.get('phone')),
+        'mobile_full': _first_value(comp.get('mobile_full'), nurse_d.get('mobile_full'), nurse_d.get('mobile'), roster_d.get('phone')),
+        'whatsapp': _first_value(comp.get('whatsapp'), nurse_d.get('whatsapp_full'), nurse_d.get('mobile_full'), roster_d.get('phone')),
+        'whatsapp_full': _first_value(comp.get('whatsapp_full'), nurse_d.get('whatsapp_full'), nurse_d.get('mobile_full'), roster_d.get('phone')),
+        'hospital': _first_value(comp.get('hospital'), nurse_d.get('hospital'), nurse_d.get('hospital_workplace'), roster_d.get('workplace')),
+        'workplace': _first_value(comp.get('workplace'), nurse_d.get('hospital'), nurse_d.get('hospital_workplace'), roster_d.get('workplace')),
+        'current_arrangement': _first_value(nurse_d.get('current_accommodation'), nurse_d.get('current_accommodation_status'), nurse_d.get('accommodation_status')),
+        'vendor_name': _first_value(comp.get('vendor_name'), nurse_d.get('vendor_name'), roster_d.get('vendor_name')),
+        'facility_name': _first_value(comp.get('facility_name'), nurse_d.get('current_hostel'), roster_d.get('facility_name')),
+        'facility_area': _first_value(comp.get('facility_area'), nurse_d.get('facility_area'), roster_d.get('facility_area'), roster_d.get('area')),
+        'category': category,
+        'complaint_category': _first_value(comp.get('complaint_category'), category),
+        'complaint_type': _first_value(comp.get('complaint_type'), category),
+        'subject': _first_value(comp.get('subject'), category),
+        'details': details,
+        'description': details,
+        'message': details,
+        'complaint_text': details,
+        'priority': _first_value(comp.get('priority'), 'Normal'),
+        'status': status,
+        'complaint_status': status,
+        'assigned_to': _first_value(comp.get('assigned_to_name'), comp.get('assigned_to_username'), comp.get('assigned_to')),
+        'assigned_to_username': _first_value(comp.get('assigned_to_username')),
+        'assigned_to_name': _first_value(comp.get('assigned_to_name')),
+        'preferred_contact_method': _first_value(comp.get('preferred_contact_method')),
+        'public_response': _first_value(comp.get('public_response')),
+        'internal_notes': _first_value(comp.get('internal_notes')),
+        'created_at': _first_value(comp.get('created_at')),
+        'updated_at': _first_value(comp.get('updated_at'), comp.get('created_at')),
+    }
+    payload['email_status'] = _email_status_label(nurse_d) if nurse_d else 'Unverified'
+    return payload
+
+
 def _complaint_status_allowed_for_staff(status):
     return status in ('In Progress', 'Awaiting Nurse Response', 'Resolved', 'Reopened')
 
@@ -19775,52 +19953,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            complaint_id = (params.get('complaint_id') or params.get('id') or '').strip()
-            if not complaint_id:
-                self.send_json({'success': False, 'error': 'complaint_id required'}, 400); return
-            db = get_db()
+            complaint_key = _complaint_identifier_from(params)
+            if not complaint_key:
+                self.send_json({'success': False, 'error': 'Complaint/request reference is required.'}, 400); return
+            db = None
             try:
-                row = db.execute("SELECT * FROM nurse_complaints WHERE complaint_id = ? ORDER BY id DESC LIMIT 1", [complaint_id]).fetchone()
+                db = get_db()
+                row = _find_nurse_complaint(db, complaint_key)
                 if not row:
-                    self.send_json({'success': False, 'error': 'Not found'}, 404); return
+                    self.send_json({'success': False, 'error': 'Complaint/request not found.'}, 404); return
                 comp = dict(row)
+                complaint_ref = _nurse_complaint_reference(comp)
                 if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
-                nurse = db.execute("""SELECT id, reference_id, full_name, passport_number, civil_id, mobile, mobile_full,
-                                             whatsapp_full, email, hospital, accommodation_status, current_accommodation,
-                                             vendor_name, current_hostel, facility_area, date_shifted_to_facility, contract_start_date,
-                                             stay_reminders_opt_in, emergency_contact, emergency_contact_full,
-                                             email_verified, email_last_status
-                                      FROM nurse_registrations
-                                      WHERE reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
-                                      ORDER BY id DESC LIMIT 1""",
-                                  [comp.get('nurse_reference_id', ''), comp.get('passport_number', '')]).fetchone()
-                actions = db.execute("""SELECT * FROM nurse_complaint_actions
-                                        WHERE complaint_id = ?
-                                        ORDER BY id DESC LIMIT 200""", [complaint_id]).fetchall()
+                actions = _nurse_complaint_actions(db, comp)
                 cur_status = comp.get('status') or comp.get('complaint_status') or ''
                 if user['role'] == 'admin' and cur_status == 'Submitted':
-                    db.execute("""UPDATE nurse_complaints SET
-                                  complaint_status = 'Seen by Admin',
-                                  status = 'Seen by Admin',
-                                  last_action_at = CURRENT_TIMESTAMP,
-                                  updated_at = CURRENT_TIMESTAMP,
-                                  updated_by = ?
-                                  WHERE complaint_id = ?""", [user['user'], complaint_id])
-                    _add_nurse_complaint_action(db, complaint_id, 'Seen', user['user'], user['role'],
+                    update_cols = _table_columns(db, 'nurse_complaints')
+                    assignments = []
+                    vals = []
+                    for col in ('complaint_status', 'status'):
+                        if col in update_cols:
+                            assignments.append(f"{col} = ?")
+                            vals.append('Seen by Admin')
+                    for col in ('last_action_at', 'updated_at'):
+                        if col in update_cols:
+                            assignments.append(f"{col} = CURRENT_TIMESTAMP")
+                    if 'updated_by' in update_cols:
+                        assignments.append("updated_by = ?")
+                        vals.append(user['user'])
+                    if assignments and 'id' in update_cols:
+                        vals.append(comp.get('id'))
+                        db.execute(f"UPDATE nurse_complaints SET {', '.join(assignments)} WHERE id = ?", vals)
+                    _add_nurse_complaint_action(db, complaint_ref, 'Seen', user['user'], user['role'],
                                                 old_status='Submitted', new_status='Seen by Admin', visible_to_nurse=0)
                     db.commit()
-                complaint = _nurse_enrich_complaint_record(db, comp)
-                complaint['email_status'] = _email_status_label(nurse) if nurse else 'Unverified'
+                    comp['status'] = 'Seen by Admin'
+                    comp['complaint_status'] = 'Seen by Admin'
+                    actions = _nurse_complaint_actions(db, comp)
+                complaint = _nurse_complaint_detail_payload(db, comp)
                 self.send_json({
                     'success': True,
                     'record': complaint,
                     'complaint': complaint,
-                    'nurse': _attach_email_status(nurse) if nurse else None,
-                    'actions': [dict(a) for a in actions]
+                    'nurse': None,
+                    'actions': actions
                 })
+            except Exception:
+                print('[NurseComplaintDetail] unable to load complaint details', flush=True)
+                traceback.print_exc()
+                self.send_json({'success': False, 'error': 'Unable to load complaint details.'}, 500)
             finally:
-                db.close()
+                if db:
+                    db.close()
         elif path == '/api/admin/nurses/complaint-assignees':
             user = self.require_auth()
             if not user: return
@@ -22308,16 +22493,18 @@ function printBoth(){{
             if user['role'] != 'admin':
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
-            complaint_id = (data.get('complaint_id') or '').strip()
+            complaint_id = _complaint_identifier_from(data)
             assignee_username = (data.get('assigned_to_username') or '').strip()
             assignment_note = (data.get('assignment_note') or '').strip()
             if not complaint_id or not assignee_username:
                 self.send_json({'success': False, 'error': 'complaint_id and assigned_to_username are required'}, 400); return
             db = get_db()
             try:
-                comp = db.execute("SELECT * FROM nurse_complaints WHERE complaint_id = ? ORDER BY id DESC LIMIT 1", [complaint_id]).fetchone()
-                if not comp:
+                comp_row = _find_nurse_complaint(db, complaint_id)
+                if not comp_row:
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
+                comp = dict(comp_row)
+                complaint_ref = _nurse_complaint_reference(comp)
                 assignee = db.execute("SELECT id, username, COALESCE(full_name, username) as display_name FROM users WHERE username = ?", [assignee_username]).fetchone()
                 if not assignee:
                     self.send_json({'success': False, 'error': 'Assignee not found'}, 404); return
@@ -22336,25 +22523,27 @@ function printBoth(){{
                     last_action_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP,
                     updated_by = ?
-                    WHERE complaint_id = ?""",
-                    [str(assignee['id']), assignee['username'], assignee['display_name'], user['user'], assignment_note, new_status, new_status, user['user'], complaint_id])
-                _add_nurse_complaint_action(db, complaint_id, 'Assigned' if not old_assigned else 'Reassigned',
+                    WHERE id = ?""",
+                    [str(assignee['id']), assignee['username'], assignee['display_name'], user['user'], assignment_note, new_status, new_status, user['user'], comp['id']])
+                _add_nurse_complaint_action(db, complaint_ref, 'Assigned' if not old_assigned else 'Reassigned',
                                             user['user'], user['role'], note=assignment_note, old_status=old_status, new_status=new_status,
                                             old_assigned_to=old_assigned, new_assigned_to=assignee['username'], visible_to_nurse=0)
                 _nurse_log(db, 'complaint_assigned', comp.get('nurse_reference_id', ''), comp.get('passport_number', ''), user['user'],
-                           {'complaint_id': complaint_id, 'assigned_to': assignee['username']})
+                           {'complaint_id': complaint_ref, 'assigned_to': assignee['username']})
                 nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
                                    [comp.get('nurse_reference_id', '')]).fetchone()
+                nurse = dict(nurse) if nurse else None
                 assignee_user = db.execute("SELECT email, COALESCE(full_name, username) AS full_name FROM users WHERE username = ?",
                                            [assignee['username']]).fetchone()
+                assignee_user = dict(assignee_user) if assignee_user else None
                 db.commit()
                 if nurse and nurse.get('email') and _is_valid_email_loose(nurse.get('email')):
-                    _enqueue_email_job({'type': 'nurse_request_updated', 'to': nurse.get('email'), 'complaint_id': complaint_id, 'name': nurse.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
+                    _enqueue_email_job({'type': 'nurse_request_updated', 'to': nurse.get('email'), 'complaint_id': complaint_ref, 'name': nurse.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
                 if assignee_user and assignee_user.get('email') and _is_valid_email_loose(assignee_user.get('email')):
-                    _enqueue_email_job({'type': 'nurse_request_assigned', 'to': assignee_user.get('email'), 'complaint_id': complaint_id, 'name': assignee_user.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
+                    _enqueue_email_job({'type': 'nurse_request_assigned', 'to': assignee_user.get('email'), 'complaint_id': complaint_ref, 'name': assignee_user.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
                 notify_case_event(
                     case_type='nurse',
-                    case_reference=complaint_id,
+                    case_reference=complaint_ref,
                     event_type='case_assigned_to_staff',
                     applicant_name=(comp.get('nurse_full_name') or 'Applicant'),
                     staff_username=assignee_username,
@@ -22371,7 +22560,7 @@ function printBoth(){{
                 if nurse and nurse.get('email') and should_notify:
                     notify_case_event(
                         case_type='nurse',
-                        case_reference=complaint_id,
+                        case_reference=complaint_ref,
                         event_type='assigned_for_followup',
                         applicant_email=nurse.get('email') or '',
                         applicant_name=nurse.get('full_name') or 'Applicant',
@@ -22388,16 +22577,18 @@ function printBoth(){{
             if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
-            complaint_id = (data.get('complaint_id') or '').strip()
+            complaint_id = _complaint_identifier_from(data)
             new_status = (data.get('status') or '').strip()
             note = (data.get('note') or '').strip()
             if not complaint_id or not new_status:
                 self.send_json({'success': False, 'error': 'complaint_id and status are required'}, 400); return
             db = get_db()
             try:
-                comp = db.execute("SELECT * FROM nurse_complaints WHERE complaint_id = ? ORDER BY id DESC LIMIT 1", [complaint_id]).fetchone()
-                if not comp:
+                comp_row = _find_nurse_complaint(db, complaint_id)
+                if not comp_row:
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
+                comp = dict(comp_row)
+                complaint_ref = _nurse_complaint_reference(comp)
                 if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 if user['role'] != 'admin' and not _complaint_status_allowed_for_staff(new_status):
@@ -22409,28 +22600,13 @@ function printBoth(){{
                     last_action_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP,
                     updated_by = ?
-                    WHERE complaint_id = ?""", [new_status, new_status, user['user'], complaint_id])
-                _add_nurse_complaint_action(db, complaint_id, 'Status Changed', user['user'], user['role'],
+                    WHERE id = ?""", [new_status, new_status, user['user'], comp['id']])
+                _add_nurse_complaint_action(db, complaint_ref, 'Status Changed', user['user'], user['role'],
                                             note=note, old_status=old_status, new_status=new_status,
                                             visible_to_nurse=1 if new_status in ('Awaiting Nurse Response', 'Resolved', 'Closed', 'Reopened') else 0)
                 _nurse_log(db, 'complaint_status_changed', comp.get('nurse_reference_id', ''), comp.get('passport_number', ''), user['user'],
-                           {'complaint_id': complaint_id, 'old_status': old_status, 'new_status': new_status})
-                nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
-                                   [comp.get('nurse_reference_id', '')]).fetchone()
+                           {'complaint_id': complaint_ref, 'old_status': old_status, 'new_status': new_status})
                 db.commit()
-                if nurse and nurse.get('email') and _is_valid_email_loose(nurse.get('email')) and new_status in ('Awaiting Nurse Response', 'Resolved', 'Closed', 'Reopened'):
-                    _enqueue_email_job({'type': 'nurse_request_updated', 'to': nurse.get('email'), 'complaint_id': complaint_id, 'name': nurse.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
-                if nurse and nurse.get('email'):
-                    notify_case_event(
-                        case_type='nurse',
-                        case_reference=complaint_id,
-                        event_type='more_information_requested' if new_status == 'Awaiting Nurse Response' else ('resolved' if new_status == 'Resolved' else ('closed' if new_status == 'Closed' else 'status_updated')),
-                        applicant_email=nurse.get('email') or '',
-                        applicant_name=nurse.get('full_name') or 'Applicant',
-                        status=new_status,
-                        public_note=note,
-                        tracking_link='https://cwakuwait.com/nurses/login'
-                    )
                 self.send_json({'success': True})
             finally:
                 db.close()
@@ -22441,36 +22617,40 @@ function printBoth(){{
             if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
-            complaint_id = (data.get('complaint_id') or '').strip()
+            complaint_id = _complaint_identifier_from(data)
             note = (data.get('note') or '').strip()
             note_type = (data.get('note_type') or 'internal').strip()  # internal/public
             if not complaint_id or not note:
                 self.send_json({'success': False, 'error': 'complaint_id and note are required'}, 400); return
             db = get_db()
             try:
-                comp = db.execute("SELECT * FROM nurse_complaints WHERE complaint_id = ? ORDER BY id DESC LIMIT 1", [complaint_id]).fetchone()
-                if not comp:
+                comp_row = _find_nurse_complaint(db, complaint_id)
+                if not comp_row:
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
+                comp = dict(comp_row)
+                complaint_ref = _nurse_complaint_reference(comp)
                 if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
-                if note_type == 'public':
+                visible_note = note_type in ('public', 'nurse') or str(data.get('visible_to_nurse') or '').lower() in ('1', 'true', 'yes', 'on')
+                if visible_note:
                     db.execute("""UPDATE nurse_complaints SET public_response = ?, last_action_at = CURRENT_TIMESTAMP,
-                                 updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE complaint_id = ?""",
-                               [note, user['user'], complaint_id])
+                                 updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?""",
+                               [note, user['user'], comp['id']])
                 else:
                     db.execute("""UPDATE nurse_complaints SET internal_notes = ?, last_action_at = CURRENT_TIMESTAMP,
-                                 updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE complaint_id = ?""",
-                               [note, user['user'], complaint_id])
-                _add_nurse_complaint_action(db, complaint_id, 'Public Reply' if note_type == 'public' else 'Internal Note',
-                                            user['user'], user['role'], note=note, visible_to_nurse=1 if note_type == 'public' else 0)
+                                 updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?""",
+                               [note, user['user'], comp['id']])
+                _add_nurse_complaint_action(db, complaint_ref, 'Nurse-Visible Message' if visible_note else 'Internal Note',
+                                            user['user'], user['role'], note=note, visible_to_nurse=1 if visible_note else 0)
                 db.commit()
-                if note_type == 'public':
+                if visible_note:
                     nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
                                        [comp.get('nurse_reference_id', '')]).fetchone()
+                    nurse = dict(nurse) if nurse else None
                     if nurse and nurse.get('email'):
                         notify_case_event(
                             case_type='nurse',
-                            case_reference=complaint_id,
+                            case_reference=complaint_ref,
                             event_type='applicant_note_added',
                             applicant_email=nurse.get('email') or '',
                             applicant_name=nurse.get('full_name') or 'Applicant',
@@ -22488,13 +22668,15 @@ function printBoth(){{
             if user['role'] not in ('admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
-            complaint_id = (data.get('complaint_id') or '').strip()
+            complaint_id = _complaint_identifier_from(data)
             resolution_note = (data.get('resolution_note') or '').strip()
             db = get_db()
             try:
-                comp = db.execute("SELECT * FROM nurse_complaints WHERE complaint_id = ? ORDER BY id DESC LIMIT 1", [complaint_id]).fetchone()
-                if not comp:
+                comp_row = _find_nurse_complaint(db, complaint_id)
+                if not comp_row:
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
+                comp = dict(comp_row)
+                complaint_ref = _nurse_complaint_reference(comp)
                 if user['role'] != 'admin' and comp.get('assigned_to_username') != user['user']:
                     self.send_json({'error': 'Unauthorized'}, 403); return
                 old_status = comp.get('status') or comp.get('complaint_status') or ''
@@ -22506,18 +22688,19 @@ function printBoth(){{
                     last_action_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP,
                     updated_by = ?
-                    WHERE complaint_id = ?""", [resolution_note, user['user'], complaint_id])
-                _add_nurse_complaint_action(db, complaint_id, 'Resolved', user['user'], user['role'],
+                    WHERE id = ?""", [resolution_note, user['user'], comp['id']])
+                _add_nurse_complaint_action(db, complaint_ref, 'Resolved', user['user'], user['role'],
                                             note=resolution_note, old_status=old_status, new_status='Resolved', visible_to_nurse=1)
                 nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
                                    [comp.get('nurse_reference_id', '')]).fetchone()
+                nurse = dict(nurse) if nurse else None
                 db.commit()
-                if nurse and nurse.get('email') and _is_valid_email_loose(nurse.get('email')):
-                    _enqueue_email_job({'type': 'nurse_request_resolved', 'to': nurse.get('email'), 'complaint_id': complaint_id, 'name': nurse.get('full_name',''), 'status': 'Resolved', 'changed_by': user['user']})
-                if nurse and nurse.get('email'):
+                if resolution_note and nurse and nurse.get('email') and _is_valid_email_loose(nurse.get('email')):
+                    _enqueue_email_job({'type': 'nurse_request_resolved', 'to': nurse.get('email'), 'complaint_id': complaint_ref, 'name': nurse.get('full_name',''), 'status': 'Resolved', 'changed_by': user['user']})
+                if resolution_note and nurse and nurse.get('email'):
                     notify_case_event(
                         case_type='nurse',
-                        case_reference=complaint_id,
+                        case_reference=complaint_ref,
                         event_type='resolved',
                         applicant_email=nurse.get('email') or '',
                         applicant_name=nurse.get('full_name') or 'Applicant',
@@ -22535,13 +22718,15 @@ function printBoth(){{
             if user['role'] != 'admin':
                 self.send_json({'error': 'Unauthorized'}, 403); return
             data = json.loads(body) if body else {}
-            complaint_id = (data.get('complaint_id') or '').strip()
+            complaint_id = _complaint_identifier_from(data)
             note = (data.get('note') or '').strip()
             db = get_db()
             try:
-                comp = db.execute("SELECT * FROM nurse_complaints WHERE complaint_id = ? ORDER BY id DESC LIMIT 1", [complaint_id]).fetchone()
-                if not comp:
+                comp_row = _find_nurse_complaint(db, complaint_id)
+                if not comp_row:
                     self.send_json({'success': False, 'error': 'Complaint not found'}, 404); return
+                comp = dict(comp_row)
+                complaint_ref = _nurse_complaint_reference(comp)
                 old_status = comp.get('status') or comp.get('complaint_status') or ''
                 db.execute("""UPDATE nurse_complaints SET
                     complaint_status = 'Closed',
@@ -22550,16 +22735,17 @@ function printBoth(){{
                     last_action_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP,
                     updated_by = ?
-                    WHERE complaint_id = ?""", [user['user'], complaint_id])
-                _add_nurse_complaint_action(db, complaint_id, 'Closed', user['user'], user['role'],
+                    WHERE id = ?""", [user['user'], comp['id']])
+                _add_nurse_complaint_action(db, complaint_ref, 'Closed', user['user'], user['role'],
                                             note=note, old_status=old_status, new_status='Closed', visible_to_nurse=1)
                 db.commit()
                 nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
                                    [comp.get('nurse_reference_id', '')]).fetchone()
-                if nurse and nurse.get('email'):
+                nurse = dict(nurse) if nurse else None
+                if note and nurse and nurse.get('email'):
                     notify_case_event(
                         case_type='nurse',
-                        case_reference=complaint_id,
+                        case_reference=complaint_ref,
                         event_type='closed',
                         applicant_email=nurse.get('email') or '',
                         applicant_name=nurse.get('full_name') or 'Applicant',
