@@ -30938,7 +30938,46 @@ ADMIN_COMMUNITY_WELFARE_FALLBACK_PAGE = cwa_module_page("Community Welfare Overv
 
 
 ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
-<div class="card">
+<style>
+.pulse-controls{margin-bottom:12px}
+.pulse-print-header{display:none;border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;margin-bottom:12px;background:#fff}
+.pulse-print-header h2{margin:6px 0 4px;font-size:20px;color:#0f172a}
+.pulse-print-header .sub{font-size:12px;color:#475569}
+.pulse-narrative{font-size:13px;line-height:1.5;color:#0f172a}
+.policy-cards{display:grid;gap:10px}
+.policy-card{border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;background:#fff;page-break-inside:avoid}
+.policy-card h4{margin:0 0 6px;font-size:14px;color:#10253f}
+.policy-meta{font-size:12px;color:#334155;margin-bottom:6px}
+.pulse-table-wrap{overflow:auto}
+.pulse-table-wrap table{width:100%;table-layout:auto}
+.pulse-table-wrap th,.pulse-table-wrap td{word-break:break-word;overflow-wrap:anywhere}
+.evidence-print-list{display:none}
+.evidence-print-card{border:1px solid #d8e0ea;border-radius:8px;padding:8px 10px;margin-bottom:8px;page-break-inside:avoid}
+.evidence-print-card .line{font-size:12px;color:#334155;margin-bottom:4px}
+.evidence-print-card .title{font-size:13px;font-weight:700;color:#0f172a;margin-bottom:4px}
+.evidence-print-card .excerpt{font-size:12px;color:#1e293b}
+@media print{
+  @page { size: A4 portrait; margin: 12mm; }
+  body{background:#fff}
+  .app-head .crumbs,.app-head .flex,.badge,.btn,button,.secondary,.pulse-controls .row,.pulse-controls .flex,#pulseError{display:none!important}
+  .pulse-print-header{display:block!important}
+  .card{border:1px solid #d8e0ea;box-shadow:none;break-inside:avoid}
+  .pulse-table-wrap{overflow:visible}
+  .pulse-table-wrap table{font-size:10px}
+  .pulse-table-wrap th,.pulse-table-wrap td{padding:5px 6px;white-space:normal}
+  .pulse-table-wrap tr{break-inside:avoid;page-break-inside:avoid}
+  #pulseEvidenceWrap{display:none!important}
+  .evidence-print-list{display:block!important}
+}
+</style>
+<div id="pulsePrintHeader" class="pulse-print-header">
+  <div><strong>Embassy of Pakistan, Kuwait</strong></div>
+  <div class="sub">Community Welfare Wing</div>
+  <h2>Ambassador Pulse Report</h2>
+  <div class="sub">Period: <span id="pulsePrintPeriod">-</span></div>
+  <div class="sub">Generated: <span id="pulsePrintGenerated">-</span></div>
+</div>
+<div class="card pulse-controls">
   <h3>Ambassador Pulse Report</h3>
   <p class="muted">Issue intelligence across welfare, legal/OPF, nurses, death, and feedback channels.</p>
   <div class="row">
@@ -30958,6 +30997,10 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
   <div class="kpis" id="pulseSummaryKpis"></div>
 </div>
 <div class="card">
+  <h3>Executive Narrative</h3>
+  <div id="pulseExecutiveNarrative" class="pulse-narrative">Generate report to view executive narrative.</div>
+</div>
+<div class="card">
   <h3>Top Themes</h3>
   <div id="pulseTopThemesWrap" class="empty">Generate report to view top themes.</div>
 </div>
@@ -30966,12 +31009,17 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
   <div id="pulsePolicyIssuesWrap" class="empty">Generate report to view policy-sensitive issues.</div>
 </div>
 <div class="card">
+  <h3>Key Policy Issues for Senior Attention</h3>
+  <div id="pulsePolicyCardsWrap" class="policy-cards"><div class="empty">Generate report to view key policy issues.</div></div>
+</div>
+<div class="card">
   <h3>Staff / Operational Picture</h3>
   <div id="pulseStaffWrap" class="empty">Generate report to view staff picture.</div>
 </div>
 <div class="card">
   <h3>Evidence Cases</h3>
-  <div id="pulseEvidenceWrap" class="empty">Generate report to view evidence cases.</div>
+  <div id="pulseEvidenceWrap" class="empty pulse-table-wrap">Generate report to view evidence cases.</div>
+  <div id="pulseEvidenceCardsWrap" class="evidence-print-list"></div>
 </div>
 <script>
 let pulseReportData = null;
@@ -30980,7 +31028,7 @@ function _daysAgoIso(days){const d=new Date();d.setDate(d.getDate()-days);return
 function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]))}
 function pulseTable(headers, rows){
   if(!rows || !rows.length) return '<div class="empty">No records for selected period.</div>';
-  let h = '<div style="overflow:auto"><table><thead><tr>' + headers.map(x=>'<th>'+esc(x)+'</th>').join('') + '</tr></thead><tbody>';
+  let h = '<div class="pulse-table-wrap"><table><thead><tr>' + headers.map(x=>'<th>'+esc(x)+'</th>').join('') + '</tr></thead><tbody>';
   rows.forEach(r=>{h += '<tr>' + r.map(c=>'<td>'+String(c)+'</td>').join('') + '</tr>';});
   h += '</tbody></table></div>';
   return h;
@@ -30994,7 +31042,13 @@ function setPulseError(msg){
 function renderPulseSummary(rep){
   const s=(rep&&rep.summary)||{};
   const operational=(rep&&rep.operational_status)||{};
+  const period=(rep&&rep.period)||{};
+  const generatedAt=(rep&&rep.generated_at)||'';
   const kpi=document.getElementById('pulseSummaryKpis');
+  const printPeriod=document.getElementById('pulsePrintPeriod');
+  const printGenerated=document.getElementById('pulsePrintGenerated');
+  if(printPeriod) printPeriod.textContent=(period.start_date||'-')+' to '+(period.end_date||'-');
+  if(printGenerated) printGenerated.textContent=generatedAt||'-';
   if(kpi){
     kpi.innerHTML = `
       <div class="kpi"><div class="lbl">Total Submissions</div><div class="val">${esc(s.total_items||0)}</div></div>
@@ -31003,6 +31057,11 @@ function renderPulseSummary(rep){
       <div class="kpi"><div class="lbl">Overdue Cases</div><div class="val">${esc(operational.total_overdue||0)}</div></div>`;
   }
   const top=(rep&&rep.top_themes)||[];
+  const topThemeLabel=((top[0]||{}).theme_label)||'Other / Unclassified';
+  const narrativeEl=document.getElementById('pulseExecutiveNarrative');
+  if(narrativeEl){
+    narrativeEl.textContent='During the reporting period, the portal recorded '+(s.total_items||0)+' submissions. The highest-volume theme was '+topThemeLabel+'. '+(s.high_sensitivity_count||0)+' high-sensitivity issue(s) were identified for senior review. Key policy-sensitive matters are listed below with supporting case references.';
+  }
   const topRows=top.map(t=>[
     esc(t.theme_label||'—'),
     esc(t.count||0),
@@ -31022,6 +31081,21 @@ function renderPulseSummary(rep){
   ]);
   const policyWrap=document.getElementById('pulsePolicyIssuesWrap');
   if(policyWrap){policyWrap.innerHTML=pulseTable(['Issue','Count','Authority','Suggested Action','Evidence References'], policyRows);}
+  const policyCardsWrap=document.getElementById('pulsePolicyCardsWrap');
+  if(policyCardsWrap){
+    if(!policy.length){
+      policyCardsWrap.innerHTML='<div class="empty">No high-sensitivity policy issues for selected period.</div>';
+    }else{
+      policyCardsWrap.innerHTML=policy.map(p=>(
+        '<div class="policy-card">'
+        +'<h4>'+esc(p.theme_label||'—')+'</h4>'
+        +'<div class="policy-meta"><strong>Count:</strong> '+esc(p.count||0)+' | <strong>Authority:</strong> '+esc(p.authority||'—')+'</div>'
+        +'<div class="policy-meta"><strong>Evidence references:</strong> '+esc((p.sample_references||[]).join(', ')||'—')+'</div>'
+        +'<div><strong>Suggested action:</strong> '+esc(p.suggested_action||'—')+'</div>'
+        +'</div>'
+      )).join('');
+    }
+  }
   const byOfficer=((rep&&rep.staff_accountability)||{}).by_officer||[];
   const staffRows=byOfficer.map(o=>[
     esc(o.officer_name||o.assigned_to||'—'),
@@ -31045,6 +31119,30 @@ function renderPulseSummary(rep){
   ]);
   const evidenceWrap=document.getElementById('pulseEvidenceWrap');
   if(evidenceWrap){evidenceWrap.innerHTML=pulseTable(['Reference','Module','Date','Theme','Subject','Status','Assigned To','Excerpt'], evidenceRows);}
+  const evidenceCardsWrap=document.getElementById('pulseEvidenceCardsWrap');
+  if(evidenceCardsWrap){
+    if(!evidence.length){
+      evidenceCardsWrap.innerHTML='<div class="empty">No evidence cases for selected period.</div>';
+    }else{
+      evidenceCardsWrap.innerHTML=evidence.map(c=>{
+        const ref=esc(c.reference||'—');
+        const module=esc(c.module||'—');
+        const date=esc((c.created_at||'').slice(0,10)||'—');
+        const status=esc(c.status||'—');
+        const assignedTo=esc(c.assigned_to||'—');
+        const theme=esc(((c.theme||{}).theme_label)||'—');
+        const subject=esc(c.subject||'—');
+        const excerpt=esc(c.details_excerpt||'—');
+        return '<div class="evidence-print-card">'
+          +'<div class="line"><strong>Reference:</strong> '+ref+'</div>'
+          +'<div class="line"><strong>Module:</strong> '+module+' | <strong>Date:</strong> '+date+' | <strong>Status:</strong> '+status+' | <strong>Assigned to:</strong> '+assignedTo+'</div>'
+          +'<div class="line"><strong>Theme:</strong> '+theme+'</div>'
+          +'<div class="title">Subject: '+subject+'</div>'
+          +'<div class="excerpt"><strong>Excerpt:</strong> '+excerpt+'</div>'
+          +'</div>';
+      }).join('');
+    }
+  }
 }
 async function loadAmbassadorPulseReport(){
   try{
