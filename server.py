@@ -13017,6 +13017,26 @@ def _classify_pulse_theme(text='', source_module='', category='', case_type=''):
     }
 
 
+def _pulse_theme_why_it_matters(theme_key):
+    key = _clean_text(theme_key, 80)
+    reasons = {
+        'family_visa_restrictions': 'Reported restrictions on family/dependent visas directly affect family unity and may require official policy clarification.',
+        'visit_visa_restrictions': 'Visit visa restrictions affect family contact and short-term travel for Pakistani nationals.',
+        'koc_gate_pass': 'Reported shorter gate-pass validity for Pakistani workers may affect employment continuity and raises equal-treatment concerns if verified.',
+        'nationality_differential_treatment': 'Reports comparing treatment of Pakistani nationals with other nationalities may require careful verification and diplomatic handling.',
+        'legal_detention_police': 'Detention and police-linked cases require urgent legal follow-up and careful senior-level monitoring.',
+        'death_mortal_remains': 'Death and mortal-remains cases are highly sensitive and require coordinated handling with relevant authorities.',
+        'domestic_worker_shelter': 'Domestic worker abuse or shelter-linked complaints can involve urgent protection and legal risk.',
+        'labour_salary_employer': 'Recurring labour and salary disputes may indicate employer-side patterns requiring structured follow-up.',
+        'opf_insurance_compensation': 'High OPF-related volume indicates recurring demand for Pakistan-side welfare/insurance/compensation guidance.',
+        'passport_nadra_consular': 'Consular service requests indicate need for clear public guidance and correct branch handover.',
+        'general_welfare': 'General welfare requests indicate broad community service needs but may not require diplomatic escalation unless repeated.',
+        'nurses_welfare': 'Nurses welfare complaints can signal recurring workplace or accommodation issues needing desk-level coordination.',
+        'other': 'Mixed issues require manual triage to determine whether diplomatic escalation is needed.'
+    }
+    return reasons.get(key, reasons['other'])
+
+
 def _collect_pulse_report_cases(start_date, end_date, include_full_details=False):
     cases = []
     limitations = []
@@ -13172,6 +13192,25 @@ def _collect_pulse_report_cases(start_date, end_date, include_full_details=False
 
 def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_details=False):
     sensitivity_rank = {'High': 0, 'Medium': 1, 'Low': 2}
+    diplomatic_priority = [
+        'family_visa_restrictions',
+        'visit_visa_restrictions',
+        'koc_gate_pass',
+        'nationality_differential_treatment',
+        'legal_detention_police',
+        'death_mortal_remains',
+        'domestic_worker_shelter',
+        'labour_salary_employer'
+    ]
+    diplomatic_priority_index = {k: i for i, k in enumerate(diplomatic_priority)}
+    diplomatic_force_keys = set(diplomatic_priority)
+    operational_theme_keys = {
+        'opf_insurance_compensation',
+        'passport_nadra_consular',
+        'general_welfare',
+        'nurses_welfare',
+        'labour_salary_employer'
+    }
     by_module = {}
     by_status = {}
     theme_map = {}
@@ -13204,6 +13243,7 @@ def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_det
     for t in top_themes:
         authority = t.get('authority') or 'Not specified'
         t['short_summary'] = f"{t['count']} submissions during the period related to {t['theme_label']}. Main authority mentioned: {authority}."
+        t['why_it_matters'] = _pulse_theme_why_it_matters(t.get('theme_key'))
 
     policy_sensitive_issues = []
     for t in top_themes:
@@ -13211,12 +13251,14 @@ def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_det
             continue
         sample_case = next((x for x in cases if (x.get('theme') or {}).get('theme_key') == t.get('theme_key')), {})
         policy_sensitive_issues.append({
+            'theme_key': t.get('theme_key'),
             'theme_label': t.get('theme_label'),
             'count': t.get('count'),
             'authority': t.get('authority'),
             'sample_references': t.get('sample_references') or [],
             'suggested_action': t.get('suggested_action') or '',
-            'representative_excerpt': _clean_text(sample_case.get('details_excerpt'), 500)
+            'why_it_matters': _pulse_theme_why_it_matters(t.get('theme_key')),
+            'representative_excerpt': _clean_text(sample_case.get('details_excerpt'), 300)
         })
 
     authority_mentions = [
@@ -13224,18 +13266,89 @@ def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_det
         for k, v in sorted(authority_counts.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
 
-    evidence_cases = sorted(
+    sorted_cases = sorted(
         cases,
         key=lambda c: (
             sensitivity_rank.get((c.get('theme') or {}).get('sensitivity'), 9),
             -(int(_case_age_days(c.get('created_at')) or 0)),
             c.get('reference') or ''
         )
-    )[:100]
+    )
 
     high_count = sum(1 for c in cases if (c.get('theme') or {}).get('sensitivity') == 'High')
     medium_count = sum(1 for c in cases if (c.get('theme') or {}).get('sensitivity') == 'Medium')
     top_theme_label = top_themes[0]['theme_label'] if top_themes else 'None'
+    top_theme_count = int(top_themes[0]['count']) if top_themes else 0
+
+    diplomatic_candidates = [
+        t for t in top_themes
+        if (t.get('sensitivity') == 'High') and (t.get('theme_key') in diplomatic_force_keys)
+    ]
+    diplomatic_candidates.sort(
+        key=lambda t: (
+            diplomatic_priority_index.get(t.get('theme_key'), 999),
+            -(t.get('count') or 0),
+            t.get('theme_label') or ''
+        )
+    )
+    top_diplomatic = diplomatic_candidates[0] if diplomatic_candidates else None
+
+    operational_candidates = [t for t in top_themes if t.get('theme_key') in operational_theme_keys]
+    operational_candidates.sort(key=lambda t: (-(t.get('count') or 0), t.get('theme_label') or ''))
+    top_operational = operational_candidates[0] if operational_candidates else (top_themes[0] if top_themes else None)
+
+    diplomatic_issues = []
+    for t in top_themes:
+        tkey = t.get('theme_key')
+        tsens = t.get('sensitivity')
+        tcount = int(t.get('count') or 0)
+        include_issue = (
+            (tsens == 'High') or
+            (tsens == 'Medium' and tcount >= 3) or
+            (tkey in diplomatic_force_keys)
+        )
+        if not include_issue or tcount <= 0:
+            continue
+        sample_case = next((x for x in sorted_cases if (x.get('theme') or {}).get('theme_key') == tkey), {})
+        diplomatic_issues.append({
+            'theme_key': tkey,
+            'issue_title': t.get('theme_label'),
+            'why_it_matters': _pulse_theme_why_it_matters(tkey),
+            'authority': t.get('authority') or '',
+            'count': tcount,
+            'evidence_references': (t.get('sample_references') or [])[:5],
+            'suggested_action': t.get('suggested_action') or '',
+            'representative_excerpt': _clean_text(sample_case.get('details_excerpt'), 300),
+            'sensitivity': tsens or 'Low',
+        })
+    diplomatic_issues.sort(
+        key=lambda x: (
+            diplomatic_priority_index.get(x.get('theme_key'), 999),
+            -(x.get('count') or 0),
+            x.get('issue_title') or ''
+        )
+    )
+
+    community_service_workload = []
+    for t in top_themes:
+        tkey = t.get('theme_key')
+        if tkey not in operational_theme_keys:
+            continue
+        community_service_workload.append({
+            'theme_key': tkey,
+            'theme_label': t.get('theme_label'),
+            'count': int(t.get('count') or 0),
+            'responsible_section': t.get('authority') or 'Community Welfare Wing',
+            'sample_references': (t.get('sample_references') or [])[:3],
+            'note': 'Operational/service handling' if t.get('sensitivity') != 'High' else 'Sensitive: monitor for senior review'
+        })
+    community_service_workload.sort(key=lambda x: (-x.get('count', 0), x.get('theme_label') or ''))
+
+    policy_evidence_cases = [c for c in sorted_cases if (c.get('theme') or {}).get('sensitivity') == 'High']
+    operational_evidence_pool = [c for c in sorted_cases if (c.get('theme') or {}).get('sensitivity') != 'High']
+    operational_limit = 30 if include_full_details else 10
+    operational_evidence_cases = operational_evidence_pool[:operational_limit]
+    evidence_cases = (policy_evidence_cases + operational_evidence_cases) if not include_full_details else sorted_cases[:200]
 
     staff_accountability = getattr(_build_ambassador_pulse_report, '_staff_accountability', {}) or {}
     staff_summary = (staff_accountability or {}).get('summary') or {}
@@ -13257,9 +13370,29 @@ def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_det
     if int(staff_summary.get('overdue_5_days') or 0) > 0:
         recommendations.append('Conduct desk-wise overdue follow-up with assigned officers and document immediate action plans.')
 
+    high_theme_names = [x.get('theme_label') for x in top_themes if x.get('sensitivity') == 'High']
+    high_theme_text = ', '.join(high_theme_names[:4]) if high_theme_names else 'None'
+    top_diplomatic_label = (top_diplomatic or {}).get('theme_label') or 'No high-sensitivity diplomatic issue identified'
+    top_diplomatic_count = int((top_diplomatic or {}).get('count') or 0)
+    top_operational_label = (top_operational or {}).get('theme_label') if top_operational else 'None'
+    top_operational_count = int((top_operational or {}).get('count') or 0)
+    top_diplomatic_refs = ', '.join(((top_diplomatic or {}).get('sample_references') or [])[:3]) or 'No references'
+    other_high = [x for x in high_theme_names if x != top_diplomatic_label]
+    other_high_text = ', '.join(other_high[:3]) if other_high else 'None'
+
+    ambassador_brief_points = [
+        f"The portal recorded {len(cases)} submissions during the reporting period.",
+        f"{high_count} issue(s) were assessed as high-sensitivity and may require senior review.",
+        f"The highest-volume operational theme was {top_operational_label} with {top_operational_count} submissions.",
+        f"The key diplomatic issue was {top_diplomatic_label}.",
+        f"Policy-sensitive themes identified include: {high_theme_text}.",
+        f"{int(staff_summary.get('overdue_5_days') or 0)} assigned case(s) are overdue beyond the monitoring threshold.",
+        "Evidence references are included below for verification."
+    ]
+
     report = {
         'success': True,
-        'title': 'Ambassador Pulse Report',
+        'title': 'Ambassador Pulse Brief',
         'period': {'start_date': start_date, 'end_date': end_date},
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'summary': {
@@ -13268,10 +13401,25 @@ def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_det
             'by_status': by_status,
             'high_sensitivity_count': high_count,
             'medium_sensitivity_count': medium_count,
-            'top_theme_label': top_theme_label
+            'top_theme_label': top_theme_label,
+            'top_theme_count': top_theme_count,
+            'top_operational_theme': top_operational_label,
+            'top_operational_theme_count': top_operational_count,
+            'top_diplomatic_issue': top_diplomatic_label,
+            'top_diplomatic_issue_count': top_diplomatic_count
         },
+        'ambassador_brief_points': ambassador_brief_points[:6],
+        'executive_narrative': (
+            f"During the reporting period, the portal received {len(cases)} submissions. "
+            f"The highest-volume operational workload concerned {top_operational_label} ({top_operational_count} cases). "
+            f"The main policy-sensitive issue requiring senior attention was {top_diplomatic_label}, supported by {top_diplomatic_refs}. "
+            f"Additional sensitive themes included {other_high_text}. "
+            "The report separates policy matters from routine operational service requests so that senior review can focus on issues requiring diplomatic visibility."
+        ),
         'top_themes': top_themes,
         'policy_sensitive_issues': policy_sensitive_issues,
+        'diplomatic_issues': diplomatic_issues,
+        'community_service_workload': community_service_workload,
         'authority_mentions': authority_mentions,
         'operational_status': operational_status,
         'staff_accountability': {
@@ -13279,6 +13427,11 @@ def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_det
             'by_officer': (staff_accountability or {}).get('by_officer') or []
         },
         'evidence_cases': evidence_cases,
+        'evidence_annex': {
+            'senior_attention': policy_evidence_cases,
+            'operational_samples': operational_evidence_cases,
+            'note': 'Full case records remain available in the portal by reference number.'
+        },
         'recommended_followups': recommendations,
         'include_full_details': bool(include_full_details),
         'limitations': getattr(_collect_pulse_report_cases, 'last_limitations', []) or []
@@ -30943,6 +31096,8 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
 .pulse-print-header{display:none;border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;margin-bottom:12px;background:#fff}
 .pulse-print-header h2{margin:6px 0 4px;font-size:20px;color:#0f172a}
 .pulse-print-header .sub{font-size:12px;color:#475569}
+.pulse-key-points{margin:0;padding-left:18px}
+.pulse-key-points li{margin:6px 0;line-height:1.45}
 .pulse-narrative{font-size:13px;line-height:1.5;color:#0f172a}
 .policy-cards{display:grid;gap:10px}
 .policy-card{border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;background:#fff;page-break-inside:avoid}
@@ -30951,8 +31106,8 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
 .pulse-table-wrap{overflow:auto}
 .pulse-table-wrap table{width:100%;table-layout:auto}
 .pulse-table-wrap th,.pulse-table-wrap td{word-break:break-word;overflow-wrap:anywhere}
-.evidence-print-list{display:none}
-.evidence-print-card{border:1px solid #d8e0ea;border-radius:8px;padding:8px 10px;margin-bottom:8px;page-break-inside:avoid}
+.evidence-card-list{display:grid;gap:8px}
+.evidence-print-card{border:1px solid #d8e0ea;border-radius:8px;padding:8px 10px;margin-bottom:0;page-break-inside:avoid}
 .evidence-print-card .line{font-size:12px;color:#334155;margin-bottom:4px}
 .evidence-print-card .title{font-size:13px;font-weight:700;color:#0f172a;margin-bottom:4px}
 .evidence-print-card .excerpt{font-size:12px;color:#1e293b}
@@ -30966,19 +31121,18 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
   .pulse-table-wrap table{font-size:10px}
   .pulse-table-wrap th,.pulse-table-wrap td{padding:5px 6px;white-space:normal}
   .pulse-table-wrap tr{break-inside:avoid;page-break-inside:avoid}
-  #pulseEvidenceWrap{display:none!important}
-  .evidence-print-list{display:block!important}
+  #pulseWorkloadTableWrap,#pulseStaffTableWrap{display:block!important}
 }
 </style>
 <div id="pulsePrintHeader" class="pulse-print-header">
   <div><strong>Embassy of Pakistan, Kuwait</strong></div>
   <div class="sub">Community Welfare Wing</div>
-  <h2>Ambassador Pulse Report</h2>
+  <h2>Ambassador Pulse Brief</h2>
   <div class="sub">Period: <span id="pulsePrintPeriod">-</span></div>
   <div class="sub">Generated: <span id="pulsePrintGenerated">-</span></div>
 </div>
 <div class="card pulse-controls">
-  <h3>Ambassador Pulse Report</h3>
+  <h3>Ambassador Pulse Brief</h3>
   <p class="muted">Issue intelligence across welfare, legal/OPF, nurses, death, and feedback channels.</p>
   <div class="row">
     <div><label>Start date</label><input id="pulseStartDate" type="date"></div>
@@ -30993,33 +31147,33 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
   <div id="pulseError" class="hint" style="color:#b91c1c;margin-top:8px;display:none"></div>
 </div>
 <div class="card">
-  <h3>Executive Summary</h3>
+  <h3>Ambassador Brief — Key Points</h3>
+  <ul id="pulseBriefPoints" class="pulse-key-points"><li>Generate report to view key points.</li></ul>
   <div class="kpis" id="pulseSummaryKpis"></div>
 </div>
 <div class="card">
-  <h3>Executive Narrative</h3>
+  <h3>Issue-Focused Executive Narrative</h3>
   <div id="pulseExecutiveNarrative" class="pulse-narrative">Generate report to view executive narrative.</div>
 </div>
 <div class="card">
-  <h3>Top Themes</h3>
-  <div id="pulseTopThemesWrap" class="empty">Generate report to view top themes.</div>
+  <h3>Issues Requiring Diplomatic / Senior Attention</h3>
+  <div id="pulsePolicyCardsWrap" class="policy-cards"><div class="empty">Generate report to view senior-attention issues.</div></div>
 </div>
 <div class="card">
-  <h3>Policy-Sensitive Issues</h3>
-  <div id="pulsePolicyIssuesWrap" class="empty">Generate report to view policy-sensitive issues.</div>
+  <h3>Community Service Workload</h3>
+  <div id="pulseWorkloadTableWrap" class="pulse-table-wrap"><div class="empty">Generate report to view workload themes.</div></div>
 </div>
 <div class="card">
-  <h3>Key Policy Issues for Senior Attention</h3>
-  <div id="pulsePolicyCardsWrap" class="policy-cards"><div class="empty">Generate report to view key policy issues.</div></div>
+  <h3>Staff Accountability Snapshot</h3>
+  <div id="pulseStaffTableWrap" class="pulse-table-wrap"><div class="empty">Generate report to view staff snapshot.</div></div>
 </div>
 <div class="card">
-  <h3>Staff / Operational Picture</h3>
-  <div id="pulseStaffWrap" class="empty">Generate report to view staff picture.</div>
-</div>
-<div class="card">
-  <h3>Evidence Cases</h3>
-  <div id="pulseEvidenceWrap" class="empty pulse-table-wrap">Generate report to view evidence cases.</div>
-  <div id="pulseEvidenceCardsWrap" class="evidence-print-list"></div>
+  <h3>Evidence Annex</h3>
+  <p class="hint" id="pulseEvidenceNote">Full case records remain available in the portal by reference number.</p>
+  <h4 style="margin:4px 0 8px;color:#10253f">A. Evidence for Senior Attention</h4>
+  <div id="pulseEvidenceSeniorWrap" class="evidence-card-list"><div class="empty">Generate report to view senior evidence.</div></div>
+  <h4 style="margin:12px 0 8px;color:#10253f">B. Operational Evidence Samples</h4>
+  <div id="pulseEvidenceOperationalWrap" class="evidence-card-list"><div class="empty">Generate report to view operational evidence samples.</div></div>
 </div>
 <script>
 let pulseReportData = null;
@@ -31045,57 +31199,57 @@ function renderPulseSummary(rep){
   const period=(rep&&rep.period)||{};
   const generatedAt=(rep&&rep.generated_at)||'';
   const kpi=document.getElementById('pulseSummaryKpis');
+  const briefEl=document.getElementById('pulseBriefPoints');
   const printPeriod=document.getElementById('pulsePrintPeriod');
   const printGenerated=document.getElementById('pulsePrintGenerated');
   if(printPeriod) printPeriod.textContent=(period.start_date||'-')+' to '+(period.end_date||'-');
   if(printGenerated) printGenerated.textContent=generatedAt||'-';
+  const points=(rep&&rep.ambassador_brief_points)||[];
+  if(briefEl){
+    briefEl.innerHTML=(points.length?points:[
+      'The report is generated from available case records in the selected period.',
+      'Evidence references are listed below for verification.'
+    ]).slice(0,6).map(p=>'<li>'+esc(p)+'</li>').join('');
+  }
   if(kpi){
     kpi.innerHTML = `
       <div class="kpi"><div class="lbl">Total Submissions</div><div class="val">${esc(s.total_items||0)}</div></div>
       <div class="kpi"><div class="lbl">High Sensitivity</div><div class="val">${esc(s.high_sensitivity_count||0)}</div></div>
-      <div class="kpi"><div class="lbl">Top Theme</div><div class="val">${esc(s.top_theme_label||'—')}</div></div>
+      <div class="kpi"><div class="lbl">Top Operational Theme</div><div class="val">${esc(s.top_operational_theme||'—')}</div></div>
+      <div class="kpi"><div class="lbl">Top Diplomatic Issue</div><div class="val">${esc(s.top_diplomatic_issue||'—')}</div></div>
       <div class="kpi"><div class="lbl">Overdue Cases</div><div class="val">${esc(operational.total_overdue||0)}</div></div>`;
   }
-  const top=(rep&&rep.top_themes)||[];
-  const topThemeLabel=((top[0]||{}).theme_label)||'Other / Unclassified';
   const narrativeEl=document.getElementById('pulseExecutiveNarrative');
   if(narrativeEl){
-    narrativeEl.textContent='During the reporting period, the portal recorded '+(s.total_items||0)+' submissions. The highest-volume theme was '+topThemeLabel+'. '+(s.high_sensitivity_count||0)+' high-sensitivity issue(s) were identified for senior review. Key policy-sensitive matters are listed below with supporting case references.';
+    narrativeEl.textContent=String((rep&&rep.executive_narrative)||'No executive narrative available for this period.');
   }
-  const topRows=top.map(t=>[
-    esc(t.theme_label||'—'),
-    esc(t.count||0),
-    esc(t.sensitivity||'Low'),
-    esc(t.authority||'—'),
-    esc((t.sample_references||[]).join(', ')||'—')
-  ]);
-  const topWrap=document.getElementById('pulseTopThemesWrap');
-  if(topWrap){topWrap.innerHTML=pulseTable(['Theme','Count','Sensitivity','Authority','Sample References'], topRows);}
-  const policy=(rep&&rep.policy_sensitive_issues)||[];
-  const policyRows=policy.map(i=>[
-    esc(i.theme_label||'—'),
-    esc(i.count||0),
-    esc(i.authority||'—'),
-    esc(i.suggested_action||'—'),
-    esc((i.sample_references||[]).join(', ')||'—')
-  ]);
-  const policyWrap=document.getElementById('pulsePolicyIssuesWrap');
-  if(policyWrap){policyWrap.innerHTML=pulseTable(['Issue','Count','Authority','Suggested Action','Evidence References'], policyRows);}
+  const policy=(rep&&rep.diplomatic_issues)||[];
   const policyCardsWrap=document.getElementById('pulsePolicyCardsWrap');
   if(policyCardsWrap){
     if(!policy.length){
-      policyCardsWrap.innerHTML='<div class="empty">No high-sensitivity policy issues for selected period.</div>';
+      policyCardsWrap.innerHTML='<div class="empty">No diplomatic or senior-attention issues for selected period.</div>';
     }else{
       policyCardsWrap.innerHTML=policy.map(p=>(
         '<div class="policy-card">'
-        +'<h4>'+esc(p.theme_label||'—')+'</h4>'
+        +'<h4>'+esc(p.issue_title||p.theme_label||'—')+'</h4>'
+        +'<div class="policy-meta"><strong>Why it matters:</strong> '+esc(p.why_it_matters||'—')+'</div>'
         +'<div class="policy-meta"><strong>Count:</strong> '+esc(p.count||0)+' | <strong>Authority:</strong> '+esc(p.authority||'—')+'</div>'
-        +'<div class="policy-meta"><strong>Evidence references:</strong> '+esc((p.sample_references||[]).join(', ')||'—')+'</div>'
+        +'<div class="policy-meta"><strong>Evidence references:</strong> '+esc((p.evidence_references||p.sample_references||[]).join(', ')||'—')+'</div>'
         +'<div><strong>Suggested action:</strong> '+esc(p.suggested_action||'—')+'</div>'
+        +'<div class="policy-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+esc(p.representative_excerpt||'—')+'</div>'
         +'</div>'
       )).join('');
     }
   }
+  const workload=((rep&&rep.community_service_workload)||[]).map(w=>[
+    esc(w.theme_label||'—'),
+    esc(w.count||0),
+    esc(w.responsible_section||'—'),
+    esc((w.sample_references||[]).join(', ')||'—'),
+    esc(w.note||'Operational/service handling')
+  ]);
+  const workloadWrap=document.getElementById('pulseWorkloadTableWrap');
+  if(workloadWrap){workloadWrap.innerHTML=pulseTable(['Theme','Count','Responsible Section','Sample References','Note'], workload);}
   const byOfficer=((rep&&rep.staff_accountability)||{}).by_officer||[];
   const staffRows=byOfficer.map(o=>[
     esc(o.officer_name||o.assigned_to||'—'),
@@ -31104,45 +31258,37 @@ function renderPulseSummary(rep){
     esc(o.no_action_after_assignment||0),
     esc(o.resolved_this_week||0)
   ]);
-  const staffWrap=document.getElementById('pulseStaffWrap');
+  const staffWrap=document.getElementById('pulseStaffTableWrap');
   if(staffWrap){staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'], staffRows);}
-  const evidence=(rep&&rep.evidence_cases)||[];
-  const evidenceRows=evidence.map(c=>[
-    esc(c.reference||'—'),
-    esc(c.module||'—'),
-    esc((c.created_at||'').slice(0,10)),
-    esc((c.theme||{}).theme_label||'—'),
-    esc(c.subject||'—'),
-    esc(c.status||'—'),
-    esc(c.assigned_to||'—'),
-    esc(c.details_excerpt||'—')
-  ]);
-  const evidenceWrap=document.getElementById('pulseEvidenceWrap');
-  if(evidenceWrap){evidenceWrap.innerHTML=pulseTable(['Reference','Module','Date','Theme','Subject','Status','Assigned To','Excerpt'], evidenceRows);}
-  const evidenceCardsWrap=document.getElementById('pulseEvidenceCardsWrap');
-  if(evidenceCardsWrap){
-    if(!evidence.length){
-      evidenceCardsWrap.innerHTML='<div class="empty">No evidence cases for selected period.</div>';
-    }else{
-      evidenceCardsWrap.innerHTML=evidence.map(c=>{
-        const ref=esc(c.reference||'—');
-        const module=esc(c.module||'—');
-        const date=esc((c.created_at||'').slice(0,10)||'—');
-        const status=esc(c.status||'—');
-        const assignedTo=esc(c.assigned_to||'—');
-        const theme=esc(((c.theme||{}).theme_label)||'—');
-        const subject=esc(c.subject||'—');
-        const excerpt=esc(c.details_excerpt||'—');
-        return '<div class="evidence-print-card">'
-          +'<div class="line"><strong>Reference:</strong> '+ref+'</div>'
-          +'<div class="line"><strong>Module:</strong> '+module+' | <strong>Date:</strong> '+date+' | <strong>Status:</strong> '+status+' | <strong>Assigned to:</strong> '+assignedTo+'</div>'
-          +'<div class="line"><strong>Theme:</strong> '+theme+'</div>'
-          +'<div class="title">Subject: '+subject+'</div>'
-          +'<div class="excerpt"><strong>Excerpt:</strong> '+excerpt+'</div>'
-          +'</div>';
-      }).join('');
-    }
-  }
+  const annex=(rep&&rep.evidence_annex)||{};
+  const seniorEvidence=annex.senior_attention||[];
+  const opsEvidence=annex.operational_samples||[];
+  const noteEl=document.getElementById('pulseEvidenceNote');
+  if(noteEl) noteEl.textContent=String(annex.note||'Full case records remain available in the portal by reference number.');
+  const renderEvidenceCards=(items)=>{
+    if(!items.length) return '<div class="empty">No evidence cases for selected period.</div>';
+    return items.map(c=>{
+      const ref=esc(c.reference||'—');
+      const module=esc(c.module||'—');
+      const date=esc((c.created_at||'').slice(0,10)||'—');
+      const status=esc(c.status||'—');
+      const assignedTo=esc(c.assigned_to||'—');
+      const theme=esc(((c.theme||{}).theme_label)||'—');
+      const subject=esc(c.subject||'—');
+      const excerpt=esc(c.details_excerpt||'—');
+      return '<div class="evidence-print-card">'
+        +'<div class="line"><strong>Reference:</strong> '+ref+'</div>'
+        +'<div class="line"><strong>Module:</strong> '+module+' | <strong>Date:</strong> '+date+' | <strong>Status:</strong> '+status+' | <strong>Assigned to:</strong> '+assignedTo+'</div>'
+        +'<div class="line"><strong>Theme:</strong> '+theme+'</div>'
+        +'<div class="title">Subject: '+subject+'</div>'
+        +'<div class="excerpt"><strong>Excerpt:</strong> '+excerpt+'</div>'
+        +'</div>';
+    }).join('');
+  };
+  const seniorWrap=document.getElementById('pulseEvidenceSeniorWrap');
+  if(seniorWrap) seniorWrap.innerHTML=renderEvidenceCards(seniorEvidence);
+  const opsWrap=document.getElementById('pulseEvidenceOperationalWrap');
+  if(opsWrap) opsWrap.innerHTML=renderEvidenceCards(opsEvidence);
 }
 async function loadAmbassadorPulseReport(){
   try{
@@ -31165,13 +31311,15 @@ async function copyPulseSummary(){
     const rep=pulseReportData;
     if(!rep){setPulseError('Generate report first.');return;}
     const s=rep.summary||{};
-    const top=((rep.top_themes||[])[0]||{}).theme_label||'—';
+    const topOperational=s.top_operational_theme||'—';
+    const topDiplomatic=s.top_diplomatic_issue||'—';
     const txt=[
-      'Ambassador Pulse Report',
+      'Ambassador Pulse Brief',
       'Period: '+((rep.period||{}).start_date||'')+' to '+((rep.period||{}).end_date||''),
       'Total submissions: '+(s.total_items||0),
       'High sensitivity: '+(s.high_sensitivity_count||0),
-      'Top theme: '+top
+      'Top operational theme: '+topOperational,
+      'Top diplomatic issue: '+topDiplomatic
     ].join('\\n');
     await navigator.clipboard.writeText(txt);
     setPulseError('');
