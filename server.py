@@ -1156,7 +1156,44 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_welfare_cases_assigned ON welfare_cases(assigned_to);
     CREATE INDEX IF NOT EXISTS idx_welfare_cases_escalation ON welfare_cases(escalation_level);
     CREATE INDEX IF NOT EXISTS idx_welfare_actions_case ON welfare_case_actions(case_id);
+    CREATE TABLE IF NOT EXISTS public_feedback_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        requester_name TEXT,
+        requester_phone TEXT,
+        requester_email TEXT,
+        category TEXT,
+        subject TEXT,
+        details TEXT,
+        source TEXT DEFAULT 'public_feedback',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ack_email_queued INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_public_feedback_created ON public_feedback_messages(created_at);
+    CREATE INDEX IF NOT EXISTS idx_public_feedback_email_created ON public_feedback_messages(requester_email, created_at);
+    CREATE TABLE IF NOT EXISTS counsellor_branch_contacts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        branch_key TEXT NOT NULL UNIQUE,
+        branch_name TEXT NOT NULL,
+        officer_name TEXT DEFAULT '',
+        designation TEXT DEFAULT '',
+        email TEXT DEFAULT '',
+        phone TEXT DEFAULT '',
+        keywords TEXT DEFAULT '',
+        is_active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_counsellor_branch_contacts_active ON counsellor_branch_contacts(is_active);
+    CREATE INDEX IF NOT EXISTS idx_counsellor_branch_contacts_branch_key ON counsellor_branch_contacts(branch_key);
     """)
+    for branch_key, cfg in COUNSELLOR_BRANCH_DEFAULTS.items():
+        db.execute(
+            """INSERT OR IGNORE INTO counsellor_branch_contacts
+               (branch_key, branch_name, keywords, email, is_active, updated_at)
+               VALUES (?, ?, ?, '', 1, CURRENT_TIMESTAMP)""",
+            [branch_key, cfg.get('branch_name', branch_key), cfg.get('keywords', '')]
+        )
+    db.commit()
     for col, coltype in [
         ('case_reference', 'TEXT'),
         ('case_type', 'TEXT'),
@@ -3181,6 +3218,24 @@ RIYADH_CWA_WEBSITE = 'https://pakistaninksa.com/community-welfare-wing/'
 RIYADH_CWA_EMAIL = 'info-parepriyadh@mofa.gov.pk'
 RIYADH_CWA_PHONE = '+966-11-4887272'
 RIYADH_CWA_OTHER_PHONES = '+966-11-4884111, +966-11-4884222, +966-11-4884666'
+COUNSELLOR_SECTION_EMAIL = os.environ.get('COUNSELLOR_SECTION_EMAIL', 'parepkuwait@mofa.gov.pk').strip()
+COUNSELLOR_SECTION_NAME = os.environ.get('COUNSELLOR_SECTION_NAME', 'Counsellor / Consular Section').strip()
+COUNSELLOR_SECTION_PHONE = os.environ.get('COUNSELLOR_SECTION_PHONE', '').strip()
+COUNSELLOR_BRANCH_PRIORITY = ('passport', 'nadra', 'consular_attestation')
+COUNSELLOR_BRANCH_DEFAULTS = {
+    'nadra': {
+        'branch_name': 'NADRA Branch',
+        'keywords': 'nadra, cnic, nicop, poc, national identity card, id card, smart card, frc, family registration certificate, crc, b-form, bay form, birth registration',
+    },
+    'passport': {
+        'branch_name': 'Passport Branch',
+        'keywords': 'passport, pakistani passport, first passport, child passport, daughter passport, minor passport, renewal of passport, passport renewal, mrp, machine readable passport, emergency passport, lost passport',
+    },
+    'consular_attestation': {
+        'branch_name': 'Consular / Attestation Branch',
+        'keywords': 'attestation, document attestation, educational document, educational documents attestation, degree attestation, marriage certificate, birth certificate, police character certificate, power of attorney, affidavit, verification, document verification, dual citizen, dual citizenship, nationality, citizenship, consular section, counsellor section, counselor section, pakistani origin',
+    }
+}
 
 DEFAULT_EMAIL_TEMPLATES = {
     'registration_success': (
@@ -3558,6 +3613,96 @@ def _email_worker_loop():
                         final_email_sent_flag = 1,
                         final_email_sent_at = COALESCE(final_email_sent_at, CURRENT_TIMESTAMP)
                         WHERE id = ?""", [sub_id])
+                db.commit()
+                db.close()
+            elif job.get('type') == 'welfare_general_feedback_ack':
+                subject = "Feedback Received - Community Welfare Wing"
+                name = (job.get('name') or 'Applicant').strip() or 'Applicant'
+                body = (
+                    f"Dear {name},\n\n"
+                    "Thank you for sharing your feedback with the Community Welfare Wing, Embassy of Pakistan, Kuwait.\n\n"
+                    "Your comments have been received and will be reviewed for service improvement. Please note that general feedback submissions do not generate a tracking number and are not processed as individual case files.\n\n"
+                    "If your matter requires action, follow-up, or assistance on a personal issue, please submit the relevant complaint/service request form so that a trackable case can be created.\n\n"
+                    "Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+                )
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute(
+                    "INSERT INTO audit_log (action, user, details) VALUES ('email_welfare_general_feedback_ack', ?, ?)",
+                    [job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'counsellor_section_handover_internal':
+                case_reference = job.get('case_reference', '')
+                branch_name = (job.get('branch_name') or COUNSELLOR_SECTION_NAME).strip()
+                subject = f"Request Forwarded to {branch_name} from Community Welfare Portal - {case_reference}"
+                keywords = job.get('matched_keywords') or []
+                keyword_text = ', '.join(keywords) if keywords else 'No keyword list provided'
+                fallback_note = (
+                    "\nNo branch-specific email is configured. This email has been sent to the default Counsellor Section address.\n"
+                    if int(job.get('fallback_default_email_used') or 0) == 1 else ''
+                )
+                body = (
+                    f"This request appears to fall under {branch_name} and has been auto-forwarded for appropriate handling. "
+                    "The Community Welfare Wing has treated it as handed over/resolved from its side.\n\n"
+                    f"Case reference: {case_reference}\n"
+                    f"Detected branch: {branch_name}\n"
+                    f"Officer name: {job.get('officer_name', '')}\n"
+                    f"Designation: {job.get('designation', '')}\n"
+                    f"Email: {job.get('branch_email', COUNSELLOR_SECTION_EMAIL)}\n"
+                    f"Phone: {job.get('branch_phone', '')}\n"
+                    f"Matched reason: {job.get('matched_reason', '')}\n"
+                    f"Matched keywords: {keyword_text}\n\n"
+                    f"Applicant name: {job.get('requester_name', '')}\n"
+                    f"Applicant phone: {job.get('requester_phone', '')}\n"
+                    f"Applicant email: {job.get('requester_email', '')}\n"
+                    f"Preferred contact/location: {job.get('requester_location', '')}\n\n"
+                    f"Category: {job.get('category', '')}\n"
+                    f"Subject: {job.get('subject', '')}\n"
+                    f"Full details:\n{job.get('details', '')}\n\n"
+                    f"Created time: {job.get('created_at', '')}\n"
+                    f"{fallback_note}"
+                )
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute(
+                    "INSERT INTO audit_log (action, user, details) VALUES ('email_counsellor_section_handover_internal', ?, ?)",
+                    [job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'reference': case_reference})]
+                )
+                db.commit()
+                db.close()
+            elif job.get('type') == 'counsellor_section_handover_applicant':
+                case_reference = job.get('case_reference', '')
+                branch_name = (job.get('branch_name') or COUNSELLOR_SECTION_NAME).strip()
+                subject = f"Your Request Has Been Forwarded to {branch_name} - {case_reference}"
+                name = (job.get('name') or 'Applicant').strip() or 'Applicant'
+                contact_phone = (job.get('branch_phone') or COUNSELLOR_SECTION_PHONE or '').strip() or 'Please contact the Embassy through official contact channels.'
+                branch_email = (job.get('branch_email') or COUNSELLOR_SECTION_EMAIL).strip() or COUNSELLOR_SECTION_EMAIL
+                designation_line = f"Designation: {job.get('designation', '')}\n" if (job.get('designation') or '').strip() else ''
+                body = (
+                    f"Dear {name},\n\n"
+                    f"Your request has been received under reference {case_reference}.\n\n"
+                    f"Based on the subject/details provided, the matter appears to relate to {branch_name}. It has therefore been forwarded to the concerned branch for appropriate handling.\n\n"
+                    "Concerned branch:\n"
+                    f"{branch_name}\n"
+                    f"Officer: {(job.get('officer_name') or 'Concerned Branch Officer')}\n"
+                    f"{designation_line}"
+                    f"Email: {branch_email}\n"
+                    f"Phone: {contact_phone}\n\n"
+                    "As this matter falls outside the Community Welfare Wing's direct jurisdiction, the Community Welfare Wing will treat this request as handed over/resolved after forwarding it to the concerned branch.\n\n"
+                    "Please contact the concerned branch directly for further guidance.\n\n"
+                    "Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+                )
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute(
+                    "INSERT INTO audit_log (action, user, details) VALUES ('email_counsellor_section_handover_applicant', ?, ?)",
+                    [job.get('changed_by', 'system'),
+                     json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'reference': case_reference})]
+                )
                 db.commit()
                 db.close()
             elif job.get('type') == 'admin_advisory':
@@ -7986,6 +8131,251 @@ def api_welfare_locating_assistance(data):
         db.close()
 
 
+def _detect_counsellor_section_case(category='', subject='', details=''):
+    text = ' '.join([str(category or ''), str(subject or ''), str(details or '')]).lower()
+
+    branch_rows = []
+    db = None
+    try:
+        db = get_db()
+        table_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='counsellor_branch_contacts' LIMIT 1"
+        ).fetchone()
+        if table_exists:
+            branch_rows = [dict(r) for r in db.execute(
+                """SELECT branch_key, branch_name, officer_name, designation, email, phone, keywords, is_active
+                   FROM counsellor_branch_contacts
+                   WHERE COALESCE(is_active, 1) = 1"""
+            ).fetchall()]
+    except Exception:
+        branch_rows = []
+    finally:
+        if db:
+            db.close()
+
+    if not branch_rows:
+        branch_rows = []
+        for key, cfg in COUNSELLOR_BRANCH_DEFAULTS.items():
+            branch_rows.append({
+                'branch_key': key,
+                'branch_name': cfg.get('branch_name') or key,
+                'officer_name': '',
+                'designation': '',
+                'email': '',
+                'phone': '',
+                'keywords': cfg.get('keywords', ''),
+                'is_active': 1
+            })
+
+    matches = {}
+    for row in branch_rows:
+        branch_key = _clean_text(row.get('branch_key'), 80).lower()
+        if not branch_key:
+            continue
+        keywords = [k.strip().lower() for k in str(row.get('keywords') or '').split(',') if k.strip()]
+        branch_hits = sorted(set([kw for kw in keywords if kw and kw in text]))
+        if branch_hits:
+            matches[branch_key] = {
+                'row': row,
+                'hits': branch_hits
+            }
+
+    selected_key = ''
+    for key in COUNSELLOR_BRANCH_PRIORITY:
+        if key in matches:
+            selected_key = key
+            break
+    if not selected_key and matches:
+        selected_key = sorted(matches.keys())[0]
+    if not selected_key:
+        return {
+            'matched': False,
+            'branch_key': '',
+            'branch_name': '',
+            'officer_name': '',
+            'designation': '',
+            'email': '',
+            'phone': '',
+            'matched_keywords': [],
+            'reason': ''
+        }
+
+    picked = matches[selected_key]
+    picked_row = picked.get('row') or {}
+    branch_name = _clean_text(picked_row.get('branch_name') or COUNSELLOR_BRANCH_DEFAULTS.get(selected_key, {}).get('branch_name'), 200)
+    officer_name = _clean_text(picked_row.get('officer_name'), 200)
+    designation = _clean_text(picked_row.get('designation'), 200)
+    email = _clean_text(picked_row.get('email') or COUNSELLOR_SECTION_EMAIL, 200)
+    phone = _clean_text(picked_row.get('phone') or COUNSELLOR_SECTION_PHONE, 120)
+    return {
+        'matched': True,
+        'branch_key': selected_key,
+        'branch_name': branch_name,
+        'officer_name': officer_name,
+        'designation': designation,
+        'email': email,
+        'phone': phone,
+        'matched_keywords': picked.get('hits') or [],
+        'reason': f"Matched {branch_name} keywords with priority routing"
+    }
+
+
+def _classify_public_feedback_submission(category='', subject='', details=''):
+    cat = (category or '').strip().lower()
+    text = ' '.join([cat, str(subject or '').lower(), str(details or '').lower()])
+
+    counsellor_match = _detect_counsellor_section_case(category, subject, details)
+    if counsellor_match.get('matched'):
+        return {
+            'kind': 'actionable_case',
+            'reason': 'Consular/counsellor keywords detected',
+            'matched_keywords': counsellor_match.get('matched_keywords') or []
+        }
+
+    actionable_keywords = [
+        'legal issue', 'death case', 'welfare issue', 'employment issue', 'unpaid salary',
+        'employer problem', 'detention', 'missing person', 'domestic worker issue', 'shelter',
+        'stay issue', 'medical emergency', 'help needed', 'need help', 'violence', 'abuse',
+        'harassment', 'police case', 'salary', 'employer', 'detained'
+    ]
+    actionable_hits = [term for term in actionable_keywords if term in text]
+    if actionable_hits:
+        return {
+            'kind': 'actionable_case',
+            'reason': 'Actionable welfare keywords detected',
+            'matched_keywords': sorted(set(actionable_hits))
+        }
+
+    feedback_keywords = [
+        'website feedback', 'suggestion', 'appreciation', 'general comment', 'system feedback',
+        'improvement suggestion', 'complaint about website', 'system is not working',
+        'good service', 'please improve portal', 'feedback', 'portal design'
+    ]
+    feedback_hits = [term for term in feedback_keywords if term in text]
+    if ('feedback' in cat or 'suggestion' in cat or 'comment' in cat) and not actionable_hits:
+        return {
+            'kind': 'general_feedback',
+            'reason': 'Feedback/suggestion category with no actionable keywords',
+            'matched_keywords': sorted(set(feedback_hits))
+        }
+    if feedback_hits and not actionable_hits:
+        return {
+            'kind': 'general_feedback',
+            'reason': 'General feedback keywords detected',
+            'matched_keywords': sorted(set(feedback_hits))
+        }
+
+    return {
+        'kind': 'actionable_case',
+        'reason': 'Ambiguous submission defaulted to actionable for safety',
+        'matched_keywords': []
+    }
+
+
+def _get_counsellor_branch_contact(branch_key):
+    key = _clean_text(branch_key, 80).lower()
+    if not key:
+        return None
+    db = None
+    try:
+        db = get_db()
+        row = db.execute(
+            """SELECT branch_key, branch_name, officer_name, designation, email, phone, keywords,
+                      COALESCE(is_active,1) AS is_active
+               FROM counsellor_branch_contacts
+               WHERE branch_key = ?
+               LIMIT 1""",
+            [key]
+        ).fetchone()
+        if row:
+            out = dict(row)
+            out['email'] = _clean_text(out.get('email') or COUNSELLOR_SECTION_EMAIL, 240) or COUNSELLOR_SECTION_EMAIL
+            return out
+    except Exception:
+        pass
+    finally:
+        if db:
+            db.close()
+    fallback = COUNSELLOR_BRANCH_DEFAULTS.get(key)
+    if not fallback:
+        return None
+    return {
+        'branch_key': key,
+        'branch_name': fallback.get('branch_name') or key,
+        'officer_name': '',
+        'designation': '',
+        'email': COUNSELLOR_SECTION_EMAIL,
+        'phone': COUNSELLOR_SECTION_PHONE,
+        'keywords': fallback.get('keywords') or '',
+        'is_active': 1
+    }
+
+
+def _queue_welfare_general_feedback_ack(name, email, changed_by='public'):
+    to_addr = (email or '').strip()
+    if not _is_valid_email_loose(to_addr):
+        return False
+    return _enqueue_email_job({
+        'type': 'welfare_general_feedback_ack',
+        'to': to_addr,
+        'name': (name or 'Applicant').strip() or 'Applicant',
+        'changed_by': changed_by
+    })
+
+
+def _queue_counsellor_section_handover_internal(case_payload, handover_meta, changed_by='system'):
+    branch_email = _clean_text(handover_meta.get('email'), 200)
+    to_addr = (branch_email or '').strip()
+    fallback_used = 0
+    if not _is_valid_email_loose(to_addr):
+        to_addr = (COUNSELLOR_SECTION_EMAIL or '').strip()
+        fallback_used = 1
+    if not _is_valid_email_loose(to_addr):
+        return False
+    return _enqueue_email_job({
+        'type': 'counsellor_section_handover_internal',
+        'to': to_addr,
+        'fallback_default_email_used': fallback_used,
+        'branch_key': handover_meta.get('branch_key') or '',
+        'branch_name': handover_meta.get('branch_name') or '',
+        'officer_name': handover_meta.get('officer_name') or '',
+        'designation': handover_meta.get('designation') or '',
+        'branch_email': to_addr,
+        'branch_phone': handover_meta.get('phone') or '',
+        'case_reference': case_payload.get('case_reference') or '',
+        'requester_name': case_payload.get('requester_name') or '',
+        'requester_phone': case_payload.get('requester_phone') or '',
+        'requester_email': case_payload.get('requester_email') or '',
+        'requester_location': case_payload.get('requester_location') or '',
+        'category': case_payload.get('category') or '',
+        'subject': case_payload.get('subject') or '',
+        'details': case_payload.get('details') or '',
+        'created_at': case_payload.get('created_at') or '',
+        'matched_keywords': handover_meta.get('matched_keywords') or [],
+        'matched_reason': handover_meta.get('reason') or '',
+        'changed_by': changed_by
+    })
+
+
+def _queue_counsellor_section_handover_applicant(case_payload, changed_by='system'):
+    to_addr = (case_payload.get('requester_email') or '').strip()
+    if not _is_valid_email_loose(to_addr):
+        return False
+    return _enqueue_email_job({
+        'type': 'counsellor_section_handover_applicant',
+        'to': to_addr,
+        'name': (case_payload.get('requester_name') or 'Applicant').strip() or 'Applicant',
+        'case_reference': case_payload.get('case_reference') or '',
+        'branch_key': case_payload.get('branch_key') or '',
+        'branch_name': case_payload.get('branch_name') or '',
+        'officer_name': case_payload.get('officer_name') or '',
+        'designation': case_payload.get('designation') or '',
+        'branch_email': case_payload.get('branch_email') or COUNSELLOR_SECTION_EMAIL,
+        'branch_phone': case_payload.get('branch_phone') or '',
+        'changed_by': changed_by
+    })
+
+
 def api_welfare_feedback(data):
     requester_name = _clean_text(data.get('name') or data.get('requester_name'), 180)
     requester_phone = _clean_text(data.get('phone') or data.get('requester_phone'), 80)
@@ -7993,13 +8383,49 @@ def api_welfare_feedback(data):
     subject = _clean_text(data.get('subject'), 240)
     details = _clean_text(data.get('details'), 4000)
     requester_email = _clean_text(data.get('email'), 180)
+    preferred_contact = _clean_text(data.get('preferred_contact_method') or data.get('requester_location'), 120)
     if not requester_name or not requester_phone or not category or not subject or not details:
         return {'ok': False, 'success': False, 'error': 'Full name, phone, category, subject, and details are required'}
+    classification = _classify_public_feedback_submission(category, subject, details)
     db = get_db()
     try:
-        # Allow repeated feedback from the same person; only soft-block near-exact rapid re-submits.
+        if classification.get('kind') == 'general_feedback':
+            recent_same_feedback = db.execute(
+                """SELECT id FROM public_feedback_messages
+                   WHERE lower(trim(COALESCE(requester_name, ''))) = lower(trim(?))
+                     AND lower(trim(COALESCE(requester_email, ''))) = lower(trim(?))
+                     AND lower(trim(COALESCE(subject, ''))) = lower(trim(?))
+                     AND lower(trim(COALESCE(details, ''))) = lower(trim(?))
+                     AND datetime(created_at) >= datetime('now', '-10 minutes')
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                [requester_name, requester_email, subject, details]
+            ).fetchone()
+            if recent_same_feedback:
+                return {
+                    'ok': False,
+                    'success': False,
+                    'error': 'A similar feedback submission was received recently. Please wait a few minutes before submitting the same message again.'
+                }
+
+            ack_queued = 1 if _queue_welfare_general_feedback_ack(requester_name, requester_email, 'public') else 0
+            db.execute(
+                """INSERT INTO public_feedback_messages
+                   (requester_name, requester_phone, requester_email, category, subject, details, source, ack_email_queued)
+                   VALUES (?, ?, ?, ?, ?, ?, 'public_feedback', ?)""",
+                [requester_name, requester_phone, requester_email, category, subject, details, ack_queued]
+            )
+            db.commit()
+            return {
+                'ok': True,
+                'success': True,
+                'tracking_available': False,
+                'reference': '',
+                'message': 'Thank you for your feedback. Your comments have been received by the Community Welfare Wing. Feedback submissions are reviewed for service improvement and do not generate a tracking number. If you need action on a personal case, please submit the relevant service request/complaint form.'
+            }
+
         if requester_email:
-            recent_same = db.execute(
+            recent_same_case = db.execute(
                 """SELECT id FROM welfare_cases
                    WHERE case_type = 'community_feedback'
                      AND lower(trim(COALESCE(requester_name, ''))) = lower(trim(?))
@@ -8011,12 +8437,13 @@ def api_welfare_feedback(data):
                    LIMIT 1""",
                 [requester_name, requester_email, subject, details]
             ).fetchone()
-            if recent_same:
+            if recent_same_case:
                 return {
                     'ok': False,
                     'success': False,
                     'error': 'A similar feedback submission was received recently. Please wait a few minutes before submitting the same message again.'
                 }
+
         reference = _welfare_next_reference(db, 'FBK')
         cur = db.execute(
             """INSERT INTO welfare_cases
@@ -8029,13 +8456,82 @@ def api_welfare_feedback(data):
                 requester_name,
                 requester_phone,
                 requester_email,
-                _clean_text(data.get('preferred_contact_method'), 120),
+                preferred_contact,
                 subject,
                 subject,
                 details
             ]
         )
         _welfare_insert_action(db, cur.lastrowid, 'public', 'created', '', 'New', 'Public community feedback submitted', False)
+
+        handover = _detect_counsellor_section_case(category, subject, details)
+        if handover.get('matched'):
+            branch_key = _clean_text(handover.get('branch_key'), 80) or 'consular_attestation'
+            branch_name = _clean_text(handover.get('branch_name'), 200) or COUNSELLOR_SECTION_NAME
+            branch_officer = _clean_text(handover.get('officer_name'), 200)
+            branch_designation = _clean_text(handover.get('designation'), 200)
+            branch_email = _clean_text(handover.get('email') or COUNSELLOR_SECTION_EMAIL, 200) or COUNSELLOR_SECTION_EMAIL
+            branch_phone = _clean_text(handover.get('phone') or COUNSELLOR_SECTION_PHONE, 120)
+            keyword_text = ', '.join(handover.get('matched_keywords') or []) or 'consular keywords detected'
+            officer_line = f" Officer: {branch_officer}." if branch_officer else ''
+            designation_line = f" Designation: {branch_designation}." if branch_designation else ''
+            phone_line = f" Phone: {branch_phone}." if branch_phone else ''
+            handover_note = (
+                f"Auto-forwarded to {branch_name}.{officer_line}{designation_line} Email: {branch_email}.{phone_line} "
+                f"Matched keywords: {keyword_text}. This matter has been handed over to the concerned branch and treated as closed/resolved from the Community Welfare side."
+            )
+            db.execute(
+                """UPDATE welfare_cases
+                   SET status = 'Resolved',
+                       assigned_to = ?,
+                       assigned_role = 'counsellor_external',
+                       assigned_department = ?,
+                       resolved_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP,
+                       escalation_level = 'external_handover'
+                   WHERE id = ?""",
+                [f'external_branch:{branch_key}', branch_name, cur.lastrowid]
+            )
+            _welfare_insert_action(db, cur.lastrowid, 'system', 'external_handover', 'New', 'Resolved', handover_note, True)
+
+            case_payload = {
+                'case_reference': reference,
+                'requester_name': requester_name,
+                'requester_phone': requester_phone,
+                'requester_email': requester_email,
+                'requester_location': preferred_contact,
+                'category': category,
+                'subject': subject,
+                'details': details,
+                'branch_key': branch_key,
+                'branch_name': branch_name,
+                'officer_name': branch_officer,
+                'designation': branch_designation,
+                'branch_email': branch_email,
+                'branch_phone': branch_phone,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            _queue_counsellor_section_handover_internal(case_payload, handover, 'system')
+            _queue_counsellor_section_handover_applicant(case_payload, 'system')
+            db.commit()
+            contact_bits = []
+            if branch_officer:
+                contact_bits.append(f"Officer: {branch_officer}")
+            if branch_email:
+                contact_bits.append(f"Email: {branch_email}")
+            if branch_phone:
+                contact_bits.append(f"Phone: {branch_phone}")
+            contact_suffix = (' ' + ' '.join(contact_bits)) if contact_bits else ''
+            return {
+                'ok': True,
+                'success': True,
+                'tracking_available': True,
+                'reference': reference,
+                'routed_to': branch_name,
+                'status': 'Resolved',
+                'message': f'Your request has been received under reference {reference}. Based on the details provided, it appears to relate to {branch_name}. It has been forwarded to the concerned branch for appropriate handling. As this matter falls outside the Community Welfare Wing, it will be treated as handed over/resolved from the Community Welfare side. Please contact the concerned branch directly for further guidance.{contact_suffix}'
+            }
+
         db.commit()
         verification = _send_email_verification_for_record(
             'welfare_cases', cur.lastrowid, reference, requester_name, requester_email, 'community_feedback'
@@ -8052,8 +8548,9 @@ def api_welfare_feedback(data):
         return {
             'ok': True,
             'success': True,
+            'tracking_available': True,
             'reference': reference,
-            'message': 'Your request has been received. If you provided an email address, please check your inbox and verify your email address to receive future updates.',
+            'message': f'Your request has been received under reference {reference}. If you provided an email address, please check your inbox and verify your email address to receive future updates.',
             'email_verification_status': verification.get('status'),
         }
     except sqlite3.IntegrityError:
@@ -8132,6 +8629,25 @@ def api_admin_welfare_case_detail(case_id, user):
         if err:
             return err
         case = _welfare_case_to_dict(row)
+        case['counsellor_section_name'] = COUNSELLOR_SECTION_NAME
+        case['counsellor_section_email'] = COUNSELLOR_SECTION_EMAIL
+        case['counsellor_section_phone'] = COUNSELLOR_SECTION_PHONE
+        case['handover_branch_key'] = ''
+        case['handover_branch_name'] = ''
+        case['handover_officer_name'] = ''
+        case['handover_designation'] = ''
+        case['handover_email'] = COUNSELLOR_SECTION_EMAIL
+        case['handover_phone'] = COUNSELLOR_SECTION_PHONE or 'Please contact the Embassy through official contact channels.'
+        assigned_to = _clean_text(case.get('assigned_to'), 160)
+        if assigned_to.startswith('external_branch:'):
+            branch_key = assigned_to.split(':', 1)[1].strip().lower()
+            branch = _get_counsellor_branch_contact(branch_key) or {}
+            case['handover_branch_key'] = branch_key
+            case['handover_branch_name'] = branch.get('branch_name') or case.get('assigned_department') or ''
+            case['handover_officer_name'] = branch.get('officer_name') or ''
+            case['handover_designation'] = branch.get('designation') or ''
+            case['handover_email'] = branch.get('email') or COUNSELLOR_SECTION_EMAIL
+            case['handover_phone'] = branch.get('phone') or case['handover_phone']
         actions = [dict(r) for r in db.execute(
             """SELECT id, actor_username, action_type, old_value, new_value, note,
                       visible_to_requester, created_at
@@ -8153,6 +8669,71 @@ def api_admin_welfare_users():
             list(WELFARE_ASSIGNABLE_ROLES)
         ).fetchall()]
         return {'success': True, 'users': rows}
+    finally:
+        db.close()
+
+
+def api_admin_counsellor_branches(user):
+    if (user or {}).get('role') != 'admin':
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        rows = [dict(r) for r in db.execute(
+            """SELECT id, branch_key, branch_name, officer_name, designation, email, phone, keywords,
+                      COALESCE(is_active,1) AS is_active, created_at, updated_at
+               FROM counsellor_branch_contacts
+               ORDER BY CASE branch_key
+                    WHEN 'passport' THEN 1
+                    WHEN 'nadra' THEN 2
+                    WHEN 'consular_attestation' THEN 3
+                    ELSE 99 END, branch_name, id"""
+        ).fetchall()]
+        return {'success': True, 'items': rows}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_counsellor_branches_update(data, user):
+    if (user or {}).get('role') != 'admin':
+        return {'success': False, 'error': 'Unauthorized'}
+    branch_key = _clean_text((data or {}).get('branch_key'), 80).lower()
+    branch_name = _clean_text((data or {}).get('branch_name'), 200)
+    officer_name = _clean_text((data or {}).get('officer_name'), 200)
+    designation = _clean_text((data or {}).get('designation'), 200)
+    email = _clean_text((data or {}).get('email'), 240)
+    phone = _clean_text((data or {}).get('phone'), 100)
+    keywords = _clean_text((data or {}).get('keywords'), 4000)
+    is_active = 1 if str((data or {}).get('is_active', 1)).strip().lower() in ('1', 'true', 'yes', 'on') else 0
+
+    if not branch_key:
+        return {'success': False, 'error': 'branch_key is required'}
+    if not branch_name:
+        return {'success': False, 'error': 'branch_name is required'}
+    if email and ('@' not in email or '.' not in email):
+        return {'success': False, 'error': 'A valid email is required when email is provided'}
+
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT branch_key FROM counsellor_branch_contacts WHERE branch_key = ? LIMIT 1",
+            [branch_key]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Branch not found'}
+        db.execute(
+            """UPDATE counsellor_branch_contacts
+               SET branch_name = ?, officer_name = ?, designation = ?, email = ?, phone = ?,
+                   keywords = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE branch_key = ?""",
+            [branch_name, officer_name, designation, email, phone, keywords, is_active, branch_key]
+        )
+        db.commit()
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
     finally:
         db.close()
 
@@ -8295,7 +8876,16 @@ def api_admin_welfare_status(data, user):
         status = _clean_text(data.get('status'), 80)
         if status not in WELFARE_STATUSES:
             return {'success': False, 'error': 'Invalid status'}
-        note = _clean_text(data.get('note'), 2000)
+        note = _clean_text(data.get('note'), 4000)
+        visible_raw = str(data.get('visible_to_requester') or '').strip().lower()
+        visible_to_requester = visible_raw in ('1', 'true', 'yes', 'on')
+        if status == 'Resolved':
+            if len(note.strip()) < 20:
+                return {
+                    'success': False,
+                    'error': 'Resolution note is required before marking a case as Resolved. Please write what action was taken and make it visible to the applicant.'
+                }
+            visible_to_requester = True
         resolved_at = 'CURRENT_TIMESTAMP' if status == 'Resolved' else 'resolved_at'
         closed_at = 'CURRENT_TIMESTAMP' if status == 'Closed' else 'closed_at'
         db.execute(
@@ -8306,14 +8896,14 @@ def api_admin_welfare_status(data, user):
                 WHERE id = ?""",
             [status, row['id']]
         )
-        _welfare_insert_action(db, row['id'], user.get('user'), 'status_changed', row['status'] or '', status, note, bool(data.get('visible_to_requester')))
+        _welfare_insert_action(db, row['id'], user.get('user'), 'status_changed', row['status'] or '', status, note, visible_to_requester)
         db.commit()
         row_d = dict(row)
-        note_for_applicant = note if bool(data.get('visible_to_requester')) else ''
+        note_for_applicant = note if visible_to_requester else ''
         should_notify = _should_notify_applicant_status(
             status=status,
             public_note=note_for_applicant,
-            visible_to_applicant=bool(data.get('visible_to_requester')),
+            visible_to_applicant=visible_to_requester,
             safe_statuses={'Awaiting Requester Response', 'Resolved', 'Closed', 'Reopened'}
         )
         if should_notify:
@@ -8414,7 +9004,12 @@ def api_admin_welfare_resolve(data, user):
         row, err = _welfare_load_case_for_action(db, data.get('case_id'), user)
         if err:
             return err
-        note = _clean_text(data.get('resolution_note'), 4000)
+        note = _clean_text(data.get('resolution_note') or data.get('note'), 4000)
+        if len((note or '').strip()) < 20:
+            return {
+                'success': False,
+                'error': 'Resolution note is required before resolving this case. Please explain the action taken so the applicant can see how the matter was resolved.'
+            }
         db.execute(
             """UPDATE welfare_cases
                SET status = 'Resolved', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -22413,6 +23008,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not (user['role'] in WELFARE_ADMIN_ROLES or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_welfare_users())
+        elif path == '/api/admin/counsellor-branches':
+            user = self.require_auth()
+            if not user: return
+            res = api_admin_counsellor_branches(user)
+            self.send_json(res, 200 if res.get('success') else 403)
         elif path == '/api/admin/welfare-cases':
             user = self.require_auth()
             if not user: return
@@ -25046,6 +25646,18 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             if path == '/api/admin/welfare-cases/resolve':
                 self.send_json(api_admin_welfare_resolve(data, user)); return
             self.send_json({'success': False, 'error': 'Unknown welfare case action'}, 404)
+            return
+
+        if path == '/api/admin/counsellor-branches/update':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            res = api_admin_counsellor_branches_update(data, user)
+            self.send_json(res, 200 if res.get('success') else (403 if res.get('error') == 'Unauthorized' else 400))
             return
 
         if path == '/api/public-register':
@@ -28350,12 +28962,12 @@ load();async function refreshNotificationBadges(){try{const r=await fetch('/api/
 </script></body></html>"""
 
 WELFARE_CASES_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PAGE_TITLE__</title>
-<style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f2f7fa;color:#172033}.top{height:58px;background:white;border-bottom:1px solid #dbe5ea;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.shell{display:flex}.side{width:230px;min-height:calc(100vh - 58px);background:#10253f;color:white;padding:18px 10px}.side h3{font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em;text-transform:uppercase;padding:0 10px}.side a{display:block;color:rgba(255,255,255,.68);text-decoration:none;font-weight:700;font-size:13px;padding:10px 12px;border-radius:8px;margin:2px}.side a.active,.side a:hover{background:rgba(255,255,255,.1);color:white}.badge-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:12px;font-weight:700;margin-left:auto}.badge-count.hidden{display:none}.main{flex:1;min-width:0}.head{background:white;border-bottom:1px solid #dbe5ea;padding:18px 24px}.head h1{font-size:22px;margin:0;color:#10253f}.head p{font-size:12px;color:#64748b;margin:4px 0 0}.content{padding:20px 24px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:white;border:1px solid #dbe5ea;border-radius:8px;padding:14px}.kpi b{display:block;font-size:24px;color:#10253f}.kpi span{font-size:11px;color:#64748b;font-weight:800;text-transform:uppercase}.panel{background:white;border:1px solid #dbe5ea;border-radius:8px;overflow:hidden}.filters{display:flex;gap:10px;flex-wrap:wrap;padding:14px;border-bottom:1px solid #e2e8f0}input,select,textarea{border:1px solid #cbd5e1;border-radius:7px;padding:9px 10px;font:inherit;font-size:13px}button{border:0;border-radius:7px;background:#2f7d4e;color:white;padding:9px 12px;font-weight:800;cursor:pointer}.btn2{background:#e2e8f0;color:#10253f}.btn3{background:#2d4a6b}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;background:#f8fafc;color:#64748b;font-size:11px;text-transform:uppercase;padding:10px;border-bottom:1px solid #e2e8f0}td{padding:11px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#e2e8f0;color:#334155}.New{background:#eff6ff;color:#1d4ed8}.Assigned{background:#ecfdf5;color:#047857}.High,.Urgent{background:#fef2f2;color:#b91c1c}.Resolved{background:#f0fdf4;color:#166534}.drawer{position:fixed;right:0;top:0;width:min(560px,100%);height:100vh;background:white;box-shadow:-24px 0 60px rgba(15,23,42,.2);display:none;z-index:5;overflow:auto}.drawer.open{display:block}.drawerHead{background:#2d4a6b;color:white;padding:20px}.drawerBody{padding:18px}.row{display:grid;grid-template-columns:150px 1fr;gap:8px;margin-bottom:8px;font-size:13px}.row span{color:#64748b}.timeline{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}.act{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px}.err{color:#b91c1c;font-weight:800;margin:10px 0}</style></head><body>
+<style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f2f7fa;color:#172033}.top{height:58px;background:white;border-bottom:1px solid #dbe5ea;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.shell{display:flex}.side{width:230px;min-height:calc(100vh - 58px);background:#10253f;color:white;padding:18px 10px}.side h3{font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em;text-transform:uppercase;padding:0 10px}.side a{display:block;color:rgba(255,255,255,.68);text-decoration:none;font-weight:700;font-size:13px;padding:10px 12px;border-radius:8px;margin:2px}.side a.active,.side a:hover{background:rgba(255,255,255,.1);color:white}.badge-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:12px;font-weight:700;margin-left:auto}.badge-count.hidden{display:none}.main{flex:1;min-width:0}.head{background:white;border-bottom:1px solid #dbe5ea;padding:18px 24px}.head h1{font-size:22px;margin:0;color:#10253f}.head p{font-size:12px;color:#64748b;margin:4px 0 0}.content{padding:20px 24px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:white;border:1px solid #dbe5ea;border-radius:8px;padding:14px}.kpi b{display:block;font-size:24px;color:#10253f}.kpi span{font-size:11px;color:#64748b;font-weight:800;text-transform:uppercase}.panel{background:white;border:1px solid #dbe5ea;border-radius:8px;overflow:hidden}.filters{display:flex;gap:10px;flex-wrap:wrap;padding:14px;border-bottom:1px solid #e2e8f0}input,select,textarea{border:1px solid #cbd5e1;border-radius:7px;padding:9px 10px;font:inherit;font-size:13px}button{border:0;border-radius:7px;background:#2f7d4e;color:white;padding:9px 12px;font-weight:800;cursor:pointer}.btn2{background:#e2e8f0;color:#10253f}.btn3{background:#2d4a6b}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;background:#f8fafc;color:#64748b;font-size:11px;text-transform:uppercase;padding:10px;border-bottom:1px solid #e2e8f0}td{padding:11px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#e2e8f0;color:#334155}.New{background:#eff6ff;color:#1d4ed8}.Assigned{background:#ecfdf5;color:#047857}.High,.Urgent{background:#fef2f2;color:#b91c1c}.Resolved{background:#f0fdf4;color:#166534}.drawer{position:fixed;right:0;top:0;width:min(560px,100%);height:100vh;background:white;box-shadow:-24px 0 60px rgba(15,23,42,.2);display:none;z-index:5;overflow:auto}.drawer.open{display:block}.drawerHead{background:#2d4a6b;color:white;padding:20px}.drawerBody{padding:18px}.row{display:grid;grid-template-columns:150px 1fr;gap:8px;margin-bottom:8px;font-size:13px}.row span{color:#64748b}.timeline{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}.act{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px}.err{color:#b91c1c;font-weight:800;margin:10px 0}.hint{font-size:12px;color:#64748b;margin:6px 0 10px}.badge-handover{display:inline-block;background:#ecfeff;color:#0e7490;border:1px solid #99f6e4;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:700;margin:4px 0}</style></head><body>
 <div class="top"><div><b>Embassy of Pakistan, Kuwait</b><div style="font-size:11px;color:#64748b">Community Welfare Wing</div></div><div style="font-size:12px;color:#64748b">__USER_NAME__ · __USER_ROLE__</div></div>
 <div class="shell"><aside class="side"><h3>Main Dashboard</h3><a href="/admin/dashboard">Dashboard</a><h3>Community Welfare</h3><a href="/admin/community-welfare">CWA Overview <span class="badge-count hidden" data-badge="community_welfare"></span></a><a href="/admin/nurses">Nurses <span class="badge-count hidden" data-badge="nurses"></span></a><a href="/admin/legal-cases">Legal Cases <span class="badge-count hidden" data-badge="legal_cases"></span></a><a href="/admin/death-cases">Death Cases <span class="badge-count hidden" data-badge="death_cases"></span></a><a href="/admin/welfare-cases" data-nav="all">Welfare Cases <span class="badge-count hidden" data-badge="welfare_cases"></span></a><a href="/admin/my-cases" data-nav="my">My Assigned Cases <span class="badge-count hidden" data-badge="my_cases"></span></a><a href="/admin/ambassador-review" data-nav="ambassador">Ambassador Review <span class="badge-count hidden" data-badge="ambassador_review"></span></a></aside>
-<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel" style="margin-bottom:14px"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Review Print Pack</strong><input id="printDate" type="date"><select id="printPackType"><option value="daily">Today’s New / Updated Cases</option><option value="pending">Pending Review</option><option value="open">All Open Cases</option><option value="ambassador_review">Ambassador Review Queue</option><option value="resolved_today">Resolved Today</option></select><select id="printCaseType"><option value="all">All Case Types</option><option value="welfare">Welfare</option><option value="legal">Legal / OPF</option><option value="death">Death Cases</option><option value="nurse">Nurse / Health Worker</option><option value="locating">Locating Assistance</option><option value="feedback">Feedback / Complaints</option></select><select id="printPriority"><option value="all">All Priorities</option><option value="urgent">Urgent</option><option value="normal">Normal</option></select><select id="printAssigned"><option value="all">All Assignees</option><option value="unassigned">Unassigned</option></select><button onclick="generatePrintPack()">Generate Print Pack</button><button class="btn3" onclick="printSelectedCases()">Print Selected Cases</button></div></div><div class="panel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table id="caseTable"><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div></div></main></div>
-<div class="drawer" id="drawer"><div class="drawerHead"><button class="btn2" style="float:right" onclick="closeDrawer()">Close</button><h2 id="dRef"></h2><div id="dType"></div></div><div class="drawerBody"><div id="details"></div><h3>Assignment</h3><select id="assignee"></select><input id="assignNote" placeholder="Assignment note"><button onclick="assignCase()">Assign</button><h3>Status</h3><select id="newStatus"><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><input id="statusNote" placeholder="Status note"><button class="btn3" onclick="statusCase()">Update Status</button><h3>Escalation</h3><select id="escLevel"><option value="normal">Normal</option><option value="senior_review">Senior Review</option><option value="ambassador_review">Ambassador Review</option></select><input id="escNote" placeholder="Escalation note"><button class="btn3" onclick="escalateCase()">Escalate</button><h3>Notes</h3><textarea id="noteText" placeholder="Internal note or requester-visible message"></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="visibleNote" type="checkbox"> Visible to requester</label><button onclick="addNote()">Add Note</button><button class="btn3" onclick="resolveCase()">Mark Resolved</button><div class="timeline" id="timeline"></div></div></div>
-<script>const PAGE_MODE='__PAGE_MODE__';let current=null,users=[];document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}async function loadCases(){try{document.getElementById('err').textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};document.getElementById('kpis').innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');document.getElementById('rows').innerHTML=(data.items||[]).map(c=>'<tr><td><b>'+c.case_reference+'</b></td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>'}catch(e){document.getElementById('err').textContent=e.message}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;document.getElementById('details').innerHTML=rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}async function statusCase(){await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:document.getElementById('newStatus').value,note:document.getElementById('statusNote').value});await refresh()}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:document.getElementById('noteText').value});await refresh()}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}loadUsers();loadCases();refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html>"""
+<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel" style="margin-bottom:14px"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Review Print Pack</strong><input id="printDate" type="date"><select id="printPackType"><option value="daily">Today’s New / Updated Cases</option><option value="pending">Pending Review</option><option value="open">All Open Cases</option><option value="ambassador_review">Ambassador Review Queue</option><option value="resolved_today">Resolved Today</option></select><select id="printCaseType"><option value="all">All Case Types</option><option value="welfare">Welfare</option><option value="legal">Legal / OPF</option><option value="death">Death Cases</option><option value="nurse">Nurse / Health Worker</option><option value="locating">Locating Assistance</option><option value="feedback">Feedback / Complaints</option></select><select id="printPriority"><option value="all">All Priorities</option><option value="urgent">Urgent</option><option value="normal">Normal</option></select><select id="printAssigned"><option value="all">All Assignees</option><option value="unassigned">Unassigned</option></select><button onclick="generatePrintPack()">Generate Print Pack</button><button class="btn3" onclick="printSelectedCases()">Print Selected Cases</button></div></div><div class="panel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table id="caseTable"><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div><div class="panel" id="counsellorBranchesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Counsellor Branches</strong><span style="font-size:12px;color:#64748b">Admin-only branch routing contacts</span></div><div style="padding:12px 14px"><div id="branchErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Branch</th><th>Officer Name</th><th>Designation</th><th>Email</th><th>Phone</th><th>Active</th><th>Actions</th></tr></thead><tbody id="branchRows"><tr><td colspan="7">Loading...</td></tr></tbody></table></div><div id="branchEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="branch_key"><div class="filters" style="padding:0;border:0"><input id="branch_name" placeholder="Branch name"><input id="branch_officer" placeholder="Officer name"><input id="branch_designation" placeholder="Designation"><input id="branch_email" placeholder="Email"><input id="branch_phone" placeholder="Phone"><select id="branch_active"><option value="1">Active</option><option value="0">Inactive</option></select></div><textarea id="branch_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveBranch()">Save Branch</button> <button class="btn2" onclick="cancelBranchEdit()">Cancel</button></div></div></div></div></div></main></div>
+<div class="drawer" id="drawer"><div class="drawerHead"><button class="btn2" style="float:right" onclick="closeDrawer()">Close</button><h2 id="dRef"></h2><div id="dType"></div></div><div class="drawerBody"><div id="details"></div><h3>Assignment</h3><select id="assignee"></select><input id="assignNote" placeholder="Assignment note"><button onclick="assignCase()">Assign</button><h3>Status</h3><select id="newStatus" onchange="toggleResolvedNoteUi()"><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><input id="statusNote" placeholder="Status note"><div id="resolvedNoteWrap" style="display:none"><label style="display:block;margin:8px 0 4px;font-size:12px;font-weight:700">Resolution note visible to applicant</label><textarea id="resolvedApplicantNote" placeholder="Example: Applicant was contacted on phone. Guidance was provided regarding required documents and the matter has been closed."></textarea><div class="hint">Resolved cases require an applicant-visible note. This note will be emailed/shown to the applicant.</div></div><button id="statusBtn" class="btn3" onclick="statusCase()">Update Status</button><h3>Escalation</h3><select id="escLevel"><option value="normal">Normal</option><option value="senior_review">Senior Review</option><option value="ambassador_review">Ambassador Review</option></select><input id="escNote" placeholder="Escalation note"><button class="btn3" onclick="escalateCase()">Escalate</button><h3>Notes</h3><textarea id="noteText" placeholder="Internal note or requester-visible message"></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="visibleNote" type="checkbox"> Visible to requester</label><button onclick="addNote()">Add Note</button><button class="btn3" onclick="resolveCase()">Mark Resolved</button><div class="timeline" id="timeline"></div></div></div>
+<script>const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';let current=null,users=[],branchItems=[];document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}async function loadCases(){try{document.getElementById('err').textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};document.getElementById('kpis').innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');document.getElementById('rows').innerHTML=(data.items||[]).map(c=>'<tr><td><b>'+c.case_reference+'</b></td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>'}catch(e){document.getElementById('err').textContent=e.message}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;const handover=(String(current.assigned_role||'')==='counsellor_external'||String(current.escalation_level||'')==='external_handover'||String(current.assigned_to||'').indexOf('external_branch:')===0);const handoverNotes=(d.actions||[]).filter(a=>String(a.action_type||'').toLowerCase()==='external_handover'&&Number(a.visible_to_requester||0)===1).map(a=>a.note||'').join(' | ');const handoverPhone=(current.handover_phone||current.counsellor_section_phone||'').trim()||'Please contact the Embassy through official contact channels.';const handoverHtml=handover?('<div class="badge-handover">Forwarded to Counsellor Section Branch</div>'+rows({'Branch':current.handover_branch_name||current.assigned_department||current.counsellor_section_name||'Counsellor / Consular Section','Officer':current.handover_officer_name||'Concerned Branch Officer','Email':current.handover_email||current.counsellor_section_email||'parepkuwait@mofa.gov.pk','Phone':handoverPhone,'Status':'Resolved / handed over from Community Welfare','Handover note':handoverNotes||'-'})):'';document.getElementById('details').innerHTML=handoverHtml+rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');toggleResolvedNoteUi();document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}function toggleResolvedNoteUi(){const statusEl=document.getElementById('newStatus');const wrap=document.getElementById('resolvedNoteWrap');const btn=document.getElementById('statusBtn');if(!statusEl||!wrap||!btn)return;const isResolved=statusEl.value==='Resolved';wrap.style.display=isResolved?'block':'none';if(!isResolved){btn.disabled=false;return;}const t=(document.getElementById('resolvedApplicantNote').value||'').trim();btn.disabled=t.length<20}async function statusCase(){try{document.getElementById('err').textContent='';const status=document.getElementById('newStatus').value;const resolvedNote=document.getElementById('resolvedApplicantNote').value||'';if(status==='Resolved'&&resolvedNote.trim().length<20){throw new Error('Resolution note is required before marking a case as Resolved. Please write what action was taken and make it visible to the applicant.')}await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:status,note:status==='Resolved'?resolvedNote:document.getElementById('statusNote').value,visible_to_requester:status==='Resolved'});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){try{document.getElementById('err').textContent='';const note=(document.getElementById('noteText').value||'').trim();if(note.length<20){throw new Error('Resolution note is required before resolving this case. Please explain the action taken so the applicant can see how the matter was resolved.')}await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:note});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function loadCounsellorBranches(){if(USER_ROLE!=='admin')return;try{document.getElementById('counsellorBranchesCard').style.display='block';document.getElementById('branchErr').textContent='';const d=await jget('/api/admin/counsellor-branches');branchItems=d.items||[];document.getElementById('branchRows').innerHTML=branchItems.map(b=>'<tr><td>'+String(b.branch_name||b.branch_key||'-')+'</td><td>'+(b.officer_name||'-')+'</td><td>'+(b.designation||'-')+'</td><td>'+(b.email||'-')+'</td><td>'+(b.phone||'-')+'</td><td>'+((Number(b.is_active||0)===1)?'Yes':'No')+'</td><td><button class="btn2" onclick="editBranch(\''+String(b.branch_key||'')+'\')">Edit</button></td></tr>').join('')||'<tr><td colspan="7">No branches found.</td></tr>';}catch(e){document.getElementById('branchErr').textContent=e.message||'Could not load branch settings';}}function editBranch(branchKey){const b=(branchItems||[]).find(x=>String(x.branch_key||'')===String(branchKey||''));if(!b)return;document.getElementById('branchEditor').style.display='block';document.getElementById('branch_key').value=b.branch_key||'';document.getElementById('branch_name').value=b.branch_name||'';document.getElementById('branch_officer').value=b.officer_name||'';document.getElementById('branch_designation').value=b.designation||'';document.getElementById('branch_email').value=b.email||'';document.getElementById('branch_phone').value=b.phone||'';document.getElementById('branch_keywords').value=b.keywords||'';document.getElementById('branch_active').value=String(Number(b.is_active||0)===1?1:0);}function cancelBranchEdit(){document.getElementById('branchEditor').style.display='none';}async function saveBranch(){try{document.getElementById('branchErr').textContent='';await jpost('/api/admin/counsellor-branches/update',{branch_key:document.getElementById('branch_key').value,branch_name:document.getElementById('branch_name').value,officer_name:document.getElementById('branch_officer').value,designation:document.getElementById('branch_designation').value,email:document.getElementById('branch_email').value,phone:document.getElementById('branch_phone').value,keywords:document.getElementById('branch_keywords').value,is_active:Number(document.getElementById('branch_active').value||0)});cancelBranchEdit();await loadCounsellorBranches();if(current)await openCase(current.id);}catch(e){document.getElementById('branchErr').textContent=e.message||'Save failed';}}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}document.getElementById('resolvedApplicantNote')&&document.getElementById('resolvedApplicantNote').addEventListener('input',toggleResolvedNoteUi);loadUsers();loadCases();if(USER_ROLE==='admin'){loadCounsellorBranches();}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html>"""
 
 WELFARE_CASES_PRINT_SCRIPT = """
 <script>
