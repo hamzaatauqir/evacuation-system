@@ -1185,6 +1185,28 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_counsellor_branch_contacts_active ON counsellor_branch_contacts(is_active);
     CREATE INDEX IF NOT EXISTS idx_counsellor_branch_contacts_branch_key ON counsellor_branch_contacts(branch_key);
+    CREATE TABLE IF NOT EXISTS welfare_auto_routing_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_key TEXT NOT NULL UNIQUE,
+        desk_name TEXT NOT NULL,
+        assigned_to TEXT DEFAULT '',
+        assigned_role TEXT DEFAULT '',
+        assigned_department TEXT DEFAULT '',
+        officer_name TEXT DEFAULT '',
+        officer_email TEXT DEFAULT '',
+        officer_phone TEXT DEFAULT '',
+        priority TEXT DEFAULT 'Medium',
+        keywords TEXT DEFAULT '',
+        case_types TEXT DEFAULT '',
+        categories TEXT DEFAULT '',
+        is_active INTEGER DEFAULT 1,
+        sort_order INTEGER DEFAULT 100,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_welfare_auto_routing_active ON welfare_auto_routing_rules(is_active);
+    CREATE INDEX IF NOT EXISTS idx_welfare_auto_routing_key ON welfare_auto_routing_rules(rule_key);
+    CREATE INDEX IF NOT EXISTS idx_welfare_auto_routing_sort ON welfare_auto_routing_rules(sort_order);
     """)
     for branch_key, cfg in COUNSELLOR_BRANCH_DEFAULTS.items():
         db.execute(
@@ -1192,6 +1214,29 @@ def init_db():
                (branch_key, branch_name, keywords, email, is_active, updated_at)
                VALUES (?, ?, ?, '', 1, CURRENT_TIMESTAMP)""",
             [branch_key, cfg.get('branch_name', branch_key), cfg.get('keywords', '')]
+        )
+    for rule in WELFARE_AUTO_ROUTING_DEFAULTS:
+        db.execute(
+            """INSERT OR IGNORE INTO welfare_auto_routing_rules
+               (rule_key, desk_name, assigned_to, assigned_role, assigned_department, officer_name, officer_email,
+                officer_phone, priority, keywords, case_types, categories, is_active, sort_order, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            [
+                rule.get('rule_key', ''),
+                rule.get('desk_name', ''),
+                rule.get('assigned_to', ''),
+                rule.get('assigned_role', ''),
+                rule.get('assigned_department', ''),
+                rule.get('officer_name', ''),
+                rule.get('officer_email', ''),
+                rule.get('officer_phone', ''),
+                rule.get('priority', 'Medium'),
+                rule.get('keywords', ''),
+                rule.get('case_types', ''),
+                rule.get('categories', ''),
+                int(rule.get('is_active', 1) or 0),
+                int(rule.get('sort_order', 100) or 100),
+            ]
         )
     db.commit()
     for col, coltype in [
@@ -3236,6 +3281,120 @@ COUNSELLOR_BRANCH_DEFAULTS = {
         'keywords': 'attestation, document attestation, educational document, educational documents attestation, degree attestation, marriage certificate, birth certificate, police character certificate, power of attorney, affidavit, verification, document verification, dual citizen, dual citizenship, nationality, citizenship, consular section, counsellor section, counselor section, pakistani origin',
     }
 }
+WELFARE_AUTO_ROUTING_DEFAULTS = [
+    {
+        'rule_key': 'nurses_matters',
+        'desk_name': 'Nurses Welfare Desk',
+        'assigned_to': 'Awais',
+        'assigned_role': 'operator',
+        'assigned_department': 'CWA Office / AP',
+        'officer_name': 'Awais',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': 'High',
+        'keywords': 'nurse, nurses, nursing, staff nurse, female nurse, male nurse, moh nurse, ministry nurse, hospital nurse, health worker, medical staff, hostel, accommodation, duty, shift, salary issue nurse, nursing license, kuwait moh, health worker complaint',
+        'case_types': '',
+        'categories': '',
+        'is_active': 1,
+        'sort_order': 10,
+    },
+    {
+        'rule_key': 'legal_advisor',
+        'desk_name': 'Legal Advisory Desk',
+        'assigned_to': 'Rajab',
+        'assigned_role': 'legal_officer',
+        'assigned_department': 'Legal',
+        'officer_name': 'Rajab Khan',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': 'High',
+        'keywords': 'legal, court, lawyer, advocate, police, jail, detention, arrested, arrest, deportation, travel ban, ban, criminal case, civil case, legal notice, contract dispute, employer dispute, unpaid salary, salary, indemnity, labor court, labour court',
+        'case_types': '',
+        'categories': '',
+        'is_active': 1,
+        'sort_order': 20,
+    },
+    {
+        'rule_key': 'death_body_case',
+        'desk_name': 'Death / Mortal Remains Desk',
+        'assigned_to': 'Zahid_New',
+        'assigned_role': 'operator',
+        'assigned_department': 'Community Welfare Wing Kuwait',
+        'officer_name': 'Zahid',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': 'Urgent',
+        'keywords': 'death, dead body, deceased, mortal remains, body repatriation, burial, janaza, funeral, hospital mortuary, mortuary, death certificate',
+        'case_types': '',
+        'categories': '',
+        'is_active': 1,
+        'sort_order': 30,
+    },
+    {
+        'rule_key': 'opf_welfare',
+        'desk_name': 'OPF / Insurance / Compensation Desk',
+        'assigned_to': 'Zahid_New',
+        'assigned_role': 'operator',
+        'assigned_department': 'Community Welfare Wing Kuwait',
+        'officer_name': 'Zahid',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': 'Medium',
+        'keywords': 'opf, overseas pakistanis foundation, opf islamabad, opf isb, opi, overseas pakistani, welfare support, pension, compensation, insurance claim, insurance, dues, benefits, death grant, financial assistance',
+        'case_types': '',
+        'categories': '',
+        'is_active': 1,
+        'sort_order': 40,
+    },
+    {
+        'rule_key': 'domestic_worker_welfare',
+        'desk_name': 'Domestic Worker / Shelter Desk',
+        'assigned_to': 'Zahid_New',
+        'assigned_role': 'operator',
+        'assigned_department': 'Community Welfare Wing Kuwait',
+        'officer_name': 'Zahid',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': 'High',
+        'keywords': 'domestic worker, khadama, housemaid, maid, runaway, shelter, abuse, sponsor, kafeel, passport held, passport confiscated, salary not paid, escape, embassy shelter, accommodation problem',
+        'case_types': '',
+        'categories': '',
+        'is_active': 1,
+        'sort_order': 50,
+    },
+    {
+        'rule_key': 'field_inspection',
+        'desk_name': 'Field Inspection / Facility Desk',
+        'assigned_to': 'Shahid',
+        'assigned_role': 'inspector_field',
+        'assigned_department': 'Community Welfare Wing Embassy',
+        'officer_name': 'Shahid Khan',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': 'Medium',
+        'keywords': 'inspection, field visit, facility, accommodation, camp, labour camp, labor camp, company visit, site visit, workplace visit, housing, overcrowded, room, unsafe accommodation',
+        'case_types': '',
+        'categories': '',
+        'is_active': 1,
+        'sort_order': 60,
+    },
+    {
+        'rule_key': 'general_welfare',
+        'desk_name': 'General Welfare Desk',
+        'assigned_to': 'Zahid_New',
+        'assigned_role': 'operator',
+        'assigned_department': 'Community Welfare Wing Kuwait',
+        'officer_name': 'Zahid',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': 'Medium',
+        'keywords': 'help, assistance, problem, complaint, welfare, community welfare, stranded, medical, hospital, emergency, guidance, support',
+        'case_types': '',
+        'categories': '',
+        'is_active': 1,
+        'sort_order': 90,
+    },
+]
 
 DEFAULT_EMAIL_TEMPLATES = {
     'registration_success': (
@@ -8272,6 +8431,71 @@ def _classify_public_feedback_submission(category='', subject='', details=''):
     }
 
 
+def _detect_internal_welfare_desk(case_type='', category='', subject='', details=''):
+    text = ' '.join([str(case_type or ''), str(category or ''), str(subject or ''), str(details or '')]).lower()
+    type_text = str(case_type or '').strip().lower()
+    cat_text = str(category or '').strip().lower()
+    db = None
+    rules = []
+    try:
+        db = get_db()
+        table_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='welfare_auto_routing_rules' LIMIT 1"
+        ).fetchone()
+        if table_exists:
+            rules = [dict(r) for r in db.execute(
+                """SELECT * FROM welfare_auto_routing_rules
+                   WHERE COALESCE(is_active, 1) = 1
+                   ORDER BY COALESCE(sort_order, 100) ASC, id ASC"""
+            ).fetchall()]
+    except Exception:
+        rules = []
+    finally:
+        if db:
+            db.close()
+    if not rules:
+        rules = [dict(r) for r in WELFARE_AUTO_ROUTING_DEFAULTS]
+
+    for rule in rules:
+        rule_key = _clean_text(rule.get('rule_key'), 120).lower()
+        desk_name = _clean_text(rule.get('desk_name'), 200)
+        keywords = [k.strip().lower() for k in str(rule.get('keywords') or '').split(',') if k.strip()]
+        case_types = [k.strip().lower() for k in str(rule.get('case_types') or '').split(',') if k.strip()]
+        categories = [k.strip().lower() for k in str(rule.get('categories') or '').split(',') if k.strip()]
+        keyword_hits = sorted(set([kw for kw in keywords if kw in text]))
+        case_type_match = (not case_types) or any(ct in type_text for ct in case_types)
+        category_match = (not categories) or any(ca in cat_text for ca in categories)
+        if keyword_hits and case_type_match and category_match:
+            return {
+                'matched': True,
+                'rule_key': rule_key,
+                'desk_name': desk_name,
+                'assigned_to': _clean_text(rule.get('assigned_to'), 100),
+                'assigned_role': _clean_text(rule.get('assigned_role'), 100),
+                'assigned_department': _clean_text(rule.get('assigned_department'), 200),
+                'officer_name': _clean_text(rule.get('officer_name'), 200),
+                'officer_email': _clean_text(rule.get('officer_email'), 200),
+                'officer_phone': _clean_text(rule.get('officer_phone'), 100),
+                'priority': _clean_text(rule.get('priority') or 'Medium', 20),
+                'matched_keywords': keyword_hits,
+                'reason': f"Matched internal rule {rule_key}"
+            }
+    return {
+        'matched': False,
+        'rule_key': '',
+        'desk_name': '',
+        'assigned_to': '',
+        'assigned_role': '',
+        'assigned_department': '',
+        'officer_name': '',
+        'officer_email': '',
+        'officer_phone': '',
+        'priority': '',
+        'matched_keywords': [],
+        'reason': ''
+    }
+
+
 def _get_counsellor_branch_contact(branch_key):
     key = _clean_text(branch_key, 80).lower()
     if not key:
@@ -8532,6 +8756,61 @@ def api_welfare_feedback(data):
                 'message': f'Your request has been received under reference {reference}. Based on the details provided, it appears to relate to {branch_name}. It has been forwarded to the concerned branch for appropriate handling. As this matter falls outside the Community Welfare Wing, it will be treated as handed over/resolved from the Community Welfare side. Please contact the concerned branch directly for further guidance.{contact_suffix}'
             }
 
+        desk = _detect_internal_welfare_desk('community_feedback', category, subject, details)
+        if desk.get('matched'):
+            matched_keywords = ', '.join(desk.get('matched_keywords') or []) or 'routing keywords detected'
+            assigned_to = _clean_text(desk.get('assigned_to'), 100)
+            if assigned_to:
+                assigned_role = _clean_text(desk.get('assigned_role'), 100)
+                assigned_department = _clean_text(desk.get('assigned_department'), 200) or _clean_text(desk.get('desk_name'), 200)
+                routed_priority = _clean_text(desk.get('priority'), 20)
+                valid_priority = routed_priority if routed_priority in ('Low', 'Medium', 'High', 'Urgent', 'Normal') else None
+                if valid_priority:
+                    db.execute(
+                        """UPDATE welfare_cases
+                           SET assigned_to = ?, assigned_role = ?, assigned_department = ?,
+                               priority = ?, status = 'Assigned', assigned_at = CURRENT_TIMESTAMP,
+                               updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        [assigned_to, assigned_role, assigned_department, valid_priority, cur.lastrowid]
+                    )
+                else:
+                    db.execute(
+                        """UPDATE welfare_cases
+                           SET assigned_to = ?, assigned_role = ?, assigned_department = ?,
+                               status = 'Assigned', assigned_at = CURRENT_TIMESTAMP,
+                               updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        [assigned_to, assigned_role, assigned_department, cur.lastrowid]
+                    )
+                _welfare_insert_action(
+                    db,
+                    cur.lastrowid,
+                    'system',
+                    'auto_assignment',
+                    'Unassigned',
+                    f"{desk.get('desk_name') or assigned_department} / {assigned_to}",
+                    f"Auto-assigned to {desk.get('desk_name')} ({assigned_to}) based on keywords: {matched_keywords}.",
+                    False
+                )
+                assignee = db.execute(
+                    "SELECT username, full_name, role, COALESCE(email,'') AS email, COALESCE(department,'') AS department FROM users WHERE username = ? LIMIT 1",
+                    [assigned_to]
+                ).fetchone()
+                if assignee:
+                    _queue_welfare_assignment_email(db, assignee, reference)
+            else:
+                _welfare_insert_action(
+                    db,
+                    cur.lastrowid,
+                    'system',
+                    'routing_suggestion',
+                    '',
+                    desk.get('desk_name') or '',
+                    f"Suggested desk: {desk.get('desk_name')} based on keywords: {matched_keywords}, but no assigned_to user is configured.",
+                    False
+                )
+
         db.commit()
         verification = _send_email_verification_for_record(
             'welfare_cases', cur.lastrowid, reference, requester_name, requester_email, 'community_feedback'
@@ -8564,6 +8843,7 @@ def api_welfare_feedback(data):
 
 
 def _welfare_case_kpis(db, username=None):
+    # TODO: Add senior overdue monitoring for unresolved welfare cases older than 5 days.
     def _count(sql, vals=()):
         try:
             row = db.execute(sql, vals).fetchone()
@@ -8655,6 +8935,11 @@ def api_admin_welfare_case_detail(case_id, user):
                ORDER BY datetime(created_at) DESC, id DESC""",
             [case['id']]
         ).fetchall()]
+        latest_routing = next((a for a in actions if (a.get('action_type') or '') in ('auto_assignment', 'routing_suggestion')), None)
+        case['auto_routing_action_type'] = (latest_routing or {}).get('action_type', '')
+        case['auto_routing_note'] = (latest_routing or {}).get('note', '')
+        case['auto_routing_created_at'] = (latest_routing or {}).get('created_at', '')
+        case['auto_routing_new_value'] = (latest_routing or {}).get('new_value', '')
         return {'success': True, 'case': case, 'actions': actions}
     finally:
         db.close()
@@ -8728,6 +9013,86 @@ def api_admin_counsellor_branches_update(data, user):
                    keywords = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
                WHERE branch_key = ?""",
             [branch_name, officer_name, designation, email, phone, keywords, is_active, branch_key]
+        )
+        db.commit()
+        return {'success': True}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_routing_rules(user):
+    if (user or {}).get('role') != 'admin':
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        rows = [dict(r) for r in db.execute(
+            """SELECT id, rule_key, desk_name, assigned_to, assigned_role, assigned_department,
+                      officer_name, officer_email, officer_phone, priority, keywords, case_types,
+                      categories, COALESCE(is_active,1) AS is_active, COALESCE(sort_order,100) AS sort_order,
+                      created_at, updated_at
+               FROM welfare_auto_routing_rules
+               ORDER BY COALESCE(sort_order,100) ASC, id ASC"""
+        ).fetchall()]
+        return {'success': True, 'items': rows}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
+
+
+def api_admin_welfare_routing_rules_update(data, user):
+    if (user or {}).get('role') != 'admin':
+        return {'success': False, 'error': 'Unauthorized'}
+    payload = data or {}
+    rule_key = _clean_text(payload.get('rule_key'), 120).lower()
+    desk_name = _clean_text(payload.get('desk_name'), 200)
+    assigned_to = _clean_text(payload.get('assigned_to'), 100)
+    assigned_role = _clean_text(payload.get('assigned_role'), 100)
+    assigned_department = _clean_text(payload.get('assigned_department'), 200)
+    officer_name = _clean_text(payload.get('officer_name'), 200)
+    officer_email = _clean_text(payload.get('officer_email'), 200)
+    officer_phone = _clean_text(payload.get('officer_phone'), 100)
+    priority = _clean_text(payload.get('priority') or 'Medium', 20)
+    keywords = _clean_text(payload.get('keywords'), 5000)
+    case_types = _clean_text(payload.get('case_types'), 2000)
+    categories = _clean_text(payload.get('categories'), 2000)
+    is_active = 1 if str(payload.get('is_active', 1)).strip().lower() in ('1', 'true', 'yes', 'on') else 0
+    try:
+        sort_order = int(payload.get('sort_order', 100))
+    except Exception:
+        return {'success': False, 'error': 'sort_order must be an integer'}
+
+    if not rule_key:
+        return {'success': False, 'error': 'rule_key is required'}
+    if not desk_name:
+        return {'success': False, 'error': 'desk_name is required'}
+    if officer_email and ('@' not in officer_email or '.' not in officer_email):
+        return {'success': False, 'error': 'A valid officer_email is required when provided'}
+    if priority not in ('Low', 'Medium', 'High', 'Urgent'):
+        return {'success': False, 'error': 'priority must be one of Low, Medium, High, Urgent'}
+
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT rule_key FROM welfare_auto_routing_rules WHERE rule_key = ? LIMIT 1",
+            [rule_key]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Rule not found'}
+        db.execute(
+            """UPDATE welfare_auto_routing_rules
+               SET desk_name = ?, assigned_to = ?, assigned_role = ?, assigned_department = ?,
+                   officer_name = ?, officer_email = ?, officer_phone = ?, priority = ?, keywords = ?,
+                   case_types = ?, categories = ?, is_active = ?, sort_order = ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE rule_key = ?""",
+            [
+                desk_name, assigned_to, assigned_role, assigned_department, officer_name, officer_email,
+                officer_phone, priority, keywords, case_types, categories, is_active, sort_order, rule_key
+            ]
         )
         db.commit()
         return {'success': True}
@@ -23013,6 +23378,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             res = api_admin_counsellor_branches(user)
             self.send_json(res, 200 if res.get('success') else 403)
+        elif path == '/api/admin/welfare-routing-rules':
+            user = self.require_auth()
+            if not user: return
+            res = api_admin_welfare_routing_rules(user)
+            self.send_json(res, 200 if res.get('success') else 403)
         elif path == '/api/admin/welfare-cases':
             user = self.require_auth()
             if not user: return
@@ -25657,6 +26027,18 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400)
                 return
             res = api_admin_counsellor_branches_update(data, user)
+            self.send_json(res, 200 if res.get('success') else (403 if res.get('error') == 'Unauthorized' else 400))
+            return
+
+        if path == '/api/admin/welfare-routing-rules/update':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            res = api_admin_welfare_routing_rules_update(data, user)
             self.send_json(res, 200 if res.get('success') else (403 if res.get('error') == 'Unauthorized' else 400))
             return
 
@@ -28965,9 +29347,9 @@ WELFARE_CASES_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset
 <style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f2f7fa;color:#172033}.top{height:58px;background:white;border-bottom:1px solid #dbe5ea;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.shell{display:flex}.side{width:230px;min-height:calc(100vh - 58px);background:#10253f;color:white;padding:18px 10px}.side h3{font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em;text-transform:uppercase;padding:0 10px}.side a{display:block;color:rgba(255,255,255,.68);text-decoration:none;font-weight:700;font-size:13px;padding:10px 12px;border-radius:8px;margin:2px}.side a.active,.side a:hover{background:rgba(255,255,255,.1);color:white}.badge-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:12px;font-weight:700;margin-left:auto}.badge-count.hidden{display:none}.main{flex:1;min-width:0}.head{background:white;border-bottom:1px solid #dbe5ea;padding:18px 24px}.head h1{font-size:22px;margin:0;color:#10253f}.head p{font-size:12px;color:#64748b;margin:4px 0 0}.content{padding:20px 24px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:white;border:1px solid #dbe5ea;border-radius:8px;padding:14px}.kpi b{display:block;font-size:24px;color:#10253f}.kpi span{font-size:11px;color:#64748b;font-weight:800;text-transform:uppercase}.panel{background:white;border:1px solid #dbe5ea;border-radius:8px;overflow:hidden}.filters{display:flex;gap:10px;flex-wrap:wrap;padding:14px;border-bottom:1px solid #e2e8f0}input,select,textarea{border:1px solid #cbd5e1;border-radius:7px;padding:9px 10px;font:inherit;font-size:13px}button{border:0;border-radius:7px;background:#2f7d4e;color:white;padding:9px 12px;font-weight:800;cursor:pointer}.btn2{background:#e2e8f0;color:#10253f}.btn3{background:#2d4a6b}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;background:#f8fafc;color:#64748b;font-size:11px;text-transform:uppercase;padding:10px;border-bottom:1px solid #e2e8f0}td{padding:11px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#e2e8f0;color:#334155}.New{background:#eff6ff;color:#1d4ed8}.Assigned{background:#ecfdf5;color:#047857}.High,.Urgent{background:#fef2f2;color:#b91c1c}.Resolved{background:#f0fdf4;color:#166534}.drawer{position:fixed;right:0;top:0;width:min(560px,100%);height:100vh;background:white;box-shadow:-24px 0 60px rgba(15,23,42,.2);display:none;z-index:5;overflow:auto}.drawer.open{display:block}.drawerHead{background:#2d4a6b;color:white;padding:20px}.drawerBody{padding:18px}.row{display:grid;grid-template-columns:150px 1fr;gap:8px;margin-bottom:8px;font-size:13px}.row span{color:#64748b}.timeline{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}.act{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px}.err{color:#b91c1c;font-weight:800;margin:10px 0}.hint{font-size:12px;color:#64748b;margin:6px 0 10px}.badge-handover{display:inline-block;background:#ecfeff;color:#0e7490;border:1px solid #99f6e4;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:700;margin:4px 0}</style></head><body>
 <div class="top"><div><b>Embassy of Pakistan, Kuwait</b><div style="font-size:11px;color:#64748b">Community Welfare Wing</div></div><div style="font-size:12px;color:#64748b">__USER_NAME__ · __USER_ROLE__</div></div>
 <div class="shell"><aside class="side"><h3>Main Dashboard</h3><a href="/admin/dashboard">Dashboard</a><h3>Community Welfare</h3><a href="/admin/community-welfare">CWA Overview <span class="badge-count hidden" data-badge="community_welfare"></span></a><a href="/admin/nurses">Nurses <span class="badge-count hidden" data-badge="nurses"></span></a><a href="/admin/legal-cases">Legal Cases <span class="badge-count hidden" data-badge="legal_cases"></span></a><a href="/admin/death-cases">Death Cases <span class="badge-count hidden" data-badge="death_cases"></span></a><a href="/admin/welfare-cases" data-nav="all">Welfare Cases <span class="badge-count hidden" data-badge="welfare_cases"></span></a><a href="/admin/my-cases" data-nav="my">My Assigned Cases <span class="badge-count hidden" data-badge="my_cases"></span></a><a href="/admin/ambassador-review" data-nav="ambassador">Ambassador Review <span class="badge-count hidden" data-badge="ambassador_review"></span></a></aside>
-<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel" style="margin-bottom:14px"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Review Print Pack</strong><input id="printDate" type="date"><select id="printPackType"><option value="daily">Today’s New / Updated Cases</option><option value="pending">Pending Review</option><option value="open">All Open Cases</option><option value="ambassador_review">Ambassador Review Queue</option><option value="resolved_today">Resolved Today</option></select><select id="printCaseType"><option value="all">All Case Types</option><option value="welfare">Welfare</option><option value="legal">Legal / OPF</option><option value="death">Death Cases</option><option value="nurse">Nurse / Health Worker</option><option value="locating">Locating Assistance</option><option value="feedback">Feedback / Complaints</option></select><select id="printPriority"><option value="all">All Priorities</option><option value="urgent">Urgent</option><option value="normal">Normal</option></select><select id="printAssigned"><option value="all">All Assignees</option><option value="unassigned">Unassigned</option></select><button onclick="generatePrintPack()">Generate Print Pack</button><button class="btn3" onclick="printSelectedCases()">Print Selected Cases</button></div></div><div class="panel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table id="caseTable"><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div><div class="panel" id="counsellorBranchesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Counsellor Branches</strong><span style="font-size:12px;color:#64748b">Admin-only branch routing contacts</span></div><div style="padding:12px 14px"><div id="branchErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Branch</th><th>Officer Name</th><th>Designation</th><th>Email</th><th>Phone</th><th>Active</th><th>Actions</th></tr></thead><tbody id="branchRows"><tr><td colspan="7">Loading...</td></tr></tbody></table></div><div id="branchEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="branch_key"><div class="filters" style="padding:0;border:0"><input id="branch_name" placeholder="Branch name"><input id="branch_officer" placeholder="Officer name"><input id="branch_designation" placeholder="Designation"><input id="branch_email" placeholder="Email"><input id="branch_phone" placeholder="Phone"><select id="branch_active"><option value="1">Active</option><option value="0">Inactive</option></select></div><textarea id="branch_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveBranch()">Save Branch</button> <button class="btn2" onclick="cancelBranchEdit()">Cancel</button></div></div></div></div></div></main></div>
+<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel" style="margin-bottom:14px"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Review Print Pack</strong><input id="printDate" type="date"><select id="printPackType"><option value="daily">Today’s New / Updated Cases</option><option value="pending">Pending Review</option><option value="open">All Open Cases</option><option value="ambassador_review">Ambassador Review Queue</option><option value="resolved_today">Resolved Today</option></select><select id="printCaseType"><option value="all">All Case Types</option><option value="welfare">Welfare</option><option value="legal">Legal / OPF</option><option value="death">Death Cases</option><option value="nurse">Nurse / Health Worker</option><option value="locating">Locating Assistance</option><option value="feedback">Feedback / Complaints</option></select><select id="printPriority"><option value="all">All Priorities</option><option value="urgent">Urgent</option><option value="normal">Normal</option></select><select id="printAssigned"><option value="all">All Assignees</option><option value="unassigned">Unassigned</option></select><button onclick="generatePrintPack()">Generate Print Pack</button><button class="btn3" onclick="printSelectedCases()">Print Selected Cases</button></div></div><div class="panel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table id="caseTable"><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div><div class="panel" id="counsellorBranchesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Counsellor Branches</strong><span style="font-size:12px;color:#64748b">Admin-only branch routing contacts</span></div><div style="padding:12px 14px"><div id="branchErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Branch</th><th>Officer Name</th><th>Designation</th><th>Email</th><th>Phone</th><th>Active</th><th>Actions</th></tr></thead><tbody id="branchRows"><tr><td colspan="7">Loading...</td></tr></tbody></table></div><div id="branchEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="branch_key"><div class="filters" style="padding:0;border:0"><input id="branch_name" placeholder="Branch name"><input id="branch_officer" placeholder="Officer name"><input id="branch_designation" placeholder="Designation"><input id="branch_email" placeholder="Email"><input id="branch_phone" placeholder="Phone"><select id="branch_active"><option value="1">Active</option><option value="0">Inactive</option></select></div><textarea id="branch_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveBranch()">Save Branch</button> <button class="btn2" onclick="cancelBranchEdit()">Cancel</button></div></div></div><div class="panel" id="welfareRoutingRulesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Auto Routing Rules</strong><span style="font-size:12px;color:#64748b">Internal Community Welfare desk routing</span></div><div style="padding:12px 14px"><div id="routeErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Rule / Desk</th><th>Officer</th><th>Assigned To</th><th>Department</th><th>Priority</th><th>Active</th><th>Sort Order</th><th>Actions</th></tr></thead><tbody id="routeRows"><tr><td colspan="8">Loading...</td></tr></tbody></table></div><div id="routeEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="route_rule_key"><div class="filters" style="padding:0;border:0"><input id="route_desk_name" placeholder="Desk name"><input id="route_assigned_to" placeholder="Assigned to username"><input id="route_assigned_role" placeholder="Assigned role"><input id="route_assigned_department" placeholder="Department"><input id="route_officer_name" placeholder="Officer name"><input id="route_officer_email" placeholder="Officer email"><input id="route_officer_phone" placeholder="Officer phone"><select id="route_priority"><option>Low</option><option selected>Medium</option><option>High</option><option>Urgent</option></select><select id="route_is_active"><option value="1">Active</option><option value="0">Inactive</option></select><input id="route_sort_order" type="number" placeholder="Sort order"></div><textarea id="route_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><textarea id="route_case_types" placeholder="Case types (comma separated)" style="width:100%;margin-top:8px"></textarea><textarea id="route_categories" placeholder="Categories (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveRoutingRule()">Save Rule</button> <button class="btn2" onclick="cancelRoutingRuleEdit()">Cancel</button></div></div></div></div></div></main></div>
 <div class="drawer" id="drawer"><div class="drawerHead"><button class="btn2" style="float:right" onclick="closeDrawer()">Close</button><h2 id="dRef"></h2><div id="dType"></div></div><div class="drawerBody"><div id="details"></div><h3>Assignment</h3><select id="assignee"></select><input id="assignNote" placeholder="Assignment note"><button onclick="assignCase()">Assign</button><h3>Status</h3><select id="newStatus" onchange="toggleResolvedNoteUi()"><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><input id="statusNote" placeholder="Status note"><div id="resolvedNoteWrap" style="display:none"><label style="display:block;margin:8px 0 4px;font-size:12px;font-weight:700">Resolution note visible to applicant</label><textarea id="resolvedApplicantNote" placeholder="Example: Applicant was contacted on phone. Guidance was provided regarding required documents and the matter has been closed."></textarea><div class="hint">Resolved cases require an applicant-visible note. This note will be emailed/shown to the applicant.</div></div><button id="statusBtn" class="btn3" onclick="statusCase()">Update Status</button><h3>Escalation</h3><select id="escLevel"><option value="normal">Normal</option><option value="senior_review">Senior Review</option><option value="ambassador_review">Ambassador Review</option></select><input id="escNote" placeholder="Escalation note"><button class="btn3" onclick="escalateCase()">Escalate</button><h3>Notes</h3><textarea id="noteText" placeholder="Internal note or requester-visible message"></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="visibleNote" type="checkbox"> Visible to requester</label><button onclick="addNote()">Add Note</button><button class="btn3" onclick="resolveCase()">Mark Resolved</button><div class="timeline" id="timeline"></div></div></div>
-<script>const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';let current=null,users=[],branchItems=[];document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}async function loadCases(){const errEl=document.getElementById('err');const kpiEl=document.getElementById('kpis');const rowsEl=document.getElementById('rows');try{if(errEl)errEl.textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};if(kpiEl)kpiEl.innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');const items=Array.isArray(data.items)?data.items:[];if(rowsEl)rowsEl.innerHTML=items.map(c=>'<tr><td><b>'+c.case_reference+'</b></td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>';}catch(e){if(rowsEl)rowsEl.innerHTML='<tr><td colspan="11">No cases found.</td></tr>';if(errEl)errEl.textContent=e.message||'Request failed';}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;const handover=(String(current.assigned_role||'')==='counsellor_external'||String(current.escalation_level||'')==='external_handover'||String(current.assigned_to||'').indexOf('external_branch:')===0);const handoverNotes=(d.actions||[]).filter(a=>String(a.action_type||'').toLowerCase()==='external_handover'&&Number(a.visible_to_requester||0)===1).map(a=>a.note||'').join(' | ');const handoverPhone=(current.handover_phone||current.counsellor_section_phone||'').trim()||'Please contact the Embassy through official contact channels.';const handoverHtml=handover?('<div class="badge-handover">Forwarded to Counsellor Section Branch</div>'+rows({'Branch':current.handover_branch_name||current.assigned_department||current.counsellor_section_name||'Counsellor / Consular Section','Officer':current.handover_officer_name||'Concerned Branch Officer','Email':current.handover_email||current.counsellor_section_email||'parepkuwait@mofa.gov.pk','Phone':handoverPhone,'Status':'Resolved / handed over from Community Welfare','Handover note':handoverNotes||'-'})):'';document.getElementById('details').innerHTML=handoverHtml+rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');toggleResolvedNoteUi();document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}function toggleResolvedNoteUi(){const statusEl=document.getElementById('newStatus');const wrap=document.getElementById('resolvedNoteWrap');const btn=document.getElementById('statusBtn');if(!statusEl||!wrap||!btn)return;const isResolved=statusEl.value==='Resolved';wrap.style.display=isResolved?'block':'none';if(!isResolved){btn.disabled=false;return;}const t=(document.getElementById('resolvedApplicantNote').value||'').trim();btn.disabled=t.length<20}async function statusCase(){try{document.getElementById('err').textContent='';const status=document.getElementById('newStatus').value;const resolvedNote=document.getElementById('resolvedApplicantNote').value||'';if(status==='Resolved'&&resolvedNote.trim().length<20){throw new Error('Resolution note is required before marking a case as Resolved. Please write what action was taken and make it visible to the applicant.')}await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:status,note:status==='Resolved'?resolvedNote:document.getElementById('statusNote').value,visible_to_requester:status==='Resolved'});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){try{document.getElementById('err').textContent='';const note=(document.getElementById('noteText').value||'').trim();if(note.length<20){throw new Error('Resolution note is required before resolving this case. Please explain the action taken so the applicant can see how the matter was resolved.')}await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:note});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function loadCounsellorBranches(){if(USER_ROLE!=='admin')return;const card=document.getElementById('counsellorBranchesCard');const errEl=document.getElementById('branchErr');const rowsEl=document.getElementById('branchRows');if(!card||!errEl||!rowsEl)return;try{card.style.display='block';errEl.textContent='';const d=await jget('/api/admin/counsellor-branches');branchItems=Array.isArray(d.items)?d.items:[];rowsEl.innerHTML=branchItems.map(b=>'<tr><td>'+String(b.branch_name||b.branch_key||'-')+'</td><td>'+(b.officer_name||'-')+'</td><td>'+(b.designation||'-')+'</td><td>'+(b.email||'-')+'</td><td>'+(b.phone||'-')+'</td><td>'+((Number(b.is_active||0)===1)?'Yes':'No')+'</td><td><button class="btn2" data-key="'+String(b.branch_key||'')+'" onclick="editBranch(this.dataset.key)">Edit</button></td></tr>').join('')||'<tr><td colspan="7">No branches found.</td></tr>';}catch(e){errEl.textContent=e.message||'Could not load branch settings';}}function editBranch(branchKey){const editor=document.getElementById('branchEditor');if(!editor)return;const b=(branchItems||[]).find(x=>String(x.branch_key||'')===String(branchKey||''));if(!b)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val||'';};set('branch_key',b.branch_key);set('branch_name',b.branch_name);set('branch_officer',b.officer_name);set('branch_designation',b.designation);set('branch_email',b.email);set('branch_phone',b.phone);set('branch_keywords',b.keywords);set('branch_active',String(Number(b.is_active||0)===1?1:0));}function cancelBranchEdit(){const el=document.getElementById('branchEditor');if(el)el.style.display='none';}async function saveBranch(){const errEl=document.getElementById('branchErr');const byId=id=>document.getElementById(id);if(!byId('branch_key')||!byId('branch_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/counsellor-branches/update',{branch_key:byId('branch_key').value,branch_name:byId('branch_name').value,officer_name:(byId('branch_officer')||{}).value||'',designation:(byId('branch_designation')||{}).value||'',email:(byId('branch_email')||{}).value||'',phone:(byId('branch_phone')||{}).value||'',keywords:(byId('branch_keywords')||{}).value||'',is_active:Number(((byId('branch_active')||{}).value)||0)});cancelBranchEdit();await loadCounsellorBranches();if(current)await openCase(current.id);}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}document.getElementById('resolvedApplicantNote')&&document.getElementById('resolvedApplicantNote').addEventListener('input',toggleResolvedNoteUi);loadUsers();loadCases();if(USER_ROLE==='admin'){loadCounsellorBranches();}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html>"""
+<script>const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';let current=null,users=[],branchItems=[],routingRuleItems=[];document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}async function loadCases(){const errEl=document.getElementById('err');const kpiEl=document.getElementById('kpis');const rowsEl=document.getElementById('rows');try{if(errEl)errEl.textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};if(kpiEl)kpiEl.innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');const items=Array.isArray(data.items)?data.items:[];if(rowsEl)rowsEl.innerHTML=items.map(c=>'<tr><td><b>'+c.case_reference+'</b></td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>';}catch(e){if(rowsEl)rowsEl.innerHTML='<tr><td colspan="11">No cases found.</td></tr>';if(errEl)errEl.textContent=e.message||'Request failed';}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;const handover=(String(current.assigned_role||'')==='counsellor_external'||String(current.escalation_level||'')==='external_handover'||String(current.assigned_to||'').indexOf('external_branch:')===0);const handoverNotes=(d.actions||[]).filter(a=>String(a.action_type||'').toLowerCase()==='external_handover'&&Number(a.visible_to_requester||0)===1).map(a=>a.note||'').join(' | ');const handoverPhone=(current.handover_phone||current.counsellor_section_phone||'').trim()||'Please contact the Embassy through official contact channels.';const handoverHtml=handover?('<div class="badge-handover">Forwarded to Counsellor Section Branch</div>'+rows({'Branch':current.handover_branch_name||current.assigned_department||current.counsellor_section_name||'Counsellor / Consular Section','Officer':current.handover_officer_name||'Concerned Branch Officer','Email':current.handover_email||current.counsellor_section_email||'parepkuwait@mofa.gov.pk','Phone':handoverPhone,'Status':'Resolved / handed over from Community Welfare','Handover note':handoverNotes||'-'})):'';const autoRoutingType=String(current.auto_routing_action_type||'');const autoRoutingState=autoRoutingType==='auto_assignment'?'Assigned':'Suggested';const autoRoutingHtml=(autoRoutingType==='auto_assignment'||autoRoutingType==='routing_suggestion')?('<div class="badge">Auto Routing</div>'+rows({'Suggested/Assigned Desk':current.auto_routing_new_value||current.assigned_department||'-','Assigned To':current.assigned_to||'-','Matched Keywords / Note':current.auto_routing_note||'-','Status':autoRoutingState})):'';document.getElementById('details').innerHTML=handoverHtml+autoRoutingHtml+rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');toggleResolvedNoteUi();document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}function toggleResolvedNoteUi(){const statusEl=document.getElementById('newStatus');const wrap=document.getElementById('resolvedNoteWrap');const btn=document.getElementById('statusBtn');if(!statusEl||!wrap||!btn)return;const isResolved=statusEl.value==='Resolved';wrap.style.display=isResolved?'block':'none';if(!isResolved){btn.disabled=false;return;}const t=(document.getElementById('resolvedApplicantNote').value||'').trim();btn.disabled=t.length<20}async function statusCase(){try{document.getElementById('err').textContent='';const status=document.getElementById('newStatus').value;const resolvedNote=document.getElementById('resolvedApplicantNote').value||'';if(status==='Resolved'&&resolvedNote.trim().length<20){throw new Error('Resolution note is required before marking a case as Resolved. Please write what action was taken and make it visible to the applicant.')}await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:status,note:status==='Resolved'?resolvedNote:document.getElementById('statusNote').value,visible_to_requester:status==='Resolved'});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){try{document.getElementById('err').textContent='';const note=(document.getElementById('noteText').value||'').trim();if(note.length<20){throw new Error('Resolution note is required before resolving this case. Please explain the action taken so the applicant can see how the matter was resolved.')}await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:note});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function loadCounsellorBranches(){if(USER_ROLE!=='admin')return;const card=document.getElementById('counsellorBranchesCard');const errEl=document.getElementById('branchErr');const rowsEl=document.getElementById('branchRows');if(!card||!errEl||!rowsEl)return;try{card.style.display='block';errEl.textContent='';const d=await jget('/api/admin/counsellor-branches');branchItems=Array.isArray(d.items)?d.items:[];rowsEl.innerHTML=branchItems.map(b=>'<tr><td>'+String(b.branch_name||b.branch_key||'-')+'</td><td>'+(b.officer_name||'-')+'</td><td>'+(b.designation||'-')+'</td><td>'+(b.email||'-')+'</td><td>'+(b.phone||'-')+'</td><td>'+((Number(b.is_active||0)===1)?'Yes':'No')+'</td><td><button class="btn2" data-key="'+String(b.branch_key||'')+'" onclick="editBranch(this.dataset.key)">Edit</button></td></tr>').join('')||'<tr><td colspan="7">No branches found.</td></tr>';}catch(e){errEl.textContent=e.message||'Could not load branch settings';}}function editBranch(branchKey){const editor=document.getElementById('branchEditor');if(!editor)return;const b=(branchItems||[]).find(x=>String(x.branch_key||'')===String(branchKey||''));if(!b)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val||'';};set('branch_key',b.branch_key);set('branch_name',b.branch_name);set('branch_officer',b.officer_name);set('branch_designation',b.designation);set('branch_email',b.email);set('branch_phone',b.phone);set('branch_keywords',b.keywords);set('branch_active',String(Number(b.is_active||0)===1?1:0));}function cancelBranchEdit(){const el=document.getElementById('branchEditor');if(el)el.style.display='none';}async function saveBranch(){const errEl=document.getElementById('branchErr');const byId=id=>document.getElementById(id);if(!byId('branch_key')||!byId('branch_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/counsellor-branches/update',{branch_key:byId('branch_key').value,branch_name:byId('branch_name').value,officer_name:(byId('branch_officer')||{}).value||'',designation:(byId('branch_designation')||{}).value||'',email:(byId('branch_email')||{}).value||'',phone:(byId('branch_phone')||{}).value||'',keywords:(byId('branch_keywords')||{}).value||'',is_active:Number(((byId('branch_active')||{}).value)||0)});cancelBranchEdit();await loadCounsellorBranches();if(current)await openCase(current.id);}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}async function loadRoutingRules(){if(USER_ROLE!=='admin')return;const card=document.getElementById('welfareRoutingRulesCard');const errEl=document.getElementById('routeErr');const rowsEl=document.getElementById('routeRows');if(!card||!errEl||!rowsEl)return;try{card.style.display='block';errEl.textContent='';const d=await jget('/api/admin/welfare-routing-rules');routingRuleItems=Array.isArray(d.items)?d.items:[];rowsEl.innerHTML=routingRuleItems.map(r=>'<tr><td><b>'+(r.rule_key||'-')+'</b><br><small>'+(r.desk_name||'-')+'</small></td><td>'+(r.officer_name||'-')+'</td><td>'+(r.assigned_to||'-')+'</td><td>'+(r.assigned_department||'-')+'</td><td>'+(r.priority||'-')+'</td><td>'+((Number(r.is_active||0)===1)?'Yes':'No')+'</td><td>'+(r.sort_order==null?'-':r.sort_order)+'</td><td><button class="btn2" data-rule-key="'+String(r.rule_key||'')+'" onclick="editRoutingRule(this.dataset.ruleKey)">Edit</button></td></tr>').join('')||'<tr><td colspan="8">No routing rules found.</td></tr>';}catch(e){if(errEl)errEl.textContent=e.message||'Could not load routing rules';}}function editRoutingRule(ruleKey){const editor=document.getElementById('routeEditor');if(!editor)return;const r=(routingRuleItems||[]).find(x=>String(x.rule_key||'')===String(ruleKey||''));if(!r)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val==null?'':String(val);};set('route_rule_key',r.rule_key);set('route_desk_name',r.desk_name);set('route_assigned_to',r.assigned_to);set('route_assigned_role',r.assigned_role);set('route_assigned_department',r.assigned_department);set('route_officer_name',r.officer_name);set('route_officer_email',r.officer_email);set('route_officer_phone',r.officer_phone);set('route_priority',r.priority||'Medium');set('route_keywords',r.keywords);set('route_case_types',r.case_types);set('route_categories',r.categories);set('route_is_active',Number(r.is_active||0)===1?'1':'0');set('route_sort_order',r.sort_order==null?100:r.sort_order);}function cancelRoutingRuleEdit(){const el=document.getElementById('routeEditor');if(el)el.style.display='none';}async function saveRoutingRule(){const errEl=document.getElementById('routeErr');const byId=id=>document.getElementById(id);if(!byId('route_rule_key')||!byId('route_desk_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/welfare-routing-rules/update',{rule_key:byId('route_rule_key').value,desk_name:byId('route_desk_name').value,assigned_to:(byId('route_assigned_to')||{}).value||'',assigned_role:(byId('route_assigned_role')||{}).value||'',assigned_department:(byId('route_assigned_department')||{}).value||'',officer_name:(byId('route_officer_name')||{}).value||'',officer_email:(byId('route_officer_email')||{}).value||'',officer_phone:(byId('route_officer_phone')||{}).value||'',priority:(byId('route_priority')||{}).value||'Medium',keywords:(byId('route_keywords')||{}).value||'',case_types:(byId('route_case_types')||{}).value||'',categories:(byId('route_categories')||{}).value||'',is_active:Number(((byId('route_is_active')||{}).value)||0),sort_order:Number(((byId('route_sort_order')||{}).value)||100)});cancelRoutingRuleEdit();await loadRoutingRules();}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}document.getElementById('resolvedApplicantNote')&&document.getElementById('resolvedApplicantNote').addEventListener('input',toggleResolvedNoteUi);loadUsers();loadCases();if(USER_ROLE==='admin'){loadCounsellorBranches();loadRoutingRules();}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html>"""
 
 WELFARE_CASES_PRINT_SCRIPT = """
 <script>
