@@ -1238,6 +1238,11 @@ def init_db():
                 int(rule.get('sort_order', 100) or 100),
             ]
         )
+    db.execute(
+        """UPDATE welfare_auto_routing_rules
+           SET sort_order = 15, updated_at = CURRENT_TIMESTAMP
+           WHERE rule_key = 'opf_welfare' AND sort_order = 40"""
+    )
     db.commit()
     for col, coltype in [
         ('case_reference', 'TEXT'),
@@ -7972,6 +7977,50 @@ def api_legal_case_intake(data):
              (data.get('next_hearing_date') or '').strip()])
         _add_legal_case_action(db, ref, 'Submitted', 'public', 'public',
                                note=description, new_status='Submitted', visible_to_applicant=1)
+        desk = _detect_internal_welfare_desk(case_type=case_type, category=case_type, subject=subject, details=description)
+        if desk.get('matched') and (desk.get('assigned_to') or '').strip():
+            assignee_username = (desk.get('assigned_to') or '').strip()
+            assignee_row = db.execute(
+                """SELECT id, username, COALESCE(full_name, username) AS display_name, role,
+                          COALESCE(department, '') AS department, COALESCE(email, '') AS email
+                   FROM users WHERE username = ? LIMIT 1""",
+                [assignee_username]
+            ).fetchone()
+            assignee = dict(assignee_row) if assignee_row else {}
+            assigned_role = (desk.get('assigned_role') or '').strip() or (assignee.get('role') or '')
+            assigned_department = (desk.get('assigned_department') or '').strip() or (desk.get('desk_name') or '').strip() or (assignee.get('department') or '')
+            route_priority = (desk.get('priority') or '').strip()
+            legal_priority = route_priority if route_priority in ('Normal', 'Important', 'Urgent') else priority
+            old_status = 'Submitted'
+            old_assigned = ''
+            db.execute(
+                """UPDATE legal_case_requests
+                   SET assigned_to_user_id = ?, assigned_to_username = ?, assigned_to_name = ?,
+                       assigned_role = ?, assigned_department = ?, assigned_by = 'system',
+                       assigned_at = CURRENT_TIMESTAMP, status = 'Assigned',
+                       priority = ?, last_action_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+                       updated_by = 'system'
+                   WHERE reference_id = ?""",
+                [
+                    str(assignee.get('id') or ''),
+                    assignee_username,
+                    assignee.get('display_name') or assignee_username,
+                    assigned_role,
+                    assigned_department,
+                    legal_priority,
+                    ref
+                ]
+            )
+            matched_keywords = ', '.join(desk.get('matched_keywords') or []) or 'routing keywords detected'
+            _add_legal_case_action(
+                db, ref, 'auto_assignment', 'system', 'system',
+                note=f"Auto-assigned to {desk.get('desk_name')} ({assignee_username}) based on keywords: {matched_keywords}.",
+                old_status=old_status, new_status='Assigned',
+                old_assigned_to=old_assigned, new_assigned_to=assignee_username,
+                visible_to_applicant=0
+            )
+            if assignee:
+                _queue_welfare_assignment_email(db, assignee, ref)
         db.commit()
         verification = _send_email_verification_for_record(
             'legal_case_requests', cur.lastrowid, ref, full_name, email, 'legal'
