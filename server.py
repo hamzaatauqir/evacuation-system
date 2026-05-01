@@ -24150,7 +24150,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] != 'admin':
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(ADMIN_AMBASSADOR_PULSE_PAGE)
+            self.send_html(
+                WELFARE_CASES_ADMIN_PAGE
+                .replace('__PAGE_MODE__', 'pulse')
+                .replace('__PAGE_TITLE__', 'Ambassador Pulse Report')
+                .replace('__USER_NAME__', user['user'])
+                .replace('__USER_ROLE__', user['role'])
+            )
         elif path == '/admin/nurses':
             user = self.require_auth()
             if not user: return
@@ -24208,19 +24214,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             if not self.render_template('admin_death_cases.html'):
                 self.send_html(ADMIN_DEATH_CASES_COMING_SOON_PAGE)
-        elif path in ('/admin/welfare-cases', '/admin/my-cases', '/admin/ambassador-review'):
+        elif path in ('/admin/welfare-cases', '/admin/my-cases', '/admin/ambassador-review', '/admin/community-welfare/welfare', '/admin/community-welfare/my', '/admin/community-welfare/ambassador'):
             user = self.require_auth()
             if not user: return
             if user['role'] not in WELFARE_CASE_ACCESS_ROLES:
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            mode = 'all'
-            title = 'Unified Community Welfare Case Management'
-            if path == '/admin/my-cases':
+            mode = 'welfare'
+            title = 'Welfare Cases'
+            if path in ('/admin/my-cases', '/admin/community-welfare/my'):
                 mode = 'my'
                 title = 'My Assigned Cases'
-            elif path == '/admin/ambassador-review':
+            elif path in ('/admin/ambassador-review', '/admin/community-welfare/ambassador'):
                 mode = 'ambassador'
-                title = 'Ambassador Review Queue'
+                title = 'Ambassador Review'
             self.send_html(
                 WELFARE_CASES_ADMIN_PAGE
                 .replace('__PAGE_MODE__', mode)
