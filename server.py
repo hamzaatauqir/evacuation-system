@@ -31734,7 +31734,189 @@ setInterval(refreshNotificationBadges, 60000);
 window.addEventListener('focus', refreshNotificationBadges);""",
     1
 )
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_PULSE_TRANSFER_SCRIPT + WELFARE_CASES_WIRING_FIX_SCRIPT + "</body></html>")
+WELFARE_CASES_PULSE_FINAL_RENDER_SCRIPT = """
+<script>
+(function(){
+function pulsePageMode(){
+  if (typeof PAGE_MODE !== 'undefined') return String(PAGE_MODE || '');
+  return String(window.PAGE_MODE || '');
+}
+function pulseEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function pulseList(v) {
+  return Array.isArray(v) ? v : [];
+}
+function pulseDisplay(v) {
+  return (v == null || v === '') ? '-' : v;
+}
+function pulseRefs(v) {
+  if (Array.isArray(v)) {
+    const joined = v.filter(function(x){ return x != null && String(x).trim() !== ''; }).join(', ');
+    return joined || '-';
+  }
+  return pulseDisplay(v);
+}
+function pulseHasRefs(v) {
+  if (Array.isArray(v)) return v.filter(function(x){ return x != null && String(x).trim() !== ''; }).length > 0;
+  return v != null && String(v).trim() !== '';
+}
+function pulseRefsEither(primary, fallback) {
+  return pulseRefs(pulseHasRefs(primary) ? primary : fallback);
+}
+function pulseTodayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+function pulseDaysAgoIso(days) {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+function pulseById(id) {
+  return document.getElementById(id);
+}
+function pulseEnsureShell() {
+  const card = pulseById('ambassadorPulseCard');
+  if (!card) return;
+  card.style.display = 'block';
+  const hasLegacyRows = pulseById('pulseThemesRows') && pulseById('pulsePolicyRows') && pulseById('pulseOfficerRows') && pulseById('pulseEvidenceRows');
+  if (hasLegacyRows) return;
+  const startValue = (pulseById('pulseStartDate') || {}).value || pulseDaysAgoIso(6);
+  const endValue = (pulseById('pulseEndDate') || {}).value || pulseTodayIso();
+  const includeEl = pulseById('pulseFullDetails') || pulseById('pulseIncludeFull');
+  const includeChecked = !!(includeEl && includeEl.checked);
+  card.innerHTML = '<div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Pulse Report</strong><span style="font-size:12px;color:#64748b">Issue intelligence across welfare, legal/OPF, nurses, death, and feedback channels</span><input id="pulseStartDate" type="date"><input id="pulseEndDate" type="date"><label style="font-size:12px;color:#475569"><input id="pulseFullDetails" type="checkbox"> Include internal full details</label><button onclick="loadAmbassadorPulseReport()">Generate Report</button><button class="btn2" onclick="printAmbassadorPulseReport()">Print / Save PDF</button><button class="btn2" onclick="copyPulseSummary()">Copy Summary</button></div><div style="padding:12px 14px"><div id="pulseErr" class="err" style="margin:6px 0"></div><div id="pulseSummaryKpis" class="kpis" style="margin-bottom:12px"></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Theme</th><th>Count</th><th>Sensitivity</th><th>Authority</th><th>Sample References</th></tr></thead><tbody id="pulseThemesRows"><tr><td colspan="5">Loading report...</td></tr></tbody></table></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Issue</th><th>Count</th><th>Authority</th><th>Suggested Action</th><th>Evidence References</th></tr></thead><tbody id="pulsePolicyRows"><tr><td colspan="5">Loading report...</td></tr></tbody></table></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Officer</th><th>Open Assigned</th><th>Overdue</th><th>No Action</th><th>Resolved This Week</th></tr></thead><tbody id="pulseOfficerRows"><tr><td colspan="5">Loading report...</td></tr></tbody></table></div><div style="overflow:auto"><table><thead><tr><th>Reference</th><th>Module</th><th>Date</th><th>Theme</th><th>Subject</th><th>Status</th><th>Assigned To</th><th>Excerpt</th></tr></thead><tbody id="pulseEvidenceRows"><tr><td colspan="8">Loading report...</td></tr></tbody></table></div></div>';
+  if (pulseById('pulseStartDate')) pulseById('pulseStartDate').value = startValue;
+  if (pulseById('pulseEndDate')) pulseById('pulseEndDate').value = endValue;
+  if (pulseById('pulseFullDetails')) pulseById('pulseFullDetails').checked = includeChecked;
+}
+function pulseEnsureDebugLine() {
+  let debug = pulseById('pulseDebugLine');
+  if (debug) return debug;
+  debug = document.createElement('div');
+  debug.id = 'pulseDebugLine';
+  debug.className = 'hint';
+  debug.style.marginTop = '8px';
+  const anchor = pulseById('pulseErr') || pulseById('pulseError') || pulseById('pulseSummaryKpis') || pulseById('ambassadorPulseCard');
+  if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(debug, anchor.nextSibling);
+  return debug;
+}
+function pulseSetDebug(message, isError) {
+  const debug = pulseEnsureDebugLine();
+  if (!debug) return;
+  debug.textContent = message || '';
+  debug.style.color = isError ? '#b91c1c' : '#475569';
+}
+function pulseSetError(message) {
+  const err = pulseById('pulseErr') || pulseById('pulseError');
+  if (err) {
+    err.textContent = message || '';
+    err.style.display = message ? 'block' : 'none';
+  }
+  if (message) pulseSetDebug('Report data loaded: no | Error: ' + message, true);
+}
+function pulseSetRows(id, html) {
+  const el = pulseById(id);
+  if (el) el.innerHTML = html;
+}
+function pulseSetLoadingRows() {
+  pulseSetRows('pulseThemesRows', '<tr><td colspan="5">Loading report...</td></tr>');
+  pulseSetRows('pulsePolicyRows', '<tr><td colspan="5">Loading report...</td></tr>');
+  pulseSetRows('pulseOfficerRows', '<tr><td colspan="5">Loading report...</td></tr>');
+  pulseSetRows('pulseEvidenceRows', '<tr><td colspan="8">Loading report...</td></tr>');
+}
+function pulseRenderKpis(summary, op) {
+  const kpi = pulseById('pulseSummaryKpis');
+  if (!kpi) return;
+  const cards = [
+    ['Total Submissions', summary.total_items],
+    ['High Sensitivity', summary.high_sensitivity_count],
+    ['Top Operational Workload', summary.top_operational_theme || summary.top_theme_label],
+    ['Top Diplomatic Issue', summary.top_diplomatic_issue],
+    ['Overdue Cases', op.total_overdue]
+  ];
+  kpi.innerHTML = cards.map(function(x) {
+    return '<div class="kpi"><b>'+pulseEsc(pulseDisplay(x[1]))+'</b><span>'+pulseEsc(x[0])+'</span></div>';
+  }).join('');
+}
+function pulseRenderReport(data) {
+  const summary = (data && data.summary) || {};
+  const themes = pulseList(data && data.top_themes);
+  const diplomaticIssues = pulseList(data && data.diplomatic_issues);
+  const policySensitiveIssues = pulseList(data && data.policy_sensitive_issues);
+  const policy = diplomaticIssues.length ? diplomaticIssues : policySensitiveIssues;
+  const staff = pulseList(((data || {}).staff_accountability || {}).by_officer);
+  const evidenceAnnex = (data && data.evidence_annex) || {};
+  let evidence = []
+    .concat(pulseList(evidenceAnnex.policy_evidence_cases))
+    .concat(pulseList(evidenceAnnex.operational_evidence_cases))
+    .concat(pulseList(data && data.evidence_cases));
+  if (!evidence.length) {
+    evidence = []
+      .concat(pulseList(evidenceAnnex.senior_attention))
+      .concat(pulseList(evidenceAnnex.operational_samples));
+  }
+  const op = (data && data.operational_status) || {};
+  pulseRenderKpis(summary, op);
+  pulseSetRows('pulseThemesRows', themes.length ? themes.map(function(t) {
+    return '<tr><td>'+pulseEsc(pulseDisplay(t.theme_label))+'</td><td>'+pulseEsc(pulseDisplay(t.count))+'</td><td>'+pulseEsc(pulseDisplay(t.sensitivity))+'</td><td>'+pulseEsc(pulseDisplay(t.authority))+'</td><td>'+pulseEsc(pulseRefs(t.sample_references))+'</td></tr>';
+  }).join('') : '<tr><td colspan="5">No themes found for selected period.</td></tr>');
+  pulseSetRows('pulsePolicyRows', policy.length ? policy.map(function(p) {
+    return '<tr><td>'+pulseEsc(pulseDisplay(p.theme_label || p.issue_title))+'</td><td>'+pulseEsc(pulseDisplay(p.count))+'</td><td>'+pulseEsc(pulseDisplay(p.authority))+'</td><td>'+pulseEsc(pulseDisplay(p.suggested_action))+'</td><td>'+pulseEsc(pulseRefsEither(p.sample_references, p.evidence_references))+'</td></tr>';
+  }).join('') : '<tr><td colspan="5">No policy-sensitive issues found for selected period.</td></tr>');
+  pulseSetRows('pulseOfficerRows', staff.length ? staff.map(function(r) {
+    return '<tr><td>'+pulseEsc(pulseDisplay(r.officer_name || r.assigned_to))+'</td><td>'+pulseEsc(pulseDisplay(r.assigned_open))+'</td><td>'+pulseEsc(pulseDisplay(r.overdue_5_days))+'</td><td>'+pulseEsc(pulseDisplay(r.no_action_after_assignment))+'</td><td>'+pulseEsc(pulseDisplay(r.resolved_this_week))+'</td></tr>';
+  }).join('') : '<tr><td colspan="5">No staff accountability rows found.</td></tr>');
+  pulseSetRows('pulseEvidenceRows', evidence.length ? evidence.map(function(c) {
+    const dateValue = c.created_at || c.date;
+    const themeValue = ((c.theme || {}).theme_label) || c.theme_label;
+    const excerpt = c.details_excerpt || c.representative_excerpt;
+    return '<tr><td>'+pulseEsc(pulseDisplay(c.reference))+'</td><td>'+pulseEsc(pulseDisplay(c.module))+'</td><td>'+pulseEsc(pulseDisplay(dateValue ? String(dateValue).slice(0, 10) : ''))+'</td><td>'+pulseEsc(pulseDisplay(themeValue))+'</td><td>'+pulseEsc(pulseDisplay(c.subject))+'</td><td>'+pulseEsc(pulseDisplay(c.status))+'</td><td>'+pulseEsc(pulseDisplay(c.assigned_to))+'</td><td>'+pulseEsc(pulseDisplay(excerpt))+'</td></tr>';
+  }).join('') : '<tr><td colspan="8">No evidence cases found for selected period.</td></tr>');
+  pulseSetDebug('Report data loaded: yes | Total: ' + Number(summary.total_items || 0) + ' | Themes: ' + themes.length + ' | Policy issues: ' + policy.length + ' | Evidence: ' + evidence.length, false);
+}
+window.loadAmbassadorPulseReport = async function finalLoadAmbassadorPulseReport() {
+  const mode = pulsePageMode();
+  if (mode !== 'pulse') return;
+  pulseEnsureShell();
+  const startEl = pulseById('pulseStartDate');
+  const endEl = pulseById('pulseEndDate');
+  const includeEl = pulseById('pulseFullDetails') || pulseById('pulseIncludeFull');
+  if (startEl && !startEl.value) startEl.value = pulseDaysAgoIso(6);
+  if (endEl && !endEl.value) endEl.value = pulseTodayIso();
+  pulseSetError('');
+  pulseSetDebug('Report data loading...', false);
+  pulseSetLoadingRows();
+  try {
+    const qs = new URLSearchParams();
+    qs.set('start_date', startEl && startEl.value ? startEl.value : pulseDaysAgoIso(6));
+    qs.set('end_date', endEl && endEl.value ? endEl.value : pulseTodayIso());
+    qs.set('include_full_details', includeEl && includeEl.checked ? '1' : '0');
+    const r = await fetch('/api/admin/ambassador-pulse-report?' + qs.toString(), {credentials:'include'});
+    const data = await r.json();
+    if (!r.ok || data.success === false) throw new Error(data.error || 'Failed to load report');
+    try { pulseReportData = data; } catch (_) {}
+    window.cwaPulseReportData = data;
+    pulseRenderReport(data);
+  } catch (err) {
+    const message = (err && err.message) ? err.message : 'Failed to load report';
+    pulseSetError(message);
+    pulseSetRows('pulseThemesRows', '<tr><td colspan="5">Report could not be loaded.</td></tr>');
+    pulseSetRows('pulsePolicyRows', '<tr><td colspan="5">Report could not be loaded.</td></tr>');
+    pulseSetRows('pulseOfficerRows', '<tr><td colspan="5">Report could not be loaded.</td></tr>');
+    pulseSetRows('pulseEvidenceRows', '<tr><td colspan="8">Report could not be loaded.</td></tr>');
+  }
+};
+const mode = (typeof PAGE_MODE !== 'undefined') ? PAGE_MODE : (window.PAGE_MODE || '');
+if (String(mode) === 'pulse') {
+  setTimeout(() => window.loadAmbassadorPulseReport(), 100);
+}
+})();
+</script>
+"""
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_PULSE_TRANSFER_SCRIPT + WELFARE_CASES_WIRING_FIX_SCRIPT + WELFARE_CASES_PULSE_FINAL_RENDER_SCRIPT + "</body></html>")
 
 PUBLIC_HOME_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Welfare Wing Digital Services</title>
