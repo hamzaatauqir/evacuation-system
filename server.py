@@ -4050,6 +4050,7 @@ def _complaint_identifier_from(data):
     data = data or {}
     return _first_value(
         data.get('complaint_id'),
+        data.get('case_id'),
         data.get('id'),
         data.get('reference'),
         data.get('complaint_reference'),
@@ -9752,9 +9753,26 @@ def api_admin_cases_transfer(data, user):
             return {'success': False, 'error': 'Assignee is inactive'}
         staff_public = _staff_payload_from_user(assignee_d, include_private_contact=False)
         staff_private = _staff_payload_from_user(assignee_d, include_private_contact=True)
+        if not routing_rule:
+            route_key = _clean_text(payload.get('routing_rule_key'), 120).lower()
+            if route_key:
+                rule_row = db.execute(
+                    """SELECT rule_key, desk_name
+                       FROM welfare_auto_routing_rules
+                       WHERE rule_key = ? AND COALESCE(is_active,1) = 1
+                       LIMIT 1""",
+                    [route_key]
+                ).fetchone()
+                if rule_row:
+                    routing_rule = dict(rule_row)
         route_note = ''
+        routing_desk_name = ''
         if routing_rule:
-            route_note = f" Routing rule: {routing_rule.get('desk_name') or routing_rule.get('rule_key')}."
+            routing_desk_name = routing_rule.get('desk_name') or routing_rule.get('rule_key') or ''
+            route_note = f" Routing rule: {routing_desk_name}."
+        if routing_desk_name:
+            staff_public['department'] = routing_desk_name
+            staff_private['department'] = routing_desk_name
         transfer_note = f"Transferred to {staff_private.get('name')} ({assigned_to}).{route_note} Reason: {reason}"
 
         if module == 'welfare':
@@ -9787,11 +9805,16 @@ def api_admin_cases_transfer(data, user):
             applicant_email = case_payload.get('applicant_email')
             applicant_name = case_payload.get('applicant_name')
         elif module == 'legal':
+            case_id = payload.get('case_id') or payload.get('id')
             ref = _clean_text(payload.get('reference_id') or payload.get('case_reference') or payload.get('reference'), 160)
-            row = db.execute("SELECT * FROM legal_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
+            if case_id:
+                row = db.execute("SELECT * FROM legal_case_requests WHERE id = ? LIMIT 1", [case_id]).fetchone()
+            else:
+                row = db.execute("SELECT * FROM legal_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
             if not row:
                 return {'success': False, 'error': 'Legal/OPF case not found'}
             current = dict(row)
+            ref = current.get('reference_id') or ref
             if not _user_can_transfer_assigned_case(user, current.get('assigned_to_username')):
                 return {'success': False, 'error': 'Only the assigned staff member or admin can transfer this case'}
             old_assignee = current.get('assigned_to_username') or ''
@@ -9803,10 +9826,10 @@ def api_admin_cases_transfer(data, user):
                        assigned_at = CURRENT_TIMESTAMP, assignment_note = ?,
                        status = 'Assigned', last_action_at = CURRENT_TIMESTAMP,
                        updated_at = CURRENT_TIMESTAMP, updated_by = ?
-                   WHERE reference_id = ?""",
+                   WHERE id = ?""",
                 [str(assignee_d.get('id') or ''), assigned_to, staff_private.get('name'),
                  assignee_d.get('role') or '', assignee_d.get('department') or '', actor,
-                 reason, actor, ref]
+                 reason, actor, current.get('id')]
             )
             _add_legal_case_action(db, ref, 'transfer', actor, (user or {}).get('role') or '',
                                    note=transfer_note, old_status=old_status, new_status='Assigned',
@@ -9862,11 +9885,16 @@ def api_admin_cases_transfer(data, user):
                     case_payload['applicant_email'] = applicant_email
                     case_payload['applicant_name'] = applicant_name
         elif module == 'death':
+            case_id = payload.get('case_id') or payload.get('id')
             ref = _clean_text(payload.get('reference_id') or payload.get('case_reference') or payload.get('reference'), 160)
-            row = db.execute("SELECT * FROM death_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
+            if case_id:
+                row = db.execute("SELECT * FROM death_case_requests WHERE id = ? LIMIT 1", [case_id]).fetchone()
+            else:
+                row = db.execute("SELECT * FROM death_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
             if not row:
                 return {'success': False, 'error': 'Death case not found'}
             current = dict(row)
+            ref = current.get('reference_id') or ref
             if not _user_can_transfer_assigned_case(user, current.get('assigned_to_username')):
                 return {'success': False, 'error': 'Only the assigned staff member or admin can transfer this case'}
             old_assignee = current.get('assigned_to_username') or ''
@@ -9878,10 +9906,10 @@ def api_admin_cases_transfer(data, user):
                        assigned_at = CURRENT_TIMESTAMP, assignment_note = ?,
                        status = 'Assigned', last_action_at = CURRENT_TIMESTAMP,
                        updated_at = CURRENT_TIMESTAMP, updated_by = ?
-                   WHERE reference_id = ?""",
+                   WHERE id = ?""",
                 [str(assignee_d.get('id') or ''), assigned_to, staff_private.get('name'),
                  assignee_d.get('role') or '', assignee_d.get('department') or '', actor,
-                 reason, actor, ref]
+                 reason, actor, current.get('id')]
             )
             _add_death_case_action(db, ref, 'transfer', actor, (user or {}).get('role') or '',
                                    note=transfer_note, old_status=old_status, new_status='Assigned',
@@ -31166,13 +31194,101 @@ if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse'){ensurePulseShell();setTi
 </script>
 """
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "<body>",
+    '<body data-page-mode="__PAGE_MODE__">',
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "</style></head>",
+    "body[data-page-mode=\"pulse\"] #printPackPanel,"
+    "body[data-page-mode=\"pulse\"] #caseListPanel,"
+    "body[data-page-mode=\"pulse\"] #counsellorBranchesCard,"
+    "body[data-page-mode=\"pulse\"] #welfareRoutingRulesCard,"
+    "body[data-page-mode=\"pulse\"] #staffAccountabilityCard{display:none!important}"
+    "body[data-page-mode=\"pulse\"] #ambassadorPulseCard{display:block!important}</style></head>",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     '</div></div><div class="panel" id="welfareRoutingRulesCard"',
     '</div></div></div><div class="panel" id="welfareRoutingRulesCard"',
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "applyPageModeVisibility();loadUsers();if(PAGE_MODE!=='pulse')loadCases();",
-    "loadUsers();applyPageModeVisibility();if(PAGE_MODE!=='pulse')loadCases();",
+    "function applyPageModeVisibility(){const isAdmin=USER_ROLE==='admin';const show=(id,yes)=>{const el=document.getElementById(id);if(el)el.style.display=yes?'block':'none';};show('printPackPanel',PAGE_MODE!=='pulse'&&PAGE_MODE!=='my');show('caseListPanel',PAGE_MODE!=='pulse');show('counsellorBranchesCard',isAdmin&&PAGE_MODE==='welfare');show('welfareRoutingRulesCard',isAdmin&&PAGE_MODE==='welfare');show('staffAccountabilityCard',isAdmin&&PAGE_MODE==='welfare');show('ambassadorPulseCard',isAdmin&&PAGE_MODE==='pulse');}",
+    """function applyPageModeVisibility() {
+  const isAdmin = USER_ROLE === 'admin';
+  const show = (id, yes) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = yes ? 'block' : 'none';
+  };
+
+  show('printPackPanel', PAGE_MODE !== 'pulse' && PAGE_MODE !== 'my');
+  show('caseListPanel', PAGE_MODE !== 'pulse');
+
+  show('counsellorBranchesCard', isAdmin && PAGE_MODE === 'welfare');
+  show('welfareRoutingRulesCard', isAdmin && PAGE_MODE === 'welfare');
+  show('staffAccountabilityCard', isAdmin && PAGE_MODE === 'welfare');
+
+  show('ambassadorPulseCard', isAdmin && PAGE_MODE === 'pulse');
+}""",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "async function loadCounsellorBranches(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
+    """async function loadCounsellorBranches(){
+if (PAGE_MODE !== 'welfare') return;
+if (USER_ROLE !== 'admin') return;""",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "async function loadRoutingRules(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
+    """async function loadRoutingRules(){
+if (PAGE_MODE !== 'welfare') return;
+if (USER_ROLE !== 'admin') return;""",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "async function loadStaffAccountability(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
+    """async function loadStaffAccountability(){
+if (PAGE_MODE !== 'welfare') return;
+if (USER_ROLE !== 'admin') return;""",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "async function loadAmbassadorPulseReport(){if(USER_ROLE!=='admin'||PAGE_MODE!=='pulse')return;",
+    """async function loadAmbassadorPulseReport(){
+if (PAGE_MODE !== 'pulse') return;
+if (USER_ROLE !== 'admin') return;""",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "window.loadAmbassadorPulseReport=async function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;",
+    """window.loadAmbassadorPulseReport=async function(){
+if (PAGE_MODE !== 'pulse') return;""",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "applyPageModeVisibility();loadUsers();if(PAGE_MODE!=='pulse')loadCases();if(USER_ROLE==='admin'&&PAGE_MODE==='welfare'){loadCounsellorBranches();loadRoutingRules();loadStaffAccountability();}if(USER_ROLE==='admin'&&PAGE_MODE==='pulse'){loadAmbassadorPulseReport();}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);",
+    """loadUsers();
+applyPageModeVisibility();
+
+if (PAGE_MODE !== 'pulse') {
+  loadCases();
+}
+
+if (USER_ROLE === 'admin' && PAGE_MODE === 'welfare') {
+  loadCounsellorBranches();
+  loadRoutingRules();
+  loadStaffAccountability();
+}
+
+if (USER_ROLE === 'admin' && PAGE_MODE === 'pulse') {
+  loadAmbassadorPulseReport();
+}
+
+refreshNotificationBadges();
+setInterval(refreshNotificationBadges, 60000);
+window.addEventListener('focus', refreshNotificationBadges);""",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_PULSE_TRANSFER_SCRIPT + "</body></html>")
