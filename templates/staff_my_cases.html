@@ -13,7 +13,7 @@
     .notice{background:#fff;border:1px solid #dce7ef;border-left:4px solid #15324a;border-radius:8px;padding:12px;margin-bottom:12px;color:#31495f}
     .tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}.tools button{border:1px solid #d7e2ea;background:#fff;border-radius:6px;padding:9px 12px;font-weight:700;color:#29445b;cursor:pointer}.tools button.active{background:#15324a;color:#fff}
     .card{background:#fff;border:1px solid #e3ebf0;border-radius:8px}.table-wrap{overflow:auto}.cases{width:100%;border-collapse:collapse}.cases th,.cases td{border-bottom:1px solid #eef3f7;padding:10px;text-align:left;font-size:13px}.cases tr{cursor:pointer}.cases tr:hover{background:#f7fafc}
-    .drawer{position:fixed;inset:0;background:rgba(15,35,52,.45);display:none;align-items:stretch;justify-content:flex-end;z-index:40}.drawer.open{display:flex}.panel{background:#fff;width:min(760px,100%);height:100%;overflow:auto;padding:18px;box-sizing:border-box}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.field{border:1px solid #edf2f6;border-radius:7px;padding:9px}.field span{display:block;font-size:11px;color:#6b7b88}.field b{display:block;color:#172b3a;margin-top:3px}.actions{display:grid;grid-template-columns:1fr;gap:10px;margin-top:14px}.actions textarea,.actions select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.timeline{margin-top:14px}.event{border-left:3px solid #dce7ef;padding:8px 0 8px 10px;font-size:13px}
+    .drawer{position:fixed;inset:0;background:rgba(15,35,52,.45);display:none;align-items:stretch;justify-content:flex-end;z-index:40}.drawer.open{display:flex}.panel{background:#fff;width:min(760px,100%);height:100%;overflow:auto;padding:18px;box-sizing:border-box}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.field{border:1px solid #edf2f6;border-radius:7px;padding:9px}.field span{display:block;font-size:11px;color:#6b7b88}.field b{display:block;color:#172b3a;margin-top:3px}.actions{display:grid;grid-template-columns:1fr;gap:10px;margin-top:14px}.actions textarea,.actions select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.transfer-box{border-top:1px solid #e2e8f0;margin-top:14px;padding-top:14px}.transfer-box h3{margin:0 0 10px;color:#15324a}.transfer-box label{display:block;margin:8px 0 5px;font-size:13px}.transfer-box textarea,.transfer-box select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.transfer-destination-help{font-size:12px;color:#607182;margin-top:6px;line-height:1.45}.transfer-msg{font-size:13px;font-weight:700;margin:8px 0}.transfer-msg.err{color:#b91c1c}.transfer-msg.ok{color:#047857}.timeline{margin-top:14px}.event{border-left:3px solid #dce7ef;padding:8px 0 8px 10px;font-size:13px}
   </style>
 </head>
 <body>
@@ -57,6 +57,17 @@
           <button class="cwa-btn cwa-btn--primary cwa-btn--sm" style="margin-top:8px" onclick="resolveCase()">Mark Follow-up Completed</button>
         </div>
       </div>
+      <div class="transfer-box" id="transferSection" style="display:none">
+        <h3>Transfer / Reroute Case</h3>
+        <label><strong>Transfer to desk/officer</strong></label>
+        <select id="transferTo" onchange="updateTransferDestinationHelp()"></select>
+        <div id="transferDestinationHelp" class="transfer-destination-help"></div>
+        <label><strong>Reason for transfer</strong></label>
+        <textarea id="transferReason" rows="4" placeholder="Explain why this case is being transferred and which desk should handle it."></textarea>
+        <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input id="transferVisible" type="checkbox" checked> Notify applicant with new handling officer/contact</label>
+        <div id="transferMsg" class="transfer-msg"></div>
+        <button id="transferBtn" class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="transferCase()">Transfer Case</button>
+      </div>
       <div class="timeline" id="timeline"></div>
     </div>
   </div>
@@ -64,6 +75,15 @@
 const USER_NAME='__USER_NAME__', USER_ROLE='__USER_ROLE__';
 let state={filter:'',items:[],current:null};
 const filters=[['','All Assigned'],['pending','Pending'],['in_progress','In Progress'],['completed','Follow-up Completed']];
+const transferFallbackDestinations=[
+  {rule_key:'opf_welfare',desk_name:'OPF / Insurance / Compensation Desk',assigned_to:'Zahid_New'},
+  {rule_key:'legal_advisor',desk_name:'Legal Advisory Desk',assigned_to:'Rajab'},
+  {rule_key:'nurses_matters',desk_name:'Nurses Welfare Desk',assigned_to:'Awais'},
+  {rule_key:'field_inspection',desk_name:'Field Inspection / Facility Desk',assigned_to:'Shahid'},
+  {rule_key:'general_welfare',desk_name:'General Welfare Desk',assigned_to:'Zahid_New'},
+  {rule_key:'death_body_case',desk_name:'Death / Mortal Remains Desk',assigned_to:'Zahid_New'}
+];
+let transferDestinations=transferFallbackDestinations.slice();
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function api(url,opts){const r=await fetch(url,{credentials:'include',...(opts||{})});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}
 function renderFilters(){document.getElementById('filters').innerHTML=filters.map(([id,l])=>`<button class="${state.filter===id?'active':''}" onclick="load('${id}')">${l}</button>`).join('')}
@@ -71,17 +91,82 @@ function renderKpis(c){document.getElementById('kpis').innerHTML=[['assigned_to_
 function renderRows(){document.getElementById('rows').innerHTML=(state.items||[]).map(r=>`<tr onclick="openDetail('${esc(r.module)}','${esc(r.id)}')"><td>${esc(r.module)}</td><td><b>${esc(r.reference)}</b></td><td>${esc(r.applicant_name||'-')}</td><td>${esc(r.phone||r.whatsapp||r.email||'-')}</td><td>${esc(r.subject||r.case_type||'-')}</td><td><span class="cwa-badge" data-type="processing">${esc(r.status||'-')}</span></td><td>${esc(r.priority||'Normal')}</td><td>${esc(r.due_date||'-')}</td></tr>`).join('')||'<tr><td colspan="8" class="cwa-empty">No assigned cases found.</td></tr>'}
 function field(k,v){return `<div class="field"><span>${esc(k)}</span><b>${esc(v||'-')}</b></div>`}
 function closeDrawer(){document.getElementById('drawer').classList.remove('open')}
-async function openDetail(module,id){const d=await api('/api/staff/my-cases/detail?module='+encodeURIComponent(module)+'&id='+encodeURIComponent(id));state.current={module,id,record:d.record};const r=d.record||{};const ref=r.case_reference||r.complaint_id||r.roster_reference||r.reference_id||r.id;document.getElementById('dTitle').textContent=ref||'Case Detail';document.getElementById('dMeta').textContent=module+' | '+(r.status||r.complaint_status||r.reconciliation_status||'');
+function transferModuleSupported(module){return ['welfare','legal','nurse','nurse_complaint','death'].includes(String(module||''))}
+function transferOptionLabel(d){
+const officer=d.officer_name||d.assigned_to||'';
+const contact=[d.officer_phone,d.officer_email].filter(Boolean).join(' / ');
+return [d.desk_name||d.rule_key||'Desk',officer,contact].filter(Boolean).join(' - ');
+}
+function updateTransferDestinationHelp(){
+const select=document.getElementById('transferTo'),help=document.getElementById('transferDestinationHelp');
+if(!select||!help)return;
+const idx=select.value===''?-1:Number(select.value);
+const d=idx>=0?transferDestinations[idx]:null;
+if(!d){help.textContent='';return;}
+const lines=[
+  d.desk_name?('Desk: '+d.desk_name):'',
+  d.assigned_to?('Username: '+d.assigned_to):'',
+  d.officer_name?('Officer: '+d.officer_name):'',
+  d.assigned_department?('Department: '+d.assigned_department):'',
+  d.officer_phone?('Phone/Mobile: '+d.officer_phone):'',
+  d.officer_email?('Email: '+d.officer_email):''
+].filter(Boolean);
+help.textContent=lines.join(' | ');
+}
+async function loadTransferDestinations(){
+try{
+const d=await api('/api/staff/transfer-destinations');
+if(Array.isArray(d.items)&&d.items.length)transferDestinations=d.items;
+}catch(_e){
+transferDestinations=transferFallbackDestinations.slice();
+}
+}
+function renderTransferSection(module){
+const section=document.getElementById('transferSection'),select=document.getElementById('transferTo'),reason=document.getElementById('transferReason'),visible=document.getElementById('transferVisible'),msg=document.getElementById('transferMsg');
+if(!section||!select)return;
+if(!transferModuleSupported(module)){section.style.display='none';return;}
+section.style.display='block';
+select.innerHTML='<option value="">Select desk/officer</option>'+transferDestinations.map((d,i)=>`<option value="${i}">${esc(transferOptionLabel(d))}</option>`).join('');
+updateTransferDestinationHelp();
+if(reason)reason.value='';
+if(visible)visible.checked=true;
+if(msg){msg.textContent='';msg.className='transfer-msg';}
+}
+async function openDetail(module,id){const d=await api('/api/staff/my-cases/detail?module='+encodeURIComponent(module)+'&id='+encodeURIComponent(id));const r=d.record||{};const ref=r.case_reference||r.complaint_id||r.roster_reference||r.reference_id||r.id;state.current={module,id,record:r,reference:ref};document.getElementById('dTitle').textContent=ref||'Case Detail';document.getElementById('dMeta').textContent=module+' | '+(r.status||r.complaint_status||r.reconciliation_status||'');
 document.getElementById('detailGrid').innerHTML=[
 field('Reference',ref),field('Name',r.requester_name||r.nurse_full_name||r.full_name||r.reporter_name||r.deceased_name),field('Phone',r.requester_phone||r.mobile||r.phone||r.reporter_mobile),field('WhatsApp',r.whatsapp_full||r.phone),field('Email',r.requester_email||r.email||r.reporter_email),field('Category / Type',r.category||r.case_type||r.complaint_category),field('Subject',r.subject||r.subject_name||r.concern_summary),field('Status',r.status||r.complaint_status||r.reconciliation_status),field('Priority',r.priority),field('Due Date',r.due_date),field('Details',r.details||r.description||r.concern_summary||r.remarks)
 ].join('');
+renderTransferSection(module);
 document.getElementById('timeline').innerHTML='<h3 style="color:#15324a">Activity Timeline</h3>'+((d.actions||[]).map(a=>`<div class="event"><strong>${esc(a.action_type||'update')}</strong> · ${esc(a.actor_username||'system')}<br>${esc(a.note||a.new_status||a.new_value||'')}<br><span class="muted">${esc(a.created_at||'')}</span></div>`).join('')||'<div class="muted">No activity yet.</div>');
 document.getElementById('drawer').classList.add('open')}
+async function transferCase(){
+if(!state.current)return;
+const msg=document.getElementById('transferMsg'),btn=document.getElementById('transferBtn'),select=document.getElementById('transferTo');
+const selectedIndex=select?select.value:'';
+const dest=selectedIndex===''?null:transferDestinations[Number(selectedIndex)];
+const reason=(document.getElementById('transferReason').value||'').trim();
+if(msg){msg.textContent='';msg.className='transfer-msg';}
+if(!dest){if(msg){msg.textContent='Please select a destination desk/officer.';msg.className='transfer-msg err';}return;}
+if(reason.length<20){if(msg){msg.textContent='Transfer reason must be at least 20 characters.';msg.className='transfer-msg err';}return;}
+const visible=!!(document.getElementById('transferVisible')&&document.getElementById('transferVisible').checked);
+const payload={module:state.current.module,case_id:state.current.id,id:state.current.id,reference_id:state.current.reference,case_reference:state.current.reference,reference:state.current.reference,destination_type:'internal_staff',assigned_to:dest.assigned_to,routing_rule_key:dest.rule_key,reason:reason,visible_to_applicant:visible};
+try{
+if(btn)btn.disabled=true;
+await api('/api/admin/cases/transfer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+if(msg){msg.textContent='Case transferred successfully.';msg.className='transfer-msg ok';}
+await load(state.filter);
+setTimeout(closeDrawer,700);
+}catch(e){
+if(msg){msg.textContent=e.message||'Transfer failed';msg.className='transfer-msg err';}
+}finally{
+if(btn)btn.disabled=false;
+}
+}
 async function addNote(){if(!state.current)return;await api('/api/staff/my-cases/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({module:state.current.module,id:state.current.id,note:document.getElementById('noteText').value,visible_to_applicant:document.getElementById('visibleNote').checked})});document.getElementById('noteText').value='';await openDetail(state.current.module,state.current.id);await load(state.filter)}
 async function saveStatus(){if(!state.current)return;await api('/api/staff/my-cases/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({module:state.current.module,id:state.current.id,status:document.getElementById('statusSel').value,note:document.getElementById('noteText').value})});await openDetail(state.current.module,state.current.id);await load(state.filter)}
 async function resolveCase(){if(!state.current)return;await api('/api/staff/my-cases/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({module:state.current.module,id:state.current.id,resolution_note:document.getElementById('noteText').value,status:'Follow-up Completed'})});await openDetail(state.current.module,state.current.id);await load(state.filter)}
 async function load(filter){state.filter=filter||'';renderFilters();try{const qs=state.filter?'?status='+encodeURIComponent(state.filter):'';const d=await api('/api/staff/my-cases'+qs);state.items=d.items||[];renderKpis(d.counters||{});renderRows()}catch(e){document.getElementById('rows').innerHTML='<tr><td colspan="8" class="cwa-empty">'+esc(e.message)+'</td></tr>'}}
-renderFilters();load('');
+renderFilters();loadTransferDestinations().finally(()=>load(''));
 </script>
 </body>
 </html>

@@ -4419,6 +4419,8 @@ def _staff_base_path_allowed(path):
         return True
     if path.startswith('/api/staff/my-cases'):
         return True
+    if path == '/api/staff/transfer-destinations':
+        return True
     return False
 
 
@@ -4489,9 +4491,12 @@ def can_access_api_route(role, path):
             '/api/admin/notifications',
             '/api/admin/aja-reconciliation/',
             '/api/staff/my-cases',
+            '/api/staff/transfer-destinations',
         )
         return any(path.startswith(prefix) for prefix in allowed_prefixes)
     if path.startswith('/api/staff/my-cases'):
+        return True
+    if path == '/api/staff/transfer-destinations':
         return True
     if path.startswith('/api/admin/welfare-cases') and role in AMBASSADOR_PRINT_CASE_ROLES:
         return True
@@ -12448,6 +12453,73 @@ def api_staff_case_detail(params, user):
         if err:
             return err
         return {'success': True, 'record': record, 'actions': actions}
+    finally:
+        db.close()
+
+
+def api_staff_transfer_destinations(user):
+    if not _staff_cases_user_allowed(user) and (user or {}).get('role') != 'admin':
+        return {'success': False, 'error': 'Unauthorized'}
+    quick_keys = [
+        'opf_welfare',
+        'legal_advisor',
+        'nurses_matters',
+        'field_inspection',
+        'general_welfare',
+        'death_body_case',
+    ]
+    db = get_db()
+    try:
+        rules = []
+        table_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='welfare_auto_routing_rules' LIMIT 1"
+        ).fetchone()
+        if table_exists:
+            placeholders = ','.join(['?'] * len(quick_keys))
+            rows = db.execute(
+                f"""SELECT rule_key, desk_name, assigned_to, assigned_role, assigned_department,
+                          officer_name, officer_email, officer_phone, priority, sort_order
+                   FROM welfare_auto_routing_rules
+                   WHERE COALESCE(is_active, 1) = 1
+                     AND rule_key IN ({placeholders})""",
+                quick_keys
+            ).fetchall()
+            by_key = {r['rule_key']: dict(r) for r in rows}
+            rules = [by_key[k] for k in quick_keys if k in by_key]
+        if not rules:
+            defaults = {r.get('rule_key'): dict(r) for r in WELFARE_AUTO_ROUTING_DEFAULTS}
+            rules = [defaults[k] for k in quick_keys if k in defaults]
+        usernames = sorted({(r.get('assigned_to') or '').strip() for r in rules if (r.get('assigned_to') or '').strip()})
+        users_by_name = {}
+        if usernames:
+            placeholders = ','.join(['?'] * len(usernames))
+            for row in db.execute(
+                f"""SELECT username, COALESCE(full_name, username) AS full_name,
+                          COALESCE(email, '') AS email,
+                          COALESCE(mobile_number, '') AS mobile_number,
+                          COALESCE(department, '') AS department,
+                          COALESCE(designation, '') AS designation
+                   FROM users
+                   WHERE COALESCE(is_active, 1) = 1
+                     AND username IN ({placeholders})""",
+                usernames
+            ).fetchall():
+                users_by_name[row['username']] = dict(row)
+        items = []
+        for rule in rules:
+            assigned_to = _clean_text(rule.get('assigned_to'), 120)
+            staff = users_by_name.get(assigned_to, {})
+            items.append({
+                'rule_key': _clean_text(rule.get('rule_key'), 120),
+                'desk_name': _clean_text(rule.get('desk_name'), 200),
+                'assigned_to': assigned_to,
+                'assigned_department': _clean_text(rule.get('assigned_department') or staff.get('department'), 200),
+                'officer_name': _clean_text(rule.get('officer_name') or staff.get('full_name') or assigned_to, 200),
+                'officer_email': _clean_text(rule.get('officer_email') or staff.get('email'), 200),
+                'officer_phone': _clean_text(rule.get('officer_phone') or staff.get('mobile_number'), 100),
+                'assigned_role': _clean_text(rule.get('assigned_role') or staff.get('designation'), 120),
+            })
+        return {'success': True, 'items': items}
     finally:
         db.close()
 
@@ -25110,6 +25182,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             self.send_json(api_staff_case_detail(params, user))
+        elif path == '/api/staff/transfer-destinations':
+            user = self.require_auth()
+            if not user: return
+            self.send_json(api_staff_transfer_destinations(user))
         elif path == '/api/admin/facility-occupancy':
             user = self.require_auth()
             if not user: return
@@ -31195,17 +31271,35 @@ if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse'){ensurePulseShell();setTi
 """
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "<body>",
-    '<body data-page-mode="__PAGE_MODE__">',
+    '<body data-page-mode="__PAGE_MODE__" data-user-role="__USER_ROLE__">',
     1
 )
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "</style></head>",
+WELFARE_PAGE_MODE_CSS = (
+    "#counsellorBranchesCard,#welfareRoutingRulesCard,#staffAccountabilityCard,#ambassadorPulseCard{display:none}"
+    "body[data-page-mode=\"welfare\"] #printPackPanel,"
+    "body[data-page-mode=\"welfare\"] #caseListPanel{display:block!important}"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"admin\"] #counsellorBranchesCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"admin\"] #welfareRoutingRulesCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"admin\"] #staffAccountabilityCard{display:block!important}"
+    "body[data-page-mode=\"my\"] #printPackPanel,"
+    "body[data-page-mode=\"my\"] #counsellorBranchesCard,"
+    "body[data-page-mode=\"my\"] #welfareRoutingRulesCard,"
+    "body[data-page-mode=\"my\"] #staffAccountabilityCard,"
+    "body[data-page-mode=\"my\"] #ambassadorPulseCard{display:none!important}"
+    "body[data-page-mode=\"ambassador\"] #counsellorBranchesCard,"
+    "body[data-page-mode=\"ambassador\"] #welfareRoutingRulesCard,"
+    "body[data-page-mode=\"ambassador\"] #staffAccountabilityCard,"
+    "body[data-page-mode=\"ambassador\"] #ambassadorPulseCard{display:none!important}"
     "body[data-page-mode=\"pulse\"] #printPackPanel,"
     "body[data-page-mode=\"pulse\"] #caseListPanel,"
     "body[data-page-mode=\"pulse\"] #counsellorBranchesCard,"
     "body[data-page-mode=\"pulse\"] #welfareRoutingRulesCard,"
     "body[data-page-mode=\"pulse\"] #staffAccountabilityCard{display:none!important}"
-    "body[data-page-mode=\"pulse\"] #ambassadorPulseCard{display:block!important}</style></head>",
+    "body[data-page-mode=\"pulse\"][data-user-role=\"admin\"] #ambassadorPulseCard{display:block!important}"
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "</style></head>",
+    WELFARE_PAGE_MODE_CSS + "</style></head>",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
@@ -31271,6 +31365,13 @@ WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "applyPageModeVisibility();loadUsers();if(PAGE_MODE!=='pulse')loadCases();if(USER_ROLE==='admin'&&PAGE_MODE==='welfare'){loadCounsellorBranches();loadRoutingRules();loadStaffAccountability();}if(USER_ROLE==='admin'&&PAGE_MODE==='pulse'){loadAmbassadorPulseReport();}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);",
     """loadUsers();
 applyPageModeVisibility();
+
+if (PAGE_MODE === 'pulse') {
+  document.querySelectorAll('#printPackPanel,#caseListPanel,#counsellorBranchesCard,#welfareRoutingRulesCard,#staffAccountabilityCard')
+    .forEach(el => { if (el) el.style.display = 'none'; });
+  const pulse = document.getElementById('ambassadorPulseCard');
+  if (pulse) pulse.style.display = 'block';
+}
 
 if (PAGE_MODE !== 'pulse') {
   loadCases();
