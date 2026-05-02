@@ -111,7 +111,8 @@ const lines=[
   d.officer_name?('Officer: '+d.officer_name):'',
   d.officer_phone?('Phone/Mobile: '+d.officer_phone):'',
   d.officer_email?('Email: '+d.officer_email):'',
-  d.assigned_department?('Department: '+d.assigned_department):''
+  d.assigned_department?('Department: '+d.assigned_department):'',
+  (!d.officer_phone&&!d.officer_email)?'Contact details not configured. Admin may update Auto Routing Rules.':''
 ].filter(Boolean);
 help.textContent=lines.join('\n');
 }
@@ -122,7 +123,7 @@ transferDestinationLoadError='';
 if(Array.isArray(d.items)&&d.items.length)transferDestinations=d.items;
 }catch(_e){
 transferDestinations=transferFallbackDestinations.slice();
-transferDestinationLoadError='Could not load transfer destinations.';
+transferDestinationLoadError='Contact details not configured. Admin may update Auto Routing Rules.';
 const help=document.getElementById('transferDestinationHelp');
 if(help)help.textContent=transferDestinationLoadError;
 }

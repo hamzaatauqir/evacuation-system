@@ -31287,7 +31287,284 @@ function renderTransferPanel(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='p
 window.updateTransferDestinationVisibility=function(){const type=(document.getElementById('transferDestinationType')||{}).value||'internal_staff';[['transferStaffWrap',type==='internal_staff'],['transferRuleWrap',type==='auto_routing_rule'],['transferBranchWrap',type==='counsellor_branch']].forEach(function(x){const el=document.getElementById(x[0]);if(el)el.style.display=x[1]?'block':'none';});};
 window.transferCurrentCase=async function(){const err=document.getElementById('transferErr');try{if(err){err.textContent='';err.style.display='none';}if(!current)throw new Error('Open a case first.');const type=(document.getElementById('transferDestinationType')||{}).value||'internal_staff';const reason=((document.getElementById('transferReason')||{}).value||'').trim();if(reason.length<20)throw new Error('Transfer reason must be at least 20 characters.');const body={module:'welfare',case_id:current.id,destination_type:type,reason:reason,visible_to_applicant:!!((document.getElementById('transferVisible')||{}).checked)};if(type==='internal_staff')body.assigned_to=(document.getElementById('transferAssignedTo')||{}).value||'';if(type==='auto_routing_rule')body.routing_rule_key=(document.getElementById('transferRoutingRule')||{}).value||'';if(type==='counsellor_branch')body.branch_key=(document.getElementById('transferBranchKey')||{}).value||'';await jpost('/api/admin/cases/transfer',body);await refresh();}catch(ex){if(err){err.textContent=ex&&ex.message?ex.message:'Transfer failed';err.style.display='block';}else{alert(ex&&ex.message?ex.message:'Transfer failed');}}};
 if(typeof openCase==='function'){const prevOpenCase=openCase;window.openCase=openCase=async function(id){await prevOpenCase(id);renderTransferPanel();};}
-if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse'){ensurePulseShell();setTimeout(function(){window.loadAmbassadorPulseReport&&window.loadAmbassadorPulseReport();},0);}
+if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse'){ensurePulseShell();if(!window.__cwaPulseLoadScheduled){window.__cwaPulseLoadScheduled=true;setTimeout(function(){window.loadAmbassadorPulseReport&&window.loadAmbassadorPulseReport();},0);}}
+})();
+</script>
+"""
+WELFARE_CASES_WIRING_FIX_SCRIPT = """
+<script>
+(function(){
+const CWA_PAGE_MODE = (typeof PAGE_MODE !== 'undefined') ? PAGE_MODE : '';
+const CWA_USER_ROLE = String((typeof USER_ROLE !== 'undefined' ? USER_ROLE : '') || '').trim().toLowerCase();
+const CWA_IS_ADMIN = CWA_USER_ROLE === 'admin';
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(m) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
+  });
+}
+async function cwaGet(url) {
+  const r = await fetch(url, {credentials:'include'});
+  const j = await r.json();
+  if (!r.ok || j.success === false) throw new Error(j.error || 'Request failed');
+  return j;
+}
+function cwaSetTableError(rowsEl, colSpan, message) {
+  if (rowsEl) rowsEl.innerHTML = '<tr><td colspan="'+colSpan+'">'+esc(message)+'</td></tr>';
+}
+function cwaNoRecords(message) {
+  return '<div class="pulse-empty">'+esc(message || 'No records found for selected period.')+'</div>';
+}
+function cwaList(v) { return Array.isArray(v) ? v : []; }
+function cwaRefs(v) { return cwaList(v).filter(Boolean).join(', ') || '-'; }
+function cwaTrim(v, n) {
+  const s = String(v || '-');
+  return s.length > n ? s.slice(0, n - 3) + '...' : s;
+}
+
+window.loadCounsellorBranches = async function() {
+  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare')) return;
+  const card = document.getElementById('counsellorBranchesCard');
+  const errEl = document.getElementById('branchErr');
+  const rowsEl = document.getElementById('branchRows');
+  if (!card) return;
+  if (!rowsEl) {
+    if (errEl) errEl.textContent = 'Error loading branch settings: table body not found';
+    return;
+  }
+  try {
+    card.style.display = 'block';
+    if (errEl) errEl.textContent = '';
+    const d = await cwaGet('/api/admin/counsellor-branches');
+    const items = cwaList(d.items).length ? cwaList(d.items) : (cwaList(d.branches).length ? cwaList(d.branches) : cwaList(d.rows));
+    try { branchItems = items; } catch (_) {}
+    rowsEl.innerHTML = items.length ? items.map(function(b) {
+      return '<tr><td>'+esc(b.branch_name || b.branch_key || '-')+'</td><td>'+esc(b.officer_name || '-')+'</td><td>'+esc(b.designation || '-')+'</td><td>'+esc(b.email || '-')+'</td><td>'+esc(b.phone || '-')+'</td><td>'+((Number(b.is_active || 0) === 1) ? 'Yes' : 'No')+'</td><td><button class="btn2" data-key="'+esc(b.branch_key || '')+'" onclick="editBranch(this.dataset.key)">Edit</button></td></tr>';
+    }).join('') : '<tr><td colspan="7">No branches found.</td></tr>';
+  } catch (e) {
+    const msg = 'Error loading branch settings: ' + ((e && e.message) ? e.message : 'Request failed');
+    if (errEl) errEl.textContent = msg;
+    cwaSetTableError(rowsEl, 7, msg);
+  }
+};
+
+window.loadRoutingRules = async function() {
+  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare')) return;
+  const card = document.getElementById('welfareRoutingRulesCard');
+  const errEl = document.getElementById('routeErr');
+  const rowsEl = document.getElementById('routeRows');
+  if (!card) return;
+  if (!rowsEl) {
+    if (errEl) errEl.textContent = 'Error loading routing rules: table body not found';
+    return;
+  }
+  try {
+    card.style.display = 'block';
+    if (errEl) errEl.textContent = '';
+    const d = await cwaGet('/api/admin/welfare-routing-rules');
+    const items = cwaList(d.items).length ? cwaList(d.items) : (cwaList(d.rules).length ? cwaList(d.rules) : cwaList(d.rows));
+    try { routingRuleItems = items; } catch (_) {}
+    rowsEl.innerHTML = items.length ? items.map(function(r) {
+      return '<tr><td><b>'+esc(r.rule_key || '-')+'</b><br><small>'+esc(r.desk_name || '-')+'</small></td><td>'+esc(r.officer_name || '-')+'</td><td>'+esc(r.assigned_to || '-')+'</td><td>'+esc(r.assigned_department || '-')+'</td><td>'+esc(r.priority || '-')+'</td><td>'+((Number(r.is_active || 0) === 1) ? 'Yes' : 'No')+'</td><td>'+esc(r.sort_order == null ? '-' : r.sort_order)+'</td><td><button class="btn2" data-rule-key="'+esc(r.rule_key || '')+'" onclick="editRoutingRule(this.dataset.ruleKey)">Edit</button></td></tr>';
+    }).join('') : '<tr><td colspan="8">No routing rules found.</td></tr>';
+  } catch (e) {
+    const msg = 'Error loading routing rules: ' + ((e && e.message) ? e.message : 'Request failed');
+    if (errEl) errEl.textContent = msg;
+    cwaSetTableError(rowsEl, 8, msg);
+  }
+};
+
+window.loadStaffAccountability = async function() {
+  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare')) return;
+  const card = document.getElementById('staffAccountabilityCard');
+  const errEl = document.getElementById('acctErr');
+  const kpiEl = document.getElementById('acctKpis');
+  const officerRows = document.getElementById('acctOfficerRows');
+  const caseRows = document.getElementById('acctCaseRows');
+  if (!card) return;
+  if (!officerRows || !caseRows) {
+    if (errEl) errEl.textContent = 'Error loading staff accountability: table body not found';
+    return;
+  }
+  try {
+    card.style.display = 'block';
+    if (errEl) errEl.textContent = '';
+    const d = await cwaGet('/api/admin/staff-accountability');
+    const sum = (d && d.summary) || {};
+    const byOfficer = cwaList(d.by_officer);
+    const overdue = cwaList(d.overdue_cases);
+    const noAction = cwaList(d.no_action_cases);
+    try {
+      accountabilityData.overdueCasesByRef = {};
+      accountabilityData.noActionCasesByRef = {};
+      overdue.forEach(function(x){ if (x && x.reference) accountabilityData.overdueCasesByRef[String(x.reference)] = x; });
+      noAction.forEach(function(x){ if (x && x.reference) accountabilityData.noActionCasesByRef[String(x.reference)] = x; });
+    } catch (_) {}
+    if (kpiEl) {
+      kpiEl.innerHTML = [['Assigned Open',sum.total_assigned_open],['Overdue >5 Days',sum.overdue_5_days],['No Action After Assignment',sum.no_action_after_assignment],['Resolved This Week',sum.resolved_this_week]].map(function(x) {
+        return '<div class="kpi"><b>'+Number(x[1] || 0)+'</b><span>'+esc(x[0])+'</span></div>';
+      }).join('');
+    }
+    officerRows.innerHTML = byOfficer.length ? byOfficer.map(function(r) {
+      return '<tr><td>'+esc(r.officer_name || r.assigned_to || '-')+'<br><small>'+esc(r.department || '')+'</small></td><td>'+Number(r.assigned_open || 0)+'</td><td>'+Number(r.overdue_5_days || 0)+'</td><td>'+Number(r.no_action_after_assignment || 0)+'</td><td>'+Number(r.resolved_this_week || 0)+'</td></tr>';
+    }).join('') : '<tr><td colspan="5">No assigned staff cases found.</td></tr>';
+    const attention = overdue.concat(noAction).slice(0, 50);
+    caseRows.innerHTML = attention.length ? attention.map(function(c) {
+      return '<tr><td>'+esc(c.reference || '-')+'</td><td>'+esc(c.module || '-')+'</td><td>'+esc(c.subject || '-')+'</td><td>'+esc(c.assigned_to || '-')+'</td><td>'+Number(c.days_pending || 0)+'</td><td>'+esc(c.status || '-')+'</td><td>'+esc(c.last_action_note || '-')+'</td></tr>';
+    }).join('') : '<tr><td colspan="7">No overdue or no-action cases right now.</td></tr>';
+  } catch (e) {
+    const msg = 'Error loading staff accountability: ' + ((e && e.message) ? e.message : 'Request failed');
+    if (errEl) errEl.textContent = msg;
+    if (kpiEl) kpiEl.innerHTML = '';
+    cwaSetTableError(officerRows, 5, msg);
+    cwaSetTableError(caseRows, 7, msg);
+  }
+};
+
+function cwaPulseSetError(message) {
+  if (typeof pulseSetError === 'function') {
+    pulseSetError(message || '');
+    return;
+  }
+  const el = document.getElementById('pulseError') || document.getElementById('pulseErr');
+  if (!el) return;
+  el.textContent = message || '';
+  el.style.display = message ? 'block' : 'none';
+}
+function cwaPulseIssueItems(data) {
+  const diplomatic = cwaList(data && data.diplomatic_issues);
+  if (diplomatic.length) return diplomatic;
+  return cwaList(data && data.policy_sensitive_issues);
+}
+function cwaPulseWorkloadItems(data, themes) {
+  const workload = cwaList(data && data.community_service_workload);
+  if (workload.length) return workload;
+  return cwaList(themes).filter(function(t) { return String(t.sensitivity || '').toLowerCase() !== 'high'; });
+}
+function cwaPulseCards(items, mapper) {
+  if (!items.length) return cwaNoRecords();
+  return items.map(mapper).join('');
+}
+function cwaPulseEvidenceCards(items) {
+  return cwaPulseCards(items, function(c) {
+    return '<div class="pulse-evidence-card"><div class="line"><strong>Reference:</strong> '+esc(c.reference || '-')+'</div><div class="line"><strong>Module:</strong> '+esc(c.module || '-')+' | <strong>Date:</strong> '+esc((c.created_at || '').slice(0,10) || '-')+' | <strong>Status:</strong> '+esc(c.status || '-')+' | <strong>Assigned to:</strong> '+esc(c.assigned_to || '-')+'</div><div class="line"><strong>Theme:</strong> '+esc(((c.theme || {}).theme_label) || '-')+'</div><div class="title">Subject: '+esc(c.subject || '-')+'</div><div class="excerpt"><strong>Excerpt:</strong> '+esc(cwaTrim(c.details_excerpt || '-', 300))+'</div></div>';
+  });
+}
+function cwaRenderPulseReport(data) {
+  if (typeof ensurePulseShell === 'function') ensurePulseShell();
+  const summary = (data && data.summary) || {};
+  const operational = (data && data.operational_status) || {};
+  const themes = cwaList(data && data.top_themes);
+  const policy = cwaPulseIssueItems(data);
+  const workload = cwaPulseWorkloadItems(data, themes);
+  const staff = cwaList(((data || {}).staff_accountability || {}).by_officer);
+  const annex = (data && data.evidence_annex) || {};
+  const evidence = cwaList(data && data.evidence_cases);
+  let seniorEvidence = cwaList(annex.policy_evidence_cases);
+  if (!seniorEvidence.length) seniorEvidence = cwaList(annex.senior_attention);
+  let operationalEvidence = cwaList(annex.operational_evidence_cases);
+  if (!operationalEvidence.length) operationalEvidence = cwaList(annex.operational_samples);
+  if (!seniorEvidence.length && !operationalEvidence.length && evidence.length) {
+    seniorEvidence = evidence.filter(function(c) { return String(((c.theme || {}).sensitivity) || '').toLowerCase() === 'high'; });
+    operationalEvidence = evidence.filter(function(c) { return String(((c.theme || {}).sensitivity) || '').toLowerCase() !== 'high'; });
+  }
+  if (!(data && data.include_full_details)) operationalEvidence = operationalEvidence.slice(0, 10);
+  let debug = document.getElementById('pulseDebugLine');
+  if (!debug) {
+    debug = document.createElement('div');
+    debug.id = 'pulseDebugLine';
+    debug.className = 'hint';
+    debug.style.marginTop = '8px';
+    const anchor = document.getElementById('pulseError') || document.getElementById('pulseErr') || document.getElementById('pulseSummaryKpis') || document.getElementById('ambassadorPulseCard');
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(debug, anchor.nextSibling);
+  }
+  debug.textContent = 'Report data loaded: yes | Total: ' + Number(summary.total_items || 0) + ' | Themes: ' + themes.length + ' | Policy issues: ' + policy.length;
+  const points = cwaList(data && data.ambassador_brief_points);
+  const fallbackPoints = [
+    'Total submissions during period: ' + Number(summary.total_items || 0) + '.',
+    'High-sensitivity issues: ' + Number(summary.high_sensitivity_count || 0) + '.',
+    'Highest-volume operational workload: ' + String(summary.top_operational_theme || summary.top_theme_label || '-') + '.',
+    'Key diplomatic issue: ' + String(summary.top_diplomatic_issue || '-') + '.',
+    'Overdue cases: ' + Number(operational.total_overdue || 0) + '.',
+    'Evidence references are available below.'
+  ];
+  const brief = document.getElementById('pulseBriefPoints');
+  if (brief) brief.innerHTML = (points.length ? points : fallbackPoints).slice(0, 6).map(function(p){ return '<li>'+esc(p)+'</li>'; }).join('');
+  const kpi = document.getElementById('pulseSummaryKpis');
+  if (kpi) {
+    kpi.innerHTML = [['Total submissions',summary.total_items],['High sensitivity',summary.high_sensitivity_count],['Top operational workload',summary.top_operational_theme || '-'],['Top diplomatic issue',summary.top_diplomatic_issue || '-'],['Overdue cases',operational.total_overdue || 0]].map(function(x) {
+      return '<div class="kpi"><b>'+esc(x[1] == null ? '-' : x[1])+'</b><span>'+esc(x[0])+'</span></div>';
+    }).join('');
+  }
+  const narrative = document.getElementById('pulseExecutiveNarrative');
+  if (narrative) narrative.textContent = String((data && data.executive_narrative) || 'No records found for selected period.');
+  const policyWrap = document.getElementById('pulsePolicyCardsWrap');
+  if (policyWrap) {
+    policyWrap.innerHTML = cwaPulseCards(policy, function(p) {
+      return '<div class="pulse-policy-card"><h4>'+esc(p.issue_title || p.theme_label || '-')+'</h4><div class="pulse-meta"><strong>Why it matters:</strong> '+esc(p.why_it_matters || '-')+'</div><div class="pulse-meta"><strong>Authority / institution:</strong> '+esc(p.authority || '-')+'</div><div class="pulse-meta"><strong>Submissions:</strong> '+Number(p.count || 0)+' | <strong>Evidence:</strong> '+esc(cwaRefs(p.evidence_references || p.sample_references))+'</div><div><strong>Suggested action:</strong> '+esc(p.suggested_action || '-')+'</div><div class="pulse-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+esc(cwaTrim(p.representative_excerpt || p.short_summary || '-', 300))+'</div></div>';
+    });
+  }
+  const workloadWrap = document.getElementById('pulseWorkloadTableWrap');
+  if (workloadWrap) {
+    workloadWrap.innerHTML = cwaPulseCards(workload, function(w) {
+      return '<div class="pulse-policy-card"><h4>'+esc(w.theme_label || w.issue_title || '-')+'</h4><div class="pulse-meta"><strong>Count:</strong> '+Number(w.count || 0)+' | <strong>Responsible desk/section:</strong> '+esc(w.responsible_section || w.authority || '-')+'</div><div class="pulse-meta"><strong>Sample refs:</strong> '+esc(cwaRefs(w.sample_references || w.evidence_references))+'</div><div>'+esc(w.note || 'Operational/service handling')+'</div></div>';
+    });
+  }
+  const staffWrap = document.getElementById('pulseStaffTableWrap');
+  if (staffWrap) {
+    staffWrap.innerHTML = staff.length ? pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'], staff.map(function(o) {
+      return [esc(o.officer_name || o.assigned_to || '-'), esc(o.assigned_open || 0), esc(o.overdue_5_days || 0), esc(o.no_action_after_assignment || 0), esc(o.resolved_this_week || 0)];
+    })) : cwaNoRecords();
+  }
+  const note = document.getElementById('pulseEvidenceNote');
+  if (note) note.textContent = String(annex.note || 'Evidence is grouped by senior-attention issues first, followed by operational samples. Full case records remain available by reference number.');
+  const seniorWrap = document.getElementById('pulseEvidenceSeniorWrap');
+  if (seniorWrap) seniorWrap.innerHTML = cwaPulseEvidenceCards(seniorEvidence);
+  const opsWrap = document.getElementById('pulseEvidenceOperationalWrap');
+  if (opsWrap) opsWrap.innerHTML = cwaPulseEvidenceCards(operationalEvidence);
+  const themeRows = document.getElementById('pulseThemesRows');
+  if (themeRows) themeRows.innerHTML = themes.length ? themes.map(function(t){ return '<tr><td>'+esc(t.theme_label || '-')+'</td><td>'+Number(t.count || 0)+'</td><td>'+esc(t.sensitivity || '-')+'</td><td>'+esc(t.authority || '-')+'</td><td>'+esc(cwaRefs(t.sample_references))+'</td></tr>'; }).join('') : '<tr><td colspan="5">No records found for selected period.</td></tr>';
+  const policyRows = document.getElementById('pulsePolicyRows');
+  if (policyRows) policyRows.innerHTML = policy.length ? policy.map(function(p){ return '<tr><td>'+esc(p.issue_title || p.theme_label || '-')+'</td><td>'+Number(p.count || 0)+'</td><td>'+esc(p.authority || '-')+'</td><td>'+esc(p.suggested_action || '-')+'</td><td>'+esc(cwaRefs(p.evidence_references || p.sample_references))+'</td></tr>'; }).join('') : '<tr><td colspan="5">No records found for selected period.</td></tr>';
+  const officerRows = document.getElementById('pulseOfficerRows');
+  if (officerRows) officerRows.innerHTML = staff.length ? staff.map(function(o){ return '<tr><td>'+esc(o.officer_name || o.assigned_to || '-')+'</td><td>'+Number(o.assigned_open || 0)+'</td><td>'+Number(o.overdue_5_days || 0)+'</td><td>'+Number(o.no_action_after_assignment || 0)+'</td><td>'+Number(o.resolved_this_week || 0)+'</td></tr>'; }).join('') : '<tr><td colspan="5">No records found for selected period.</td></tr>';
+  const evidenceRows = document.getElementById('pulseEvidenceRows');
+  if (evidenceRows) evidenceRows.innerHTML = evidence.length ? evidence.map(function(c){ return '<tr><td>'+esc(c.reference || '-')+'</td><td>'+esc(c.module || '-')+'</td><td>'+esc((c.created_at || '').slice(0,10) || '-')+'</td><td>'+esc(((c.theme || {}).theme_label) || '-')+'</td><td>'+esc(c.subject || '-')+'</td><td>'+esc(c.status || '-')+'</td><td>'+esc(c.assigned_to || '-')+'</td><td>'+esc(cwaTrim(c.details_excerpt || '-', 220))+'</td></tr>'; }).join('') : '<tr><td colspan="8">No records found for selected period.</td></tr>';
+}
+window.renderPulseReport = cwaRenderPulseReport;
+window.loadAmbassadorPulseReport = async function() {
+  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'pulse')) return;
+  if (typeof ensurePulseShell === 'function') ensurePulseShell();
+  try {
+    cwaPulseSetError('');
+    const start = (document.getElementById('pulseStartDate') || {}).value || (typeof pulseDaysAgoIso === 'function' ? pulseDaysAgoIso(7) : '');
+    const end = (document.getElementById('pulseEndDate') || {}).value || (typeof pulseTodayIso === 'function' ? pulseTodayIso() : '');
+    const includeEl = document.getElementById('pulseIncludeFull') || document.getElementById('pulseFullDetails');
+    const include = includeEl && includeEl.checked ? '1' : '0';
+    const url = '/api/admin/ambassador-pulse-report?start_date=' + encodeURIComponent(start) + '&end_date=' + encodeURIComponent(end) + '&include_full_details=' + include;
+    const data = await cwaGet(url);
+    try { pulseReportData = data; } catch (_) {}
+    window.cwaPulseReportData = data;
+    try {
+      cwaRenderPulseReport(data);
+    } catch (renderErr) {
+      cwaPulseSetError('Report rendering error: ' + ((renderErr && renderErr.message) ? renderErr.message : 'Unknown error'));
+    }
+  } catch (e) {
+    cwaPulseSetError((e && e.message) ? e.message : 'Failed to load report');
+  }
+};
+try { loadAmbassadorPulseReport = window.loadAmbassadorPulseReport; } catch (_) {}
+if (CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare') {
+  setTimeout(function() {
+    window.loadCounsellorBranches();
+    window.loadRoutingRules();
+    window.loadStaffAccountability();
+  }, 0);
+}
+if (CWA_IS_ADMIN && CWA_PAGE_MODE === 'pulse' && !window.__cwaPulseLoadScheduled) {
+  window.__cwaPulseLoadScheduled = true;
+  setTimeout(function() { window.loadAmbassadorPulseReport(); }, 0);
+}
 })();
 </script>
 """
@@ -31326,12 +31603,12 @@ WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';let current=",
-    "const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';const IS_ADMIN=String(USER_ROLE||'').toLowerCase()==='admin';let current=",
+    "const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';const IS_ADMIN=String(USER_ROLE||'').trim().toLowerCase()==='admin';let current=",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "function badge(v){return '<span class=\"badge '+String(v||'').replaceAll(' ','_')+'\">'+(v||'-')+'</span>'}",
-    "function badge(v){return '<span class=\"badge '+String(v||'').replaceAll(' ','_')+'\">'+(v||'-')+'</span>'}function safeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(s){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[s];});}",
+    "function badge(v){return '<span class=\"badge '+String(v||'').replaceAll(' ','_')+'\">'+(v||'-')+'</span>'}function esc(s){return String(s == null ? '' : s).replace(/[&<>\"']/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m];});}function safeHtml(v){return esc(v);}",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
@@ -31408,6 +31685,16 @@ WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "function printAmbassadorPulseReport(){if(USER_ROLE!=='admin')return;window.print()}",
+    "function printAmbassadorPulseReport(){if(!IS_ADMIN)return;window.print()}",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "const branchOption=(USER_ROLE==='admin')?",
+    "const branchOption=(IS_ADMIN)?",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "window.loadAmbassadorPulseReport=async function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;",
     """window.loadAmbassadorPulseReport=async function(){
 if (PAGE_MODE !== 'pulse') return;""",
@@ -31436,7 +31723,10 @@ if (IS_ADMIN && PAGE_MODE === 'welfare') {
 }
 
 if (IS_ADMIN && PAGE_MODE === 'pulse') {
-  loadAmbassadorPulseReport();
+  window.__cwaPulseLoadScheduled = true;
+  setTimeout(function() {
+    if (window.loadAmbassadorPulseReport) window.loadAmbassadorPulseReport();
+  }, 0);
 }
 
 refreshNotificationBadges();
@@ -31444,7 +31734,7 @@ setInterval(refreshNotificationBadges, 60000);
 window.addEventListener('focus', refreshNotificationBadges);""",
     1
 )
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_PULSE_TRANSFER_SCRIPT + "</body></html>")
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_PULSE_TRANSFER_SCRIPT + WELFARE_CASES_WIRING_FIX_SCRIPT + "</body></html>")
 
 PUBLIC_HOME_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Welfare Wing Digital Services</title>
