@@ -3808,7 +3808,7 @@ def _email_worker_loop():
                     "\nNo branch-specific email is configured. This email has been sent to the default Counsellor Section address.\n"
                     if int(job.get('fallback_default_email_used') or 0) == 1 else ''
                 )
-                body = (
+                body = job.get('body') or (
                     f"This request appears to fall under {branch_name} and has been auto-forwarded for appropriate handling. "
                     "The Community Welfare Wing has treated it as handed over/resolved from its side.\n\n"
                     f"Case reference: {case_reference}\n"
@@ -3893,8 +3893,8 @@ def _email_worker_loop():
                     'nurse_request_updated': 'Nurse Request Updated',
                     'nurse_request_resolved': 'Nurse Request Resolved'
                 }
-                subject = f"{type_map.get(job.get('type'), 'Nurse Request')} - {job.get('complaint_id','')}"
-                body = (
+                subject = job.get('subject') or f"{type_map.get(job.get('type'), 'Nurse Request')} - {job.get('complaint_id','')}"
+                body = job.get('body') or (
                     f"Dear {(job.get('name') or 'Nurse')},\n\n"
                     f"Complaint ID: {job.get('complaint_id','')}\n"
                     f"Status: {job.get('status','')}\n\n"
@@ -3910,12 +3910,21 @@ def _email_worker_loop():
                 db.commit()
                 db.close()
             elif job.get('type') == 'welfare_case_assigned':
-                subject = f"Community Welfare case assigned: {job.get('reference', '')}"
-                body = "A Community Welfare case has been assigned to you for action."
+                subject = job.get('subject') or f"Community Welfare case assigned: {job.get('reference', '')}"
+                body = job.get('body') or "A Community Welfare case has been assigned to you for action."
                 ok, detail = _send_email_smtp(job['to'], subject, body)
                 db = get_db()
                 db.execute("INSERT INTO audit_log (action, user, details) VALUES ('email_welfare_case_assigned', ?, ?)",
                            [job.get('changed_by', 'system'), json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'reference': job.get('reference')})])
+                db.commit()
+                db.close()
+            elif job.get('type') in ('case_transfer_staff', 'case_transfer_applicant'):
+                subject = job.get('subject') or f"Community Welfare case update: {job.get('reference', '')}"
+                body = job.get('body') or "There is an update regarding a Community Welfare case."
+                ok, detail = _send_email_smtp(job['to'], subject, body)
+                db = get_db()
+                db.execute("INSERT INTO audit_log (action, user, details) VALUES ('email_case_transfer_notice', ?, ?)",
+                           [job.get('changed_by', 'system'), json.dumps({'to': job.get('to'), 'ok': ok, 'detail': detail, 'reference': job.get('reference'), 'type': job.get('type')})])
                 db.commit()
                 db.close()
         except Exception as _ew_exc:
@@ -4467,6 +4476,8 @@ def can_access_api_route(role, path):
         return path.startswith('/api/fee-') or path.startswith('/api/office-expense')
     if role == 'iraq_cwa':
         return path.startswith('/api/iraq')
+    if path == '/api/admin/cases/transfer' and role in WELFARE_CASE_ACCESS_ROLES:
+        return True
     if is_community_desk_role(role):
         allowed_prefixes = (
             '/api/admin/community-welfare/',
@@ -5506,6 +5517,7 @@ def _assignment_public_note_for_staff(username):
         row = db.execute("""SELECT username, role, COALESCE(full_name, username) AS full_name,
                                    COALESCE(email, '') AS email,
                                    COALESCE(mobile_number, '') AS mobile_number,
+                                   COALESCE(department, '') AS department,
                                    COALESCE(designation, '') AS designation,
                                    show_contact_to_applicant,
                                    COALESCE(show_contact_to_applicant_explicit, 0) AS show_contact_to_applicant_explicit
@@ -5518,8 +5530,11 @@ def _assignment_public_note_for_staff(username):
         designation = staff.get('designation') or role.replace('_', ' ').title() or 'Assigned Staff'
         name = staff.get('full_name') or staff.get('username') or 'Assigned Staff'
         email = staff.get('email') or ''
-        if mobile and can_show_assigned_staff_contact(staff):
+        department = staff.get('department') or ''
+        if can_show_assigned_staff_contact(staff):
             email_line = f"\nEmail: {email}" if email else ""
+            mobile_line = f"\nMobile/WhatsApp: {mobile}" if mobile else ""
+            department_line = f"\nDepartment/Desk: {department}" if department else ""
             return (
                 "Your request has been assigned for follow-up. The assigned staff member may contact you "
                 "to obtain further information or to process your request. You may also contact the assigned "
@@ -5527,13 +5542,16 @@ def _assignment_public_note_for_staff(username):
                 "Assigned Staff:\n"
                 f"Name: {name}\n"
                 f"Designation: {designation}"
-                f"{email_line}\n"
-                f"Mobile/WhatsApp: {mobile}"
+                f"{department_line}"
+                f"{email_line}"
+                f"{mobile_line}"
             )
+        department_line = f"Department/Desk: {department}\n" if department else ""
         return (
             "Assigned Officer/Staff:\n"
             f"Name: {name}\n"
             f"Designation: {designation}\n\n"
+            f"{department_line}"
             "The assigned officer/staff member may contact you if further information is required."
         )
     except Exception:
@@ -8020,7 +8038,9 @@ def api_legal_case_intake(data):
                 visible_to_applicant=0
             )
             if assignee:
-                _queue_welfare_assignment_email(db, assignee, ref)
+                _queue_welfare_assignment_email(db, assignee, ref, changed_by='system',
+                                                assignment_note=f"Auto-assigned based on keywords: {matched_keywords}.",
+                                                module_hint='legal')
         db.commit()
         verification = _send_email_verification_for_record(
             'legal_case_requests', cur.lastrowid, ref, full_name, email, 'legal'
@@ -8596,6 +8616,310 @@ def _queue_welfare_general_feedback_ack(name, email, changed_by='public'):
     })
 
 
+def _display_value(value, fallback='-'):
+    text = _clean_text(value, 12000)
+    return text if text else fallback
+
+
+def _staff_payload_from_user(user_row, include_private_contact=True):
+    staff = dict(user_row or {})
+    role = staff.get('role') or ''
+    name = staff.get('display_name') or staff.get('full_name') or staff.get('username') or 'Assigned Officer'
+    designation = staff.get('designation') or role.replace('_', ' ').title() or 'Assigned Staff'
+    phone = staff.get('mobile_number') or staff.get('phone') or ''
+    email = staff.get('email') or ''
+    if not include_private_contact and not can_show_assigned_staff_contact(staff):
+        phone = ''
+        email = ''
+    return {
+        'username': staff.get('username') or '',
+        'name': name,
+        'role': role,
+        'designation': designation,
+        'department': staff.get('department') or '',
+        'phone': phone,
+        'email': email,
+    }
+
+
+def _case_payload_from_record(module, row):
+    d = dict(row or {})
+    module_key = _clean_text(module, 40).lower()
+    if module_key == 'welfare':
+        ref = d.get('case_reference') or ''
+        return {
+            'module': 'Welfare',
+            'module_key': 'welfare',
+            'reference': ref,
+            'case_reference': ref,
+            'case_type': d.get('case_type') or 'Community Welfare',
+            'category': d.get('category') or '',
+            'priority': d.get('priority') or 'Normal',
+            'status': d.get('status') or '',
+            'applicant_name': d.get('requester_name') or d.get('subject_name') or 'Applicant',
+            'applicant_phone': d.get('requester_phone') or d.get('subject_phone') or '',
+            'applicant_email': d.get('requester_email') or '',
+            'requester_name': d.get('requester_name') or '',
+            'requester_phone': d.get('requester_phone') or '',
+            'requester_email': d.get('requester_email') or '',
+            'requester_location': d.get('requester_location') or '',
+            'passport': d.get('subject_passport') or '',
+            'cnic': d.get('subject_cnic') or '',
+            'civil_id': d.get('subject_civil_id') or '',
+            'subject': d.get('subject_name') or d.get('concern_summary') or '',
+            'summary': d.get('concern_summary') or '',
+            'details': d.get('details') or d.get('concern_summary') or '',
+            'assigned_to': d.get('assigned_to') or '',
+            'assigned_name': d.get('assigned_to') or '',
+            'assigned_department': d.get('assigned_department') or '',
+            'created_at': d.get('created_at') or '',
+            'due_date': d.get('due_date') or '',
+        }
+    if module_key == 'legal':
+        ref = d.get('reference_id') or ''
+        return {
+            'module': 'Legal/OPF',
+            'module_key': 'legal',
+            'reference': ref,
+            'case_reference': ref,
+            'case_type': d.get('case_type') or 'Legal / OPF',
+            'category': d.get('case_type') or '',
+            'priority': d.get('priority') or 'Normal',
+            'status': d.get('status') or '',
+            'applicant_name': d.get('full_name') or 'Applicant',
+            'applicant_phone': d.get('mobile') or '',
+            'applicant_email': d.get('email') or '',
+            'passport': d.get('passport_number') or '',
+            'cnic': d.get('cnic') or '',
+            'civil_id': d.get('civil_id') or '',
+            'subject': d.get('subject') or d.get('case_type') or '',
+            'summary': d.get('subject') or '',
+            'details': d.get('description') or '',
+            'assigned_to': d.get('assigned_to_username') or '',
+            'assigned_name': d.get('assigned_to_name') or d.get('assigned_to_username') or '',
+            'assigned_department': d.get('assigned_department') or '',
+            'created_at': d.get('created_at') or '',
+            'due_date': d.get('due_date') or '',
+        }
+    if module_key == 'nurse':
+        ref = _nurse_complaint_reference(d)
+        return {
+            'module': 'Nurses',
+            'module_key': 'nurse',
+            'reference': ref,
+            'case_reference': ref,
+            'case_type': d.get('complaint_category') or d.get('category') or 'Nurse Complaint',
+            'category': d.get('category') or d.get('complaint_category') or '',
+            'priority': d.get('priority') or 'Normal',
+            'status': d.get('status') or d.get('complaint_status') or '',
+            'applicant_name': d.get('nurse_full_name') or d.get('full_name') or 'Applicant',
+            'applicant_phone': _first_value(d.get('mobile_number'), d.get('mobile'), d.get('phone')),
+            'applicant_email': _first_value(d.get('email_address'), d.get('email')),
+            'passport': d.get('passport_number') or '',
+            'cnic': d.get('cnic') or '',
+            'civil_id': d.get('civil_id') or '',
+            'subject': d.get('subject') or d.get('complaint_category') or '',
+            'summary': d.get('subject') or '',
+            'details': _first_value(d.get('complaint_details'), d.get('description'), d.get('details')),
+            'assigned_to': d.get('assigned_to_username') or '',
+            'assigned_name': d.get('assigned_to_name') or d.get('assigned_to_username') or '',
+            'assigned_department': d.get('assigned_department') or '',
+            'created_at': d.get('created_at') or '',
+            'due_date': d.get('due_date') or '',
+        }
+    if module_key == 'death':
+        ref = d.get('reference_id') or ''
+        return {
+            'module': 'Death',
+            'module_key': 'death',
+            'reference': ref,
+            'case_reference': ref,
+            'case_type': 'Death Case',
+            'category': d.get('repatriation_required') or 'Death Case',
+            'priority': d.get('priority') or 'Normal',
+            'status': d.get('status') or '',
+            'applicant_name': d.get('reporter_name') or d.get('next_of_kin_name') or 'Family Representative',
+            'applicant_phone': d.get('reporter_mobile') or d.get('next_of_kin_mobile') or '',
+            'applicant_email': d.get('reporter_email') or d.get('next_of_kin_email') or '',
+            'passport': d.get('deceased_passport') or '',
+            'cnic': d.get('deceased_cnic') or '',
+            'civil_id': d.get('deceased_civil_id') or '',
+            'subject': d.get('deceased_name') or 'Death Case',
+            'summary': d.get('hospital_or_authority') or d.get('place_of_death') or '',
+            'details': d.get('description') or '',
+            'assigned_to': d.get('assigned_to_username') or '',
+            'assigned_name': d.get('assigned_to_name') or d.get('assigned_to_username') or '',
+            'assigned_department': d.get('assigned_department') or '',
+            'created_at': d.get('created_at') or '',
+            'due_date': d.get('due_date') or '',
+        }
+    return {
+        'module': module or 'Case',
+        'module_key': module_key,
+        'reference': d.get('reference') or d.get('reference_id') or d.get('case_reference') or '',
+        'case_reference': d.get('reference') or d.get('reference_id') or d.get('case_reference') or '',
+        'case_type': d.get('case_type') or '',
+        'category': d.get('category') or '',
+        'priority': d.get('priority') or '',
+        'status': d.get('status') or '',
+        'applicant_name': d.get('applicant_name') or d.get('requester_name') or d.get('full_name') or 'Applicant',
+        'applicant_phone': d.get('applicant_phone') or d.get('requester_phone') or d.get('mobile') or '',
+        'applicant_email': d.get('applicant_email') or d.get('requester_email') or d.get('email') or '',
+        'passport': d.get('passport') or d.get('passport_number') or '',
+        'cnic': d.get('cnic') or '',
+        'civil_id': d.get('civil_id') or '',
+        'subject': d.get('subject') or '',
+        'summary': d.get('summary') or '',
+        'details': d.get('details') or d.get('description') or '',
+        'assigned_to': d.get('assigned_to') or d.get('assigned_to_username') or '',
+        'assigned_name': d.get('assigned_name') or d.get('assigned_to_name') or '',
+        'assigned_department': d.get('assigned_department') or '',
+        'created_at': d.get('created_at') or '',
+        'due_date': d.get('due_date') or '',
+    }
+
+
+def _case_payload_for_reference(db, case_reference, module_hint=''):
+    ref = _clean_text(case_reference, 160)
+    hint = _clean_text(module_hint, 40).lower()
+    if not ref:
+        return {}
+    if hint in ('', 'welfare'):
+        row = db.execute("SELECT * FROM welfare_cases WHERE case_reference = ? LIMIT 1", [ref]).fetchone()
+        if row:
+            return _case_payload_from_record('welfare', row)
+    if hint in ('', 'legal', 'opf'):
+        row = db.execute("SELECT * FROM legal_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
+        if row:
+            return _case_payload_from_record('legal', row)
+    if hint in ('', 'nurse', 'nurses'):
+        row = _find_nurse_complaint(db, ref)
+        if row:
+            return _case_payload_from_record('nurse', row)
+    if hint in ('', 'death'):
+        row = db.execute("SELECT * FROM death_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
+        if row:
+            return _case_payload_from_record('death', row)
+    return {'reference': ref, 'case_reference': ref, 'module': module_hint or 'Community Welfare'}
+
+
+def _build_full_case_email_body(case_payload, heading='', transfer_reason='', include_applicant_contact=True):
+    """
+    Returns official plain text case details for staff assignment, staff transfer,
+    and Counsellor Branch handover emails.
+    """
+    p = dict(case_payload or {})
+    ref = p.get('reference') or p.get('case_reference') or ''
+    officer = dict(p.get('assigned_officer') or {})
+    previous = p.get('previous_assignee') or ''
+    assigned_by = p.get('assigned_by') or ''
+    lines = [
+        heading or 'Case assignment / transfer details',
+        '',
+        f"Reference: {_display_value(ref)}",
+        f"Module: {_display_value(p.get('module'))}",
+        f"Case type/category: {_display_value(p.get('case_type') or p.get('category'))}",
+        f"Priority: {_display_value(p.get('priority'))}",
+        f"Status: {_display_value(p.get('status'))}",
+        f"Created: {_display_value(p.get('created_at'))}",
+    ]
+    if p.get('due_date'):
+        lines.append(f"Due date: {_display_value(p.get('due_date'))}")
+    lines.extend(['', 'Applicant / requester details:'])
+    lines.append(f"Name: {_display_value(p.get('applicant_name') or p.get('requester_name'))}")
+    if include_applicant_contact:
+        lines.append(f"Phone: {_display_value(p.get('applicant_phone') or p.get('requester_phone'))}")
+        lines.append(f"Email: {_display_value(p.get('applicant_email') or p.get('requester_email'))}")
+    lines.append(f"Passport: {_display_value(p.get('passport'))}")
+    lines.append(f"CNIC: {_display_value(p.get('cnic'))}")
+    lines.append(f"Civil ID: {_display_value(p.get('civil_id'))}")
+    lines.extend([
+        '',
+        f"Subject: {_display_value(p.get('subject') or p.get('summary'))}",
+        f"Category: {_display_value(p.get('category'))}",
+        '',
+        'Full details / description:',
+        _display_value(p.get('details') or p.get('description') or p.get('summary')),
+    ])
+    if transfer_reason:
+        lines.extend(['', 'Assignment / transfer reason:', _display_value(transfer_reason)])
+    if previous:
+        lines.append(f"Previous assignee: {_display_value(previous)}")
+    if assigned_by:
+        lines.append(f"Assigned / transferred by: {_display_value(assigned_by)}")
+    if officer:
+        lines.extend([
+            '',
+            'Assigned officer / desk:',
+            f"Name: {_display_value(officer.get('name'))}",
+            f"Designation/Role: {_display_value(officer.get('designation') or officer.get('role'))}",
+            f"Department/Desk: {_display_value(officer.get('department'))}",
+            f"Contact: {_display_value(officer.get('phone'))}",
+            f"Email: {_display_value(officer.get('email'))}",
+        ])
+    portal_guidance = p.get('portal_guidance') or 'Please log in to the portal to update actions.'
+    lines.extend(['', portal_guidance, '', 'Regards,', 'Community Welfare Wing', 'Embassy of Pakistan, Kuwait'])
+    return '\n'.join(lines)
+
+
+def _queue_case_transfer_staff_email(staff_row, case_payload, transfer_reason='', previous_assignee='', assigned_by='system'):
+    staff = _staff_payload_from_user(staff_row, include_private_contact=True)
+    to_addr = (staff.get('email') or '').strip()
+    if not _is_valid_email_loose(to_addr):
+        return False
+    payload = dict(case_payload or {})
+    payload['assigned_officer'] = staff
+    payload['previous_assignee'] = previous_assignee or payload.get('previous_assignee') or ''
+    payload['assigned_by'] = assigned_by or payload.get('assigned_by') or 'system'
+    ref = payload.get('reference') or payload.get('case_reference') or ''
+    body = _build_full_case_email_body(
+        payload,
+        heading='Case assigned/transferred to you',
+        transfer_reason=transfer_reason,
+        include_applicant_contact=True
+    )
+    return _enqueue_email_job({
+        'type': 'case_transfer_staff',
+        'to': to_addr,
+        'subject': f"Case assigned/transferred to you - {ref}",
+        'body': body,
+        'reference': ref,
+        'changed_by': assigned_by or 'system'
+    })
+
+
+def _queue_case_transfer_applicant_email(applicant_email, applicant_name, case_payload, officer_payload, transfer_reason='', changed_by='system'):
+    to_addr = (applicant_email or '').strip()
+    if not _is_valid_email_loose(to_addr):
+        return False
+    p = dict(case_payload or {})
+    officer = dict(officer_payload or {})
+    ref = p.get('reference') or p.get('case_reference') or ''
+    name = (applicant_name or p.get('applicant_name') or 'Applicant').strip() or 'Applicant'
+    body = (
+        f"Dear {name},\n\n"
+        f"Your case/reference {ref} has been transferred to the concerned desk/officer for appropriate handling.\n\n"
+        "New handling officer/desk:\n"
+        f"Name: {_display_value(officer.get('name'))}\n"
+        f"Designation/Role: {_display_value(officer.get('designation') or officer.get('role'))}\n"
+        f"Department/Desk: {_display_value(officer.get('department'))}\n"
+        f"Contact: {_display_value(officer.get('phone'))}\n"
+        f"Email: {_display_value(officer.get('email'))}\n\n"
+        "Reason / update:\n"
+        f"{_display_value(transfer_reason)}\n\n"
+        "The concerned officer/desk will handle the matter from this stage. Please mention your reference number in any follow-up.\n\n"
+        "Regards,\nCommunity Welfare Wing\nEmbassy of Pakistan, Kuwait"
+    )
+    return _enqueue_email_job({
+        'type': 'case_transfer_applicant',
+        'to': to_addr,
+        'subject': f"Your case has been transferred to the concerned desk - {ref}",
+        'body': body,
+        'reference': ref,
+        'changed_by': changed_by or 'system'
+    })
+
+
 def _queue_counsellor_section_handover_internal(case_payload, handover_meta, changed_by='system'):
     branch_email = _clean_text(handover_meta.get('email'), 200)
     to_addr = (branch_email or '').strip()
@@ -8605,9 +8929,39 @@ def _queue_counsellor_section_handover_internal(case_payload, handover_meta, cha
         fallback_used = 1
     if not _is_valid_email_loose(to_addr):
         return False
+    full_payload = dict(case_payload or {})
+    full_payload['assigned_officer'] = {
+        'name': handover_meta.get('officer_name') or 'Concerned Branch Officer',
+        'designation': handover_meta.get('designation') or '',
+        'role': 'Counsellor Branch',
+        'department': handover_meta.get('branch_name') or '',
+        'phone': handover_meta.get('phone') or '',
+        'email': to_addr,
+    }
+    full_payload['status'] = full_payload.get('status') or 'Resolved / external handover'
+    full_body = _build_full_case_email_body(
+        full_payload,
+        heading=f"Counsellor Branch handover - {handover_meta.get('branch_name') or COUNSELLOR_SECTION_NAME}",
+        transfer_reason=handover_meta.get('reason') or 'Detected as Counsellor Branch matter.',
+        include_applicant_contact=True
+    )
+    keyword_text = ', '.join(handover_meta.get('matched_keywords') or []) or 'No keyword list provided'
+    full_body = (
+        f"{full_body}\n\n"
+        "Counsellor Branch handover details:\n"
+        f"Detected branch: {handover_meta.get('branch_name') or COUNSELLOR_SECTION_NAME}\n"
+        f"Officer name: {handover_meta.get('officer_name') or 'Concerned Branch Officer'}\n"
+        f"Designation: {handover_meta.get('designation') or '-'}\n"
+        f"Email: {to_addr}\n"
+        f"Phone: {handover_meta.get('phone') or '-'}\n"
+        f"Matched reason: {handover_meta.get('reason') or '-'}\n"
+        f"Matched keywords: {keyword_text}\n"
+        "Note: The matter has been handed over to the concerned branch and closed/resolved from the Community Welfare side."
+    )
     return _enqueue_email_job({
         'type': 'counsellor_section_handover_internal',
         'to': to_addr,
+        'body': full_body,
         'fallback_default_email_used': fallback_used,
         'branch_key': handover_meta.get('branch_key') or '',
         'branch_name': handover_meta.get('branch_name') or '',
@@ -8847,7 +9201,9 @@ def api_welfare_feedback(data):
                     [assigned_to]
                 ).fetchone()
                 if assignee:
-                    _queue_welfare_assignment_email(db, assignee, reference)
+                    _queue_welfare_assignment_email(db, assignee, reference, changed_by='system',
+                                                    assignment_note=f"Auto-assigned based on keywords: {matched_keywords}.",
+                                                    module_hint='welfare')
             else:
                 _welfare_insert_action(
                     db,
@@ -8999,7 +9355,12 @@ def api_admin_welfare_users():
     try:
         placeholders = ','.join(['?'] * len(WELFARE_ASSIGNABLE_ROLES))
         rows = [dict(r) for r in db.execute(
-            f"SELECT username, full_name, role FROM users WHERE role IN ({placeholders}) ORDER BY role, username",
+            f"""SELECT username, full_name, role, COALESCE(email,'') AS email,
+                      COALESCE(mobile_number,'') AS mobile_number,
+                      COALESCE(department,'') AS department,
+                      COALESCE(designation,'') AS designation
+               FROM users WHERE role IN ({placeholders})
+               ORDER BY role, username""",
             list(WELFARE_ASSIGNABLE_ROLES)
         ).fetchall()]
         return {'success': True, 'users': rows}
@@ -9205,7 +9566,7 @@ def api_admin_notifications(params, user):
             db.close()
 
 
-def _queue_welfare_assignment_email(db, assignee_row, case_reference):
+def _queue_welfare_assignment_email(db, assignee_row, case_reference, changed_by='system', assignment_note='', module_hint=''):
     cfg = _load_email_config(db)
     if not cfg.get('enabled') or not cfg.get('from_email') or not cfg.get('app_password_enc'):
         print('SMTP not configured; assignment email not sent.', flush=True)
@@ -9215,12 +9576,335 @@ def _queue_welfare_assignment_email(db, assignee_row, case_reference):
     if not to_email:
         print('No assignee email; assignment email not sent.', flush=True)
         return
+    payload = _case_payload_for_reference(db, case_reference, module_hint)
+    payload['assigned_officer'] = _staff_payload_from_user(assignee, include_private_contact=True)
+    payload['assigned_by'] = changed_by or 'system'
+    ref = payload.get('reference') or payload.get('case_reference') or case_reference
+    body = _build_full_case_email_body(
+        payload,
+        heading='Case assigned to you',
+        transfer_reason=assignment_note,
+        include_applicant_contact=True
+    )
     _enqueue_email_job({
         'type': 'welfare_case_assigned',
         'to': to_email,
-        'reference': case_reference,
-        'changed_by': 'system'
+        'reference': ref,
+        'subject': f"Case assigned/transferred to you - {ref}",
+        'body': body,
+        'changed_by': changed_by or 'system'
     })
+
+
+def _transfer_module_key(value):
+    key = _clean_text(value, 40).lower()
+    if key in ('welfare', 'community_welfare', 'feedback'):
+        return 'welfare'
+    if key in ('legal', 'opf', 'legal_opf', 'legal/opf'):
+        return 'legal'
+    if key in ('nurse', 'nurses', 'nurse_complaint'):
+        return 'nurse'
+    if key in ('death', 'death_case'):
+        return 'death'
+    return ''
+
+
+def _transfer_staff_lookup(db, username):
+    uname = _clean_text(username, 120)
+    if not uname:
+        return None
+    return db.execute(
+        """SELECT id, username, COALESCE(full_name, username) AS display_name,
+                  COALESCE(full_name, username) AS full_name, role,
+                  COALESCE(department,'') AS department,
+                  COALESCE(designation,'') AS designation,
+                  COALESCE(email,'') AS email,
+                  COALESCE(mobile_number,'') AS mobile_number,
+                  COALESCE(show_contact_to_applicant,0) AS show_contact_to_applicant,
+                  COALESCE(show_contact_to_applicant_explicit,0) AS show_contact_to_applicant_explicit,
+                  COALESCE(is_active,1) AS is_active
+           FROM users
+           WHERE username = ?
+           LIMIT 1""",
+        [uname]
+    ).fetchone()
+
+
+def _transfer_visible_flag(data):
+    if 'visible_to_applicant' not in (data or {}):
+        return True
+    return str((data or {}).get('visible_to_applicant')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _transfer_assignee_from_destination(db, data):
+    destination_type = _clean_text((data or {}).get('destination_type') or 'internal_staff', 80)
+    if destination_type == 'auto_routing_rule':
+        rule_key = _clean_text((data or {}).get('routing_rule_key'), 120).lower()
+        if not rule_key:
+            return None, None, {'success': False, 'error': 'routing_rule_key is required'}
+        rule = db.execute(
+            """SELECT * FROM welfare_auto_routing_rules
+               WHERE rule_key = ? AND COALESCE(is_active,1) = 1
+               LIMIT 1""",
+            [rule_key]
+        ).fetchone()
+        if not rule:
+            return None, None, {'success': False, 'error': 'Routing rule not found or inactive'}
+        assigned_to = (dict(rule).get('assigned_to') or '').strip()
+        if not assigned_to:
+            return None, None, {'success': False, 'error': 'Routing rule does not have an assigned staff user'}
+        return assigned_to, dict(rule), None
+    assigned_to = _clean_text((data or {}).get('assigned_to') or (data or {}).get('assigned_to_username'), 120)
+    if not assigned_to:
+        return None, None, {'success': False, 'error': 'assigned_to is required'}
+    return assigned_to, None, None
+
+
+def _user_can_transfer_assigned_case(user, assigned_username):
+    if (user or {}).get('role') == 'admin':
+        return True
+    return _clean_text(assigned_username, 120) == _clean_text((user or {}).get('user'), 120)
+
+
+def api_admin_cases_transfer(data, user):
+    payload = data or {}
+    module = _transfer_module_key(payload.get('module'))
+    if not module:
+        return {'success': False, 'error': 'Invalid module'}
+    destination_type = _clean_text(payload.get('destination_type') or 'internal_staff', 80)
+    reason = _clean_text(payload.get('reason'), 4000)
+    if len(reason) < 20:
+        return {'success': False, 'error': 'Transfer reason must be at least 20 characters'}
+    visible_to_applicant = _transfer_visible_flag(payload)
+    actor = (user or {}).get('user') or 'system'
+    db = get_db()
+    try:
+        if destination_type == 'counsellor_branch':
+            if module != 'welfare':
+                return {'success': False, 'error': 'Counsellor Branch handover is supported for welfare cases only'}
+            case_id = payload.get('case_id') or payload.get('id')
+            reference = _clean_text(payload.get('reference_id') or payload.get('case_reference') or payload.get('reference'), 160)
+            if case_id:
+                row = db.execute("SELECT * FROM welfare_cases WHERE id = ? LIMIT 1", [case_id]).fetchone()
+            else:
+                row = db.execute("SELECT * FROM welfare_cases WHERE case_reference = ? LIMIT 1", [reference]).fetchone()
+            if not row:
+                return {'success': False, 'error': 'Welfare case not found'}
+            current = dict(row)
+            if not _user_can_transfer_assigned_case(user, current.get('assigned_to')):
+                return {'success': False, 'error': 'Only the assigned staff member or admin can transfer this case'}
+            branch_key = _clean_text(payload.get('branch_key'), 80).lower()
+            if not branch_key:
+                return {'success': False, 'error': 'branch_key is required'}
+            branch = _get_counsellor_branch_contact(branch_key) or {}
+            if not branch:
+                return {'success': False, 'error': 'Counsellor Branch not found'}
+            branch_name = branch.get('branch_name') or branch_key
+            branch_email = branch.get('email') or COUNSELLOR_SECTION_EMAIL
+            branch_phone = branch.get('phone') or COUNSELLOR_SECTION_PHONE
+            branch_officer = branch.get('officer_name') or 'Concerned Branch Officer'
+            note = (
+                f"Transferred / handed over to {branch_name}. Officer: {branch_officer}. "
+                f"Email: {branch_email}. Phone: {branch_phone}. Reason: {reason}. "
+                "Community Welfare Wing has marked the matter as external handover/resolved from its side."
+            )
+            db.execute(
+                """UPDATE welfare_cases
+                   SET status = 'Resolved',
+                       assigned_to = ?,
+                       assigned_role = 'counsellor_external',
+                       assigned_department = ?,
+                       resolved_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP,
+                       escalation_level = 'external_handover'
+                   WHERE id = ?""",
+                [f'external_branch:{branch_key}', branch_name, current.get('id')]
+            )
+            _welfare_insert_action(db, current.get('id'), actor, 'external_handover',
+                                   current.get('assigned_to') or '', f'external_branch:{branch_key}',
+                                   note, True)
+            case_payload = _case_payload_from_record('welfare', current)
+            case_payload.update({
+                'status': 'Resolved / external handover',
+                'branch_key': branch_key,
+                'branch_name': branch_name,
+                'officer_name': branch_officer,
+                'designation': branch.get('designation') or '',
+                'branch_email': branch_email,
+                'branch_phone': branch_phone,
+            })
+            handover = dict(branch)
+            handover['reason'] = reason
+            handover['matched_keywords'] = []
+            db.commit()
+            _queue_counsellor_section_handover_internal(case_payload, handover, actor)
+            _queue_counsellor_section_handover_applicant(case_payload, actor)
+            return {'success': True, 'status': 'external_handover'}
+
+        assigned_to, routing_rule, err = _transfer_assignee_from_destination(db, payload)
+        if err:
+            return err
+        assignee = _transfer_staff_lookup(db, assigned_to)
+        if not assignee:
+            return {'success': False, 'error': 'Assignee not found'}
+        assignee_d = dict(assignee)
+        if int(assignee_d.get('is_active') or 0) != 1:
+            return {'success': False, 'error': 'Assignee is inactive'}
+        staff_public = _staff_payload_from_user(assignee_d, include_private_contact=False)
+        staff_private = _staff_payload_from_user(assignee_d, include_private_contact=True)
+        route_note = ''
+        if routing_rule:
+            route_note = f" Routing rule: {routing_rule.get('desk_name') or routing_rule.get('rule_key')}."
+        transfer_note = f"Transferred to {staff_private.get('name')} ({assigned_to}).{route_note} Reason: {reason}"
+
+        if module == 'welfare':
+            case_id = payload.get('case_id') or payload.get('id')
+            reference = _clean_text(payload.get('reference_id') or payload.get('case_reference') or payload.get('reference'), 160)
+            if case_id:
+                row = db.execute("SELECT * FROM welfare_cases WHERE id = ? LIMIT 1", [case_id]).fetchone()
+            else:
+                row = db.execute("SELECT * FROM welfare_cases WHERE case_reference = ? LIMIT 1", [reference]).fetchone()
+            if not row:
+                return {'success': False, 'error': 'Welfare case not found'}
+            current = dict(row)
+            if not _user_can_transfer_assigned_case(user, current.get('assigned_to')):
+                return {'success': False, 'error': 'Only the assigned staff member or admin can transfer this case'}
+            old_assignee = current.get('assigned_to') or ''
+            old_status = current.get('status') or ''
+            db.execute(
+                """UPDATE welfare_cases
+                   SET assigned_to = ?, assigned_role = ?, assigned_department = ?,
+                       status = 'Assigned', assigned_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [assigned_to, assignee_d.get('role') or '', assignee_d.get('department') or '', current.get('id')]
+            )
+            _welfare_insert_action(db, current.get('id'), actor, 'transfer',
+                                   old_assignee, assigned_to, transfer_note, visible_to_applicant)
+            case_payload = _case_payload_from_record('welfare', current)
+            case_payload.update({'status': 'Assigned', 'assigned_officer': staff_private,
+                                 'previous_assignee': old_assignee, 'assigned_by': actor})
+            applicant_email = case_payload.get('applicant_email')
+            applicant_name = case_payload.get('applicant_name')
+        elif module == 'legal':
+            ref = _clean_text(payload.get('reference_id') or payload.get('case_reference') or payload.get('reference'), 160)
+            row = db.execute("SELECT * FROM legal_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
+            if not row:
+                return {'success': False, 'error': 'Legal/OPF case not found'}
+            current = dict(row)
+            if not _user_can_transfer_assigned_case(user, current.get('assigned_to_username')):
+                return {'success': False, 'error': 'Only the assigned staff member or admin can transfer this case'}
+            old_assignee = current.get('assigned_to_username') or ''
+            old_status = current.get('status') or ''
+            db.execute(
+                """UPDATE legal_case_requests
+                   SET assigned_to_user_id = ?, assigned_to_username = ?, assigned_to_name = ?,
+                       assigned_role = ?, assigned_department = ?, assigned_by = ?,
+                       assigned_at = CURRENT_TIMESTAMP, assignment_note = ?,
+                       status = 'Assigned', last_action_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                   WHERE reference_id = ?""",
+                [str(assignee_d.get('id') or ''), assigned_to, staff_private.get('name'),
+                 assignee_d.get('role') or '', assignee_d.get('department') or '', actor,
+                 reason, actor, ref]
+            )
+            _add_legal_case_action(db, ref, 'transfer', actor, (user or {}).get('role') or '',
+                                   note=transfer_note, old_status=old_status, new_status='Assigned',
+                                   old_assigned_to=old_assignee, new_assigned_to=assigned_to,
+                                   visible_to_applicant=1 if visible_to_applicant else 0)
+            case_payload = _case_payload_from_record('legal', current)
+            case_payload.update({'status': 'Assigned', 'assigned_officer': staff_private,
+                                 'previous_assignee': old_assignee, 'assigned_by': actor})
+            applicant_email = case_payload.get('applicant_email')
+            applicant_name = case_payload.get('applicant_name')
+        elif module == 'nurse':
+            ident = _complaint_identifier_from(payload)
+            row = _find_nurse_complaint(db, ident)
+            if not row:
+                return {'success': False, 'error': 'Nurse complaint not found'}
+            current = dict(row)
+            ref = _nurse_complaint_reference(current)
+            if not _user_can_transfer_assigned_case(user, current.get('assigned_to_username')):
+                return {'success': False, 'error': 'Only the assigned staff member or admin can transfer this case'}
+            old_assignee = current.get('assigned_to_username') or ''
+            old_status = current.get('status') or current.get('complaint_status') or ''
+            db.execute(
+                """UPDATE nurse_complaints
+                   SET assigned_to_user_id = ?, assigned_to_username = ?, assigned_to_name = ?,
+                       assigned_role = ?, assigned_department = ?, assigned_by = ?,
+                       assigned_at = CURRENT_TIMESTAMP, assignment_note = ?,
+                       complaint_status = 'Assigned', status = 'Assigned',
+                       last_action_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+                       updated_by = ?
+                   WHERE id = ?""",
+                [str(assignee_d.get('id') or ''), assigned_to, staff_private.get('name'),
+                 assignee_d.get('role') or '', assignee_d.get('department') or '', actor,
+                 reason, actor, current.get('id')]
+            )
+            _add_nurse_complaint_action(db, ref, 'transfer', actor, (user or {}).get('role') or '',
+                                        note=transfer_note, old_status=old_status, new_status='Assigned',
+                                        old_assigned_to=old_assignee, new_assigned_to=assigned_to,
+                                        visible_to_nurse=1 if visible_to_applicant else 0)
+            case_payload = _case_payload_from_record('nurse', current)
+            case_payload.update({'status': 'Assigned', 'assigned_officer': staff_private,
+                                 'previous_assignee': old_assignee, 'assigned_by': actor})
+            applicant_email = case_payload.get('applicant_email')
+            applicant_name = case_payload.get('applicant_name')
+            if not applicant_email and current.get('nurse_reference_id'):
+                nurse_row = db.execute(
+                    "SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
+                    [current.get('nurse_reference_id')]
+                ).fetchone()
+                if nurse_row:
+                    nurse_d = dict(nurse_row)
+                    applicant_email = nurse_d.get('email') or applicant_email
+                    applicant_name = nurse_d.get('full_name') or applicant_name
+                    case_payload['applicant_email'] = applicant_email
+                    case_payload['applicant_name'] = applicant_name
+        elif module == 'death':
+            ref = _clean_text(payload.get('reference_id') or payload.get('case_reference') or payload.get('reference'), 160)
+            row = db.execute("SELECT * FROM death_case_requests WHERE reference_id = ? LIMIT 1", [ref]).fetchone()
+            if not row:
+                return {'success': False, 'error': 'Death case not found'}
+            current = dict(row)
+            if not _user_can_transfer_assigned_case(user, current.get('assigned_to_username')):
+                return {'success': False, 'error': 'Only the assigned staff member or admin can transfer this case'}
+            old_assignee = current.get('assigned_to_username') or ''
+            old_status = current.get('status') or ''
+            db.execute(
+                """UPDATE death_case_requests
+                   SET assigned_to_user_id = ?, assigned_to_username = ?, assigned_to_name = ?,
+                       assigned_role = ?, assigned_department = ?, assigned_by = ?,
+                       assigned_at = CURRENT_TIMESTAMP, assignment_note = ?,
+                       status = 'Assigned', last_action_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                   WHERE reference_id = ?""",
+                [str(assignee_d.get('id') or ''), assigned_to, staff_private.get('name'),
+                 assignee_d.get('role') or '', assignee_d.get('department') or '', actor,
+                 reason, actor, ref]
+            )
+            _add_death_case_action(db, ref, 'transfer', actor, (user or {}).get('role') or '',
+                                   note=transfer_note, old_status=old_status, new_status='Assigned',
+                                   old_assigned_to=old_assignee, new_assigned_to=assigned_to,
+                                   visible_to_reporter=1 if visible_to_applicant else 0)
+            case_payload = _case_payload_from_record('death', current)
+            case_payload.update({'status': 'Assigned', 'assigned_officer': staff_private,
+                                 'previous_assignee': old_assignee, 'assigned_by': actor})
+            applicant_email = case_payload.get('applicant_email')
+            applicant_name = case_payload.get('applicant_name')
+        else:
+            return {'success': False, 'error': 'Unsupported module'}
+
+        db.commit()
+        _queue_case_transfer_staff_email(assignee_d, case_payload, reason, old_assignee, actor)
+        if visible_to_applicant:
+            _queue_case_transfer_applicant_email(applicant_email, applicant_name, case_payload, staff_public, reason, actor)
+        return {'success': True, 'module': module, 'assigned_to': assigned_to}
+    except Exception as e:
+        db.rollback()
+        return {'success': False, 'error': str(e)}
+    finally:
+        db.close()
 
 
 def api_admin_welfare_assign(data, user):
@@ -9251,7 +9935,10 @@ def api_admin_welfare_assign(data, user):
         db.commit()
         row_d = dict(row)
         assignee_d = dict(assignee)
-        _queue_welfare_assignment_email(db, assignee, row['case_reference'])
+        _queue_welfare_assignment_email(db, assignee, row['case_reference'],
+                                        changed_by=user.get('user'),
+                                        assignment_note=note,
+                                        module_hint='welfare')
         notify_case_event(
             case_type=row_d.get('case_type') or 'welfare',
             case_reference=row_d.get('case_reference') or '',
@@ -13406,7 +14093,8 @@ def _build_ambassador_pulse_report(cases, start_date, end_date, include_full_det
             'top_operational_theme': top_operational_label,
             'top_operational_theme_count': top_operational_count,
             'top_diplomatic_issue': top_diplomatic_label,
-            'top_diplomatic_issue_count': top_diplomatic_count
+            'top_diplomatic_issue_count': top_diplomatic_count,
+            'top_diplomatic_issue_refs': ((top_diplomatic or {}).get('sample_references') or [])[:5]
         },
         'ambassador_brief_points': ambassador_brief_points[:6],
         'executive_narrative': (
@@ -26940,6 +27628,18 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             self.send_json(result, 200 if result.get('ok') else 400)
             return
 
+        if path == '/api/admin/cases/transfer':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            res = api_admin_cases_transfer(data, user)
+            self.send_json(res, 200 if res.get('success') else 400)
+            return
+
         if path.startswith('/api/admin/welfare-cases/'):
             user = self.require_auth()
             if not user: return
@@ -27575,14 +28275,34 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 nurse = db.execute("SELECT full_name, email FROM nurse_registrations WHERE reference_id = ? ORDER BY id DESC LIMIT 1",
                                    [comp.get('nurse_reference_id', '')]).fetchone()
                 nurse = dict(nurse) if nurse else None
-                assignee_user = db.execute("SELECT email, COALESCE(full_name, username) AS full_name FROM users WHERE username = ?",
+                assignee_user = db.execute("""SELECT username, email, COALESCE(full_name, username) AS full_name,
+                                                    COALESCE(full_name, username) AS display_name,
+                                                    role, COALESCE(department,'') AS department,
+                                                    COALESCE(designation,'') AS designation,
+                                                    COALESCE(mobile_number,'') AS mobile_number
+                                             FROM users WHERE username = ?""",
                                            [assignee['username']]).fetchone()
                 assignee_user = dict(assignee_user) if assignee_user else None
                 db.commit()
                 if nurse and nurse.get('email') and _is_valid_email_loose(nurse.get('email')):
                     _enqueue_email_job({'type': 'nurse_request_updated', 'to': nurse.get('email'), 'complaint_id': complaint_ref, 'name': nurse.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
                 if assignee_user and assignee_user.get('email') and _is_valid_email_loose(assignee_user.get('email')):
-                    _enqueue_email_job({'type': 'nurse_request_assigned', 'to': assignee_user.get('email'), 'complaint_id': complaint_ref, 'name': assignee_user.get('full_name',''), 'status': new_status, 'changed_by': user['user']})
+                    case_payload = _case_payload_from_record('nurse', comp)
+                    case_payload.update({
+                        'status': new_status,
+                        'assigned_officer': _staff_payload_from_user(assignee_user, include_private_contact=True),
+                        'assigned_by': user['user'],
+                    })
+                    _enqueue_email_job({
+                        'type': 'nurse_request_assigned',
+                        'to': assignee_user.get('email'),
+                        'complaint_id': complaint_ref,
+                        'name': assignee_user.get('full_name',''),
+                        'status': new_status,
+                        'subject': f"Case assigned/transferred to you - {complaint_ref}",
+                        'body': _build_full_case_email_body(case_payload, heading='Case assigned to you', transfer_reason=assignment_note),
+                        'changed_by': user['user']
+                    })
                 notify_case_event(
                     case_type='nurse',
                     case_reference=complaint_ref,
@@ -27887,7 +28607,11 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                     if not assignee:
                         self.send_json({'ok': False, 'success': False, 'error': 'assigned_to_username required'}, 400); return
                     a = db.execute("""SELECT id, username, COALESCE(full_name, username) AS display_name,
-                                             role, COALESCE(department,'') AS department
+                                             COALESCE(full_name, username) AS full_name,
+                                             role, COALESCE(department,'') AS department,
+                                             COALESCE(designation,'') AS designation,
+                                             COALESCE(email,'') AS email,
+                                             COALESCE(mobile_number,'') AS mobile_number
                                       FROM users WHERE username = ?""", [assignee]).fetchone()
                     if not a:
                         self.send_json({'ok': False, 'success': False, 'error': 'Assignee not found'}, 404); return
@@ -27960,6 +28684,9 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                                            visible_to_applicant=1)
                 db.commit()
                 if path in ('/api/admin/legal-cases/assign', '/api/legal-cases/assign'):
+                    _queue_welfare_assignment_email(db, a, ref, changed_by=user['user'],
+                                                    assignment_note=(data.get('assignment_note') or '').strip(),
+                                                    module_hint='legal')
                     notify_case_event(
                         case_type='legal',
                         case_reference=ref,
@@ -28110,7 +28837,11 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                     if not assignee:
                         self.send_json({'ok': False, 'success': False, 'error': 'assigned_to_username required'}, 400); return
                     a = db.execute("""SELECT id, username, COALESCE(full_name, username) AS display_name,
-                                             role, COALESCE(department,'') AS department
+                                             COALESCE(full_name, username) AS full_name,
+                                             role, COALESCE(department,'') AS department,
+                                             COALESCE(designation,'') AS designation,
+                                             COALESCE(email,'') AS email,
+                                             COALESCE(mobile_number,'') AS mobile_number
                                       FROM users WHERE username = ?""", [assignee]).fetchone()
                     if not a:
                         self.send_json({'ok': False, 'success': False, 'error': 'Assignee not found'}, 404); return
@@ -28185,6 +28916,9 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 applicant_email = (rec.get('reporter_email') or rec.get('next_of_kin_email') or '').strip()
                 applicant_name = rec.get('reporter_name') or rec.get('next_of_kin_name') or 'Family Representative'
                 if path in ('/api/admin/death-cases/assign', '/api/death-cases/assign'):
+                    _queue_welfare_assignment_email(db, a, ref, changed_by=user['user'],
+                                                    assignment_note=(data.get('assignment_note') or '').strip(),
+                                                    module_hint='death')
                     notify_case_event(
                         case_type='death',
                         case_reference=ref,
@@ -30396,7 +31130,52 @@ cwaLoadPrintAssignees();
 enhancePrintRows();
 </script>
 """
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + "</body></html>")
+WELFARE_CASES_PULSE_TRANSFER_SCRIPT = """
+<script>
+(function(){
+function cwaHtml(v){return String(v==null?'':v).replace(/[&<>"']/g,function(s){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s];});}
+function pulseTodayIso(){return new Date().toISOString().slice(0,10)}
+function pulseDaysAgoIso(days){const d=new Date();d.setDate(d.getDate()-days);return d.toISOString().slice(0,10)}
+function pulseSetError(msg){const el=document.getElementById('pulseError');if(!el)return;if(msg){el.textContent=msg;el.style.display='block';}else{el.textContent='';el.style.display='none';}}
+function pulseTable(headers,rows){if(!rows||!rows.length)return '<div class="pulse-empty">No records for selected period.</div>';let h='<div class="pulse-table-wrap"><table><thead><tr>'+headers.map(x=>'<th>'+cwaHtml(x)+'</th>').join('')+'</tr></thead><tbody>';rows.forEach(r=>{h+='<tr>'+r.map(c=>'<td>'+String(c)+'</td>').join('')+'</tr>';});return h+'</tbody></table></div>';}
+function ensurePulseShell(){if(typeof PAGE_MODE==='undefined'||PAGE_MODE!=='pulse')return;const card=document.getElementById('ambassadorPulseCard');if(!card)return;card.style.display='block';if(card.dataset.ready==='pulse')return;card.dataset.ready='pulse';card.innerHTML='\
+<style>\
+.pulse-print-header{display:none;border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;margin:0 0 12px;background:#fff}\
+.pulse-print-header h2{margin:6px 0 4px;font-size:20px;color:#0f172a}.pulse-print-header .sub{font-size:12px;color:#475569}\
+.pulse-section{padding:14px;border-bottom:1px solid #e2e8f0}.pulse-section:last-child{border-bottom:0}.pulse-section h3{margin:0 0 8px;color:#10253f;font-size:16px}.pulse-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pulse-key-points{margin:0;padding-left:18px}.pulse-key-points li{margin:6px 0;line-height:1.45}.pulse-narrative{font-size:13px;line-height:1.5;color:#0f172a}.pulse-policy-cards,.pulse-evidence-list{display:grid;gap:10px}.pulse-policy-card,.pulse-evidence-card{border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;background:#fff;page-break-inside:avoid}.pulse-policy-card h4{margin:0 0 6px;font-size:14px;color:#10253f}.pulse-meta{font-size:12px;color:#334155;margin-bottom:6px}.pulse-table-wrap{overflow:auto}.pulse-table-wrap table{width:100%;table-layout:auto}.pulse-table-wrap th,.pulse-table-wrap td{word-break:break-word;overflow-wrap:anywhere}.pulse-empty{padding:18px;text-align:center;color:#64748b;background:#f8fafc;border-radius:8px}.pulse-evidence-card .line{font-size:12px;color:#334155;margin-bottom:4px}.pulse-evidence-card .title{font-size:13px;font-weight:700;color:#0f172a;margin-bottom:4px}.pulse-evidence-card .excerpt{font-size:12px;color:#1e293b}\
+@media print{@page{size:A4 portrait;margin:12mm}body{background:#fff}.top,.side,#printPackPanel,#caseListPanel,#counsellorBranchesCard,#welfareRoutingRulesCard,#staffAccountabilityCard,.pulse-controls button,.pulse-controls label,#pulseError{display:none!important}.shell{display:block}.main{width:100%}.head{display:none}.content{padding:0}.panel{border:0}.pulse-print-header{display:block!important}.pulse-section{break-inside:avoid;page-break-inside:avoid;padding:9px 0}.pulse-table-wrap{overflow:visible}.pulse-table-wrap table{font-size:10px}.pulse-table-wrap th,.pulse-table-wrap td{padding:5px 6px;white-space:normal}.pulse-policy-card,.pulse-evidence-card{break-inside:avoid;page-break-inside:avoid}}\
+</style>\
+<div id="pulsePrintHeader" class="pulse-print-header"><div><strong>Embassy of Pakistan, Kuwait</strong></div><div class="sub">Community Welfare Wing</div><h2>Ambassador Pulse Brief</h2><div class="sub">Period: <span id="pulsePrintPeriod">-</span></div><div class="sub">Generated: <span id="pulsePrintGenerated">-</span></div></div>\
+<div class="pulse-section"><h3>Ambassador Pulse Brief</h3><div class="pulse-controls"><input id="pulseStartDate" type="date"><input id="pulseEndDate" type="date"><label style="font-size:12px;color:#475569"><input id="pulseIncludeFull" type="checkbox"> Include internal full details</label><button type="button" onclick="loadAmbassadorPulseReport()">Generate Report</button><button type="button" class="btn2" onclick="printAmbassadorPulseReport()">Print / Save PDF</button><button type="button" class="btn2" onclick="copyPulseSummary()">Copy Summary</button></div><div id="pulseError" class="err" style="display:none"></div></div>\
+<div class="pulse-section"><h3>Ambassador Brief - Key Points</h3><ul id="pulseBriefPoints" class="pulse-key-points"><li>Generate report to view key points.</li></ul><div id="pulseSummaryKpis" class="kpis" style="margin-top:12px"></div></div>\
+<div class="pulse-section"><h3>Issue-Focused Executive Narrative</h3><div id="pulseExecutiveNarrative" class="pulse-narrative">Generate report to view executive narrative.</div></div>\
+<div class="pulse-section"><h3>Issues Requiring Diplomatic / Senior Attention</h3><div id="pulsePolicyCardsWrap" class="pulse-policy-cards"><div class="pulse-empty">Generate report to view senior-attention issues.</div></div></div>\
+<div class="pulse-section"><h3>Community Service Workload</h3><div id="pulseWorkloadTableWrap" class="pulse-table-wrap"><div class="pulse-empty">Generate report to view workload themes.</div></div></div>\
+<div class="pulse-section"><h3>Staff Accountability Snapshot</h3><div id="pulseStaffTableWrap" class="pulse-table-wrap"><div class="pulse-empty">Generate report to view staff snapshot.</div></div></div>\
+<div class="pulse-section"><h3>Evidence Annex</h3><p class="hint" id="pulseEvidenceNote">Full case records remain available in the portal by reference number.</p><h4 style="margin:4px 0 8px;color:#10253f">A. Evidence for Senior Attention</h4><div id="pulseEvidenceSeniorWrap" class="pulse-evidence-list"><div class="pulse-empty">Generate report to view senior evidence.</div></div><h4 style="margin:12px 0 8px;color:#10253f">B. Operational Evidence Samples</h4><div id="pulseEvidenceOperationalWrap" class="pulse-evidence-list"><div class="pulse-empty">Generate report to view operational evidence samples.</div></div></div>';const start=document.getElementById('pulseStartDate');const end=document.getElementById('pulseEndDate');if(start&&!start.value)start.value=pulseDaysAgoIso(7);if(end&&!end.value)end.value=pulseTodayIso();}
+function renderPulseReport(rep){ensurePulseShell();const s=(rep&&rep.summary)||{};const op=(rep&&rep.operational_status)||{};const period=(rep&&rep.period)||{};const generatedAt=(rep&&rep.generated_at)||'';const printPeriod=document.getElementById('pulsePrintPeriod');const printGenerated=document.getElementById('pulsePrintGenerated');if(printPeriod)printPeriod.textContent=(period.start_date||'-')+' to '+(period.end_date||'-');if(printGenerated)printGenerated.textContent=generatedAt||'-';const brief=document.getElementById('pulseBriefPoints');const points=(rep&&rep.ambassador_brief_points)||[];if(brief)brief.innerHTML=(points.length?points:['The report is generated from available case records in the selected period.','Evidence references are listed below for verification.']).slice(0,6).map(p=>'<li>'+cwaHtml(p)+'</li>').join('');const kpi=document.getElementById('pulseSummaryKpis');if(kpi)kpi.innerHTML=[['Total submissions',s.total_items],['High sensitivity',s.high_sensitivity_count],['Top operational workload',s.top_operational_theme||'-'],['Top diplomatic issue',s.top_diplomatic_issue||'-'],['Overdue cases',op.total_overdue||0]].map(x=>'<div class="kpi"><b>'+cwaHtml(x[1]||0)+'</b><span>'+cwaHtml(x[0])+'</span></div>').join('');const narrative=document.getElementById('pulseExecutiveNarrative');if(narrative)narrative.textContent=String((rep&&rep.executive_narrative)||'No executive narrative available for this period.');const policy=(rep&&rep.diplomatic_issues)||[];const policyWrap=document.getElementById('pulsePolicyCardsWrap');if(policyWrap)policyWrap.innerHTML=policy.length?policy.map(p=>'<div class="pulse-policy-card"><h4>'+cwaHtml(p.issue_title||p.theme_label||'-')+'</h4><div class="pulse-meta"><strong>Why it matters:</strong> '+cwaHtml(p.why_it_matters||'-')+'</div><div class="pulse-meta"><strong>Authority/institution:</strong> '+cwaHtml(p.authority||'-')+'</div><div class="pulse-meta"><strong>Submissions:</strong> '+cwaHtml(p.count||0)+' | <strong>Evidence:</strong> '+cwaHtml((p.evidence_references||p.sample_references||[]).join(', ')||'-')+'</div><div><strong>Suggested action:</strong> '+cwaHtml(p.suggested_action||'-')+'</div><div class="pulse-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+cwaHtml(p.representative_excerpt||'-')+'</div></div>').join(''):'<div class="pulse-empty">No diplomatic or senior-attention issues for selected period.</div>';const workload=((rep&&rep.community_service_workload)||[]).map(w=>[cwaHtml(w.theme_label||'-'),cwaHtml(w.count||0),cwaHtml(w.responsible_section||'-'),cwaHtml((w.sample_references||[]).join(', ')||'-'),cwaHtml(w.note||'Operational/service handling')]);const workloadWrap=document.getElementById('pulseWorkloadTableWrap');if(workloadWrap)workloadWrap.innerHTML=pulseTable(['Theme','Count','Responsible Section','Sample References','Note'],workload);const officers=(((rep||{}).staff_accountability||{}).by_officer)||[];const staffRows=officers.map(o=>[cwaHtml(o.officer_name||o.assigned_to||'-'),cwaHtml(o.assigned_open||0),cwaHtml(o.overdue_5_days||0),cwaHtml(o.no_action_after_assignment||0),cwaHtml(o.resolved_this_week||0)]);const staffWrap=document.getElementById('pulseStaffTableWrap');if(staffWrap)staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'],staffRows);const annex=(rep&&rep.evidence_annex)||{};const note=document.getElementById('pulseEvidenceNote');if(note)note.textContent=String(annex.note||'Full case records remain available in the portal by reference number.');function evidenceCards(items){if(!items||!items.length)return '<div class="pulse-empty">No evidence cases for selected period.</div>';return items.map(c=>'<div class="pulse-evidence-card"><div class="line"><strong>Reference:</strong> '+cwaHtml(c.reference||'-')+'</div><div class="line"><strong>Module:</strong> '+cwaHtml(c.module||'-')+' | <strong>Date:</strong> '+cwaHtml((c.created_at||'').slice(0,10)||'-')+' | <strong>Status:</strong> '+cwaHtml(c.status||'-')+' | <strong>Assigned to:</strong> '+cwaHtml(c.assigned_to||'-')+'</div><div class="line"><strong>Theme:</strong> '+cwaHtml(((c.theme||{}).theme_label)||'-')+'</div><div class="title">Subject: '+cwaHtml(c.subject||'-')+'</div><div class="excerpt"><strong>Excerpt:</strong> '+cwaHtml(c.details_excerpt||'-')+'</div></div>').join('');}const senior=document.getElementById('pulseEvidenceSeniorWrap');if(senior)senior.innerHTML=evidenceCards(annex.senior_attention||[]);const ops=document.getElementById('pulseEvidenceOperationalWrap');if(ops)ops.innerHTML=evidenceCards(annex.operational_samples||[]);}
+window.loadAmbassadorPulseReport=async function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;ensurePulseShell();try{pulseSetError('');const s=(document.getElementById('pulseStartDate')||{}).value||pulseDaysAgoIso(7);const e=(document.getElementById('pulseEndDate')||{}).value||pulseTodayIso();const include=((document.getElementById('pulseIncludeFull')||{}).checked?'1':'0');const r=await fetch('/api/admin/ambassador-pulse-report?start_date='+encodeURIComponent(s)+'&end_date='+encodeURIComponent(e)+'&include_full_details='+include,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Failed to load report');window.cwaPulseReportData=j;renderPulseReport(j);}catch(err){pulseSetError(err&&err.message?err.message:'Failed to load report');}};
+window.copyPulseSummary=async function(){const rep=window.cwaPulseReportData;if(!rep){pulseSetError('Generate report first.');return;}const s=rep.summary||{};const text=['Ambassador Pulse Brief','Period: '+((rep.period||{}).start_date||'')+' to '+((rep.period||{}).end_date||''),'Total submissions: '+(s.total_items||0),'High sensitivity: '+(s.high_sensitivity_count||0),'Top operational workload: '+(s.top_operational_theme||'-'),'Top diplomatic issue: '+(s.top_diplomatic_issue||'-')].join('\\n');try{await navigator.clipboard.writeText(text);pulseSetError('');}catch(err){pulseSetError('Unable to copy summary.');}};
+window.printAmbassadorPulseReport=function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;window.print();};
+function renderTransferPanel(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse')return;if(!current)return;const timeline=document.getElementById('timeline');if(!timeline||!timeline.parentNode)return;let panel=document.getElementById('transferPanel');if(!panel){panel=document.createElement('div');panel.id='transferPanel';panel.className='act';timeline.parentNode.insertBefore(panel,timeline);}const staff=(Array.isArray(users)?users:[]);const staffOpts=staff.map(u=>'<option value="'+cwaHtml(u.username||'')+'">'+cwaHtml((u.full_name||u.username||'')+' ('+(u.username||'')+') - '+(u.department||u.role||''))+'</option>').join('');const ruleOpts=(Array.isArray(routingRuleItems)?routingRuleItems:[]).filter(r=>r.assigned_to).map(r=>'<option value="'+cwaHtml(r.rule_key||'')+'">'+cwaHtml((r.desk_name||r.rule_key||'')+' -> '+(r.assigned_to||''))+'</option>').join('');const branchOpts=(Array.isArray(branchItems)?branchItems:[]).map(b=>'<option value="'+cwaHtml(b.branch_key||'')+'">'+cwaHtml((b.branch_name||b.branch_key||'')+' - '+(b.officer_name||'Concerned officer'))+'</option>').join('');const branchOption=(USER_ROLE==='admin')?'<option value="counsellor_branch">Counsellor Branch external handover</option>':'';panel.innerHTML='<h3 style="margin-top:0">Transfer / Reroute Case</h3><label class="hint">Destination type</label><select id="transferDestinationType" onchange="updateTransferDestinationVisibility()"><option value="internal_staff">Internal Staff / Desk</option><option value="auto_routing_rule">Auto Routing Rule / Quick Desk</option>'+branchOption+'</select><div id="transferStaffWrap" style="margin-top:8px"><label class="hint">Destination staff</label><select id="transferAssignedTo"><option value="">Select staff</option>'+staffOpts+'</select></div><div id="transferRuleWrap" style="display:none;margin-top:8px"><label class="hint">Quick desk</label><select id="transferRoutingRule"><option value="">Select routing rule</option>'+ruleOpts+'</select></div><div id="transferBranchWrap" style="display:none;margin-top:8px"><label class="hint">Counsellor Branch</label><select id="transferBranchKey"><option value="">Select branch</option>'+branchOpts+'</select></div><label class="hint" style="display:block;margin-top:8px">Reason for transfer</label><textarea id="transferReason" placeholder="Explain why this case belongs to another desk/officer. Minimum 20 characters."></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="transferVisible" type="checkbox" checked> Notify applicant / visible to applicant</label><div id="transferErr" class="err" style="display:none"></div><button type="button" onclick="transferCurrentCase()">Transfer Case</button>';updateTransferDestinationVisibility();}
+window.updateTransferDestinationVisibility=function(){const type=(document.getElementById('transferDestinationType')||{}).value||'internal_staff';[['transferStaffWrap',type==='internal_staff'],['transferRuleWrap',type==='auto_routing_rule'],['transferBranchWrap',type==='counsellor_branch']].forEach(function(x){const el=document.getElementById(x[0]);if(el)el.style.display=x[1]?'block':'none';});};
+window.transferCurrentCase=async function(){const err=document.getElementById('transferErr');try{if(err){err.textContent='';err.style.display='none';}if(!current)throw new Error('Open a case first.');const type=(document.getElementById('transferDestinationType')||{}).value||'internal_staff';const reason=((document.getElementById('transferReason')||{}).value||'').trim();if(reason.length<20)throw new Error('Transfer reason must be at least 20 characters.');const body={module:'welfare',case_id:current.id,destination_type:type,reason:reason,visible_to_applicant:!!((document.getElementById('transferVisible')||{}).checked)};if(type==='internal_staff')body.assigned_to=(document.getElementById('transferAssignedTo')||{}).value||'';if(type==='auto_routing_rule')body.routing_rule_key=(document.getElementById('transferRoutingRule')||{}).value||'';if(type==='counsellor_branch')body.branch_key=(document.getElementById('transferBranchKey')||{}).value||'';await jpost('/api/admin/cases/transfer',body);await refresh();}catch(ex){if(err){err.textContent=ex&&ex.message?ex.message:'Transfer failed';err.style.display='block';}else{alert(ex&&ex.message?ex.message:'Transfer failed');}}};
+if(typeof openCase==='function'){const prevOpenCase=openCase;window.openCase=openCase=async function(id){await prevOpenCase(id);renderTransferPanel();};}
+if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse'){ensurePulseShell();setTimeout(function(){window.loadAmbassadorPulseReport&&window.loadAmbassadorPulseReport();},0);}
+})();
+</script>
+"""
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    '</div></div><div class="panel" id="welfareRoutingRulesCard"',
+    '</div></div></div><div class="panel" id="welfareRoutingRulesCard"',
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "applyPageModeVisibility();loadUsers();if(PAGE_MODE!=='pulse')loadCases();",
+    "loadUsers();applyPageModeVisibility();if(PAGE_MODE!=='pulse')loadCases();",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_PULSE_TRANSFER_SCRIPT + "</body></html>")
 
 PUBLIC_HOME_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Welfare Wing Digital Services</title>
@@ -30983,8 +31762,16 @@ async function loadComplaintDetail(e){
   if(!d.success){complaint_detail.innerHTML='<div class="empty">'+esc(d.error||'Not found')+'</div>';return false;}
   const r=d.complaint||{},n=d.nurse||{},acts=d.actions||[];
   const tl=acts.map(a=>'<div class="ev"><strong>'+esc(a.action_type||'')+'</strong> · '+esc(a.actor_username||'system')+'<br><span class="muted">'+esc(a.old_status||'—')+' → '+esc(a.new_status||'—')+'</span><br>'+esc(a.note||'')+'<small>'+esc(a.created_at||'')+'</small></div>').join('')||'<div class="muted">No actions yet.</div>';
-  complaint_detail.innerHTML='<div class="row"><div><strong>'+esc(r.complaint_id||'')+'</strong> '+sBadge(r.status||r.complaint_status||'')+' '+pBadge(r.priority||'')+'<div class="muted">Ref: '+esc(r.nurse_reference_id||'')+' · '+esc(r.passport_number||'')+'</div><div>'+esc(r.subject||'')+'</div><div class="muted">'+esc(r.description||'')+'</div></div><div><strong>Nurse</strong><div>'+esc(n.full_name||r.nurse_full_name||'')+'</div><div class="muted">'+esc(n.mobile||'')+' · '+esc(n.email||'')+'</div><div class="muted">Hospital: '+esc(n.hospital||'')+'</div><div class="muted">Accommodation: '+esc(n.accommodation_status||'')+'</div></div></div><div class="timeline">'+tl+'</div>';
+  const aOpts='<option value="">Select assignee</option>'+state.assignees.map(a=>'<option value="'+esc(a.username)+'">'+esc(a.display_name)+' ('+esc(a.username)+')</option>').join('');
+  complaint_detail.innerHTML='<div class="row"><div><strong>'+esc(r.complaint_id||'')+'</strong> '+sBadge(r.status||r.complaint_status||'')+' '+pBadge(r.priority||'')+'<div class="muted">Ref: '+esc(r.nurse_reference_id||'')+' · '+esc(r.passport_number||'')+'</div><div>'+esc(r.subject||'')+'</div><div class="muted">'+esc(r.description||'')+'</div></div><div><strong>Nurse</strong><div>'+esc(n.full_name||r.nurse_full_name||'')+'</div><div class="muted">'+esc(n.mobile||'')+' · '+esc(n.email||'')+'</div><div class="muted">Hospital: '+esc(n.hospital||'')+'</div><div class="muted">Accommodation: '+esc(n.accommodation_status||'')+'</div></div></div><div class="card" style="margin-top:10px"><h3>Transfer / Reroute Case</h3><div class="grid"><select id="detail_transfer_to">'+aOpts+'</select><select id="detail_transfer_visible"><option value="1">Notify nurse</option><option value="0">Internal only</option></select></div><textarea id="detail_transfer_reason" placeholder="Reason for transfer - minimum 20 characters"></textarea><button type="button" onclick="transferComplaintDetail()">Transfer Case</button><div id="detail_transfer_msg" class="muted"></div></div><div class="timeline">'+tl+'</div>';
   return false;
+}
+async function transferComplaintDetail(){
+  const msg=document.getElementById('detail_transfer_msg');
+  const p={module:'nurse',complaint_id:detail_complaint_id.value,destination_type:'internal_staff',assigned_to:document.getElementById('detail_transfer_to').value,reason:document.getElementById('detail_transfer_reason').value,visible_to_applicant:document.getElementById('detail_transfer_visible').value==='1'};
+  const r=await api('/api/admin/cases/transfer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+  if(msg)msg.textContent=r.success?'Transferred.':(r.error||'Transfer failed');
+  if(r.success)await loadComplaintDetail({preventDefault:function(){}});
 }
 async function assignComplaint(e){
   e.preventDefault();
@@ -31398,6 +32185,7 @@ document.getElementById('modalBox').innerHTML='<div class="flex"><h3 style="marg
 +'<div><div class="hint">Case</div><div>Type: <strong>'+esc(r.case_type)+'</strong></div><div class="muted">Opposing party: '+esc(r.opposing_party||'—')+'</div><div class="muted">Court Case No: '+esc(r.kuwaiti_court_case_no||'—')+'</div><div class="muted">Next hearing: '+esc(r.next_hearing_date||'—')+'</div></div></div>'
 +'<div class="card" style="margin-top:10px"><h3>Description</h3><div>'+esc(r.description||'')+'</div></div>'
 +'<div class="card"><h3>Assignment</h3><div class="row"><select id="m_assign">'+aOpts+'</select><input id="m_assign_note" placeholder="Assignment note (optional)"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'assign\\',\\''+esc(r.reference_id)+'\\')">Assign / Reassign</button><span class="muted">Currently assigned to: <strong>'+esc(r.assigned_to_name||r.assigned_to_username||'—')+'</strong></span></div></div>'
++'<div class="card"><h3>Transfer / Reroute Case</h3><div class="row"><select id="m_transfer_to">'+aOpts+'</select><select id="m_transfer_visible"><option value="1">Notify applicant</option><option value="0">Internal only</option></select></div><textarea id="m_transfer_reason" placeholder="Reason for transfer - minimum 20 characters"></textarea><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'transfer\\',\\''+esc(r.reference_id)+'\\')">Transfer Case</button></div></div>'
 +'<div class="card"><h3>Update Status</h3><div class="row"><select id="m_status">'+sOpts+'</select><input id="m_status_note" placeholder="Status note (optional)"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'status\\',\\''+esc(r.reference_id)+'\\')">Update Status</button></div></div>'
 +'<div class="card"><h3>Add Note / Reply</h3><div class="row"><select id="m_note_type"><option value="internal">Internal Note</option><option value="public">Public Reply (visible to applicant)</option></select><input id="m_note_text" placeholder="Note text"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'note\\',\\''+esc(r.reference_id)+'\\')">Save Note</button></div></div>'
 +'<div class="card"><h3>Resolve / Close</h3><textarea id="m_resolve_note" placeholder="Resolution / closure remarks"></textarea><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'resolve\\',\\''+esc(r.reference_id)+'\\')">Mark Resolved</button> <button class="danger" onclick="doAction(\\'close\\',\\''+esc(r.reference_id)+'\\')">Close Case</button></div></div>'
@@ -31406,6 +32194,7 @@ document.getElementById('modal').classList.add('open');}
 function closeModal(){document.getElementById('modal').classList.remove('open');}
 async function doAction(kind,ref){let body={reference_id:ref};let url='';
 if(kind==='assign'){body.assigned_to_username=document.getElementById('m_assign').value;body.assignment_note=document.getElementById('m_assign_note').value;url='/api/admin/legal-cases/assign';}
+else if(kind==='transfer'){body={module:'legal',reference_id:ref,destination_type:'internal_staff',assigned_to:document.getElementById('m_transfer_to').value,reason:document.getElementById('m_transfer_reason').value,visible_to_applicant:document.getElementById('m_transfer_visible').value==='1'};url='/api/admin/cases/transfer';}
 else if(kind==='status'){body.status=document.getElementById('m_status').value;body.note=document.getElementById('m_status_note').value;url='/api/admin/legal-cases/status';}
 else if(kind==='note'){body.note=document.getElementById('m_note_text').value;body.note_type=document.getElementById('m_note_type').value;url='/api/admin/legal-cases/note';}
 else if(kind==='resolve'){body.resolution_note=document.getElementById('m_resolve_note').value;url='/api/admin/legal-cases/resolve';}
@@ -31471,6 +32260,7 @@ document.getElementById('modalBox').innerHTML='<div class="flex"><h3 style="marg
 +'<div><div class="hint">Reporter / Next of Kin</div><div><strong>'+esc(r.reporter_name||'')+'</strong> ('+esc(r.reporter_relation||'')+')</div><div class="muted">'+esc(r.reporter_mobile||'')+' · '+esc(r.reporter_email||'')+'</div><div class="muted">Email Status: '+esc(r.email_status||'Unverified')+'</div><div class="muted">NOK: '+esc(r.next_of_kin_name||'—')+' ('+esc(r.next_of_kin_relation||'')+') '+esc(r.next_of_kin_mobile||'')+' '+esc(r.next_of_kin_email||'')+'</div><div class="muted">Repatriation: '+esc(r.repatriation_required||'')+' · Burial pref: '+esc(r.burial_preference||'')+'</div></div></div>'
 +'<div class="card" style="margin-top:10px"><h3>Description</h3><div>'+esc(r.description||'')+'</div></div>'
 +'<div class="card"><h3>Assignment</h3><div class="row"><select id="m_assign">'+aOpts+'</select><input id="m_assign_note" placeholder="Assignment note (optional)"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'assign\\',\\''+esc(r.reference_id)+'\\')">Assign / Reassign</button><span class="muted">Currently assigned to: <strong>'+esc(r.assigned_to_name||r.assigned_to_username||'—')+'</strong></span></div></div>'
++'<div class="card"><h3>Transfer / Reroute Case</h3><div class="row"><select id="m_transfer_to">'+aOpts+'</select><select id="m_transfer_visible"><option value="1">Notify reporter</option><option value="0">Internal only</option></select></div><textarea id="m_transfer_reason" placeholder="Reason for transfer - minimum 20 characters"></textarea><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'transfer\\',\\''+esc(r.reference_id)+'\\')">Transfer Case</button></div></div>'
 +'<div class="card"><h3>Update Status</h3><div class="row"><select id="m_status">'+sOpts+'</select><input id="m_status_note" placeholder="Status note (optional)"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'status\\',\\''+esc(r.reference_id)+'\\')">Update Status</button></div></div>'
 +'<div class="card"><h3>Add Note / Reply</h3><div class="row"><select id="m_note_type"><option value="internal">Internal Note</option><option value="public">Public Reply (visible to reporter)</option></select><input id="m_note_text" placeholder="Note text"></div><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'note\\',\\''+esc(r.reference_id)+'\\')">Save Note</button></div></div>'
 +'<div class="card"><h3>Resolve / Close</h3><textarea id="m_resolve_note" placeholder="Resolution / closure remarks"></textarea><div class="flex" style="margin-top:8px"><button onclick="doAction(\\'resolve\\',\\''+esc(r.reference_id)+'\\')">Mark Resolved</button> <button class="danger" onclick="doAction(\\'close\\',\\''+esc(r.reference_id)+'\\')">Close Case</button></div></div>'
@@ -31479,6 +32269,7 @@ document.getElementById('modal').classList.add('open');}
 function closeModal(){document.getElementById('modal').classList.remove('open');}
 async function doAction(kind,ref){let body={reference_id:ref};let url='';
 if(kind==='assign'){body.assigned_to_username=document.getElementById('m_assign').value;body.assignment_note=document.getElementById('m_assign_note').value;url='/api/admin/death-cases/assign';}
+else if(kind==='transfer'){body={module:'death',reference_id:ref,destination_type:'internal_staff',assigned_to:document.getElementById('m_transfer_to').value,reason:document.getElementById('m_transfer_reason').value,visible_to_applicant:document.getElementById('m_transfer_visible').value==='1'};url='/api/admin/cases/transfer';}
 else if(kind==='status'){body.status=document.getElementById('m_status').value;body.note=document.getElementById('m_status_note').value;url='/api/admin/death-cases/status';}
 else if(kind==='note'){body.note=document.getElementById('m_note_text').value;body.note_type=document.getElementById('m_note_type').value;url='/api/admin/death-cases/note';}
 else if(kind==='resolve'){body.resolution_note=document.getElementById('m_resolve_note').value;url='/api/admin/death-cases/resolve';}
