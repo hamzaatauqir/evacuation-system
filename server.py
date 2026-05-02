@@ -9375,7 +9375,7 @@ def api_admin_welfare_users():
 
 
 def api_admin_counsellor_branches(user):
-    if (user or {}).get('role') != 'admin':
+    if not is_full_admin_role((user or {}).get('role')):
         return {'success': False, 'error': 'Unauthorized'}
     db = get_db()
     try:
@@ -9397,7 +9397,7 @@ def api_admin_counsellor_branches(user):
 
 
 def api_admin_counsellor_branches_update(data, user):
-    if (user or {}).get('role') != 'admin':
+    if not is_full_admin_role((user or {}).get('role')):
         return {'success': False, 'error': 'Unauthorized'}
     branch_key = _clean_text((data or {}).get('branch_key'), 80).lower()
     branch_name = _clean_text((data or {}).get('branch_name'), 200)
@@ -9440,7 +9440,7 @@ def api_admin_counsellor_branches_update(data, user):
 
 
 def api_admin_welfare_routing_rules(user):
-    if (user or {}).get('role') != 'admin':
+    if not is_full_admin_role((user or {}).get('role')):
         return {'success': False, 'error': 'Unauthorized'}
     db = get_db()
     try:
@@ -9460,7 +9460,7 @@ def api_admin_welfare_routing_rules(user):
 
 
 def api_admin_welfare_routing_rules_update(data, user):
-    if (user or {}).get('role') != 'admin':
+    if not is_full_admin_role((user or {}).get('role')):
         return {'success': False, 'error': 'Unauthorized'}
     payload = data or {}
     rule_key = _clean_text(payload.get('rule_key'), 120).lower()
@@ -24952,15 +24952,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/admin/community-welfare/pulse':
             user = self.require_auth()
             if not user: return
-            if user['role'] != 'admin':
-                self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(
-                WELFARE_CASES_ADMIN_PAGE
-                .replace('__PAGE_MODE__', 'pulse')
-                .replace('__PAGE_TITLE__', 'Ambassador Pulse Report')
-                .replace('__USER_NAME__', user['user'])
-                .replace('__USER_ROLE__', user['role'])
-            )
+            self.send_response(302)
+            self.send_header('Location', '/admin/welfare-cases')
+            self.end_headers()
+            return
         elif path == '/admin/nurses':
             user = self.require_auth()
             if not user: return
@@ -31145,10 +31140,10 @@ load();async function refreshNotificationBadges(){try{const r=await fetch('/api/
 WELFARE_CASES_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PAGE_TITLE__</title>
 <style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f2f7fa;color:#172033}.top{height:58px;background:white;border-bottom:1px solid #dbe5ea;display:flex;align-items:center;justify-content:space-between;padding:0 24px}.shell{display:flex}.side{width:230px;min-height:calc(100vh - 58px);background:#10253f;color:white;padding:18px 10px}.side h3{font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em;text-transform:uppercase;padding:0 10px}.side a{display:block;color:rgba(255,255,255,.68);text-decoration:none;font-weight:700;font-size:13px;padding:10px 12px;border-radius:8px;margin:2px}.side a.active,.side a:hover{background:rgba(255,255,255,.1);color:white}.badge-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:#dc2626;color:#fff;font-size:12px;font-weight:700;margin-left:auto}.badge-count.hidden{display:none}.main{flex:1;min-width:0}.head{background:white;border-bottom:1px solid #dbe5ea;padding:18px 24px}.head h1{font-size:22px;margin:0;color:#10253f}.head p{font-size:12px;color:#64748b;margin:4px 0 0}.content{padding:20px 24px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}.kpi{background:white;border:1px solid #dbe5ea;border-radius:8px;padding:14px}.kpi b{display:block;font-size:24px;color:#10253f}.kpi span{font-size:11px;color:#64748b;font-weight:800;text-transform:uppercase}.panel{background:white;border:1px solid #dbe5ea;border-radius:8px;overflow:hidden}.filters{display:flex;gap:10px;flex-wrap:wrap;padding:14px;border-bottom:1px solid #e2e8f0}input,select,textarea{border:1px solid #cbd5e1;border-radius:7px;padding:9px 10px;font:inherit;font-size:13px}button{border:0;border-radius:7px;background:#2f7d4e;color:white;padding:9px 12px;font-weight:800;cursor:pointer}.btn2{background:#e2e8f0;color:#10253f}.btn3{background:#2d4a6b}table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;background:#f8fafc;color:#64748b;font-size:11px;text-transform:uppercase;padding:10px;border-bottom:1px solid #e2e8f0}td{padding:11px 10px;border-bottom:1px solid #edf2f7;vertical-align:top}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;background:#e2e8f0;color:#334155}.New{background:#eff6ff;color:#1d4ed8}.Assigned{background:#ecfdf5;color:#047857}.High,.Urgent{background:#fef2f2;color:#b91c1c}.Resolved{background:#f0fdf4;color:#166534}.drawer{position:fixed;right:0;top:0;width:min(560px,100%);height:100vh;background:white;box-shadow:-24px 0 60px rgba(15,23,42,.2);display:none;z-index:5;overflow:auto}.drawer.open{display:block}.drawerHead{background:#2d4a6b;color:white;padding:20px}.drawerBody{padding:18px}.row{display:grid;grid-template-columns:150px 1fr;gap:8px;margin-bottom:8px;font-size:13px}.row span{color:#64748b}.timeline{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}.act{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px;font-size:12px}.err{color:#b91c1c;font-weight:800;margin:10px 0}.hint{font-size:12px;color:#64748b;margin:6px 0 10px}.badge-handover{display:inline-block;background:#ecfeff;color:#0e7490;border:1px solid #99f6e4;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:700;margin:4px 0}</style></head><body>
 <div class="top"><div><b>Embassy of Pakistan, Kuwait</b><div style="font-size:11px;color:#64748b">Community Welfare Wing</div></div><div style="font-size:12px;color:#64748b">__USER_NAME__ · __USER_ROLE__</div></div>
-<div class="shell"><aside class="side"><h3>Main Dashboard</h3><a href="/admin/dashboard">Dashboard</a><h3>Community Welfare</h3><a href="/admin/community-welfare">CWA Overview <span class="badge-count hidden" data-badge="community_welfare"></span></a><a href="/admin/nurses">Nurses <span class="badge-count hidden" data-badge="nurses"></span></a><a href="/admin/legal-cases">Legal Cases <span class="badge-count hidden" data-badge="legal_cases"></span></a><a href="/admin/death-cases">Death Cases <span class="badge-count hidden" data-badge="death_cases"></span></a><a href="/admin/welfare-cases" data-nav="welfare">Welfare Cases <span class="badge-count hidden" data-badge="welfare_cases"></span></a><a href="/admin/community-welfare/pulse" data-nav="pulse">Ambassador Pulse Report</a><a href="/admin/my-cases" data-nav="my">My Assigned Cases <span class="badge-count hidden" data-badge="my_cases"></span></a><a href="/admin/ambassador-review" data-nav="ambassador">Ambassador Review <span class="badge-count hidden" data-badge="ambassador_review"></span></a></aside>
-<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel" id="printPackPanel" style="margin-bottom:14px"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Review Print Pack</strong><input id="printDate" type="date"><select id="printPackType"><option value="daily">Today’s New / Updated Cases</option><option value="pending">Pending Review</option><option value="open">All Open Cases</option><option value="ambassador_review">Ambassador Review Queue</option><option value="resolved_today">Resolved Today</option></select><select id="printCaseType"><option value="all">All Case Types</option><option value="welfare">Welfare</option><option value="legal">Legal / OPF</option><option value="death">Death Cases</option><option value="nurse">Nurse / Health Worker</option><option value="locating">Locating Assistance</option><option value="feedback">Feedback / Complaints</option></select><select id="printPriority"><option value="all">All Priorities</option><option value="urgent">Urgent</option><option value="normal">Normal</option></select><select id="printAssigned"><option value="all">All Assignees</option><option value="unassigned">Unassigned</option></select><button onclick="generatePrintPack()">Generate Print Pack</button><button class="btn3" onclick="printSelectedCases()">Print Selected Cases</button></div></div><div class="panel" id="caseListPanel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table id="caseTable"><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div><div class="panel" id="counsellorBranchesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Counsellor Branches</strong><span style="font-size:12px;color:#64748b">Admin-only branch routing contacts</span></div><div style="padding:12px 14px"><div id="branchErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Branch</th><th>Officer Name</th><th>Designation</th><th>Email</th><th>Phone</th><th>Active</th><th>Actions</th></tr></thead><tbody id="branchRows"><tr><td colspan="7">Loading...</td></tr></tbody></table></div><div id="branchEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="branch_key"><div class="filters" style="padding:0;border:0"><input id="branch_name" placeholder="Branch name"><input id="branch_officer" placeholder="Officer name"><input id="branch_designation" placeholder="Designation"><input id="branch_email" placeholder="Email"><input id="branch_phone" placeholder="Phone"><select id="branch_active"><option value="1">Active</option><option value="0">Inactive</option></select></div><textarea id="branch_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveBranch()">Save Branch</button> <button class="btn2" onclick="cancelBranchEdit()">Cancel</button></div></div></div><div class="panel" id="welfareRoutingRulesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Auto Routing Rules</strong><span style="font-size:12px;color:#64748b">Internal Community Welfare desk routing</span></div><div style="padding:12px 14px"><div id="routeErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Rule / Desk</th><th>Officer</th><th>Assigned To</th><th>Department</th><th>Priority</th><th>Active</th><th>Sort Order</th><th>Actions</th></tr></thead><tbody id="routeRows"><tr><td colspan="8">Loading...</td></tr></tbody></table></div><div id="routeEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="route_rule_key"><div class="filters" style="padding:0;border:0"><input id="route_desk_name" placeholder="Desk name"><input id="route_assigned_to" placeholder="Assigned to username"><input id="route_assigned_role" placeholder="Assigned role"><input id="route_assigned_department" placeholder="Department"><input id="route_officer_name" placeholder="Officer name"><input id="route_officer_email" placeholder="Officer email"><input id="route_officer_phone" placeholder="Officer phone"><select id="route_priority"><option>Low</option><option selected>Medium</option><option>High</option><option>Urgent</option></select><select id="route_is_active"><option value="1">Active</option><option value="0">Inactive</option></select><input id="route_sort_order" type="number" placeholder="Sort order"></div><textarea id="route_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><textarea id="route_case_types" placeholder="Case types (comma separated)" style="width:100%;margin-top:8px"></textarea><textarea id="route_categories" placeholder="Categories (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveRoutingRule()">Save Rule</button> <button class="btn2" onclick="cancelRoutingRuleEdit()">Cancel</button></div></div></div></div><div class="panel" id="staffAccountabilityCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Staff Accountability / Overdue Cases</strong><span style="font-size:12px;color:#64748b">Monitoring for assigned pending, overdue, and no-action cases</span></div><div style="padding:12px 14px"><div id="acctErr" class="err" style="margin:6px 0"></div><div class="kpis" id="acctKpis" style="margin-bottom:12px"></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Officer</th><th>Open Assigned</th><th>Overdue >5 Days</th><th>No Action</th><th>Resolved This Week</th></tr></thead><tbody id="acctOfficerRows"><tr><td colspan="5">Loading...</td></tr></tbody></table></div><div style="overflow:auto"><table><thead><tr><th>Reference</th><th>Module</th><th>Subject</th><th>Assigned To</th><th>Days Pending</th><th>Status</th><th>Last Action</th></tr></thead><tbody id="acctCaseRows"><tr><td colspan="7">Loading...</td></tr></tbody></table></div></div></div><div class="panel" id="ambassadorPulseCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Pulse Report</strong><span style="font-size:12px;color:#64748b">Issue intelligence across welfare, legal/OPF, nurses, death, and feedback channels</span><input id="pulseStartDate" type="date"><input id="pulseEndDate" type="date"><label style="font-size:12px;color:#475569"><input id="pulseFullDetails" type="checkbox"> Include internal full details</label><button onclick="loadAmbassadorPulseReport()">Generate Report</button><button class="btn2" onclick="printAmbassadorPulseReport()">Print / Save PDF</button><button class="btn2" onclick="copyPulseSummary()">Copy Summary</button></div><div style="padding:12px 14px"><div id="pulseErr" class="err" style="margin:6px 0"></div><div id="pulseSummaryKpis" class="kpis" style="margin-bottom:12px"></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Theme</th><th>Count</th><th>Sensitivity</th><th>Authority</th><th>Sample References</th></tr></thead><tbody id="pulseThemesRows"><tr><td colspan="5">Generate report to view themes.</td></tr></tbody></table></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Issue</th><th>Count</th><th>Authority</th><th>Suggested Action</th><th>Evidence References</th></tr></thead><tbody id="pulsePolicyRows"><tr><td colspan="5">Generate report to view policy-sensitive issues.</td></tr></tbody></table></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Officer</th><th>Open Assigned</th><th>Overdue</th><th>No Action</th><th>Resolved This Week</th></tr></thead><tbody id="pulseOfficerRows"><tr><td colspan="5">Generate report to view staff picture.</td></tr></tbody></table></div><div style="overflow:auto"><table><thead><tr><th>Reference</th><th>Module</th><th>Date</th><th>Theme</th><th>Subject</th><th>Status</th><th>Assigned To</th><th>Excerpt</th></tr></thead><tbody id="pulseEvidenceRows"><tr><td colspan="8">Generate report to view evidence cases.</td></tr></tbody></table></div></div></div></div></main></div>
+<div class="shell"><aside class="side"><h3>Main Dashboard</h3><a href="/admin/dashboard">Dashboard</a><h3>Community Welfare</h3><a href="/admin/community-welfare">CWA Overview <span class="badge-count hidden" data-badge="community_welfare"></span></a><a href="/admin/nurses">Nurses <span class="badge-count hidden" data-badge="nurses"></span></a><a href="/admin/legal-cases">Legal Cases <span class="badge-count hidden" data-badge="legal_cases"></span></a><a href="/admin/death-cases">Death Cases <span class="badge-count hidden" data-badge="death_cases"></span></a><a href="/admin/welfare-cases" data-nav="welfare">Welfare Cases <span class="badge-count hidden" data-badge="welfare_cases"></span></a><a href="/admin/my-cases" data-nav="my">My Assigned Cases <span class="badge-count hidden" data-badge="my_cases"></span></a><a href="/admin/ambassador-review" data-nav="ambassador">Ambassador Review <span class="badge-count hidden" data-badge="ambassador_review"></span></a></aside>
+<main class="main"><div class="head"><h1>__PAGE_TITLE__</h1><p>Assignment, action tracking, and senior review for Community Welfare cases.</p><p id="pendingSummary" style="font-weight:700;color:#b91c1c;margin-top:6px;display:none"></p></div><div class="content"><div class="kpis" id="kpis"></div><div class="panel" id="printPackPanel" style="margin-bottom:14px"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Review Print Pack</strong><input id="printDate" type="date"><select id="printPackType"><option value="daily">Today’s New / Updated Cases</option><option value="pending">Pending Review</option><option value="open">All Open Cases</option><option value="ambassador_review">Ambassador Review Queue</option><option value="resolved_today">Resolved Today</option></select><select id="printCaseType"><option value="all">All Case Types</option><option value="welfare">Welfare</option><option value="legal">Legal / OPF</option><option value="death">Death Cases</option><option value="nurse">Nurse / Health Worker</option><option value="locating">Locating Assistance</option><option value="feedback">Feedback / Complaints</option></select><select id="printPriority"><option value="all">All Priorities</option><option value="urgent">Urgent</option><option value="normal">Normal</option></select><select id="printAssigned"><option value="all">All Assignees</option><option value="unassigned">Unassigned</option></select><button onclick="generatePrintPack()">Generate Print Pack</button><button class="btn3" onclick="printSelectedCases()">Print Selected Cases</button></div></div><div class="panel" id="caseListPanel"><div class="filters"><select id="case_type"><option value="">All case types</option><option value="locating_assistance">Locating / Contacting Assistance</option><option value="community_feedback">Community Feedback</option><option value="nurse">Nurse</option><option value="legal">Legal</option><option value="death">Death</option><option value="general_welfare">General Welfare</option></select><select id="status"><option value="">All statuses</option><option>New</option><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><select id="priority"><option value="">All priorities</option><option>Normal</option><option>High</option><option>Urgent</option></select><input id="q" placeholder="Search reference, requester, subject"><button onclick="loadCases()">Filter</button></div><div id="err" class="err"></div><div style="overflow:auto"><table id="caseTable"><thead><tr><th>Reference</th><th>Case Type</th><th>Requester</th><th>Person/Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Escalation</th><th>Created</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div></div><div class="panel" id="counsellorBranchesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Counsellor Branches</strong><span style="font-size:12px;color:#64748b">Admin-only branch routing contacts</span></div><div style="padding:12px 14px"><div id="branchErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Branch</th><th>Officer Name</th><th>Designation</th><th>Email</th><th>Phone</th><th>Active</th><th>Actions</th></tr></thead><tbody id="branchRows"><tr><td colspan="7">Loading...</td></tr></tbody></table></div><div id="branchEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="branch_key"><div class="filters" style="padding:0;border:0"><input id="branch_name" placeholder="Branch name"><input id="branch_officer" placeholder="Officer name"><input id="branch_designation" placeholder="Designation"><input id="branch_email" placeholder="Email"><input id="branch_phone" placeholder="Phone"><select id="branch_active"><option value="1">Active</option><option value="0">Inactive</option></select></div><textarea id="branch_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveBranch()">Save Branch</button> <button class="btn2" onclick="cancelBranchEdit()">Cancel</button></div></div></div><div class="panel" id="welfareRoutingRulesCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Auto Routing Rules</strong><span style="font-size:12px;color:#64748b">Internal Community Welfare desk routing</span></div><div style="padding:12px 14px"><div id="routeErr" class="err" style="margin:6px 0"></div><div style="overflow:auto"><table><thead><tr><th>Rule / Desk</th><th>Officer</th><th>Assigned To</th><th>Department</th><th>Priority</th><th>Active</th><th>Sort Order</th><th>Actions</th></tr></thead><tbody id="routeRows"><tr><td colspan="8">Loading...</td></tr></tbody></table></div><div id="routeEditor" style="display:none;margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;padding:10px"><input type="hidden" id="route_rule_key"><div class="filters" style="padding:0;border:0"><input id="route_desk_name" placeholder="Desk name"><input id="route_assigned_to" placeholder="Assigned to username"><input id="route_assigned_role" placeholder="Assigned role"><input id="route_assigned_department" placeholder="Department"><input id="route_officer_name" placeholder="Officer name"><input id="route_officer_email" placeholder="Officer email"><input id="route_officer_phone" placeholder="Officer phone"><select id="route_priority"><option>Low</option><option selected>Medium</option><option>High</option><option>Urgent</option></select><select id="route_is_active"><option value="1">Active</option><option value="0">Inactive</option></select><input id="route_sort_order" type="number" placeholder="Sort order"></div><textarea id="route_keywords" placeholder="Keywords (comma separated)" style="width:100%;margin-top:8px"></textarea><textarea id="route_case_types" placeholder="Case types (comma separated)" style="width:100%;margin-top:8px"></textarea><textarea id="route_categories" placeholder="Categories (comma separated)" style="width:100%;margin-top:8px"></textarea><div style="margin-top:8px"><button onclick="saveRoutingRule()">Save Rule</button> <button class="btn2" onclick="cancelRoutingRuleEdit()">Cancel</button></div></div></div></div><div class="panel" id="staffAccountabilityCard" style="margin-top:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Staff Accountability / Overdue Cases</strong><span style="font-size:12px;color:#64748b">Monitoring for assigned pending, overdue, and no-action cases</span></div><div style="padding:12px 14px"><div id="acctErr" class="err" style="margin:6px 0"></div><div class="kpis" id="acctKpis" style="margin-bottom:12px"></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Officer</th><th>Open Assigned</th><th>Overdue >5 Days</th><th>No Action</th><th>Resolved This Week</th></tr></thead><tbody id="acctOfficerRows"><tr><td colspan="5">Loading...</td></tr></tbody></table></div><div style="overflow:auto"><table><thead><tr><th>Reference</th><th>Module</th><th>Subject</th><th>Assigned To</th><th>Days Pending</th><th>Status</th><th>Last Action</th></tr></thead><tbody id="acctCaseRows"><tr><td colspan="7">Loading...</td></tr></tbody></table></div></div></div></div></main></div>
 <div class="drawer" id="drawer"><div class="drawerHead"><button class="btn2" style="float:right" onclick="closeDrawer()">Close</button><h2 id="dRef"></h2><div id="dType"></div></div><div class="drawerBody"><div id="details"></div><h3>Assignment</h3><select id="assignee"></select><input id="assignNote" placeholder="Assignment note"><button onclick="assignCase()">Assign</button><h3>Status</h3><select id="newStatus" onchange="toggleResolvedNoteUi()"><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><input id="statusNote" placeholder="Status note"><div id="resolvedNoteWrap" style="display:none"><label style="display:block;margin:8px 0 4px;font-size:12px;font-weight:700">Resolution note visible to applicant</label><textarea id="resolvedApplicantNote" placeholder="Example: Applicant was contacted on phone. Guidance was provided regarding required documents and the matter has been closed."></textarea><div class="hint">Resolved cases require an applicant-visible note. This note will be emailed/shown to the applicant.</div></div><button id="statusBtn" class="btn3" onclick="statusCase()">Update Status</button><h3>Escalation</h3><select id="escLevel"><option value="normal">Normal</option><option value="senior_review">Senior Review</option><option value="ambassador_review">Ambassador Review</option></select><input id="escNote" placeholder="Escalation note"><button class="btn3" onclick="escalateCase()">Escalate</button><h3>Notes</h3><textarea id="noteText" placeholder="Internal note or requester-visible message"></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="visibleNote" type="checkbox"> Visible to requester</label><button onclick="addNote()">Add Note</button><button class="btn3" onclick="resolveCase()">Mark Resolved</button><div class="timeline" id="timeline"></div></div></div>
-<script>const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';let current=null,users=[],branchItems=[],routingRuleItems=[],accountabilityData={overdueCasesByRef:{},noActionCasesByRef:{}},pulseReportData=null;document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}function acctBadgeHtml(reference){const ref=String(reference||'');const overdue=accountabilityData.overdueCasesByRef&&accountabilityData.overdueCasesByRef[ref];const noAction=accountabilityData.noActionCasesByRef&&accountabilityData.noActionCasesByRef[ref];let html='';if(overdue)html+='<div><span class="badge Urgent">Overdue >5 days</span></div>';if(noAction)html+='<div><span class="badge">No staff action</span></div>';return html}async function loadCases(){const errEl=document.getElementById('err');const kpiEl=document.getElementById('kpis');const rowsEl=document.getElementById('rows');try{if(errEl)errEl.textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};if(kpiEl)kpiEl.innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');const items=Array.isArray(data.items)?data.items:[];if(rowsEl)rowsEl.innerHTML=items.map(c=>'<tr><td><b>'+c.case_reference+'</b>'+acctBadgeHtml(c.case_reference)+'</td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>';}catch(e){if(rowsEl)rowsEl.innerHTML='<tr><td colspan="11">No cases found.</td></tr>';if(errEl)errEl.textContent=e.message||'Request failed';}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;const handover=(String(current.assigned_role||'')==='counsellor_external'||String(current.escalation_level||'')==='external_handover'||String(current.assigned_to||'').indexOf('external_branch:')===0);const handoverNotes=(d.actions||[]).filter(a=>String(a.action_type||'').toLowerCase()==='external_handover'&&Number(a.visible_to_requester||0)===1).map(a=>a.note||'').join(' | ');const handoverPhone=(current.handover_phone||current.counsellor_section_phone||'').trim()||'Please contact the Embassy through official contact channels.';const handoverHtml=handover?('<div class="badge-handover">Forwarded to Counsellor Section Branch</div>'+rows({'Branch':current.handover_branch_name||current.assigned_department||current.counsellor_section_name||'Counsellor / Consular Section','Officer':current.handover_officer_name||'Concerned Branch Officer','Email':current.handover_email||current.counsellor_section_email||'parepkuwait@mofa.gov.pk','Phone':handoverPhone,'Status':'Resolved / handed over from Community Welfare','Handover note':handoverNotes||'-'})):'';const autoRoutingType=String(current.auto_routing_action_type||'');const autoRoutingState=autoRoutingType==='auto_assignment'?'Assigned':'Suggested';const autoRoutingHtml=(autoRoutingType==='auto_assignment'||autoRoutingType==='routing_suggestion')?('<div class="badge">Auto Routing</div>'+rows({'Suggested/Assigned Desk':current.auto_routing_new_value||current.assigned_department||'-','Assigned To':current.assigned_to||'-','Matched Keywords / Note':current.auto_routing_note||'-','Status':autoRoutingState})):'';const acctExtra=acctBadgeHtml(current.case_reference||'');document.getElementById('details').innerHTML=acctExtra+handoverHtml+autoRoutingHtml+rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');toggleResolvedNoteUi();document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}function toggleResolvedNoteUi(){const statusEl=document.getElementById('newStatus');const wrap=document.getElementById('resolvedNoteWrap');const btn=document.getElementById('statusBtn');if(!statusEl||!wrap||!btn)return;const isResolved=statusEl.value==='Resolved';wrap.style.display=isResolved?'block':'none';if(!isResolved){btn.disabled=false;return;}const t=(document.getElementById('resolvedApplicantNote').value||'').trim();btn.disabled=t.length<20}async function statusCase(){try{document.getElementById('err').textContent='';const status=document.getElementById('newStatus').value;const resolvedNote=document.getElementById('resolvedApplicantNote').value||'';if(status==='Resolved'&&resolvedNote.trim().length<20){throw new Error('Resolution note is required before marking a case as Resolved. Please write what action was taken and make it visible to the applicant.')}await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:status,note:status==='Resolved'?resolvedNote:document.getElementById('statusNote').value,visible_to_requester:status==='Resolved'});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){try{document.getElementById('err').textContent='';const note=(document.getElementById('noteText').value||'').trim();if(note.length<20){throw new Error('Resolution note is required before resolving this case. Please explain the action taken so the applicant can see how the matter was resolved.')}await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:note});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function loadCounsellorBranches(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;const card=document.getElementById('counsellorBranchesCard');const errEl=document.getElementById('branchErr');const rowsEl=document.getElementById('branchRows');if(!card||!errEl||!rowsEl)return;try{card.style.display='block';errEl.textContent='';const d=await jget('/api/admin/counsellor-branches');branchItems=Array.isArray(d.items)?d.items:[];rowsEl.innerHTML=branchItems.map(b=>'<tr><td>'+String(b.branch_name||b.branch_key||'-')+'</td><td>'+(b.officer_name||'-')+'</td><td>'+(b.designation||'-')+'</td><td>'+(b.email||'-')+'</td><td>'+(b.phone||'-')+'</td><td>'+((Number(b.is_active||0)===1)?'Yes':'No')+'</td><td><button class="btn2" data-key="'+String(b.branch_key||'')+'" onclick="editBranch(this.dataset.key)">Edit</button></td></tr>').join('')||'<tr><td colspan="7">No branches found.</td></tr>';}catch(e){errEl.textContent=e.message||'Could not load branch settings';}}function editBranch(branchKey){const editor=document.getElementById('branchEditor');if(!editor)return;const b=(branchItems||[]).find(x=>String(x.branch_key||'')===String(branchKey||''));if(!b)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val||'';};set('branch_key',b.branch_key);set('branch_name',b.branch_name);set('branch_officer',b.officer_name);set('branch_designation',b.designation);set('branch_email',b.email);set('branch_phone',b.phone);set('branch_keywords',b.keywords);set('branch_active',String(Number(b.is_active||0)===1?1:0));}function cancelBranchEdit(){const el=document.getElementById('branchEditor');if(el)el.style.display='none';}async function saveBranch(){const errEl=document.getElementById('branchErr');const byId=id=>document.getElementById(id);if(!byId('branch_key')||!byId('branch_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/counsellor-branches/update',{branch_key:byId('branch_key').value,branch_name:byId('branch_name').value,officer_name:(byId('branch_officer')||{}).value||'',designation:(byId('branch_designation')||{}).value||'',email:(byId('branch_email')||{}).value||'',phone:(byId('branch_phone')||{}).value||'',keywords:(byId('branch_keywords')||{}).value||'',is_active:Number(((byId('branch_active')||{}).value)||0)});cancelBranchEdit();await loadCounsellorBranches();if(current)await openCase(current.id);}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}async function loadRoutingRules(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;const card=document.getElementById('welfareRoutingRulesCard');const errEl=document.getElementById('routeErr');const rowsEl=document.getElementById('routeRows');if(!card||!errEl||!rowsEl)return;try{card.style.display='block';errEl.textContent='';const d=await jget('/api/admin/welfare-routing-rules');routingRuleItems=Array.isArray(d.items)?d.items:[];rowsEl.innerHTML=routingRuleItems.map(r=>'<tr><td><b>'+(r.rule_key||'-')+'</b><br><small>'+(r.desk_name||'-')+'</small></td><td>'+(r.officer_name||'-')+'</td><td>'+(r.assigned_to||'-')+'</td><td>'+(r.assigned_department||'-')+'</td><td>'+(r.priority||'-')+'</td><td>'+((Number(r.is_active||0)===1)?'Yes':'No')+'</td><td>'+(r.sort_order==null?'-':r.sort_order)+'</td><td><button class="btn2" data-rule-key="'+String(r.rule_key||'')+'" onclick="editRoutingRule(this.dataset.ruleKey)">Edit</button></td></tr>').join('')||'<tr><td colspan="8">No routing rules found.</td></tr>';}catch(e){if(errEl)errEl.textContent=e.message||'Could not load routing rules';}}function editRoutingRule(ruleKey){const editor=document.getElementById('routeEditor');if(!editor)return;const r=(routingRuleItems||[]).find(x=>String(x.rule_key||'')===String(ruleKey||''));if(!r)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val==null?'':String(val);};set('route_rule_key',r.rule_key);set('route_desk_name',r.desk_name);set('route_assigned_to',r.assigned_to);set('route_assigned_role',r.assigned_role);set('route_assigned_department',r.assigned_department);set('route_officer_name',r.officer_name);set('route_officer_email',r.officer_email);set('route_officer_phone',r.officer_phone);set('route_priority',r.priority||'Medium');set('route_keywords',r.keywords);set('route_case_types',r.case_types);set('route_categories',r.categories);set('route_is_active',Number(r.is_active||0)===1?'1':'0');set('route_sort_order',r.sort_order==null?100:r.sort_order);}function cancelRoutingRuleEdit(){const el=document.getElementById('routeEditor');if(el)el.style.display='none';}async function saveRoutingRule(){const errEl=document.getElementById('routeErr');const byId=id=>document.getElementById(id);if(!byId('route_rule_key')||!byId('route_desk_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/welfare-routing-rules/update',{rule_key:byId('route_rule_key').value,desk_name:byId('route_desk_name').value,assigned_to:(byId('route_assigned_to')||{}).value||'',assigned_role:(byId('route_assigned_role')||{}).value||'',assigned_department:(byId('route_assigned_department')||{}).value||'',officer_name:(byId('route_officer_name')||{}).value||'',officer_email:(byId('route_officer_email')||{}).value||'',officer_phone:(byId('route_officer_phone')||{}).value||'',priority:(byId('route_priority')||{}).value||'Medium',keywords:(byId('route_keywords')||{}).value||'',case_types:(byId('route_case_types')||{}).value||'',categories:(byId('route_categories')||{}).value||'',is_active:Number(((byId('route_is_active')||{}).value)||0),sort_order:Number(((byId('route_sort_order')||{}).value)||100)});cancelRoutingRuleEdit();await loadRoutingRules();}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}async function loadStaffAccountability(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;const card=document.getElementById('staffAccountabilityCard');const errEl=document.getElementById('acctErr');const kpiEl=document.getElementById('acctKpis');const officerRows=document.getElementById('acctOfficerRows');const caseRows=document.getElementById('acctCaseRows');if(!card||!errEl||!kpiEl||!officerRows||!caseRows)return;try{card.style.display='block';errEl.textContent='';const d=await jget('/api/admin/staff-accountability');const sum=(d&&d.summary)||{};const byOfficer=Array.isArray(d.by_officer)?d.by_officer:[];const overdue=Array.isArray(d.overdue_cases)?d.overdue_cases:[];const noAction=Array.isArray(d.no_action_cases)?d.no_action_cases:[];accountabilityData.overdueCasesByRef={};accountabilityData.noActionCasesByRef={};overdue.forEach(x=>{if(x&&x.reference)accountabilityData.overdueCasesByRef[String(x.reference)]=x;});noAction.forEach(x=>{if(x&&x.reference)accountabilityData.noActionCasesByRef[String(x.reference)]=x;});kpiEl.innerHTML=[['Assigned Open',sum.total_assigned_open],['Overdue >5 Days',sum.overdue_5_days],['No Action After Assignment',sum.no_action_after_assignment],['Resolved This Week',sum.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');officerRows.innerHTML=byOfficer.map(r=>'<tr><td>'+String(r.officer_name||r.assigned_to||'-')+'<br><small>'+String(r.department||'')+'</small></td><td>'+(r.assigned_open||0)+'</td><td>'+(r.overdue_5_days||0)+'</td><td>'+(r.no_action_after_assignment||0)+'</td><td>'+(r.resolved_this_week||0)+'</td></tr>').join('')||'<tr><td colspan="5">No assigned staff cases found.</td></tr>';const attention=[...overdue,...noAction].slice(0,50);caseRows.innerHTML=attention.map(c=>'<tr><td>'+String(c.reference||'-')+'</td><td>'+String(c.module||'-')+'</td><td>'+String(c.subject||'-')+'</td><td>'+String(c.assigned_to||'-')+'</td><td>'+Number(c.days_pending||0)+'</td><td>'+badge(c.status||'-')+'</td><td>'+String(c.last_action_note||'-')+'</td></tr>').join('')||'<tr><td colspan="7">No overdue or no-action cases right now.</td></tr>';if(document.getElementById('rows')){loadCases();}}catch(e){if(errEl)errEl.textContent=e.message||'Could not load staff accountability';}}function _todayIso(){const d=new Date();return d.toISOString().slice(0,10)}function _daysAgoIso(n){const d=new Date();d.setDate(d.getDate()-n);return d.toISOString().slice(0,10)}async function loadAmbassadorPulseReport(){if(USER_ROLE!=='admin'||PAGE_MODE!=='pulse')return;const card=document.getElementById('ambassadorPulseCard');const errEl=document.getElementById('pulseErr');const kpiEl=document.getElementById('pulseSummaryKpis');const themeRows=document.getElementById('pulseThemesRows');const policyRows=document.getElementById('pulsePolicyRows');const officerRows=document.getElementById('pulseOfficerRows');const evidenceRows=document.getElementById('pulseEvidenceRows');const startEl=document.getElementById('pulseStartDate');const endEl=document.getElementById('pulseEndDate');const fullEl=document.getElementById('pulseFullDetails');if(!card||!errEl||!kpiEl||!themeRows||!policyRows||!officerRows||!evidenceRows||!startEl||!endEl||!fullEl)return;try{card.style.display='block';if(!startEl.value)startEl.value=_daysAgoIso(6);if(!endEl.value)endEl.value=_todayIso();errEl.textContent='';const qs=new URLSearchParams();if(startEl.value)qs.set('start_date',startEl.value);if(endEl.value)qs.set('end_date',endEl.value);qs.set('include_full_details',fullEl.checked?'1':'0');const d=await jget('/api/admin/ambassador-pulse-report?'+qs.toString());pulseReportData=d;const sum=(d&&d.summary)||{};const op=(d&&d.operational_status)||{};kpiEl.innerHTML=[['Total submissions',sum.total_items],['High sensitivity issues',sum.high_sensitivity_count],['Top theme',sum.top_theme_label||'-'],['Overdue cases',op.total_overdue||0]].map(x=>'<div class="kpi"><b>'+String(x[1]||0)+'</b><span>'+String(x[0])+'</span></div>').join('');const themes=Array.isArray(d.top_themes)?d.top_themes:[];themeRows.innerHTML=themes.map(t=>'<tr><td>'+String(t.theme_label||'-')+'</td><td>'+Number(t.count||0)+'</td><td>'+badge(t.sensitivity||'Low')+'</td><td>'+String(t.authority||'-')+'</td><td>'+String((t.sample_references||[]).join(', ')||'-')+'</td></tr>').join('')||'<tr><td colspan="5">No themes found for selected period.</td></tr>';const policy=Array.isArray(d.policy_sensitive_issues)?d.policy_sensitive_issues:[];policyRows.innerHTML=policy.map(p=>'<tr><td>'+String(p.theme_label||'-')+'</td><td>'+Number(p.count||0)+'</td><td>'+String(p.authority||'-')+'</td><td>'+String(p.suggested_action||'-')+'</td><td>'+String((p.sample_references||[]).join(', ')||'-')+'</td></tr>').join('')||'<tr><td colspan="5">No policy-sensitive issues found.</td></tr>';const officers=(((d||{}).staff_accountability||{}).by_officer)||[];officerRows.innerHTML=officers.map(r=>'<tr><td>'+String(r.officer_name||r.assigned_to||'-')+'</td><td>'+Number(r.assigned_open||0)+'</td><td>'+Number(r.overdue_5_days||0)+'</td><td>'+Number(r.no_action_after_assignment||0)+'</td><td>'+Number(r.resolved_this_week||0)+'</td></tr>').join('')||'<tr><td colspan="5">No officer accountability rows found.</td></tr>';const evidence=Array.isArray(d.evidence_cases)?d.evidence_cases:[];evidenceRows.innerHTML=evidence.map(c=>'<tr><td>'+String(c.reference||'-')+'</td><td>'+String(c.module||'-')+'</td><td>'+String(c.created_at||'-').slice(0,10)+'</td><td>'+String(((c.theme||{}).theme_label)||'-')+'</td><td>'+String(c.subject||'-')+'</td><td>'+badge(c.status||'-')+'</td><td>'+String(c.assigned_to||'-')+'</td><td>'+String(c.details_excerpt||'-')+'</td></tr>').join('')||'<tr><td colspan="8">No evidence cases found for selected period.</td></tr>';}catch(e){if(errEl)errEl.textContent=e.message||'Could not generate ambassador pulse report';}}function printAmbassadorPulseReport(){if(USER_ROLE!=='admin')return;window.print()}async function copyPulseSummary(){const errEl=document.getElementById('pulseErr');const d=pulseReportData;if(!d){if(errEl)errEl.textContent='Generate the report first.';return;}const sum=d.summary||{};const op=d.operational_status||{};const text=['Ambassador Pulse Report',`Period: ${(d.period||{}).start_date||'-'} to ${(d.period||{}).end_date||'-'}`,`Total submissions: ${sum.total_items||0}`,`High sensitivity: ${sum.high_sensitivity_count||0}`,`Top theme: ${sum.top_theme_label||'-'}`,`Overdue cases: ${op.total_overdue||0}`].join('\n');try{await navigator.clipboard.writeText(text);if(errEl)errEl.textContent='Summary copied.';}catch(e){if(errEl)errEl.textContent='Could not copy summary.';}}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}document.getElementById('resolvedApplicantNote')&&document.getElementById('resolvedApplicantNote').addEventListener('input',toggleResolvedNoteUi);const pulseFullEl=document.getElementById('pulseFullDetails');if(pulseFullEl&&USER_ROLE!=='admin'){pulseFullEl.checked=false;pulseFullEl.disabled=true;}function applyPageModeVisibility(){const isAdmin=USER_ROLE==='admin';const show=(id,yes)=>{const el=document.getElementById(id);if(el)el.style.display=yes?'block':'none';};show('printPackPanel',PAGE_MODE!=='pulse'&&PAGE_MODE!=='my');show('caseListPanel',PAGE_MODE!=='pulse');show('counsellorBranchesCard',isAdmin&&PAGE_MODE==='welfare');show('welfareRoutingRulesCard',isAdmin&&PAGE_MODE==='welfare');show('staffAccountabilityCard',isAdmin&&PAGE_MODE==='welfare');show('ambassadorPulseCard',isAdmin&&PAGE_MODE==='pulse');}applyPageModeVisibility();loadUsers();if(PAGE_MODE!=='pulse')loadCases();if(USER_ROLE==='admin'&&PAGE_MODE==='welfare'){loadCounsellorBranches();loadRoutingRules();loadStaffAccountability();}if(USER_ROLE==='admin'&&PAGE_MODE==='pulse'){loadAmbassadorPulseReport();}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html>"""
+<script>const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';const IS_ADMIN=['admin','operator','operator_special'].indexOf(String(USER_ROLE||'').trim().toLowerCase())>=0;let current=null,users=[],branchItems=[],routingRuleItems=[],accountabilityData={overdueCasesByRef:{},noActionCasesByRef:{}};document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}function safeHtml(v){return esc(v);}async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}function acctBadgeHtml(reference){const ref=String(reference||'');const overdue=accountabilityData.overdueCasesByRef&&accountabilityData.overdueCasesByRef[ref];const noAction=accountabilityData.noActionCasesByRef&&accountabilityData.noActionCasesByRef[ref];let html='';if(overdue)html+='<div><span class="badge Urgent">Overdue >5 days</span></div>';if(noAction)html+='<div><span class="badge">No staff action</span></div>';return html}async function loadCases(){const errEl=document.getElementById('err');const kpiEl=document.getElementById('kpis');const rowsEl=document.getElementById('rows');try{if(errEl)errEl.textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};if(kpiEl)kpiEl.innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');const items=Array.isArray(data.items)?data.items:[];if(rowsEl)rowsEl.innerHTML=items.map(c=>'<tr><td><b>'+c.case_reference+'</b>'+acctBadgeHtml(c.case_reference)+'</td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>';}catch(e){const msg='Error loading cases: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan="11">'+esc(msg)+'</td></tr>';}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;const handover=(String(current.assigned_role||'')==='counsellor_external'||String(current.escalation_level||'')==='external_handover'||String(current.assigned_to||'').indexOf('external_branch:')===0);const handoverNotes=(d.actions||[]).filter(a=>String(a.action_type||'').toLowerCase()==='external_handover'&&Number(a.visible_to_requester||0)===1).map(a=>a.note||'').join(' | ');const handoverPhone=(current.handover_phone||current.counsellor_section_phone||'').trim()||'Please contact the Embassy through official contact channels.';const handoverHtml=handover?('<div class="badge-handover">Forwarded to Counsellor Section Branch</div>'+rows({'Branch':current.handover_branch_name||current.assigned_department||current.counsellor_section_name||'Counsellor / Consular Section','Officer':current.handover_officer_name||'Concerned Branch Officer','Email':current.handover_email||current.counsellor_section_email||'parepkuwait@mofa.gov.pk','Phone':handoverPhone,'Status':'Resolved / handed over from Community Welfare','Handover note':handoverNotes||'-'})):'';const autoRoutingType=String(current.auto_routing_action_type||'');const autoRoutingState=autoRoutingType==='auto_assignment'?'Assigned':'Suggested';const autoRoutingHtml=(autoRoutingType==='auto_assignment'||autoRoutingType==='routing_suggestion')?('<div class="badge">Auto Routing</div>'+rows({'Suggested/Assigned Desk':current.auto_routing_new_value||current.assigned_department||'-','Assigned To':current.assigned_to||'-','Matched Keywords / Note':current.auto_routing_note||'-','Status':autoRoutingState})):'';const acctExtra=acctBadgeHtml(current.case_reference||'');document.getElementById('details').innerHTML=acctExtra+handoverHtml+autoRoutingHtml+rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');toggleResolvedNoteUi();document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}function toggleResolvedNoteUi(){const statusEl=document.getElementById('newStatus');const wrap=document.getElementById('resolvedNoteWrap');const btn=document.getElementById('statusBtn');if(!statusEl||!wrap||!btn)return;const isResolved=statusEl.value==='Resolved';wrap.style.display=isResolved?'block':'none';if(!isResolved){btn.disabled=false;return;}const t=(document.getElementById('resolvedApplicantNote').value||'').trim();btn.disabled=t.length<20}async function statusCase(){try{document.getElementById('err').textContent='';const status=document.getElementById('newStatus').value;const resolvedNote=document.getElementById('resolvedApplicantNote').value||'';if(status==='Resolved'&&resolvedNote.trim().length<20){throw new Error('Resolution note is required before marking a case as Resolved. Please write what action was taken and make it visible to the applicant.')}await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:status,note:status==='Resolved'?resolvedNote:document.getElementById('statusNote').value,visible_to_requester:status==='Resolved'});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){try{document.getElementById('err').textContent='';const note=(document.getElementById('noteText').value||'').trim();if(note.length<20){throw new Error('Resolution note is required before resolving this case. Please explain the action taken so the applicant can see how the matter was resolved.')}await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:note});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function loadCounsellorBranches(){if(PAGE_MODE!=='welfare'||!IS_ADMIN)return;const card=document.getElementById('counsellorBranchesCard');const errEl=document.getElementById('branchErr');const rowsEl=document.getElementById('branchRows');if(!card)return;if(!rowsEl){if(errEl)errEl.textContent='Error: branch table not found';return;}try{card.style.display='block';if(errEl)errEl.textContent='';const d=await jget('/api/admin/counsellor-branches');let it=[];if(Array.isArray(d.items)&&d.items.length)it=d.items;else if(Array.isArray(d.branches)&&d.branches.length)it=d.branches;else if(Array.isArray(d.rows)&&d.rows.length)it=d.rows;branchItems=it;rowsEl.innerHTML=it.length?it.map(b=>'<tr><td>'+String(b.branch_name||b.branch_key||'-')+'</td><td>'+(b.officer_name||'-')+'</td><td>'+(b.designation||'-')+'</td><td>'+(b.email||'-')+'</td><td>'+(b.phone||'-')+'</td><td>'+((Number(b.is_active||0)===1)?'Yes':'No')+'</td><td><button class="btn2" data-key="'+String(b.branch_key||'')+'" onclick="editBranch(this.dataset.key)">Edit</button></td></tr>').join(''):'<tr><td colspan="7">No branches found.</td></tr>';}catch(e){const msg='Error loading branch settings: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan="7">'+esc(msg)+'</td></tr>';}}async function loadRoutingRules(){if(PAGE_MODE!=='welfare'||!IS_ADMIN)return;const card=document.getElementById('welfareRoutingRulesCard');const errEl=document.getElementById('routeErr');const rowsEl=document.getElementById('routeRows');if(!card)return;if(!rowsEl){if(errEl)errEl.textContent='Error: routing table not found';return;}try{card.style.display='block';if(errEl)errEl.textContent='';const d=await jget('/api/admin/welfare-routing-rules');let it=[];if(Array.isArray(d.items)&&d.items.length)it=d.items;else if(Array.isArray(d.rules)&&d.rules.length)it=d.rules;else if(Array.isArray(d.rows)&&d.rows.length)it=d.rows;routingRuleItems=it;rowsEl.innerHTML=it.length?it.map(r=>'<tr><td><b>'+(r.rule_key||'-')+'</b><br><small>'+(r.desk_name||'-')+'</small></td><td>'+(r.officer_name||'-')+'</td><td>'+(r.assigned_to||'-')+'</td><td>'+(r.assigned_department||'-')+'</td><td>'+(r.priority||'-')+'</td><td>'+((Number(r.is_active||0)===1)?'Yes':'No')+'</td><td>'+(r.sort_order==null?'-':r.sort_order)+'</td><td><button class="btn2" data-rule-key="'+String(r.rule_key||'')+'" onclick="editRoutingRule(this.dataset.ruleKey)">Edit</button></td></tr>').join(''):'<tr><td colspan="8">No routing rules found.</td></tr>';}catch(e){const msg='Error loading routing rules: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan="8">'+esc(msg)+'</td></tr>';}}async function loadStaffAccountability(){if(PAGE_MODE!=='welfare'||!IS_ADMIN)return;const card=document.getElementById('staffAccountabilityCard');const errEl=document.getElementById('acctErr');const kpiEl=document.getElementById('acctKpis');const officerRows=document.getElementById('acctOfficerRows');const caseRows=document.getElementById('acctCaseRows');if(!card)return;if(!officerRows||!caseRows){if(errEl)errEl.textContent='Error: accountability tables not found';if(officerRows)officerRows.innerHTML='<tr><td colspan="5">Error loading staff accountability.</td></tr>';if(caseRows)caseRows.innerHTML='<tr><td colspan="7">Error loading staff accountability.</td></tr>';return;}try{card.style.display='block';if(errEl)errEl.textContent='';const d=await jget('/api/admin/staff-accountability');const sum=(d&&d.summary)||{};const byOfficer=Array.isArray(d.by_officer)?d.by_officer:[];const overdue=Array.isArray(d.overdue_cases)?d.overdue_cases:[];const noAction=Array.isArray(d.no_action_cases)?d.no_action_cases:[];accountabilityData.overdueCasesByRef={};accountabilityData.noActionCasesByRef={};overdue.forEach(x=>{if(x&&x.reference)accountabilityData.overdueCasesByRef[String(x.reference)]=x;});noAction.forEach(x=>{if(x&&x.reference)accountabilityData.noActionCasesByRef[String(x.reference)]=x;});if(kpiEl)kpiEl.innerHTML=[['Assigned Open',sum.total_assigned_open],['Overdue >5 Days',sum.overdue_5_days],['No Action After Assignment',sum.no_action_after_assignment],['Resolved This Week',sum.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');officerRows.innerHTML=byOfficer.length?byOfficer.map(r=>'<tr><td>'+String(r.officer_name||r.assigned_to||'-')+'<br><small>'+String(r.department||'')+'</small></td><td>'+(r.assigned_open||0)+'</td><td>'+(r.overdue_5_days||0)+'</td><td>'+(r.no_action_after_assignment||0)+'</td><td>'+(r.resolved_this_week||0)+'</td></tr>').join(''):'<tr><td colspan="5">No assigned staff cases found.</td></tr>';const attention=[...overdue,...noAction].slice(0,50);caseRows.innerHTML=attention.length?attention.map(c=>'<tr><td>'+String(c.reference||'-')+'</td><td>'+String(c.module||'-')+'</td><td>'+String(c.subject||'-')+'</td><td>'+String(c.assigned_to||'-')+'</td><td>'+Number(c.days_pending||0)+'</td><td>'+badge(c.status||'-')+'</td><td>'+String(c.last_action_note||'-')+'</td></tr>').join(''):'<tr><td colspan="7">No overdue or no-action cases right now.</td></tr>';}catch(e){const msg='Error loading staff accountability: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(kpiEl)kpiEl.innerHTML='';officerRows.innerHTML='<tr><td colspan="5">'+esc(msg)+'</td></tr>';caseRows.innerHTML='<tr><td colspan="7">'+esc(msg)+'</td></tr>';}}function editBranch(branchKey){const editor=document.getElementById('branchEditor');if(!editor)return;const b=(branchItems||[]).find(x=>String(x.branch_key||'')===String(branchKey||''));if(!b)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val||'';};set('branch_key',b.branch_key);set('branch_name',b.branch_name);set('branch_officer',b.officer_name);set('branch_designation',b.designation);set('branch_email',b.email);set('branch_phone',b.phone);set('branch_keywords',b.keywords);set('branch_active',String(Number(b.is_active||0)===1?1:0));}function cancelBranchEdit(){const el=document.getElementById('branchEditor');if(el)el.style.display='none';}async function saveBranch(){const errEl=document.getElementById('branchErr');const byId=id=>document.getElementById(id);if(!byId('branch_key')||!byId('branch_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/counsellor-branches/update',{branch_key:byId('branch_key').value,branch_name:byId('branch_name').value,officer_name:(byId('branch_officer')||{}).value||'',designation:(byId('branch_designation')||{}).value||'',email:(byId('branch_email')||{}).value||'',phone:(byId('branch_phone')||{}).value||'',keywords:(byId('branch_keywords')||{}).value||'',is_active:Number(((byId('branch_active')||{}).value)||0)});cancelBranchEdit();await loadCounsellorBranches();if(current)await openCase(current.id);}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}function editRoutingRule(ruleKey){const editor=document.getElementById('routeEditor');if(!editor)return;const r=(routingRuleItems||[]).find(x=>String(x.rule_key||'')===String(ruleKey||''));if(!r)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val==null?'':String(val);};set('route_rule_key',r.rule_key);set('route_desk_name',r.desk_name);set('route_assigned_to',r.assigned_to);set('route_assigned_role',r.assigned_role);set('route_assigned_department',r.assigned_department);set('route_officer_name',r.officer_name);set('route_officer_email',r.officer_email);set('route_officer_phone',r.officer_phone);set('route_priority',r.priority||'Medium');set('route_keywords',r.keywords);set('route_case_types',r.case_types);set('route_categories',r.categories);set('route_is_active',Number(r.is_active||0)===1?'1':'0');set('route_sort_order',r.sort_order==null?100:r.sort_order);}function cancelRoutingRuleEdit(){const el=document.getElementById('routeEditor');if(el)el.style.display='none';}async function saveRoutingRule(){const errEl=document.getElementById('routeErr');const byId=id=>document.getElementById(id);if(!byId('route_rule_key')||!byId('route_desk_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/welfare-routing-rules/update',{rule_key:byId('route_rule_key').value,desk_name:byId('route_desk_name').value,assigned_to:(byId('route_assigned_to')||{}).value||'',assigned_role:(byId('route_assigned_role')||{}).value||'',assigned_department:(byId('route_assigned_department')||{}).value||'',officer_name:(byId('route_officer_name')||{}).value||'',officer_email:(byId('route_officer_email')||{}).value||'',officer_phone:(byId('route_officer_phone')||{}).value||'',priority:(byId('route_priority')||{}).value||'Medium',keywords:(byId('route_keywords')||{}).value||'',case_types:(byId('route_case_types')||{}).value||'',categories:(byId('route_categories')||{}).value||'',is_active:Number(((byId('route_is_active')||{}).value)||0),sort_order:Number(((byId('route_sort_order')||{}).value)||100)});cancelRoutingRuleEdit();await loadRoutingRules();}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}document.getElementById('resolvedApplicantNote')&&document.getElementById('resolvedApplicantNote').addEventListener('input',toggleResolvedNoteUi);function applyPageModeVisibility(){const isAdmin=IS_ADMIN;const show=(id,yes)=>{const el=document.getElementById(id);if(el)el.style.display=yes?'block':'none';};show('printPackPanel',PAGE_MODE!=='my');show('caseListPanel',true);show('counsellorBranchesCard',isAdmin&&PAGE_MODE==='welfare');show('welfareRoutingRulesCard',isAdmin&&PAGE_MODE==='welfare');show('staffAccountabilityCard',isAdmin&&PAGE_MODE==='welfare');const pulseEl=document.getElementById('ambassadorPulseCard');if(pulseEl)pulseEl.style.display='none';}async function bootWelfarePage(){try{applyPageModeVisibility();await loadUsers();await loadCases();if(IS_ADMIN&&PAGE_MODE==='welfare'){await loadCounsellorBranches();await loadRoutingRules();await loadStaffAccountability();}refreshNotificationBadges();}catch(e){const err=document.getElementById('err');if(err)err.textContent='Page load error: '+(e&&e.message?e.message:String(e));}}bootWelfarePage();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html></script></body></html>"""
 
 WELFARE_CASES_PRINT_SCRIPT = """
 <script>
@@ -31250,673 +31245,50 @@ cwaLoadPrintAssignees();
 enhancePrintRows();
 </script>
 """
-WELFARE_CASES_PULSE_TRANSFER_SCRIPT = """
+WELFARE_CASES_TRANSFER_SCRIPT = """
 <script>
 (function(){
 function cwaHtml(v){return String(v==null?'':v).replace(/[&<>"']/g,function(s){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s];});}
-function pulseTodayIso(){return new Date().toISOString().slice(0,10)}
-function pulseDaysAgoIso(days){const d=new Date();d.setDate(d.getDate()-days);return d.toISOString().slice(0,10)}
-function pulseSetError(msg){const el=document.getElementById('pulseError');if(!el)return;if(msg){el.textContent=msg;el.style.display='block';}else{el.textContent='';el.style.display='none';}}
-function pulseTable(headers,rows){if(!rows||!rows.length)return '<div class="pulse-empty">No records for selected period.</div>';let h='<div class="pulse-table-wrap"><table><thead><tr>'+headers.map(x=>'<th>'+cwaHtml(x)+'</th>').join('')+'</tr></thead><tbody>';rows.forEach(r=>{h+='<tr>'+r.map(c=>'<td>'+String(c)+'</td>').join('')+'</tr>';});return h+'</tbody></table></div>';}
-function ensurePulseShell(){if(typeof PAGE_MODE==='undefined'||PAGE_MODE!=='pulse')return;const card=document.getElementById('ambassadorPulseCard');if(!card)return;card.style.display='block';if(card.dataset.ready==='pulse')return;card.dataset.ready='pulse';card.innerHTML='\
-<style>\
-.pulse-print-header{display:none;border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;margin:0 0 12px;background:#fff}\
-.pulse-print-header h2{margin:6px 0 4px;font-size:20px;color:#0f172a}.pulse-print-header .sub{font-size:12px;color:#475569}\
-.pulse-section{padding:14px;border-bottom:1px solid #e2e8f0}.pulse-section:last-child{border-bottom:0}.pulse-section h3{margin:0 0 8px;color:#10253f;font-size:16px}.pulse-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pulse-key-points{margin:0;padding-left:18px}.pulse-key-points li{margin:6px 0;line-height:1.45}.pulse-narrative{font-size:13px;line-height:1.5;color:#0f172a}.pulse-policy-cards,.pulse-evidence-list{display:grid;gap:10px}.pulse-policy-card,.pulse-evidence-card{border:1px solid #d8e0ea;border-radius:8px;padding:10px 12px;background:#fff;page-break-inside:avoid}.pulse-policy-card h4{margin:0 0 6px;font-size:14px;color:#10253f}.pulse-meta{font-size:12px;color:#334155;margin-bottom:6px}.pulse-table-wrap{overflow:auto}.pulse-table-wrap table{width:100%;table-layout:auto}.pulse-table-wrap th,.pulse-table-wrap td{word-break:break-word;overflow-wrap:anywhere}.pulse-empty{padding:18px;text-align:center;color:#64748b;background:#f8fafc;border-radius:8px}.pulse-evidence-card .line{font-size:12px;color:#334155;margin-bottom:4px}.pulse-evidence-card .title{font-size:13px;font-weight:700;color:#0f172a;margin-bottom:4px}.pulse-evidence-card .excerpt{font-size:12px;color:#1e293b}\
-@media print{@page{size:A4 portrait;margin:12mm}body{background:#fff}.top,.side,#printPackPanel,#caseListPanel,#counsellorBranchesCard,#welfareRoutingRulesCard,#staffAccountabilityCard,.pulse-controls button,.pulse-controls label,#pulseError{display:none!important}.shell{display:block}.main{width:100%}.head{display:none}.content{padding:0}.panel{border:0}.pulse-print-header{display:block!important}.pulse-section{break-inside:avoid;page-break-inside:avoid;padding:9px 0}.pulse-table-wrap{overflow:visible}.pulse-table-wrap table{font-size:10px}.pulse-table-wrap th,.pulse-table-wrap td{padding:5px 6px;white-space:normal}.pulse-policy-card,.pulse-evidence-card{break-inside:avoid;page-break-inside:avoid}}\
-</style>\
-<div id="pulsePrintHeader" class="pulse-print-header"><div><strong>Embassy of Pakistan, Kuwait</strong></div><div class="sub">Community Welfare Wing</div><h2>Ambassador Pulse Brief</h2><div class="sub">Period: <span id="pulsePrintPeriod">-</span></div><div class="sub">Generated: <span id="pulsePrintGenerated">-</span></div></div>\
-<div class="pulse-section"><h3>Ambassador Pulse Brief</h3><div class="pulse-controls"><input id="pulseStartDate" type="date"><input id="pulseEndDate" type="date"><label style="font-size:12px;color:#475569"><input id="pulseIncludeFull" type="checkbox"> Include internal full details</label><button type="button" onclick="loadAmbassadorPulseReport()">Generate Report</button><button type="button" class="btn2" onclick="printAmbassadorPulseReport()">Print / Save PDF</button><button type="button" class="btn2" onclick="copyPulseSummary()">Copy Summary</button></div><div id="pulseError" class="err" style="display:none"></div></div>\
-<div class="pulse-section"><h3>Ambassador Brief - Key Points</h3><ul id="pulseBriefPoints" class="pulse-key-points"><li>Generate report to view key points.</li></ul><div id="pulseSummaryKpis" class="kpis" style="margin-top:12px"></div></div>\
-<div class="pulse-section"><h3>Issue-Focused Executive Narrative</h3><div id="pulseExecutiveNarrative" class="pulse-narrative">Generate report to view executive narrative.</div></div>\
-<div class="pulse-section"><h3>Issues Requiring Diplomatic / Senior Attention</h3><div id="pulsePolicyCardsWrap" class="pulse-policy-cards"><div class="pulse-empty">Generate report to view senior-attention issues.</div></div></div>\
-<div class="pulse-section"><h3>Community Service Workload</h3><div id="pulseWorkloadTableWrap" class="pulse-table-wrap"><div class="pulse-empty">Generate report to view workload themes.</div></div></div>\
-<div class="pulse-section"><h3>Staff Accountability Snapshot</h3><div id="pulseStaffTableWrap" class="pulse-table-wrap"><div class="pulse-empty">Generate report to view staff snapshot.</div></div></div>\
-<div class="pulse-section"><h3>Evidence Annex</h3><p class="hint" id="pulseEvidenceNote">Full case records remain available in the portal by reference number.</p><h4 style="margin:4px 0 8px;color:#10253f">A. Evidence for Senior Attention</h4><div id="pulseEvidenceSeniorWrap" class="pulse-evidence-list"><div class="pulse-empty">Generate report to view senior evidence.</div></div><h4 style="margin:12px 0 8px;color:#10253f">B. Operational Evidence Samples</h4><div id="pulseEvidenceOperationalWrap" class="pulse-evidence-list"><div class="pulse-empty">Generate report to view operational evidence samples.</div></div></div>';const start=document.getElementById('pulseStartDate');const end=document.getElementById('pulseEndDate');if(start&&!start.value)start.value=pulseDaysAgoIso(7);if(end&&!end.value)end.value=pulseTodayIso();}
-function renderPulseReport(rep){ensurePulseShell();const s=(rep&&rep.summary)||{};const op=(rep&&rep.operational_status)||{};const period=(rep&&rep.period)||{};const generatedAt=(rep&&rep.generated_at)||'';const printPeriod=document.getElementById('pulsePrintPeriod');const printGenerated=document.getElementById('pulsePrintGenerated');if(printPeriod)printPeriod.textContent=(period.start_date||'-')+' to '+(period.end_date||'-');if(printGenerated)printGenerated.textContent=generatedAt||'-';const brief=document.getElementById('pulseBriefPoints');const points=(rep&&rep.ambassador_brief_points)||[];if(brief)brief.innerHTML=(points.length?points:['The report is generated from available case records in the selected period.','Evidence references are listed below for verification.']).slice(0,6).map(p=>'<li>'+cwaHtml(p)+'</li>').join('');const kpi=document.getElementById('pulseSummaryKpis');if(kpi)kpi.innerHTML=[['Total submissions',s.total_items],['High sensitivity',s.high_sensitivity_count],['Top operational workload',s.top_operational_theme||'-'],['Top diplomatic issue',s.top_diplomatic_issue||'-'],['Overdue cases',op.total_overdue||0]].map(x=>'<div class="kpi"><b>'+cwaHtml(x[1]||0)+'</b><span>'+cwaHtml(x[0])+'</span></div>').join('');const narrative=document.getElementById('pulseExecutiveNarrative');if(narrative)narrative.textContent=String((rep&&rep.executive_narrative)||'No executive narrative available for this period.');const policy=(rep&&rep.diplomatic_issues)||[];const policyWrap=document.getElementById('pulsePolicyCardsWrap');if(policyWrap)policyWrap.innerHTML=policy.length?policy.map(p=>'<div class="pulse-policy-card"><h4>'+cwaHtml(p.issue_title||p.theme_label||'-')+'</h4><div class="pulse-meta"><strong>Why it matters:</strong> '+cwaHtml(p.why_it_matters||'-')+'</div><div class="pulse-meta"><strong>Authority/institution:</strong> '+cwaHtml(p.authority||'-')+'</div><div class="pulse-meta"><strong>Submissions:</strong> '+cwaHtml(p.count||0)+' | <strong>Evidence:</strong> '+cwaHtml((p.evidence_references||p.sample_references||[]).join(', ')||'-')+'</div><div><strong>Suggested action:</strong> '+cwaHtml(p.suggested_action||'-')+'</div><div class="pulse-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+cwaHtml(p.representative_excerpt||'-')+'</div></div>').join(''):'<div class="pulse-empty">No diplomatic or senior-attention issues for selected period.</div>';const workload=((rep&&rep.community_service_workload)||[]).map(w=>[cwaHtml(w.theme_label||'-'),cwaHtml(w.count||0),cwaHtml(w.responsible_section||'-'),cwaHtml((w.sample_references||[]).join(', ')||'-'),cwaHtml(w.note||'Operational/service handling')]);const workloadWrap=document.getElementById('pulseWorkloadTableWrap');if(workloadWrap)workloadWrap.innerHTML=pulseTable(['Theme','Count','Responsible Section','Sample References','Note'],workload);const officers=(((rep||{}).staff_accountability||{}).by_officer)||[];const staffRows=officers.map(o=>[cwaHtml(o.officer_name||o.assigned_to||'-'),cwaHtml(o.assigned_open||0),cwaHtml(o.overdue_5_days||0),cwaHtml(o.no_action_after_assignment||0),cwaHtml(o.resolved_this_week||0)]);const staffWrap=document.getElementById('pulseStaffTableWrap');if(staffWrap)staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'],staffRows);const annex=(rep&&rep.evidence_annex)||{};const note=document.getElementById('pulseEvidenceNote');if(note)note.textContent=String(annex.note||'Full case records remain available in the portal by reference number.');function evidenceCards(items){if(!items||!items.length)return '<div class="pulse-empty">No evidence cases for selected period.</div>';return items.map(c=>'<div class="pulse-evidence-card"><div class="line"><strong>Reference:</strong> '+cwaHtml(c.reference||'-')+'</div><div class="line"><strong>Module:</strong> '+cwaHtml(c.module||'-')+' | <strong>Date:</strong> '+cwaHtml((c.created_at||'').slice(0,10)||'-')+' | <strong>Status:</strong> '+cwaHtml(c.status||'-')+' | <strong>Assigned to:</strong> '+cwaHtml(c.assigned_to||'-')+'</div><div class="line"><strong>Theme:</strong> '+cwaHtml(((c.theme||{}).theme_label)||'-')+'</div><div class="title">Subject: '+cwaHtml(c.subject||'-')+'</div><div class="excerpt"><strong>Excerpt:</strong> '+cwaHtml(c.details_excerpt||'-')+'</div></div>').join('');}const senior=document.getElementById('pulseEvidenceSeniorWrap');if(senior)senior.innerHTML=evidenceCards(annex.senior_attention||[]);const ops=document.getElementById('pulseEvidenceOperationalWrap');if(ops)ops.innerHTML=evidenceCards(annex.operational_samples||[]);}
-function pulseList(v){return Array.isArray(v)?v:[];}
-function pulseRefs(v){return pulseList(v).filter(Boolean).join(', ')||'-';}
-function pulseTrim(v,n){const s=String(v||'-');return s.length>n?s.slice(0,n-3)+'...':s;}
-function pulseIssueItems(rep){const explicit=pulseList(rep&&rep.diplomatic_issues);if(explicit.length)return explicit;const policy=pulseList(rep&&rep.policy_sensitive_issues);if(policy.length)return policy.map(p=>({issue_title:p.issue_title||p.theme_label,why_it_matters:p.why_it_matters,authority:p.authority,count:p.count,evidence_references:p.evidence_references||p.sample_references,suggested_action:p.suggested_action,representative_excerpt:p.representative_excerpt,sensitivity:p.sensitivity}));return pulseList(rep&&rep.top_themes).filter(t=>String(t.sensitivity||'').toLowerCase()==='high'||(String(t.sensitivity||'').toLowerCase()==='medium'&&Number(t.count||0)>=3)).map(t=>({issue_title:t.theme_label,why_it_matters:t.why_it_matters,authority:t.authority,count:t.count,evidence_references:t.sample_references,suggested_action:t.suggested_action,representative_excerpt:t.short_summary,sensitivity:t.sensitivity}));}
-function pulseWorkloadItems(rep){const explicit=pulseList(rep&&rep.community_service_workload);if(explicit.length)return explicit;const operationalKeys=['opf_insurance_compensation','passport_nadra_consular','general_welfare','nurses_welfare','labour_salary_employer'];return pulseList(rep&&rep.top_themes).filter(t=>operationalKeys.includes(t.theme_key)).map(t=>({theme_label:t.theme_label,count:t.count,responsible_section:t.authority||'Community Welfare Wing',sample_references:(t.sample_references||[]).slice(0,3),note:String(t.sensitivity||'')==='High'?'Sensitive: monitor for senior review':'Operational/service handling'}));}
-function renderPulseReport(rep){ensurePulseShell();const s=(rep&&rep.summary)||{};const op=(rep&&rep.operational_status)||{};const period=(rep&&rep.period)||{};const generatedAt=(rep&&rep.generated_at)||'';const printPeriod=document.getElementById('pulsePrintPeriod');const printGenerated=document.getElementById('pulsePrintGenerated');if(printPeriod)printPeriod.textContent=(period.start_date||'-')+' to '+(period.end_date||'-');if(printGenerated)printGenerated.textContent=generatedAt||'-';const points=pulseList(rep&&rep.ambassador_brief_points);const derived=['The portal recorded '+String(s.total_items||0)+' submissions during the reporting period.',String(s.high_sensitivity_count||0)+' high-sensitivity issue(s) were identified for senior review.','Highest-volume operational workload: '+String(s.top_operational_theme||s.top_theme_label||'-')+'.','Key diplomatic issue: '+String(s.top_diplomatic_issue||'No high-sensitivity diplomatic issue identified')+'.',String(op.total_overdue||0)+' assigned case(s) are overdue beyond the monitoring threshold.','Evidence references are available below.'];const brief=document.getElementById('pulseBriefPoints');if(brief)brief.innerHTML=(points.length?points:derived).slice(0,6).map(p=>'<li>'+cwaHtml(p)+'</li>').join('');const kpi=document.getElementById('pulseSummaryKpis');if(kpi)kpi.innerHTML=[['Total submissions',s.total_items],['High sensitivity',s.high_sensitivity_count],['Top operational workload',s.top_operational_theme||'-'],['Top diplomatic issue',s.top_diplomatic_issue||'-'],['Overdue cases',op.total_overdue||0]].map(x=>'<div class="kpi"><b>'+cwaHtml(x[1]==null?'-':x[1])+'</b><span>'+cwaHtml(x[0])+'</span></div>').join('');const narrative=document.getElementById('pulseExecutiveNarrative');if(narrative)narrative.textContent=String((rep&&rep.executive_narrative)||'The brief separates policy-sensitive matters from operational workload so senior review can focus on issues requiring diplomatic visibility.');const policy=pulseIssueItems(rep);const policyWrap=document.getElementById('pulsePolicyCardsWrap');if(policyWrap)policyWrap.innerHTML=policy.length?policy.map(p=>'<div class="pulse-policy-card"><h4>'+cwaHtml(p.issue_title||p.theme_label||'-')+'</h4><div class="pulse-meta"><strong>Why it matters:</strong> '+cwaHtml(p.why_it_matters||'-')+'</div><div class="pulse-meta"><strong>Authority / institution:</strong> '+cwaHtml(p.authority||'-')+'</div><div class="pulse-meta"><strong>Submissions:</strong> '+cwaHtml(p.count||0)+' | <strong>Evidence:</strong> '+cwaHtml(pulseRefs(p.evidence_references||p.sample_references))+'</div><div><strong>Suggested action:</strong> '+cwaHtml(p.suggested_action||'-')+'</div><div class="pulse-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+cwaHtml(pulseTrim(p.representative_excerpt||p.short_summary,300))+'</div></div>').join(''):'<div class="pulse-empty">No diplomatic or senior-attention issues for selected period.</div>';const workload=pulseWorkloadItems(rep);const workloadWrap=document.getElementById('pulseWorkloadTableWrap');if(workloadWrap)workloadWrap.innerHTML=workload.length?'<div class="pulse-policy-cards">'+workload.map(w=>'<div class="pulse-policy-card"><h4>'+cwaHtml(w.theme_label||'-')+'</h4><div class="pulse-meta"><strong>Count:</strong> '+cwaHtml(w.count||0)+' | <strong>Responsible desk/section:</strong> '+cwaHtml(w.responsible_section||'-')+'</div><div class="pulse-meta"><strong>Sample refs:</strong> '+cwaHtml(pulseRefs(w.sample_references))+'</div><div>'+cwaHtml(w.note||'Operational/service handling')+'</div></div>').join('')+'</div>':'<div class="pulse-empty">No operational workload themes for selected period.</div>';const officers=(((rep||{}).staff_accountability||{}).by_officer)||[];const staffRows=officers.map(o=>[cwaHtml(o.officer_name||o.assigned_to||'-'),cwaHtml(o.assigned_open||0),cwaHtml(o.overdue_5_days||0),cwaHtml(o.no_action_after_assignment||0),cwaHtml(o.resolved_this_week||0)]);const staffWrap=document.getElementById('pulseStaffTableWrap');if(staffWrap)staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'],staffRows);const annex=(rep&&rep.evidence_annex)||{};const allEvidence=pulseList(rep&&rep.evidence_cases);const includeFull=!!(rep&&rep.include_full_details);const seniorEvidence=pulseList(annex.senior_attention).length?pulseList(annex.senior_attention):allEvidence.filter(c=>String(((c.theme||{}).sensitivity)||'').toLowerCase()==='high');let opsEvidence=pulseList(annex.operational_samples).length?pulseList(annex.operational_samples):allEvidence.filter(c=>String(((c.theme||{}).sensitivity)||'').toLowerCase()!=='high');if(!includeFull)opsEvidence=opsEvidence.slice(0,10);const note=document.getElementById('pulseEvidenceNote');if(note)note.textContent=String(annex.note||'Evidence is grouped by senior-attention issues first, followed by operational samples. Full case records remain available by reference number.');function evidenceCards(items){if(!items||!items.length)return '<div class="pulse-empty">No evidence cases for selected period.</div>';return items.map(c=>'<div class="pulse-evidence-card"><div class="line"><strong>Reference:</strong> '+cwaHtml(c.reference||'-')+'</div><div class="line"><strong>Module:</strong> '+cwaHtml(c.module||'-')+' | <strong>Date:</strong> '+cwaHtml((c.created_at||'').slice(0,10)||'-')+' | <strong>Status:</strong> '+cwaHtml(c.status||'-')+' | <strong>Assigned to:</strong> '+cwaHtml(c.assigned_to||'-')+'</div><div class="line"><strong>Theme:</strong> '+cwaHtml(((c.theme||{}).theme_label)||'-')+'</div><div class="title">Subject: '+cwaHtml(c.subject||'-')+'</div><div class="excerpt"><strong>Excerpt:</strong> '+cwaHtml(pulseTrim(c.details_excerpt||'-',300))+'</div></div>').join('');}const senior=document.getElementById('pulseEvidenceSeniorWrap');if(senior)senior.innerHTML=evidenceCards(seniorEvidence);const ops=document.getElementById('pulseEvidenceOperationalWrap');if(ops)ops.innerHTML=evidenceCards(opsEvidence);}
-window.loadAmbassadorPulseReport=async function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;ensurePulseShell();try{pulseSetError('');const s=(document.getElementById('pulseStartDate')||{}).value||pulseDaysAgoIso(7);const e=(document.getElementById('pulseEndDate')||{}).value||pulseTodayIso();const include=((document.getElementById('pulseIncludeFull')||{}).checked?'1':'0');const r=await fetch('/api/admin/ambassador-pulse-report?start_date='+encodeURIComponent(s)+'&end_date='+encodeURIComponent(e)+'&include_full_details='+include,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Failed to load report');window.cwaPulseReportData=j;renderPulseReport(j);}catch(err){pulseSetError(err&&err.message?err.message:'Failed to load report');}};
-window.copyPulseSummary=async function(){const rep=window.cwaPulseReportData;if(!rep){pulseSetError('Generate report first.');return;}const s=rep.summary||{};const text=['Ambassador Pulse Brief','Period: '+((rep.period||{}).start_date||'')+' to '+((rep.period||{}).end_date||''),'Total submissions: '+(s.total_items||0),'High sensitivity: '+(s.high_sensitivity_count||0),'Top operational workload: '+(s.top_operational_theme||'-'),'Top diplomatic issue: '+(s.top_diplomatic_issue||'-')].join('\\n');try{await navigator.clipboard.writeText(text);pulseSetError('');}catch(err){pulseSetError('Unable to copy summary.');}};
-window.printAmbassadorPulseReport=function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;window.print();};
-function renderTransferPanel(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse')return;if(!current)return;const timeline=document.getElementById('timeline');if(!timeline||!timeline.parentNode)return;let panel=document.getElementById('transferPanel');if(!panel){panel=document.createElement('div');panel.id='transferPanel';panel.className='act';timeline.parentNode.insertBefore(panel,timeline);}const staff=(Array.isArray(users)?users:[]);const staffOpts=staff.map(u=>'<option value="'+cwaHtml(u.username||'')+'">'+cwaHtml((u.full_name||u.username||'')+' ('+(u.username||'')+') - '+(u.department||u.role||''))+'</option>').join('');const ruleOpts=(Array.isArray(routingRuleItems)?routingRuleItems:[]).filter(r=>r.assigned_to).map(r=>'<option value="'+cwaHtml(r.rule_key||'')+'">'+cwaHtml((r.desk_name||r.rule_key||'')+' -> '+(r.assigned_to||''))+'</option>').join('');const branchOpts=(Array.isArray(branchItems)?branchItems:[]).map(b=>'<option value="'+cwaHtml(b.branch_key||'')+'">'+cwaHtml((b.branch_name||b.branch_key||'')+' - '+(b.officer_name||'Concerned officer'))+'</option>').join('');const branchOption=(USER_ROLE==='admin')?'<option value="counsellor_branch">Counsellor Branch external handover</option>':'';panel.innerHTML='<h3 style="margin-top:0">Transfer / Reroute Case</h3><label class="hint">Destination type</label><select id="transferDestinationType" onchange="updateTransferDestinationVisibility()"><option value="internal_staff">Internal Staff / Desk</option><option value="auto_routing_rule">Auto Routing Rule / Quick Desk</option>'+branchOption+'</select><div id="transferStaffWrap" style="margin-top:8px"><label class="hint">Destination staff</label><select id="transferAssignedTo"><option value="">Select staff</option>'+staffOpts+'</select></div><div id="transferRuleWrap" style="display:none;margin-top:8px"><label class="hint">Quick desk</label><select id="transferRoutingRule"><option value="">Select routing rule</option>'+ruleOpts+'</select></div><div id="transferBranchWrap" style="display:none;margin-top:8px"><label class="hint">Counsellor Branch</label><select id="transferBranchKey"><option value="">Select branch</option>'+branchOpts+'</select></div><label class="hint" style="display:block;margin-top:8px">Reason for transfer</label><textarea id="transferReason" placeholder="Explain why this case belongs to another desk/officer. Minimum 20 characters."></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="transferVisible" type="checkbox" checked> Notify applicant / visible to applicant</label><div id="transferErr" class="err" style="display:none"></div><button type="button" onclick="transferCurrentCase()">Transfer Case</button>';updateTransferDestinationVisibility();}
+function renderTransferPanel(){if(!current)return;const timeline=document.getElementById('timeline');if(!timeline||!timeline.parentNode)return;let panel=document.getElementById('transferPanel');if(!panel){panel=document.createElement('div');panel.id='transferPanel';panel.className='act';timeline.parentNode.insertBefore(panel,timeline);}const staff=(Array.isArray(users)?users:[]);const staffOpts=staff.map(u=>'<option value="'+cwaHtml(u.username||'')+'">'+cwaHtml((u.full_name||u.username||'')+' ('+(u.username||'')+') - '+(u.department||u.role||''))+'</option>').join('');const ruleOpts=(Array.isArray(routingRuleItems)?routingRuleItems:[]).filter(r=>r.assigned_to).map(r=>'<option value="'+cwaHtml(r.rule_key||'')+'">'+cwaHtml((r.desk_name||r.rule_key||'')+' -> '+(r.assigned_to||''))+'</option>').join('');const branchOpts=(Array.isArray(branchItems)?branchItems:[]).map(b=>'<option value="'+cwaHtml(b.branch_key||'')+'">'+cwaHtml((b.branch_name||b.branch_key||'')+' - '+(b.officer_name||'Concerned officer'))+'</option>').join('');const branchOption=(typeof IS_ADMIN!=='undefined'&&IS_ADMIN)?'<option value="counsellor_branch">Counsellor Branch external handover</option>':'';panel.innerHTML='<h3 style="margin-top:0">Transfer / Reroute Case</h3><label class="hint">Destination type</label><select id="transferDestinationType" onchange="updateTransferDestinationVisibility()"><option value="internal_staff">Internal Staff / Desk</option><option value="auto_routing_rule">Auto Routing Rule / Quick Desk</option>'+branchOption+'</select><div id="transferStaffWrap" style="margin-top:8px"><label class="hint">Destination staff</label><select id="transferAssignedTo"><option value="">Select staff</option>'+staffOpts+'</select></div><div id="transferRuleWrap" style="display:none;margin-top:8px"><label class="hint">Quick desk</label><select id="transferRoutingRule"><option value="">Select routing rule</option>'+ruleOpts+'</select></div><div id="transferBranchWrap" style="display:none;margin-top:8px"><label class="hint">Counsellor Branch</label><select id="transferBranchKey"><option value="">Select branch</option>'+branchOpts+'</select></div><label class="hint" style="display:block;margin-top:8px">Reason for transfer</label><textarea id="transferReason" placeholder="Explain why this case belongs to another desk/officer. Minimum 20 characters."></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="transferVisible" type="checkbox" checked> Notify applicant / visible to applicant</label><div id="transferErr" class="err" style="display:none"></div><button type="button" onclick="transferCurrentCase()">Transfer Case</button>';updateTransferDestinationVisibility();}
 window.updateTransferDestinationVisibility=function(){const type=(document.getElementById('transferDestinationType')||{}).value||'internal_staff';[['transferStaffWrap',type==='internal_staff'],['transferRuleWrap',type==='auto_routing_rule'],['transferBranchWrap',type==='counsellor_branch']].forEach(function(x){const el=document.getElementById(x[0]);if(el)el.style.display=x[1]?'block':'none';});};
 window.transferCurrentCase=async function(){const err=document.getElementById('transferErr');try{if(err){err.textContent='';err.style.display='none';}if(!current)throw new Error('Open a case first.');const type=(document.getElementById('transferDestinationType')||{}).value||'internal_staff';const reason=((document.getElementById('transferReason')||{}).value||'').trim();if(reason.length<20)throw new Error('Transfer reason must be at least 20 characters.');const body={module:'welfare',case_id:current.id,destination_type:type,reason:reason,visible_to_applicant:!!((document.getElementById('transferVisible')||{}).checked)};if(type==='internal_staff')body.assigned_to=(document.getElementById('transferAssignedTo')||{}).value||'';if(type==='auto_routing_rule')body.routing_rule_key=(document.getElementById('transferRoutingRule')||{}).value||'';if(type==='counsellor_branch')body.branch_key=(document.getElementById('transferBranchKey')||{}).value||'';await jpost('/api/admin/cases/transfer',body);await refresh();}catch(ex){if(err){err.textContent=ex&&ex.message?ex.message:'Transfer failed';err.style.display='block';}else{alert(ex&&ex.message?ex.message:'Transfer failed');}}};
 if(typeof openCase==='function'){const prevOpenCase=openCase;window.openCase=openCase=async function(id){await prevOpenCase(id);renderTransferPanel();};}
-if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE==='pulse'){ensurePulseShell();if(!window.__cwaPulseLoadScheduled){window.__cwaPulseLoadScheduled=true;setTimeout(function(){window.loadAmbassadorPulseReport&&window.loadAmbassadorPulseReport();},0);}}
 })();
 </script>
 """
-WELFARE_CASES_WIRING_FIX_SCRIPT = """
-<script>
-(function(){
-const CWA_PAGE_MODE = (typeof PAGE_MODE !== 'undefined') ? PAGE_MODE : '';
-const CWA_USER_ROLE = String((typeof USER_ROLE !== 'undefined' ? USER_ROLE : '') || '').trim().toLowerCase();
-const CWA_IS_ADMIN = CWA_USER_ROLE === 'admin';
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function(m) {
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
-  });
-}
-async function cwaGet(url) {
-  const r = await fetch(url, {credentials:'include'});
-  const j = await r.json();
-  if (!r.ok || j.success === false) throw new Error(j.error || 'Request failed');
-  return j;
-}
-function cwaSetTableError(rowsEl, colSpan, message) {
-  if (rowsEl) rowsEl.innerHTML = '<tr><td colspan="'+colSpan+'">'+esc(message)+'</td></tr>';
-}
-function cwaNoRecords(message) {
-  return '<div class="pulse-empty">'+esc(message || 'No records found for selected period.')+'</div>';
-}
-function cwaList(v) { return Array.isArray(v) ? v : []; }
-function cwaRefs(v) { return cwaList(v).filter(Boolean).join(', ') || '-'; }
-function cwaTrim(v, n) {
-  const s = String(v || '-');
-  return s.length > n ? s.slice(0, n - 3) + '...' : s;
-}
 
-window.loadCounsellorBranches = async function() {
-  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare')) return;
-  const card = document.getElementById('counsellorBranchesCard');
-  const errEl = document.getElementById('branchErr');
-  const rowsEl = document.getElementById('branchRows');
-  if (!card) return;
-  if (!rowsEl) {
-    if (errEl) errEl.textContent = 'Error loading branch settings: table body not found';
-    return;
-  }
-  try {
-    card.style.display = 'block';
-    if (errEl) errEl.textContent = '';
-    const d = await cwaGet('/api/admin/counsellor-branches');
-    const items = cwaList(d.items).length ? cwaList(d.items) : (cwaList(d.branches).length ? cwaList(d.branches) : cwaList(d.rows));
-    try { branchItems = items; } catch (_) {}
-    rowsEl.innerHTML = items.length ? items.map(function(b) {
-      return '<tr><td>'+esc(b.branch_name || b.branch_key || '-')+'</td><td>'+esc(b.officer_name || '-')+'</td><td>'+esc(b.designation || '-')+'</td><td>'+esc(b.email || '-')+'</td><td>'+esc(b.phone || '-')+'</td><td>'+((Number(b.is_active || 0) === 1) ? 'Yes' : 'No')+'</td><td><button class="btn2" data-key="'+esc(b.branch_key || '')+'" onclick="editBranch(this.dataset.key)">Edit</button></td></tr>';
-    }).join('') : '<tr><td colspan="7">No branches found.</td></tr>';
-  } catch (e) {
-    const msg = 'Error loading branch settings: ' + ((e && e.message) ? e.message : 'Request failed');
-    if (errEl) errEl.textContent = msg;
-    cwaSetTableError(rowsEl, 7, msg);
-  }
-};
-
-window.loadRoutingRules = async function() {
-  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare')) return;
-  const card = document.getElementById('welfareRoutingRulesCard');
-  const errEl = document.getElementById('routeErr');
-  const rowsEl = document.getElementById('routeRows');
-  if (!card) return;
-  if (!rowsEl) {
-    if (errEl) errEl.textContent = 'Error loading routing rules: table body not found';
-    return;
-  }
-  try {
-    card.style.display = 'block';
-    if (errEl) errEl.textContent = '';
-    const d = await cwaGet('/api/admin/welfare-routing-rules');
-    const items = cwaList(d.items).length ? cwaList(d.items) : (cwaList(d.rules).length ? cwaList(d.rules) : cwaList(d.rows));
-    try { routingRuleItems = items; } catch (_) {}
-    rowsEl.innerHTML = items.length ? items.map(function(r) {
-      return '<tr><td><b>'+esc(r.rule_key || '-')+'</b><br><small>'+esc(r.desk_name || '-')+'</small></td><td>'+esc(r.officer_name || '-')+'</td><td>'+esc(r.assigned_to || '-')+'</td><td>'+esc(r.assigned_department || '-')+'</td><td>'+esc(r.priority || '-')+'</td><td>'+((Number(r.is_active || 0) === 1) ? 'Yes' : 'No')+'</td><td>'+esc(r.sort_order == null ? '-' : r.sort_order)+'</td><td><button class="btn2" data-rule-key="'+esc(r.rule_key || '')+'" onclick="editRoutingRule(this.dataset.ruleKey)">Edit</button></td></tr>';
-    }).join('') : '<tr><td colspan="8">No routing rules found.</td></tr>';
-  } catch (e) {
-    const msg = 'Error loading routing rules: ' + ((e && e.message) ? e.message : 'Request failed');
-    if (errEl) errEl.textContent = msg;
-    cwaSetTableError(rowsEl, 8, msg);
-  }
-};
-
-window.loadStaffAccountability = async function() {
-  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare')) return;
-  const card = document.getElementById('staffAccountabilityCard');
-  const errEl = document.getElementById('acctErr');
-  const kpiEl = document.getElementById('acctKpis');
-  const officerRows = document.getElementById('acctOfficerRows');
-  const caseRows = document.getElementById('acctCaseRows');
-  if (!card) return;
-  if (!officerRows || !caseRows) {
-    if (errEl) errEl.textContent = 'Error loading staff accountability: table body not found';
-    return;
-  }
-  try {
-    card.style.display = 'block';
-    if (errEl) errEl.textContent = '';
-    const d = await cwaGet('/api/admin/staff-accountability');
-    const sum = (d && d.summary) || {};
-    const byOfficer = cwaList(d.by_officer);
-    const overdue = cwaList(d.overdue_cases);
-    const noAction = cwaList(d.no_action_cases);
-    try {
-      accountabilityData.overdueCasesByRef = {};
-      accountabilityData.noActionCasesByRef = {};
-      overdue.forEach(function(x){ if (x && x.reference) accountabilityData.overdueCasesByRef[String(x.reference)] = x; });
-      noAction.forEach(function(x){ if (x && x.reference) accountabilityData.noActionCasesByRef[String(x.reference)] = x; });
-    } catch (_) {}
-    if (kpiEl) {
-      kpiEl.innerHTML = [['Assigned Open',sum.total_assigned_open],['Overdue >5 Days',sum.overdue_5_days],['No Action After Assignment',sum.no_action_after_assignment],['Resolved This Week',sum.resolved_this_week]].map(function(x) {
-        return '<div class="kpi"><b>'+Number(x[1] || 0)+'</b><span>'+esc(x[0])+'</span></div>';
-      }).join('');
-    }
-    officerRows.innerHTML = byOfficer.length ? byOfficer.map(function(r) {
-      return '<tr><td>'+esc(r.officer_name || r.assigned_to || '-')+'<br><small>'+esc(r.department || '')+'</small></td><td>'+Number(r.assigned_open || 0)+'</td><td>'+Number(r.overdue_5_days || 0)+'</td><td>'+Number(r.no_action_after_assignment || 0)+'</td><td>'+Number(r.resolved_this_week || 0)+'</td></tr>';
-    }).join('') : '<tr><td colspan="5">No assigned staff cases found.</td></tr>';
-    const attention = overdue.concat(noAction).slice(0, 50);
-    caseRows.innerHTML = attention.length ? attention.map(function(c) {
-      return '<tr><td>'+esc(c.reference || '-')+'</td><td>'+esc(c.module || '-')+'</td><td>'+esc(c.subject || '-')+'</td><td>'+esc(c.assigned_to || '-')+'</td><td>'+Number(c.days_pending || 0)+'</td><td>'+esc(c.status || '-')+'</td><td>'+esc(c.last_action_note || '-')+'</td></tr>';
-    }).join('') : '<tr><td colspan="7">No overdue or no-action cases right now.</td></tr>';
-  } catch (e) {
-    const msg = 'Error loading staff accountability: ' + ((e && e.message) ? e.message : 'Request failed');
-    if (errEl) errEl.textContent = msg;
-    if (kpiEl) kpiEl.innerHTML = '';
-    cwaSetTableError(officerRows, 5, msg);
-    cwaSetTableError(caseRows, 7, msg);
-  }
-};
-
-function cwaPulseSetError(message) {
-  if (typeof pulseSetError === 'function') {
-    pulseSetError(message || '');
-    return;
-  }
-  const el = document.getElementById('pulseError') || document.getElementById('pulseErr');
-  if (!el) return;
-  el.textContent = message || '';
-  el.style.display = message ? 'block' : 'none';
-}
-function cwaPulseIssueItems(data) {
-  const diplomatic = cwaList(data && data.diplomatic_issues);
-  if (diplomatic.length) return diplomatic;
-  return cwaList(data && data.policy_sensitive_issues);
-}
-function cwaPulseWorkloadItems(data, themes) {
-  const workload = cwaList(data && data.community_service_workload);
-  if (workload.length) return workload;
-  return cwaList(themes).filter(function(t) { return String(t.sensitivity || '').toLowerCase() !== 'high'; });
-}
-function cwaPulseCards(items, mapper) {
-  if (!items.length) return cwaNoRecords();
-  return items.map(mapper).join('');
-}
-function cwaPulseEvidenceCards(items) {
-  return cwaPulseCards(items, function(c) {
-    return '<div class="pulse-evidence-card"><div class="line"><strong>Reference:</strong> '+esc(c.reference || '-')+'</div><div class="line"><strong>Module:</strong> '+esc(c.module || '-')+' | <strong>Date:</strong> '+esc((c.created_at || '').slice(0,10) || '-')+' | <strong>Status:</strong> '+esc(c.status || '-')+' | <strong>Assigned to:</strong> '+esc(c.assigned_to || '-')+'</div><div class="line"><strong>Theme:</strong> '+esc(((c.theme || {}).theme_label) || '-')+'</div><div class="title">Subject: '+esc(c.subject || '-')+'</div><div class="excerpt"><strong>Excerpt:</strong> '+esc(cwaTrim(c.details_excerpt || '-', 300))+'</div></div>';
-  });
-}
-function cwaRenderPulseReport(data) {
-  if (typeof ensurePulseShell === 'function') ensurePulseShell();
-  const summary = (data && data.summary) || {};
-  const operational = (data && data.operational_status) || {};
-  const themes = cwaList(data && data.top_themes);
-  const policy = cwaPulseIssueItems(data);
-  const workload = cwaPulseWorkloadItems(data, themes);
-  const staff = cwaList(((data || {}).staff_accountability || {}).by_officer);
-  const annex = (data && data.evidence_annex) || {};
-  const evidence = cwaList(data && data.evidence_cases);
-  let seniorEvidence = cwaList(annex.policy_evidence_cases);
-  if (!seniorEvidence.length) seniorEvidence = cwaList(annex.senior_attention);
-  let operationalEvidence = cwaList(annex.operational_evidence_cases);
-  if (!operationalEvidence.length) operationalEvidence = cwaList(annex.operational_samples);
-  if (!seniorEvidence.length && !operationalEvidence.length && evidence.length) {
-    seniorEvidence = evidence.filter(function(c) { return String(((c.theme || {}).sensitivity) || '').toLowerCase() === 'high'; });
-    operationalEvidence = evidence.filter(function(c) { return String(((c.theme || {}).sensitivity) || '').toLowerCase() !== 'high'; });
-  }
-  if (!(data && data.include_full_details)) operationalEvidence = operationalEvidence.slice(0, 10);
-  let debug = document.getElementById('pulseDebugLine');
-  if (!debug) {
-    debug = document.createElement('div');
-    debug.id = 'pulseDebugLine';
-    debug.className = 'hint';
-    debug.style.marginTop = '8px';
-    const anchor = document.getElementById('pulseError') || document.getElementById('pulseErr') || document.getElementById('pulseSummaryKpis') || document.getElementById('ambassadorPulseCard');
-    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(debug, anchor.nextSibling);
-  }
-  debug.textContent = 'Report data loaded: yes | Total: ' + Number(summary.total_items || 0) + ' | Themes: ' + themes.length + ' | Policy issues: ' + policy.length;
-  const points = cwaList(data && data.ambassador_brief_points);
-  const fallbackPoints = [
-    'Total submissions during period: ' + Number(summary.total_items || 0) + '.',
-    'High-sensitivity issues: ' + Number(summary.high_sensitivity_count || 0) + '.',
-    'Highest-volume operational workload: ' + String(summary.top_operational_theme || summary.top_theme_label || '-') + '.',
-    'Key diplomatic issue: ' + String(summary.top_diplomatic_issue || '-') + '.',
-    'Overdue cases: ' + Number(operational.total_overdue || 0) + '.',
-    'Evidence references are available below.'
-  ];
-  const brief = document.getElementById('pulseBriefPoints');
-  if (brief) brief.innerHTML = (points.length ? points : fallbackPoints).slice(0, 6).map(function(p){ return '<li>'+esc(p)+'</li>'; }).join('');
-  const kpi = document.getElementById('pulseSummaryKpis');
-  if (kpi) {
-    kpi.innerHTML = [['Total submissions',summary.total_items],['High sensitivity',summary.high_sensitivity_count],['Top operational workload',summary.top_operational_theme || '-'],['Top diplomatic issue',summary.top_diplomatic_issue || '-'],['Overdue cases',operational.total_overdue || 0]].map(function(x) {
-      return '<div class="kpi"><b>'+esc(x[1] == null ? '-' : x[1])+'</b><span>'+esc(x[0])+'</span></div>';
-    }).join('');
-  }
-  const narrative = document.getElementById('pulseExecutiveNarrative');
-  if (narrative) narrative.textContent = String((data && data.executive_narrative) || 'No records found for selected period.');
-  const policyWrap = document.getElementById('pulsePolicyCardsWrap');
-  if (policyWrap) {
-    policyWrap.innerHTML = cwaPulseCards(policy, function(p) {
-      return '<div class="pulse-policy-card"><h4>'+esc(p.issue_title || p.theme_label || '-')+'</h4><div class="pulse-meta"><strong>Why it matters:</strong> '+esc(p.why_it_matters || '-')+'</div><div class="pulse-meta"><strong>Authority / institution:</strong> '+esc(p.authority || '-')+'</div><div class="pulse-meta"><strong>Submissions:</strong> '+Number(p.count || 0)+' | <strong>Evidence:</strong> '+esc(cwaRefs(p.evidence_references || p.sample_references))+'</div><div><strong>Suggested action:</strong> '+esc(p.suggested_action || '-')+'</div><div class="pulse-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+esc(cwaTrim(p.representative_excerpt || p.short_summary || '-', 300))+'</div></div>';
-    });
-  }
-  const workloadWrap = document.getElementById('pulseWorkloadTableWrap');
-  if (workloadWrap) {
-    workloadWrap.innerHTML = cwaPulseCards(workload, function(w) {
-      return '<div class="pulse-policy-card"><h4>'+esc(w.theme_label || w.issue_title || '-')+'</h4><div class="pulse-meta"><strong>Count:</strong> '+Number(w.count || 0)+' | <strong>Responsible desk/section:</strong> '+esc(w.responsible_section || w.authority || '-')+'</div><div class="pulse-meta"><strong>Sample refs:</strong> '+esc(cwaRefs(w.sample_references || w.evidence_references))+'</div><div>'+esc(w.note || 'Operational/service handling')+'</div></div>';
-    });
-  }
-  const staffWrap = document.getElementById('pulseStaffTableWrap');
-  if (staffWrap) {
-    staffWrap.innerHTML = staff.length ? pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'], staff.map(function(o) {
-      return [esc(o.officer_name || o.assigned_to || '-'), esc(o.assigned_open || 0), esc(o.overdue_5_days || 0), esc(o.no_action_after_assignment || 0), esc(o.resolved_this_week || 0)];
-    })) : cwaNoRecords();
-  }
-  const note = document.getElementById('pulseEvidenceNote');
-  if (note) note.textContent = String(annex.note || 'Evidence is grouped by senior-attention issues first, followed by operational samples. Full case records remain available by reference number.');
-  const seniorWrap = document.getElementById('pulseEvidenceSeniorWrap');
-  if (seniorWrap) seniorWrap.innerHTML = cwaPulseEvidenceCards(seniorEvidence);
-  const opsWrap = document.getElementById('pulseEvidenceOperationalWrap');
-  if (opsWrap) opsWrap.innerHTML = cwaPulseEvidenceCards(operationalEvidence);
-  const themeRows = document.getElementById('pulseThemesRows');
-  if (themeRows) themeRows.innerHTML = themes.length ? themes.map(function(t){ return '<tr><td>'+esc(t.theme_label || '-')+'</td><td>'+Number(t.count || 0)+'</td><td>'+esc(t.sensitivity || '-')+'</td><td>'+esc(t.authority || '-')+'</td><td>'+esc(cwaRefs(t.sample_references))+'</td></tr>'; }).join('') : '<tr><td colspan="5">No records found for selected period.</td></tr>';
-  const policyRows = document.getElementById('pulsePolicyRows');
-  if (policyRows) policyRows.innerHTML = policy.length ? policy.map(function(p){ return '<tr><td>'+esc(p.issue_title || p.theme_label || '-')+'</td><td>'+Number(p.count || 0)+'</td><td>'+esc(p.authority || '-')+'</td><td>'+esc(p.suggested_action || '-')+'</td><td>'+esc(cwaRefs(p.evidence_references || p.sample_references))+'</td></tr>'; }).join('') : '<tr><td colspan="5">No records found for selected period.</td></tr>';
-  const officerRows = document.getElementById('pulseOfficerRows');
-  if (officerRows) officerRows.innerHTML = staff.length ? staff.map(function(o){ return '<tr><td>'+esc(o.officer_name || o.assigned_to || '-')+'</td><td>'+Number(o.assigned_open || 0)+'</td><td>'+Number(o.overdue_5_days || 0)+'</td><td>'+Number(o.no_action_after_assignment || 0)+'</td><td>'+Number(o.resolved_this_week || 0)+'</td></tr>'; }).join('') : '<tr><td colspan="5">No records found for selected period.</td></tr>';
-  const evidenceRows = document.getElementById('pulseEvidenceRows');
-  if (evidenceRows) evidenceRows.innerHTML = evidence.length ? evidence.map(function(c){ return '<tr><td>'+esc(c.reference || '-')+'</td><td>'+esc(c.module || '-')+'</td><td>'+esc((c.created_at || '').slice(0,10) || '-')+'</td><td>'+esc(((c.theme || {}).theme_label) || '-')+'</td><td>'+esc(c.subject || '-')+'</td><td>'+esc(c.status || '-')+'</td><td>'+esc(c.assigned_to || '-')+'</td><td>'+esc(cwaTrim(c.details_excerpt || '-', 220))+'</td></tr>'; }).join('') : '<tr><td colspan="8">No records found for selected period.</td></tr>';
-}
-window.renderPulseReport = cwaRenderPulseReport;
-window.loadAmbassadorPulseReport = async function() {
-  if (!(CWA_IS_ADMIN && CWA_PAGE_MODE === 'pulse')) return;
-  if (typeof ensurePulseShell === 'function') ensurePulseShell();
-  try {
-    cwaPulseSetError('');
-    const start = (document.getElementById('pulseStartDate') || {}).value || (typeof pulseDaysAgoIso === 'function' ? pulseDaysAgoIso(7) : '');
-    const end = (document.getElementById('pulseEndDate') || {}).value || (typeof pulseTodayIso === 'function' ? pulseTodayIso() : '');
-    const includeEl = document.getElementById('pulseIncludeFull') || document.getElementById('pulseFullDetails');
-    const include = includeEl && includeEl.checked ? '1' : '0';
-    const url = '/api/admin/ambassador-pulse-report?start_date=' + encodeURIComponent(start) + '&end_date=' + encodeURIComponent(end) + '&include_full_details=' + include;
-    const data = await cwaGet(url);
-    try { pulseReportData = data; } catch (_) {}
-    window.cwaPulseReportData = data;
-    try {
-      cwaRenderPulseReport(data);
-    } catch (renderErr) {
-      cwaPulseSetError('Report rendering error: ' + ((renderErr && renderErr.message) ? renderErr.message : 'Unknown error'));
-    }
-  } catch (e) {
-    cwaPulseSetError((e && e.message) ? e.message : 'Failed to load report');
-  }
-};
-try { loadAmbassadorPulseReport = window.loadAmbassadorPulseReport; } catch (_) {}
-if (CWA_IS_ADMIN && CWA_PAGE_MODE === 'welfare') {
-  setTimeout(function() {
-    window.loadCounsellorBranches();
-    window.loadRoutingRules();
-    window.loadStaffAccountability();
-  }, 0);
-}
-if (CWA_IS_ADMIN && CWA_PAGE_MODE === 'pulse' && !window.__cwaPulseLoadScheduled) {
-  window.__cwaPulseLoadScheduled = true;
-  setTimeout(function() { window.loadAmbassadorPulseReport(); }, 0);
-}
-})();
-</script>
-"""
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "<body>",
     '<body data-page-mode="__PAGE_MODE__" data-user-role="__USER_ROLE__">',
     1
 )
 WELFARE_PAGE_MODE_CSS = (
-    "#counsellorBranchesCard,#welfareRoutingRulesCard,#staffAccountabilityCard,#ambassadorPulseCard{display:none}"
+    "#counsellorBranchesCard,#welfareRoutingRulesCard,#staffAccountabilityCard{display:none}"
     "body[data-page-mode=\"welfare\"] #printPackPanel,"
     "body[data-page-mode=\"welfare\"] #caseListPanel{display:block!important}"
     "body[data-page-mode=\"welfare\"][data-user-role=\"admin\"] #counsellorBranchesCard,"
     "body[data-page-mode=\"welfare\"][data-user-role=\"admin\"] #welfareRoutingRulesCard,"
-    "body[data-page-mode=\"welfare\"][data-user-role=\"admin\"] #staffAccountabilityCard{display:block!important}"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"admin\"] #staffAccountabilityCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"operator\"] #counsellorBranchesCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"operator\"] #welfareRoutingRulesCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"operator\"] #staffAccountabilityCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"operator_special\"] #counsellorBranchesCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"operator_special\"] #welfareRoutingRulesCard,"
+    "body[data-page-mode=\"welfare\"][data-user-role=\"operator_special\"] #staffAccountabilityCard{display:block!important}"
     "body[data-page-mode=\"my\"] #printPackPanel,"
     "body[data-page-mode=\"my\"] #counsellorBranchesCard,"
     "body[data-page-mode=\"my\"] #welfareRoutingRulesCard,"
-    "body[data-page-mode=\"my\"] #staffAccountabilityCard,"
-    "body[data-page-mode=\"my\"] #ambassadorPulseCard{display:none!important}"
+    "body[data-page-mode=\"my\"] #staffAccountabilityCard{display:none!important}"
     "body[data-page-mode=\"ambassador\"] #counsellorBranchesCard,"
     "body[data-page-mode=\"ambassador\"] #welfareRoutingRulesCard,"
-    "body[data-page-mode=\"ambassador\"] #staffAccountabilityCard,"
-    "body[data-page-mode=\"ambassador\"] #ambassadorPulseCard{display:none!important}"
-    "body[data-page-mode=\"pulse\"] #printPackPanel,"
-    "body[data-page-mode=\"pulse\"] #caseListPanel,"
-    "body[data-page-mode=\"pulse\"] #counsellorBranchesCard,"
-    "body[data-page-mode=\"pulse\"] #welfareRoutingRulesCard,"
-    "body[data-page-mode=\"pulse\"] #staffAccountabilityCard{display:none!important}"
-    "body[data-page-mode=\"pulse\"][data-user-role=\"admin\"] #ambassadorPulseCard{display:block!important}"
+    "body[data-page-mode=\"ambassador\"] #staffAccountabilityCard{display:none!important}"
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "</style></head>",
     WELFARE_PAGE_MODE_CSS + "</style></head>",
     1
 )
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';let current=",
-    "const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';const IS_ADMIN=String(USER_ROLE||'').trim().toLowerCase()==='admin';let current=",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "function badge(v){return '<span class=\"badge '+String(v||'').replaceAll(' ','_')+'\">'+(v||'-')+'</span>'}",
-    "function badge(v){return '<span class=\"badge '+String(v||'').replaceAll(' ','_')+'\">'+(v||'-')+'</span>'}function esc(s){return String(s == null ? '' : s).replace(/[&<>\"']/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m];});}function safeHtml(v){return esc(v);}",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    '</div></div><div class="panel" id="welfareRoutingRulesCard"',
-    '</div></div></div><div class="panel" id="welfareRoutingRulesCard"',
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "function applyPageModeVisibility(){const isAdmin=USER_ROLE==='admin';const show=(id,yes)=>{const el=document.getElementById(id);if(el)el.style.display=yes?'block':'none';};show('printPackPanel',PAGE_MODE!=='pulse'&&PAGE_MODE!=='my');show('caseListPanel',PAGE_MODE!=='pulse');show('counsellorBranchesCard',isAdmin&&PAGE_MODE==='welfare');show('welfareRoutingRulesCard',isAdmin&&PAGE_MODE==='welfare');show('staffAccountabilityCard',isAdmin&&PAGE_MODE==='welfare');show('ambassadorPulseCard',isAdmin&&PAGE_MODE==='pulse');}",
-    """function applyPageModeVisibility() {
-  const isAdmin = IS_ADMIN;
-  const show = (id, yes) => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = yes ? 'block' : 'none';
-  };
-
-  show('printPackPanel', PAGE_MODE !== 'pulse' && PAGE_MODE !== 'my');
-  show('caseListPanel', PAGE_MODE !== 'pulse');
-
-  show('counsellorBranchesCard', isAdmin && PAGE_MODE === 'welfare');
-  show('welfareRoutingRulesCard', isAdmin && PAGE_MODE === 'welfare');
-  show('staffAccountabilityCard', isAdmin && PAGE_MODE === 'welfare');
-
-  show('ambassadorPulseCard', isAdmin && PAGE_MODE === 'pulse');
-}""",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "async function loadCounsellorBranches(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
-    """async function loadCounsellorBranches(){
-if (PAGE_MODE !== 'welfare') return;
-if (!IS_ADMIN) return;""",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "async function loadRoutingRules(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
-    """async function loadRoutingRules(){
-if (PAGE_MODE !== 'welfare') return;
-if (!IS_ADMIN) return;""",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "async function loadStaffAccountability(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
-    """async function loadStaffAccountability(){
-if (PAGE_MODE !== 'welfare') return;
-if (!IS_ADMIN) return;""",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "async function loadAmbassadorPulseReport(){if(USER_ROLE!=='admin'||PAGE_MODE!=='pulse')return;",
-    """async function loadAmbassadorPulseReport(){
-if (PAGE_MODE !== 'pulse') return;
-if (!IS_ADMIN) return;""",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "}catch(e){errEl.textContent=e.message||'Could not load branch settings';}}function editBranch",
-    "}catch(e){const msg=(e&&e.message)?e.message:'Request failed';errEl.textContent='Could not load branch settings: '+msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan=\"7\">Could not load branch settings: '+safeHtml(msg)+'</td></tr>';}}function editBranch",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "}catch(e){if(errEl)errEl.textContent=e.message||'Could not load routing rules';}}function editRoutingRule",
-    "}catch(e){const msg=(e&&e.message)?e.message:'Request failed';if(errEl)errEl.textContent='Could not load routing rules: '+msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan=\"8\">Could not load routing rules: '+safeHtml(msg)+'</td></tr>';}}function editRoutingRule",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "}catch(e){if(errEl)errEl.textContent=e.message||'Could not load staff accountability';}}function _todayIso",
-    "}catch(e){const msg=(e&&e.message)?e.message:'Request failed';if(errEl)errEl.textContent='Could not load staff accountability: '+msg;if(kpiEl)kpiEl.innerHTML='';if(officerRows)officerRows.innerHTML='<tr><td colspan=\"5\">Could not load staff accountability: '+safeHtml(msg)+'</td></tr>';if(caseRows)caseRows.innerHTML='<tr><td colspan=\"7\">Could not load staff accountability: '+safeHtml(msg)+'</td></tr>';}}function _todayIso",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "if(pulseFullEl&&USER_ROLE!=='admin')",
-    "if(pulseFullEl&&!IS_ADMIN)",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "function printAmbassadorPulseReport(){if(USER_ROLE!=='admin')return;window.print()}",
-    "function printAmbassadorPulseReport(){if(!IS_ADMIN)return;window.print()}",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "const branchOption=(USER_ROLE==='admin')?",
-    "const branchOption=(IS_ADMIN)?",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "window.loadAmbassadorPulseReport=async function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;",
-    """window.loadAmbassadorPulseReport=async function(){
-if (PAGE_MODE !== 'pulse') return;""",
-    1
-)
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
-    "applyPageModeVisibility();loadUsers();if(PAGE_MODE!=='pulse')loadCases();if(USER_ROLE==='admin'&&PAGE_MODE==='welfare'){loadCounsellorBranches();loadRoutingRules();loadStaffAccountability();}if(USER_ROLE==='admin'&&PAGE_MODE==='pulse'){loadAmbassadorPulseReport();}refreshNotificationBadges();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);",
-    """loadUsers();
-applyPageModeVisibility();
-
-if (PAGE_MODE === 'pulse') {
-  document.querySelectorAll('#printPackPanel,#caseListPanel,#counsellorBranchesCard,#welfareRoutingRulesCard,#staffAccountabilityCard')
-    .forEach(el => { if (el) el.style.display = 'none'; });
-  const pulse = document.getElementById('ambassadorPulseCard');
-  if (pulse) pulse.style.display = 'block';
-}
-
-if (PAGE_MODE !== 'pulse') {
-  loadCases();
-}
-
-if (IS_ADMIN && PAGE_MODE === 'welfare') {
-  loadCounsellorBranches();
-  loadRoutingRules();
-  loadStaffAccountability();
-}
-
-if (IS_ADMIN && PAGE_MODE === 'pulse') {
-  window.__cwaPulseLoadScheduled = true;
-  setTimeout(function() {
-    if (window.loadAmbassadorPulseReport) window.loadAmbassadorPulseReport();
-  }, 0);
-}
-
-refreshNotificationBadges();
-setInterval(refreshNotificationBadges, 60000);
-window.addEventListener('focus', refreshNotificationBadges);""",
-    1
-)
-WELFARE_CASES_PULSE_FINAL_RENDER_SCRIPT = """
-<script>
-(function(){
-function pulsePageMode(){
-  if (typeof PAGE_MODE !== 'undefined') return String(PAGE_MODE || '');
-  return String(window.PAGE_MODE || '');
-}
-function pulseEsc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-  });
-}
-function pulseList(v) {
-  return Array.isArray(v) ? v : [];
-}
-function pulseDisplay(v) {
-  return (v == null || v === '') ? '-' : v;
-}
-function pulseRefs(v) {
-  if (Array.isArray(v)) {
-    const joined = v.filter(function(x){ return x != null && String(x).trim() !== ''; }).join(', ');
-    return joined || '-';
-  }
-  return pulseDisplay(v);
-}
-function pulseHasRefs(v) {
-  if (Array.isArray(v)) return v.filter(function(x){ return x != null && String(x).trim() !== ''; }).length > 0;
-  return v != null && String(v).trim() !== '';
-}
-function pulseRefsEither(primary, fallback) {
-  return pulseRefs(pulseHasRefs(primary) ? primary : fallback);
-}
-function pulseTodayIso() {
-  return new Date().toISOString().slice(0, 10);
-}
-function pulseDaysAgoIso(days) {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
-}
-function pulseById(id) {
-  return document.getElementById(id);
-}
-function pulseEnsureShell() {
-  const card = pulseById('ambassadorPulseCard');
-  if (!card) return;
-  card.style.display = 'block';
-  const hasLegacyRows = pulseById('pulseThemesRows') && pulseById('pulsePolicyRows') && pulseById('pulseOfficerRows') && pulseById('pulseEvidenceRows');
-  if (hasLegacyRows) return;
-  const startValue = (pulseById('pulseStartDate') || {}).value || pulseDaysAgoIso(6);
-  const endValue = (pulseById('pulseEndDate') || {}).value || pulseTodayIso();
-  const includeEl = pulseById('pulseFullDetails') || pulseById('pulseIncludeFull');
-  const includeChecked = !!(includeEl && includeEl.checked);
-  card.innerHTML = '<div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Pulse Report</strong><span style="font-size:12px;color:#64748b">Issue intelligence across welfare, legal/OPF, nurses, death, and feedback channels</span><input id="pulseStartDate" type="date"><input id="pulseEndDate" type="date"><label style="font-size:12px;color:#475569"><input id="pulseFullDetails" type="checkbox"> Include internal full details</label><button onclick="loadAmbassadorPulseReport()">Generate Report</button><button class="btn2" onclick="printAmbassadorPulseReport()">Print / Save PDF</button><button class="btn2" onclick="copyPulseSummary()">Copy Summary</button></div><div style="padding:12px 14px"><div id="pulseErr" class="err" style="margin:6px 0"></div><div id="pulseSummaryKpis" class="kpis" style="margin-bottom:12px"></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Theme</th><th>Count</th><th>Sensitivity</th><th>Authority</th><th>Sample References</th></tr></thead><tbody id="pulseThemesRows"><tr><td colspan="5">Loading report...</td></tr></tbody></table></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Issue</th><th>Count</th><th>Authority</th><th>Suggested Action</th><th>Evidence References</th></tr></thead><tbody id="pulsePolicyRows"><tr><td colspan="5">Loading report...</td></tr></tbody></table></div><div style="overflow:auto;margin-bottom:12px"><table><thead><tr><th>Officer</th><th>Open Assigned</th><th>Overdue</th><th>No Action</th><th>Resolved This Week</th></tr></thead><tbody id="pulseOfficerRows"><tr><td colspan="5">Loading report...</td></tr></tbody></table></div><div style="overflow:auto"><table><thead><tr><th>Reference</th><th>Module</th><th>Date</th><th>Theme</th><th>Subject</th><th>Status</th><th>Assigned To</th><th>Excerpt</th></tr></thead><tbody id="pulseEvidenceRows"><tr><td colspan="8">Loading report...</td></tr></tbody></table></div></div>';
-  if (pulseById('pulseStartDate')) pulseById('pulseStartDate').value = startValue;
-  if (pulseById('pulseEndDate')) pulseById('pulseEndDate').value = endValue;
-  if (pulseById('pulseFullDetails')) pulseById('pulseFullDetails').checked = includeChecked;
-}
-function pulseEnsureDebugLine() {
-  let debug = pulseById('pulseDebugLine');
-  if (debug) return debug;
-  debug = document.createElement('div');
-  debug.id = 'pulseDebugLine';
-  debug.className = 'hint';
-  debug.style.marginTop = '8px';
-  const anchor = pulseById('pulseErr') || pulseById('pulseError') || pulseById('pulseSummaryKpis') || pulseById('ambassadorPulseCard');
-  if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(debug, anchor.nextSibling);
-  return debug;
-}
-function pulseSetDebug(message, isError) {
-  const debug = pulseEnsureDebugLine();
-  if (!debug) return;
-  debug.textContent = message || '';
-  debug.style.color = isError ? '#b91c1c' : '#475569';
-}
-function pulseSetError(message) {
-  const err = pulseById('pulseErr') || pulseById('pulseError');
-  if (err) {
-    err.textContent = message || '';
-    err.style.display = message ? 'block' : 'none';
-  }
-  if (message) pulseSetDebug('Report data loaded: no | Error: ' + message, true);
-}
-function pulseSetRows(id, html) {
-  const el = pulseById(id);
-  if (el) el.innerHTML = html;
-}
-function pulseSetLoadingRows() {
-  pulseSetRows('pulseThemesRows', '<tr><td colspan="5">Loading report...</td></tr>');
-  pulseSetRows('pulsePolicyRows', '<tr><td colspan="5">Loading report...</td></tr>');
-  pulseSetRows('pulseOfficerRows', '<tr><td colspan="5">Loading report...</td></tr>');
-  pulseSetRows('pulseEvidenceRows', '<tr><td colspan="8">Loading report...</td></tr>');
-}
-function pulseRenderKpis(summary, op) {
-  const kpi = pulseById('pulseSummaryKpis');
-  if (!kpi) return;
-  const cards = [
-    ['Total Submissions', summary.total_items],
-    ['High Sensitivity', summary.high_sensitivity_count],
-    ['Top Operational Workload', summary.top_operational_theme || summary.top_theme_label],
-    ['Top Diplomatic Issue', summary.top_diplomatic_issue],
-    ['Overdue Cases', op.total_overdue]
-  ];
-  kpi.innerHTML = cards.map(function(x) {
-    return '<div class="kpi"><b>'+pulseEsc(pulseDisplay(x[1]))+'</b><span>'+pulseEsc(x[0])+'</span></div>';
-  }).join('');
-}
-function pulseRenderReport(data) {
-  const summary = (data && data.summary) || {};
-  const themes = pulseList(data && data.top_themes);
-  const diplomaticIssues = pulseList(data && data.diplomatic_issues);
-  const policySensitiveIssues = pulseList(data && data.policy_sensitive_issues);
-  const policy = diplomaticIssues.length ? diplomaticIssues : policySensitiveIssues;
-  const staff = pulseList(((data || {}).staff_accountability || {}).by_officer);
-  const evidenceAnnex = (data && data.evidence_annex) || {};
-  let evidence = []
-    .concat(pulseList(evidenceAnnex.policy_evidence_cases))
-    .concat(pulseList(evidenceAnnex.operational_evidence_cases))
-    .concat(pulseList(data && data.evidence_cases));
-  if (!evidence.length) {
-    evidence = []
-      .concat(pulseList(evidenceAnnex.senior_attention))
-      .concat(pulseList(evidenceAnnex.operational_samples));
-  }
-  const op = (data && data.operational_status) || {};
-  pulseRenderKpis(summary, op);
-  pulseSetRows('pulseThemesRows', themes.length ? themes.map(function(t) {
-    return '<tr><td>'+pulseEsc(pulseDisplay(t.theme_label))+'</td><td>'+pulseEsc(pulseDisplay(t.count))+'</td><td>'+pulseEsc(pulseDisplay(t.sensitivity))+'</td><td>'+pulseEsc(pulseDisplay(t.authority))+'</td><td>'+pulseEsc(pulseRefs(t.sample_references))+'</td></tr>';
-  }).join('') : '<tr><td colspan="5">No themes found for selected period.</td></tr>');
-  pulseSetRows('pulsePolicyRows', policy.length ? policy.map(function(p) {
-    return '<tr><td>'+pulseEsc(pulseDisplay(p.theme_label || p.issue_title))+'</td><td>'+pulseEsc(pulseDisplay(p.count))+'</td><td>'+pulseEsc(pulseDisplay(p.authority))+'</td><td>'+pulseEsc(pulseDisplay(p.suggested_action))+'</td><td>'+pulseEsc(pulseRefsEither(p.sample_references, p.evidence_references))+'</td></tr>';
-  }).join('') : '<tr><td colspan="5">No policy-sensitive issues found for selected period.</td></tr>');
-  pulseSetRows('pulseOfficerRows', staff.length ? staff.map(function(r) {
-    return '<tr><td>'+pulseEsc(pulseDisplay(r.officer_name || r.assigned_to))+'</td><td>'+pulseEsc(pulseDisplay(r.assigned_open))+'</td><td>'+pulseEsc(pulseDisplay(r.overdue_5_days))+'</td><td>'+pulseEsc(pulseDisplay(r.no_action_after_assignment))+'</td><td>'+pulseEsc(pulseDisplay(r.resolved_this_week))+'</td></tr>';
-  }).join('') : '<tr><td colspan="5">No staff accountability rows found.</td></tr>');
-  pulseSetRows('pulseEvidenceRows', evidence.length ? evidence.map(function(c) {
-    const dateValue = c.created_at || c.date;
-    const themeValue = ((c.theme || {}).theme_label) || c.theme_label;
-    const excerpt = c.details_excerpt || c.representative_excerpt;
-    return '<tr><td>'+pulseEsc(pulseDisplay(c.reference))+'</td><td>'+pulseEsc(pulseDisplay(c.module))+'</td><td>'+pulseEsc(pulseDisplay(dateValue ? String(dateValue).slice(0, 10) : ''))+'</td><td>'+pulseEsc(pulseDisplay(themeValue))+'</td><td>'+pulseEsc(pulseDisplay(c.subject))+'</td><td>'+pulseEsc(pulseDisplay(c.status))+'</td><td>'+pulseEsc(pulseDisplay(c.assigned_to))+'</td><td>'+pulseEsc(pulseDisplay(excerpt))+'</td></tr>';
-  }).join('') : '<tr><td colspan="8">No evidence cases found for selected period.</td></tr>');
-  pulseSetDebug('Report data loaded: yes | Total: ' + Number(summary.total_items || 0) + ' | Themes: ' + themes.length + ' | Policy issues: ' + policy.length + ' | Evidence: ' + evidence.length, false);
-}
-window.loadAmbassadorPulseReport = async function finalLoadAmbassadorPulseReport() {
-  const mode = pulsePageMode();
-  if (mode !== 'pulse') return;
-  pulseEnsureShell();
-  const startEl = pulseById('pulseStartDate');
-  const endEl = pulseById('pulseEndDate');
-  const includeEl = pulseById('pulseFullDetails') || pulseById('pulseIncludeFull');
-  if (startEl && !startEl.value) startEl.value = pulseDaysAgoIso(6);
-  if (endEl && !endEl.value) endEl.value = pulseTodayIso();
-  pulseSetError('');
-  pulseSetDebug('Report data loading...', false);
-  pulseSetLoadingRows();
-  try {
-    const qs = new URLSearchParams();
-    qs.set('start_date', startEl && startEl.value ? startEl.value : pulseDaysAgoIso(6));
-    qs.set('end_date', endEl && endEl.value ? endEl.value : pulseTodayIso());
-    qs.set('include_full_details', includeEl && includeEl.checked ? '1' : '0');
-    const r = await fetch('/api/admin/ambassador-pulse-report?' + qs.toString(), {credentials:'include'});
-    const data = await r.json();
-    if (!r.ok || data.success === false) throw new Error(data.error || 'Failed to load report');
-    try { pulseReportData = data; } catch (_) {}
-    window.cwaPulseReportData = data;
-    pulseRenderReport(data);
-  } catch (err) {
-    const message = (err && err.message) ? err.message : 'Failed to load report';
-    pulseSetError(message);
-    pulseSetRows('pulseThemesRows', '<tr><td colspan="5">Report could not be loaded.</td></tr>');
-    pulseSetRows('pulsePolicyRows', '<tr><td colspan="5">Report could not be loaded.</td></tr>');
-    pulseSetRows('pulseOfficerRows', '<tr><td colspan="5">Report could not be loaded.</td></tr>');
-    pulseSetRows('pulseEvidenceRows', '<tr><td colspan="8">Report could not be loaded.</td></tr>');
-  }
-};
-const mode = (typeof PAGE_MODE !== 'undefined') ? PAGE_MODE : (window.PAGE_MODE || '');
-if (String(mode) === 'pulse') {
-  setTimeout(() => window.loadAmbassadorPulseReport(), 100);
-}
-})();
-</script>
-"""
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_PULSE_TRANSFER_SCRIPT + WELFARE_CASES_WIRING_FIX_SCRIPT + WELFARE_CASES_PULSE_FINAL_RENDER_SCRIPT + "</body></html>")
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_TRANSFER_SCRIPT + "</body></html>")
 
 PUBLIC_HOME_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Welfare Wing Digital Services</title>
@@ -32603,7 +31975,7 @@ tbody tr:hover{{background:#f8fafc}}
 <div class="app">
 <div class="app-head">
 <div><h1>{esc(title)}</h1><div class="crumbs"><a href="/admin/dashboard">&larr; Main Dashboard</a></div></div>
-<div class="flex"><a class="badge" href="/admin/nurses" style="text-decoration:none">Nurses</a> <a class="badge" href="/admin/legal-cases" style="text-decoration:none">Legal Cases</a> <a class="badge" href="/admin/death-cases" style="text-decoration:none">Death Cases</a> <a class="badge" href="/admin/welfare-cases" style="text-decoration:none">Welfare Cases</a> <a class="badge" href="/admin/community-welfare/pulse" style="text-decoration:none">Ambassador Pulse Report</a></div>
+<div class="flex"><a class="badge" href="/admin/nurses" style="text-decoration:none">Nurses</a> <a class="badge" href="/admin/legal-cases" style="text-decoration:none">Legal Cases</a> <a class="badge" href="/admin/death-cases" style="text-decoration:none">Death Cases</a> <a class="badge" href="/admin/welfare-cases" style="text-decoration:none">Welfare Cases</a></div>
 </div>
 {body_html}
 </div></body></html>"""
@@ -32618,7 +31990,6 @@ ADMIN_COMMUNITY_WELFARE_FALLBACK_PAGE = cwa_module_page("Community Welfare Overv
   <a class="badge" href="/admin/legal-cases" style="text-decoration:none">Legal Cases</a>
   <a class="badge" href="/admin/death-cases" style="text-decoration:none">Death Cases</a>
   <a class="badge" href="/admin/welfare-cases" style="text-decoration:none">Welfare Cases</a>
-  <a class="badge" href="/admin/community-welfare/pulse" style="text-decoration:none">Ambassador Pulse Report</a>
 </div>
 </div>
 """)
@@ -36103,7 +35474,6 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <button data-cwa-nav onclick="window.location.href='/admin/legal-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/death-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/welfare-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Welfare Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/community-welfare/pulse'"><span class="side-nav-icon" aria-hidden="true"></span><span>Ambassador Pulse Report</span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/my-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/ambassador-review'"><span class="side-nav-icon" aria-hidden="true"></span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></button>
 <button data-cwa-nav onclick="window.open('/','_blank')"><span class="side-nav-icon" aria-hidden="true"></span><span>Public Portal ↗</span></button>
