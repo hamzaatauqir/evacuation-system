@@ -12458,7 +12458,8 @@ def api_staff_case_detail(params, user):
 
 
 def api_staff_transfer_destinations(user):
-    if not _staff_cases_user_allowed(user) and (user or {}).get('role') != 'admin':
+    role = (user or {}).get('role') or ''
+    if not (_staff_cases_user_allowed(user) or is_full_admin_role(role) or is_community_desk_role(role)):
         return {'success': False, 'error': 'Unauthorized'}
     quick_keys = [
         'opf_welfare',
@@ -12493,15 +12494,29 @@ def api_staff_transfer_destinations(user):
         users_by_name = {}
         if usernames:
             placeholders = ','.join(['?'] * len(usernames))
+            user_columns = {
+                (r['name'] if isinstance(r, sqlite3.Row) else r[1])
+                for r in db.execute("PRAGMA table_info(users)").fetchall()
+            }
+            full_expr = "COALESCE(full_name, username)" if 'full_name' in user_columns else "username"
+            email_col = next((c for c in ('email', 'email_address') if c in user_columns), None)
+            phone_col = next((c for c in ('mobile_number', 'mobile', 'phone', 'contact_phone', 'contact') if c in user_columns), None)
+            dept_col = 'department' if 'department' in user_columns else None
+            desig_col = 'designation' if 'designation' in user_columns else None
+            email_expr = f"COALESCE({email_col}, '')" if email_col else "''"
+            phone_expr = f"COALESCE({phone_col}, '')" if phone_col else "''"
+            dept_expr = f"COALESCE({dept_col}, '')" if dept_col else "''"
+            desig_expr = f"COALESCE({desig_col}, '')" if desig_col else "''"
+            active_filter = "AND COALESCE(is_active, 1) = 1" if 'is_active' in user_columns else ""
             for row in db.execute(
-                f"""SELECT username, COALESCE(full_name, username) AS full_name,
-                          COALESCE(email, '') AS email,
-                          COALESCE(mobile_number, '') AS mobile_number,
-                          COALESCE(department, '') AS department,
-                          COALESCE(designation, '') AS designation
+                f"""SELECT username, {full_expr} AS full_name,
+                          {email_expr} AS email,
+                          {phone_expr} AS mobile_number,
+                          {dept_expr} AS department,
+                          {desig_expr} AS designation
                    FROM users
-                   WHERE COALESCE(is_active, 1) = 1
-                     AND username IN ({placeholders})""",
+                   WHERE username IN ({placeholders})
+                     {active_filter}""",
                 usernames
             ).fetchall():
                 users_by_name[row['username']] = dict(row)
@@ -12518,6 +12533,7 @@ def api_staff_transfer_destinations(user):
                 'officer_email': _clean_text(rule.get('officer_email') or staff.get('email'), 200),
                 'officer_phone': _clean_text(rule.get('officer_phone') or staff.get('mobile_number'), 100),
                 'assigned_role': _clean_text(rule.get('assigned_role') or staff.get('designation'), 120),
+                'priority': _clean_text(rule.get('priority'), 80),
             })
         return {'success': True, 'items': items}
     finally:
@@ -31258,6 +31274,12 @@ function ensurePulseShell(){if(typeof PAGE_MODE==='undefined'||PAGE_MODE!=='puls
 <div class="pulse-section"><h3>Staff Accountability Snapshot</h3><div id="pulseStaffTableWrap" class="pulse-table-wrap"><div class="pulse-empty">Generate report to view staff snapshot.</div></div></div>\
 <div class="pulse-section"><h3>Evidence Annex</h3><p class="hint" id="pulseEvidenceNote">Full case records remain available in the portal by reference number.</p><h4 style="margin:4px 0 8px;color:#10253f">A. Evidence for Senior Attention</h4><div id="pulseEvidenceSeniorWrap" class="pulse-evidence-list"><div class="pulse-empty">Generate report to view senior evidence.</div></div><h4 style="margin:12px 0 8px;color:#10253f">B. Operational Evidence Samples</h4><div id="pulseEvidenceOperationalWrap" class="pulse-evidence-list"><div class="pulse-empty">Generate report to view operational evidence samples.</div></div></div>';const start=document.getElementById('pulseStartDate');const end=document.getElementById('pulseEndDate');if(start&&!start.value)start.value=pulseDaysAgoIso(7);if(end&&!end.value)end.value=pulseTodayIso();}
 function renderPulseReport(rep){ensurePulseShell();const s=(rep&&rep.summary)||{};const op=(rep&&rep.operational_status)||{};const period=(rep&&rep.period)||{};const generatedAt=(rep&&rep.generated_at)||'';const printPeriod=document.getElementById('pulsePrintPeriod');const printGenerated=document.getElementById('pulsePrintGenerated');if(printPeriod)printPeriod.textContent=(period.start_date||'-')+' to '+(period.end_date||'-');if(printGenerated)printGenerated.textContent=generatedAt||'-';const brief=document.getElementById('pulseBriefPoints');const points=(rep&&rep.ambassador_brief_points)||[];if(brief)brief.innerHTML=(points.length?points:['The report is generated from available case records in the selected period.','Evidence references are listed below for verification.']).slice(0,6).map(p=>'<li>'+cwaHtml(p)+'</li>').join('');const kpi=document.getElementById('pulseSummaryKpis');if(kpi)kpi.innerHTML=[['Total submissions',s.total_items],['High sensitivity',s.high_sensitivity_count],['Top operational workload',s.top_operational_theme||'-'],['Top diplomatic issue',s.top_diplomatic_issue||'-'],['Overdue cases',op.total_overdue||0]].map(x=>'<div class="kpi"><b>'+cwaHtml(x[1]||0)+'</b><span>'+cwaHtml(x[0])+'</span></div>').join('');const narrative=document.getElementById('pulseExecutiveNarrative');if(narrative)narrative.textContent=String((rep&&rep.executive_narrative)||'No executive narrative available for this period.');const policy=(rep&&rep.diplomatic_issues)||[];const policyWrap=document.getElementById('pulsePolicyCardsWrap');if(policyWrap)policyWrap.innerHTML=policy.length?policy.map(p=>'<div class="pulse-policy-card"><h4>'+cwaHtml(p.issue_title||p.theme_label||'-')+'</h4><div class="pulse-meta"><strong>Why it matters:</strong> '+cwaHtml(p.why_it_matters||'-')+'</div><div class="pulse-meta"><strong>Authority/institution:</strong> '+cwaHtml(p.authority||'-')+'</div><div class="pulse-meta"><strong>Submissions:</strong> '+cwaHtml(p.count||0)+' | <strong>Evidence:</strong> '+cwaHtml((p.evidence_references||p.sample_references||[]).join(', ')||'-')+'</div><div><strong>Suggested action:</strong> '+cwaHtml(p.suggested_action||'-')+'</div><div class="pulse-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+cwaHtml(p.representative_excerpt||'-')+'</div></div>').join(''):'<div class="pulse-empty">No diplomatic or senior-attention issues for selected period.</div>';const workload=((rep&&rep.community_service_workload)||[]).map(w=>[cwaHtml(w.theme_label||'-'),cwaHtml(w.count||0),cwaHtml(w.responsible_section||'-'),cwaHtml((w.sample_references||[]).join(', ')||'-'),cwaHtml(w.note||'Operational/service handling')]);const workloadWrap=document.getElementById('pulseWorkloadTableWrap');if(workloadWrap)workloadWrap.innerHTML=pulseTable(['Theme','Count','Responsible Section','Sample References','Note'],workload);const officers=(((rep||{}).staff_accountability||{}).by_officer)||[];const staffRows=officers.map(o=>[cwaHtml(o.officer_name||o.assigned_to||'-'),cwaHtml(o.assigned_open||0),cwaHtml(o.overdue_5_days||0),cwaHtml(o.no_action_after_assignment||0),cwaHtml(o.resolved_this_week||0)]);const staffWrap=document.getElementById('pulseStaffTableWrap');if(staffWrap)staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'],staffRows);const annex=(rep&&rep.evidence_annex)||{};const note=document.getElementById('pulseEvidenceNote');if(note)note.textContent=String(annex.note||'Full case records remain available in the portal by reference number.');function evidenceCards(items){if(!items||!items.length)return '<div class="pulse-empty">No evidence cases for selected period.</div>';return items.map(c=>'<div class="pulse-evidence-card"><div class="line"><strong>Reference:</strong> '+cwaHtml(c.reference||'-')+'</div><div class="line"><strong>Module:</strong> '+cwaHtml(c.module||'-')+' | <strong>Date:</strong> '+cwaHtml((c.created_at||'').slice(0,10)||'-')+' | <strong>Status:</strong> '+cwaHtml(c.status||'-')+' | <strong>Assigned to:</strong> '+cwaHtml(c.assigned_to||'-')+'</div><div class="line"><strong>Theme:</strong> '+cwaHtml(((c.theme||{}).theme_label)||'-')+'</div><div class="title">Subject: '+cwaHtml(c.subject||'-')+'</div><div class="excerpt"><strong>Excerpt:</strong> '+cwaHtml(c.details_excerpt||'-')+'</div></div>').join('');}const senior=document.getElementById('pulseEvidenceSeniorWrap');if(senior)senior.innerHTML=evidenceCards(annex.senior_attention||[]);const ops=document.getElementById('pulseEvidenceOperationalWrap');if(ops)ops.innerHTML=evidenceCards(annex.operational_samples||[]);}
+function pulseList(v){return Array.isArray(v)?v:[];}
+function pulseRefs(v){return pulseList(v).filter(Boolean).join(', ')||'-';}
+function pulseTrim(v,n){const s=String(v||'-');return s.length>n?s.slice(0,n-3)+'...':s;}
+function pulseIssueItems(rep){const explicit=pulseList(rep&&rep.diplomatic_issues);if(explicit.length)return explicit;const policy=pulseList(rep&&rep.policy_sensitive_issues);if(policy.length)return policy.map(p=>({issue_title:p.issue_title||p.theme_label,why_it_matters:p.why_it_matters,authority:p.authority,count:p.count,evidence_references:p.evidence_references||p.sample_references,suggested_action:p.suggested_action,representative_excerpt:p.representative_excerpt,sensitivity:p.sensitivity}));return pulseList(rep&&rep.top_themes).filter(t=>String(t.sensitivity||'').toLowerCase()==='high'||(String(t.sensitivity||'').toLowerCase()==='medium'&&Number(t.count||0)>=3)).map(t=>({issue_title:t.theme_label,why_it_matters:t.why_it_matters,authority:t.authority,count:t.count,evidence_references:t.sample_references,suggested_action:t.suggested_action,representative_excerpt:t.short_summary,sensitivity:t.sensitivity}));}
+function pulseWorkloadItems(rep){const explicit=pulseList(rep&&rep.community_service_workload);if(explicit.length)return explicit;const operationalKeys=['opf_insurance_compensation','passport_nadra_consular','general_welfare','nurses_welfare','labour_salary_employer'];return pulseList(rep&&rep.top_themes).filter(t=>operationalKeys.includes(t.theme_key)).map(t=>({theme_label:t.theme_label,count:t.count,responsible_section:t.authority||'Community Welfare Wing',sample_references:(t.sample_references||[]).slice(0,3),note:String(t.sensitivity||'')==='High'?'Sensitive: monitor for senior review':'Operational/service handling'}));}
+function renderPulseReport(rep){ensurePulseShell();const s=(rep&&rep.summary)||{};const op=(rep&&rep.operational_status)||{};const period=(rep&&rep.period)||{};const generatedAt=(rep&&rep.generated_at)||'';const printPeriod=document.getElementById('pulsePrintPeriod');const printGenerated=document.getElementById('pulsePrintGenerated');if(printPeriod)printPeriod.textContent=(period.start_date||'-')+' to '+(period.end_date||'-');if(printGenerated)printGenerated.textContent=generatedAt||'-';const points=pulseList(rep&&rep.ambassador_brief_points);const derived=['The portal recorded '+String(s.total_items||0)+' submissions during the reporting period.',String(s.high_sensitivity_count||0)+' high-sensitivity issue(s) were identified for senior review.','Highest-volume operational workload: '+String(s.top_operational_theme||s.top_theme_label||'-')+'.','Key diplomatic issue: '+String(s.top_diplomatic_issue||'No high-sensitivity diplomatic issue identified')+'.',String(op.total_overdue||0)+' assigned case(s) are overdue beyond the monitoring threshold.','Evidence references are available below.'];const brief=document.getElementById('pulseBriefPoints');if(brief)brief.innerHTML=(points.length?points:derived).slice(0,6).map(p=>'<li>'+cwaHtml(p)+'</li>').join('');const kpi=document.getElementById('pulseSummaryKpis');if(kpi)kpi.innerHTML=[['Total submissions',s.total_items],['High sensitivity',s.high_sensitivity_count],['Top operational workload',s.top_operational_theme||'-'],['Top diplomatic issue',s.top_diplomatic_issue||'-'],['Overdue cases',op.total_overdue||0]].map(x=>'<div class="kpi"><b>'+cwaHtml(x[1]==null?'-':x[1])+'</b><span>'+cwaHtml(x[0])+'</span></div>').join('');const narrative=document.getElementById('pulseExecutiveNarrative');if(narrative)narrative.textContent=String((rep&&rep.executive_narrative)||'The brief separates policy-sensitive matters from operational workload so senior review can focus on issues requiring diplomatic visibility.');const policy=pulseIssueItems(rep);const policyWrap=document.getElementById('pulsePolicyCardsWrap');if(policyWrap)policyWrap.innerHTML=policy.length?policy.map(p=>'<div class="pulse-policy-card"><h4>'+cwaHtml(p.issue_title||p.theme_label||'-')+'</h4><div class="pulse-meta"><strong>Why it matters:</strong> '+cwaHtml(p.why_it_matters||'-')+'</div><div class="pulse-meta"><strong>Authority / institution:</strong> '+cwaHtml(p.authority||'-')+'</div><div class="pulse-meta"><strong>Submissions:</strong> '+cwaHtml(p.count||0)+' | <strong>Evidence:</strong> '+cwaHtml(pulseRefs(p.evidence_references||p.sample_references))+'</div><div><strong>Suggested action:</strong> '+cwaHtml(p.suggested_action||'-')+'</div><div class="pulse-meta" style="margin-top:6px"><strong>Representative excerpt:</strong> '+cwaHtml(pulseTrim(p.representative_excerpt||p.short_summary,300))+'</div></div>').join(''):'<div class="pulse-empty">No diplomatic or senior-attention issues for selected period.</div>';const workload=pulseWorkloadItems(rep);const workloadWrap=document.getElementById('pulseWorkloadTableWrap');if(workloadWrap)workloadWrap.innerHTML=workload.length?'<div class="pulse-policy-cards">'+workload.map(w=>'<div class="pulse-policy-card"><h4>'+cwaHtml(w.theme_label||'-')+'</h4><div class="pulse-meta"><strong>Count:</strong> '+cwaHtml(w.count||0)+' | <strong>Responsible desk/section:</strong> '+cwaHtml(w.responsible_section||'-')+'</div><div class="pulse-meta"><strong>Sample refs:</strong> '+cwaHtml(pulseRefs(w.sample_references))+'</div><div>'+cwaHtml(w.note||'Operational/service handling')+'</div></div>').join('')+'</div>':'<div class="pulse-empty">No operational workload themes for selected period.</div>';const officers=(((rep||{}).staff_accountability||{}).by_officer)||[];const staffRows=officers.map(o=>[cwaHtml(o.officer_name||o.assigned_to||'-'),cwaHtml(o.assigned_open||0),cwaHtml(o.overdue_5_days||0),cwaHtml(o.no_action_after_assignment||0),cwaHtml(o.resolved_this_week||0)]);const staffWrap=document.getElementById('pulseStaffTableWrap');if(staffWrap)staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'],staffRows);const annex=(rep&&rep.evidence_annex)||{};const allEvidence=pulseList(rep&&rep.evidence_cases);const includeFull=!!(rep&&rep.include_full_details);const seniorEvidence=pulseList(annex.senior_attention).length?pulseList(annex.senior_attention):allEvidence.filter(c=>String(((c.theme||{}).sensitivity)||'').toLowerCase()==='high');let opsEvidence=pulseList(annex.operational_samples).length?pulseList(annex.operational_samples):allEvidence.filter(c=>String(((c.theme||{}).sensitivity)||'').toLowerCase()!=='high');if(!includeFull)opsEvidence=opsEvidence.slice(0,10);const note=document.getElementById('pulseEvidenceNote');if(note)note.textContent=String(annex.note||'Evidence is grouped by senior-attention issues first, followed by operational samples. Full case records remain available by reference number.');function evidenceCards(items){if(!items||!items.length)return '<div class="pulse-empty">No evidence cases for selected period.</div>';return items.map(c=>'<div class="pulse-evidence-card"><div class="line"><strong>Reference:</strong> '+cwaHtml(c.reference||'-')+'</div><div class="line"><strong>Module:</strong> '+cwaHtml(c.module||'-')+' | <strong>Date:</strong> '+cwaHtml((c.created_at||'').slice(0,10)||'-')+' | <strong>Status:</strong> '+cwaHtml(c.status||'-')+' | <strong>Assigned to:</strong> '+cwaHtml(c.assigned_to||'-')+'</div><div class="line"><strong>Theme:</strong> '+cwaHtml(((c.theme||{}).theme_label)||'-')+'</div><div class="title">Subject: '+cwaHtml(c.subject||'-')+'</div><div class="excerpt"><strong>Excerpt:</strong> '+cwaHtml(pulseTrim(c.details_excerpt||'-',300))+'</div></div>').join('');}const senior=document.getElementById('pulseEvidenceSeniorWrap');if(senior)senior.innerHTML=evidenceCards(seniorEvidence);const ops=document.getElementById('pulseEvidenceOperationalWrap');if(ops)ops.innerHTML=evidenceCards(opsEvidence);}
 window.loadAmbassadorPulseReport=async function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;ensurePulseShell();try{pulseSetError('');const s=(document.getElementById('pulseStartDate')||{}).value||pulseDaysAgoIso(7);const e=(document.getElementById('pulseEndDate')||{}).value||pulseTodayIso();const include=((document.getElementById('pulseIncludeFull')||{}).checked?'1':'0');const r=await fetch('/api/admin/ambassador-pulse-report?start_date='+encodeURIComponent(s)+'&end_date='+encodeURIComponent(e)+'&include_full_details='+include,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Failed to load report');window.cwaPulseReportData=j;renderPulseReport(j);}catch(err){pulseSetError(err&&err.message?err.message:'Failed to load report');}};
 window.copyPulseSummary=async function(){const rep=window.cwaPulseReportData;if(!rep){pulseSetError('Generate report first.');return;}const s=rep.summary||{};const text=['Ambassador Pulse Brief','Period: '+((rep.period||{}).start_date||'')+' to '+((rep.period||{}).end_date||''),'Total submissions: '+(s.total_items||0),'High sensitivity: '+(s.high_sensitivity_count||0),'Top operational workload: '+(s.top_operational_theme||'-'),'Top diplomatic issue: '+(s.top_diplomatic_issue||'-')].join('\\n');try{await navigator.clipboard.writeText(text);pulseSetError('');}catch(err){pulseSetError('Unable to copy summary.');}};
 window.printAmbassadorPulseReport=function(){if(typeof PAGE_MODE!=='undefined'&&PAGE_MODE!=='pulse')return;window.print();};
@@ -31303,6 +31325,16 @@ WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';let current=",
+    "const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';const IS_ADMIN=String(USER_ROLE||'').toLowerCase()==='admin';let current=",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "function badge(v){return '<span class=\"badge '+String(v||'').replaceAll(' ','_')+'\">'+(v||'-')+'</span>'}",
+    "function badge(v){return '<span class=\"badge '+String(v||'').replaceAll(' ','_')+'\">'+(v||'-')+'</span>'}function safeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(s){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[s];});}",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     '</div></div><div class="panel" id="welfareRoutingRulesCard"',
     '</div></div></div><div class="panel" id="welfareRoutingRulesCard"',
     1
@@ -31310,7 +31342,7 @@ WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "function applyPageModeVisibility(){const isAdmin=USER_ROLE==='admin';const show=(id,yes)=>{const el=document.getElementById(id);if(el)el.style.display=yes?'block':'none';};show('printPackPanel',PAGE_MODE!=='pulse'&&PAGE_MODE!=='my');show('caseListPanel',PAGE_MODE!=='pulse');show('counsellorBranchesCard',isAdmin&&PAGE_MODE==='welfare');show('welfareRoutingRulesCard',isAdmin&&PAGE_MODE==='welfare');show('staffAccountabilityCard',isAdmin&&PAGE_MODE==='welfare');show('ambassadorPulseCard',isAdmin&&PAGE_MODE==='pulse');}",
     """function applyPageModeVisibility() {
-  const isAdmin = USER_ROLE === 'admin';
+  const isAdmin = IS_ADMIN;
   const show = (id, yes) => {
     const el = document.getElementById(id);
     if (el) el.style.display = yes ? 'block' : 'none';
@@ -31331,28 +31363,48 @@ WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "async function loadCounsellorBranches(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
     """async function loadCounsellorBranches(){
 if (PAGE_MODE !== 'welfare') return;
-if (USER_ROLE !== 'admin') return;""",
+if (!IS_ADMIN) return;""",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "async function loadRoutingRules(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
     """async function loadRoutingRules(){
 if (PAGE_MODE !== 'welfare') return;
-if (USER_ROLE !== 'admin') return;""",
+if (!IS_ADMIN) return;""",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "async function loadStaffAccountability(){if(USER_ROLE!=='admin'||PAGE_MODE!=='welfare')return;",
     """async function loadStaffAccountability(){
 if (PAGE_MODE !== 'welfare') return;
-if (USER_ROLE !== 'admin') return;""",
+if (!IS_ADMIN) return;""",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "async function loadAmbassadorPulseReport(){if(USER_ROLE!=='admin'||PAGE_MODE!=='pulse')return;",
     """async function loadAmbassadorPulseReport(){
 if (PAGE_MODE !== 'pulse') return;
-if (USER_ROLE !== 'admin') return;""",
+if (!IS_ADMIN) return;""",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "}catch(e){errEl.textContent=e.message||'Could not load branch settings';}}function editBranch",
+    "}catch(e){const msg=(e&&e.message)?e.message:'Request failed';errEl.textContent='Could not load branch settings: '+msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan=\"7\">Could not load branch settings: '+safeHtml(msg)+'</td></tr>';}}function editBranch",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "}catch(e){if(errEl)errEl.textContent=e.message||'Could not load routing rules';}}function editRoutingRule",
+    "}catch(e){const msg=(e&&e.message)?e.message:'Request failed';if(errEl)errEl.textContent='Could not load routing rules: '+msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan=\"8\">Could not load routing rules: '+safeHtml(msg)+'</td></tr>';}}function editRoutingRule",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "}catch(e){if(errEl)errEl.textContent=e.message||'Could not load staff accountability';}}function _todayIso",
+    "}catch(e){const msg=(e&&e.message)?e.message:'Request failed';if(errEl)errEl.textContent='Could not load staff accountability: '+msg;if(kpiEl)kpiEl.innerHTML='';if(officerRows)officerRows.innerHTML='<tr><td colspan=\"5\">Could not load staff accountability: '+safeHtml(msg)+'</td></tr>';if(caseRows)caseRows.innerHTML='<tr><td colspan=\"7\">Could not load staff accountability: '+safeHtml(msg)+'</td></tr>';}}function _todayIso",
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    "if(pulseFullEl&&USER_ROLE!=='admin')",
+    "if(pulseFullEl&&!IS_ADMIN)",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
@@ -31377,13 +31429,13 @@ if (PAGE_MODE !== 'pulse') {
   loadCases();
 }
 
-if (USER_ROLE === 'admin' && PAGE_MODE === 'welfare') {
+if (IS_ADMIN && PAGE_MODE === 'welfare') {
   loadCounsellorBranches();
   loadRoutingRules();
   loadStaffAccountability();
 }
 
-if (USER_ROLE === 'admin' && PAGE_MODE === 'pulse') {
+if (IS_ADMIN && PAGE_MODE === 'pulse') {
   loadAmbassadorPulseReport();
 }
 

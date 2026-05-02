@@ -13,7 +13,7 @@
     .notice{background:#fff;border:1px solid #dce7ef;border-left:4px solid #15324a;border-radius:8px;padding:12px;margin-bottom:12px;color:#31495f}
     .tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}.tools button{border:1px solid #d7e2ea;background:#fff;border-radius:6px;padding:9px 12px;font-weight:700;color:#29445b;cursor:pointer}.tools button.active{background:#15324a;color:#fff}
     .card{background:#fff;border:1px solid #e3ebf0;border-radius:8px}.table-wrap{overflow:auto}.cases{width:100%;border-collapse:collapse}.cases th,.cases td{border-bottom:1px solid #eef3f7;padding:10px;text-align:left;font-size:13px}.cases tr{cursor:pointer}.cases tr:hover{background:#f7fafc}
-    .drawer{position:fixed;inset:0;background:rgba(15,35,52,.45);display:none;align-items:stretch;justify-content:flex-end;z-index:40}.drawer.open{display:flex}.panel{background:#fff;width:min(760px,100%);height:100%;overflow:auto;padding:18px;box-sizing:border-box}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.field{border:1px solid #edf2f6;border-radius:7px;padding:9px}.field span{display:block;font-size:11px;color:#6b7b88}.field b{display:block;color:#172b3a;margin-top:3px}.actions{display:grid;grid-template-columns:1fr;gap:10px;margin-top:14px}.actions textarea,.actions select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.transfer-box{border-top:1px solid #e2e8f0;margin-top:14px;padding-top:14px}.transfer-box h3{margin:0 0 10px;color:#15324a}.transfer-box label{display:block;margin:8px 0 5px;font-size:13px}.transfer-box textarea,.transfer-box select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.transfer-destination-help{font-size:12px;color:#607182;margin-top:6px;line-height:1.45}.transfer-msg{font-size:13px;font-weight:700;margin:8px 0}.transfer-msg.err{color:#b91c1c}.transfer-msg.ok{color:#047857}.timeline{margin-top:14px}.event{border-left:3px solid #dce7ef;padding:8px 0 8px 10px;font-size:13px}
+    .drawer{position:fixed;inset:0;background:rgba(15,35,52,.45);display:none;align-items:stretch;justify-content:flex-end;z-index:40}.drawer.open{display:flex}.panel{background:#fff;width:min(760px,100%);height:100%;overflow:auto;padding:18px;box-sizing:border-box}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.field{border:1px solid #edf2f6;border-radius:7px;padding:9px}.field span{display:block;font-size:11px;color:#6b7b88}.field b{display:block;color:#172b3a;margin-top:3px}.actions{display:grid;grid-template-columns:1fr;gap:10px;margin-top:14px}.actions textarea,.actions select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.transfer-box{border-top:1px solid #e2e8f0;margin-top:14px;padding-top:14px}.transfer-box h3{margin:0 0 10px;color:#15324a}.transfer-box label{display:block;margin:8px 0 5px;font-size:13px}.transfer-box textarea,.transfer-box select{width:100%;box-sizing:border-box;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}.transfer-destination-help{font-size:12px;color:#607182;margin-top:6px;line-height:1.45;white-space:pre-line}.transfer-msg{font-size:13px;font-weight:700;margin:8px 0}.transfer-msg.err{color:#b91c1c}.transfer-msg.ok{color:#047857}.timeline{margin-top:14px}.event{border-left:3px solid #dce7ef;padding:8px 0 8px 10px;font-size:13px}
   </style>
 </head>
 <body>
@@ -76,14 +76,15 @@ const USER_NAME='__USER_NAME__', USER_ROLE='__USER_ROLE__';
 let state={filter:'',items:[],current:null};
 const filters=[['','All Assigned'],['pending','Pending'],['in_progress','In Progress'],['completed','Follow-up Completed']];
 const transferFallbackDestinations=[
-  {rule_key:'opf_welfare',desk_name:'OPF / Insurance / Compensation Desk',assigned_to:'Zahid_New'},
-  {rule_key:'legal_advisor',desk_name:'Legal Advisory Desk',assigned_to:'Rajab'},
-  {rule_key:'nurses_matters',desk_name:'Nurses Welfare Desk',assigned_to:'Awais'},
-  {rule_key:'field_inspection',desk_name:'Field Inspection / Facility Desk',assigned_to:'Shahid'},
-  {rule_key:'general_welfare',desk_name:'General Welfare Desk',assigned_to:'Zahid_New'},
-  {rule_key:'death_body_case',desk_name:'Death / Mortal Remains Desk',assigned_to:'Zahid_New'}
+  {rule_key:'opf_welfare',desk_name:'OPF / Insurance / Compensation Desk',assigned_to:'Zahid_New',officer_name:'Zahid',assigned_department:'Community Welfare Wing Kuwait'},
+  {rule_key:'legal_advisor',desk_name:'Legal Advisory Desk',assigned_to:'Rajab',officer_name:'Rajab Khan',assigned_department:'Legal'},
+  {rule_key:'nurses_matters',desk_name:'Nurses Welfare Desk',assigned_to:'Awais',officer_name:'Awais',assigned_department:'CWA Office / AP'},
+  {rule_key:'field_inspection',desk_name:'Field Inspection / Facility Desk',assigned_to:'Shahid',officer_name:'Shahid Khan',assigned_department:'Community Welfare Wing Embassy'},
+  {rule_key:'general_welfare',desk_name:'General Welfare Desk',assigned_to:'Zahid_New',officer_name:'Zahid',assigned_department:'Community Welfare Wing Kuwait'},
+  {rule_key:'death_body_case',desk_name:'Death / Mortal Remains Desk',assigned_to:'Zahid_New',officer_name:'Zahid',assigned_department:'Community Welfare Wing Kuwait'}
 ];
 let transferDestinations=transferFallbackDestinations.slice();
+let transferDestinationLoadError='';
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function api(url,opts){const r=await fetch(url,{credentials:'include',...(opts||{})});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}
 function renderFilters(){document.getElementById('filters').innerHTML=filters.map(([id,l])=>`<button class="${state.filter===id?'active':''}" onclick="load('${id}')">${l}</button>`).join('')}
@@ -104,21 +105,26 @@ const idx=select.value===''?-1:Number(select.value);
 const d=idx>=0?transferDestinations[idx]:null;
 if(!d){help.textContent='';return;}
 const lines=[
+  'Selected destination contact:',
   d.desk_name?('Desk: '+d.desk_name):'',
   d.assigned_to?('Username: '+d.assigned_to):'',
   d.officer_name?('Officer: '+d.officer_name):'',
-  d.assigned_department?('Department: '+d.assigned_department):'',
   d.officer_phone?('Phone/Mobile: '+d.officer_phone):'',
-  d.officer_email?('Email: '+d.officer_email):''
+  d.officer_email?('Email: '+d.officer_email):'',
+  d.assigned_department?('Department: '+d.assigned_department):''
 ].filter(Boolean);
-help.textContent=lines.join(' | ');
+help.textContent=lines.join('\n');
 }
 async function loadTransferDestinations(){
 try{
 const d=await api('/api/staff/transfer-destinations');
+transferDestinationLoadError='';
 if(Array.isArray(d.items)&&d.items.length)transferDestinations=d.items;
 }catch(_e){
 transferDestinations=transferFallbackDestinations.slice();
+transferDestinationLoadError='Could not load transfer destinations.';
+const help=document.getElementById('transferDestinationHelp');
+if(help)help.textContent=transferDestinationLoadError;
 }
 }
 function renderTransferSection(module){
@@ -128,6 +134,10 @@ if(!transferModuleSupported(module)){section.style.display='none';return;}
 section.style.display='block';
 select.innerHTML='<option value="">Select desk/officer</option>'+transferDestinations.map((d,i)=>`<option value="${i}">${esc(transferOptionLabel(d))}</option>`).join('');
 updateTransferDestinationHelp();
+if(transferDestinationLoadError){
+const help=document.getElementById('transferDestinationHelp');
+if(help)help.textContent=transferDestinationLoadError;
+}
 if(reason)reason.value='';
 if(visible)visible.checked=true;
 if(msg){msg.textContent='';msg.className='transfer-msg';}
