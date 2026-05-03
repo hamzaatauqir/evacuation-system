@@ -13676,6 +13676,259 @@ def _parse_pulse_date_range(start_date='', end_date=''):
     return start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
 
 
+PULSE_EXPORT_HEADERS = [
+    'reference',
+    'module',
+    'created_at',
+    'status',
+    'assigned_to',
+    'assigned_department',
+    'category',
+    'case_type',
+    'subject',
+    'details',
+    'requester_name',
+    'phone',
+    'email',
+    'passport',
+    'civil_id',
+]
+
+
+def _parse_pulse_export_date_range(params=None):
+    params = params or {}
+    start_date = _clean_text(params.get('start_date'), 20)
+    end_date = _clean_text(params.get('end_date'), 20)
+    if start_date or end_date:
+        return _parse_pulse_date_range(start_date, end_date)
+    today = _kuwait_now().date()
+    days_text = _clean_text(params.get('days'), 10)
+    try:
+        days = int(days_text or '7')
+    except Exception:
+        days = 7
+    days = max(1, min(days, 365))
+    start = today - timedelta(days=days - 1)
+    return start.isoformat(), today.isoformat()
+
+
+def _pulse_export_filename(start_date, end_date):
+    return f"ambassador_pulse_cases_{start_date.replace('-', '')}_{end_date.replace('-', '')}.csv"
+
+
+def _pulse_export_pick(row_dict, *keys):
+    row_dict = row_dict or {}
+    for key in keys:
+        if key in row_dict:
+            value = row_dict.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return value
+    return ''
+
+
+def _pulse_export_date_expr(columns):
+    parts = [f"NULLIF({col}, '')" for col in columns if col]
+    if not parts:
+        return ''
+    if len(parts) == 1:
+        return parts[0]
+    return f"COALESCE({', '.join(parts)})"
+
+
+def _pulse_export_rows_for_table(db, table_name, date_candidates, start_date, end_date):
+    cols = _table_columns(db, table_name)
+    if not cols:
+        return []
+    date_cols = [col for col in date_candidates if col in cols]
+    if not date_cols:
+        return []
+    date_expr = _pulse_export_date_expr(date_cols)
+    if not date_expr:
+        return []
+    order_clause = "id DESC" if 'id' in cols else "rowid DESC"
+    sql = (
+        f"SELECT * FROM {table_name} "
+        f"WHERE date({date_expr}) BETWEEN date(?) AND date(?) "
+        f"ORDER BY datetime({date_expr}) DESC, {order_clause}"
+    )
+    return [dict(row) for row in db.execute(sql, [start_date, end_date]).fetchall()]
+
+
+def _pulse_export_safe_cell(value):
+    text = '' if value is None else str(value)
+    text = text.replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
+    if text[:1] in ('=', '+', '-', '@'):
+        text = "'" + text
+    return text
+
+
+def _pulse_export_sort_key(item):
+    text = str((item or {}).get('created_at') or '').strip()
+    if not text:
+        return datetime.min
+    cleaned = text.replace('Z', '').strip()
+    for candidate in (cleaned, cleaned.replace(' ', 'T')):
+        try:
+            return datetime.fromisoformat(candidate)
+        except Exception:
+            pass
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(cleaned[:19], fmt)
+        except Exception:
+            pass
+    return datetime.min
+
+
+def _pulse_export_welfare_row(row_dict):
+    reference = _pulse_export_pick(row_dict, 'case_reference')
+    if not reference and row_dict.get('id'):
+        reference = f"WEL-GEN-{row_dict.get('id')}"
+    return {
+        'reference': reference,
+        'module': 'Welfare',
+        'created_at': _pulse_export_pick(row_dict, 'created_at'),
+        'status': _pulse_export_pick(row_dict, 'status'),
+        'assigned_to': _pulse_export_pick(row_dict, 'assigned_to'),
+        'assigned_department': _pulse_export_pick(row_dict, 'assigned_department'),
+        'category': _pulse_export_pick(row_dict, 'category'),
+        'case_type': _pulse_export_pick(row_dict, 'case_type'),
+        'subject': _pulse_export_pick(row_dict, 'subject_name', 'concern_summary', 'category'),
+        'details': _pulse_export_pick(row_dict, 'details', 'concern_summary'),
+        'requester_name': _pulse_export_pick(row_dict, 'requester_name'),
+        'phone': _pulse_export_pick(row_dict, 'requester_phone'),
+        'email': _pulse_export_pick(row_dict, 'requester_email'),
+        'passport': _pulse_export_pick(row_dict, 'subject_passport'),
+        'civil_id': _pulse_export_pick(row_dict, 'subject_civil_id'),
+    }
+
+
+def _pulse_export_legal_row(row_dict):
+    reference = _pulse_export_pick(row_dict, 'case_reference', 'reference_id', 'reference')
+    if not reference and row_dict.get('id'):
+        reference = f"LGL-GEN-{row_dict.get('id')}"
+    return {
+        'reference': reference,
+        'module': 'Legal/OPF',
+        'created_at': _pulse_export_pick(row_dict, 'created_at'),
+        'status': _pulse_export_pick(row_dict, 'status'),
+        'assigned_to': _pulse_export_pick(row_dict, 'assigned_to_username', 'assigned_to'),
+        'assigned_department': _pulse_export_pick(row_dict, 'assigned_department'),
+        'category': _pulse_export_pick(row_dict, 'case_category', 'category'),
+        'case_type': _pulse_export_pick(row_dict, 'case_type'),
+        'subject': _pulse_export_pick(row_dict, 'subject'),
+        'details': _pulse_export_pick(row_dict, 'details', 'description'),
+        'requester_name': _pulse_export_pick(row_dict, 'requester_name', 'applicant_name', 'full_name'),
+        'phone': _pulse_export_pick(row_dict, 'requester_phone', 'phone', 'mobile'),
+        'email': _pulse_export_pick(row_dict, 'requester_email', 'email'),
+        'passport': _pulse_export_pick(row_dict, 'passport', 'passport_no', 'passport_number'),
+        'civil_id': _pulse_export_pick(row_dict, 'civil_id'),
+    }
+
+
+def _pulse_export_nurse_row(row_dict):
+    reference = _pulse_export_pick(row_dict, 'case_reference', 'reference', 'complaint_id', 'nurse_reference_id')
+    if not reference and row_dict.get('id'):
+        reference = f"NCMP-GEN-{row_dict.get('id')}"
+    return {
+        'reference': reference,
+        'module': 'Nurses',
+        'created_at': _pulse_export_pick(row_dict, 'created_at', 'submitted_at'),
+        'status': _pulse_export_pick(row_dict, 'status', 'complaint_status'),
+        'assigned_to': _pulse_export_pick(row_dict, 'assigned_to', 'assigned_to_username'),
+        'assigned_department': _pulse_export_pick(row_dict, 'assigned_department'),
+        'category': _pulse_export_pick(row_dict, 'category', 'complaint_category'),
+        'case_type': 'nurse',
+        'subject': _pulse_export_pick(row_dict, 'subject'),
+        'details': _pulse_export_pick(row_dict, 'details', 'description', 'complaint', 'details_text', 'complaint_details', 'message'),
+        'requester_name': _pulse_export_pick(row_dict, 'requester_name', 'nurse_full_name', 'nurse_name', 'name'),
+        'phone': _pulse_export_pick(row_dict, 'phone', 'contact_number', 'mobile', 'mobile_number'),
+        'email': _pulse_export_pick(row_dict, 'email', 'email_address', 'requester_email'),
+        'passport': _pulse_export_pick(row_dict, 'passport', 'passport_no', 'passport_number'),
+        'civil_id': _pulse_export_pick(row_dict, 'civil_id'),
+    }
+
+
+def _pulse_export_death_row(row_dict):
+    reference = _pulse_export_pick(row_dict, 'case_reference', 'reference', 'reference_id')
+    if not reference and row_dict.get('id'):
+        reference = f"DTH-GEN-{row_dict.get('id')}"
+    return {
+        'reference': reference,
+        'module': 'Death',
+        'created_at': _pulse_export_pick(row_dict, 'created_at', 'submitted_at'),
+        'status': _pulse_export_pick(row_dict, 'status'),
+        'assigned_to': _pulse_export_pick(row_dict, 'assigned_to', 'assigned_to_username'),
+        'assigned_department': _pulse_export_pick(row_dict, 'assigned_department'),
+        'category': _pulse_export_pick(row_dict, 'category'),
+        'case_type': 'death',
+        'subject': _pulse_export_pick(row_dict, 'subject', 'deceased_name'),
+        'details': _pulse_export_pick(row_dict, 'details', 'remarks', 'case_details', 'description'),
+        'requester_name': _pulse_export_pick(row_dict, 'requester_name', 'reporter_name'),
+        'phone': _pulse_export_pick(row_dict, 'phone', 'contact_number', 'reporter_mobile', 'next_of_kin_mobile'),
+        'email': _pulse_export_pick(row_dict, 'email', 'reporter_email', 'next_of_kin_email'),
+        'passport': _pulse_export_pick(row_dict, 'passport', 'passport_no', 'deceased_passport'),
+        'civil_id': _pulse_export_pick(row_dict, 'civil_id', 'deceased_civil_id'),
+    }
+
+
+def _pulse_export_feedback_row(row_dict):
+    reference = _pulse_export_pick(row_dict, 'reference')
+    if not reference and row_dict.get('id'):
+        reference = f"FBK-GEN-{row_dict.get('id')}"
+    return {
+        'reference': reference,
+        'module': 'Feedback',
+        'created_at': _pulse_export_pick(row_dict, 'created_at'),
+        'status': 'Acknowledged',
+        'assigned_to': '',
+        'assigned_department': '',
+        'category': _pulse_export_pick(row_dict, 'category'),
+        'case_type': 'general_feedback',
+        'subject': _pulse_export_pick(row_dict, 'subject'),
+        'details': _pulse_export_pick(row_dict, 'details'),
+        'requester_name': _pulse_export_pick(row_dict, 'requester_name'),
+        'phone': _pulse_export_pick(row_dict, 'requester_phone'),
+        'email': _pulse_export_pick(row_dict, 'requester_email'),
+        'passport': '',
+        'civil_id': '',
+    }
+
+
+def api_admin_ambassador_pulse_export_csv(params, user):
+    if (user or {}).get('role') != 'admin':
+        return b'', '', {'error': 'Unauthorized'}
+    start_date, end_date = _parse_pulse_export_date_range(params)
+    db = get_db()
+    try:
+        rows = []
+        for table_name, date_candidates, mapper in (
+            ('welfare_cases', ('created_at',), _pulse_export_welfare_row),
+            ('legal_case_requests', ('created_at',), _pulse_export_legal_row),
+            ('nurse_complaints', ('created_at', 'submitted_at'), _pulse_export_nurse_row),
+            ('death_case_requests', ('created_at', 'submitted_at'), _pulse_export_death_row),
+            ('public_feedback_messages', ('created_at',), _pulse_export_feedback_row),
+        ):
+            try:
+                for row_dict in _pulse_export_rows_for_table(db, table_name, date_candidates, start_date, end_date):
+                    rows.append(mapper(row_dict))
+            except Exception as exc:
+                print(f"[PulseExport] skipped {table_name}: {exc}", flush=True)
+        rows.sort(key=_pulse_export_sort_key, reverse=True)
+        out = io.StringIO(newline='')
+        writer = csv.writer(out)
+        writer.writerow(PULSE_EXPORT_HEADERS)
+        for row in rows:
+            writer.writerow([_pulse_export_safe_cell(row.get(col, '')) for col in PULSE_EXPORT_HEADERS])
+        body = out.getvalue().encode('utf-8')
+        return body, _pulse_export_filename(start_date, end_date), None
+    finally:
+        db.close()
+
+
 def _mask_tail(value, keep=4):
     text = _clean_text(value, 120)
     if not text:
@@ -25101,6 +25354,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             res = api_admin_ambassador_pulse_report(params, user)
             self.send_json(res, 200 if res.get('success') else 403)
+        elif path == '/api/admin/ambassador-pulse-export.csv':
+            user = self.require_auth()
+            if not user: return
+            body, fname, err = api_admin_ambassador_pulse_export_csv(params, user)
+            if err:
+                self.send_json(err, 403 if err.get('error') == 'Unauthorized' else 400); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', str(len(body)))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body)
         elif path == '/api/admin/notification-counts':
             user = self.require_auth()
             if not user: return
@@ -31145,6 +31411,10 @@ WELFARE_CASES_ADMIN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset
 <div class="drawer" id="drawer"><div class="drawerHead"><button class="btn2" style="float:right" onclick="closeDrawer()">Close</button><h2 id="dRef"></h2><div id="dType"></div></div><div class="drawerBody"><div id="details"></div><h3>Assignment</h3><select id="assignee"></select><input id="assignNote" placeholder="Assignment note"><button onclick="assignCase()">Assign</button><h3>Status</h3><select id="newStatus" onchange="toggleResolvedNoteUi()"><option>Assigned</option><option>In Progress</option><option>Field Verification Required</option><option>Awaiting Requester Response</option><option>Resolved</option><option>Closed</option></select><input id="statusNote" placeholder="Status note"><div id="resolvedNoteWrap" style="display:none"><label style="display:block;margin:8px 0 4px;font-size:12px;font-weight:700">Resolution note visible to applicant</label><textarea id="resolvedApplicantNote" placeholder="Example: Applicant was contacted on phone. Guidance was provided regarding required documents and the matter has been closed."></textarea><div class="hint">Resolved cases require an applicant-visible note. This note will be emailed/shown to the applicant.</div></div><button id="statusBtn" class="btn3" onclick="statusCase()">Update Status</button><h3>Escalation</h3><select id="escLevel"><option value="normal">Normal</option><option value="senior_review">Senior Review</option><option value="ambassador_review">Ambassador Review</option></select><input id="escNote" placeholder="Escalation note"><button class="btn3" onclick="escalateCase()">Escalate</button><h3>Notes</h3><textarea id="noteText" placeholder="Internal note or requester-visible message"></textarea><label style="display:block;margin:8px 0;font-size:12px"><input id="visibleNote" type="checkbox"> Visible to requester</label><button onclick="addNote()">Add Note</button><button class="btn3" onclick="resolveCase()">Mark Resolved</button><div class="timeline" id="timeline"></div></div></div>
 <script>const PAGE_MODE='__PAGE_MODE__';const USER_ROLE='__USER_ROLE__';const IS_ADMIN=['admin','operator','operator_special'].indexOf(String(USER_ROLE||'').trim().toLowerCase())>=0;let current=null,users=[],branchItems=[],routingRuleItems=[],accountabilityData={overdueCasesByRef:{},noActionCasesByRef:{}};document.querySelectorAll('[data-nav]').forEach(a=>{if(a.dataset.nav===PAGE_MODE)a.classList.add('active')});function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}function safeHtml(v){return esc(v);}async function jget(u){const r=await fetch(u,{credentials:'include'});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}async function jpost(u,d){const r=await fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});const j=await r.json();if(!r.ok||j.success===false)throw new Error(j.error||'Request failed');return j}function qs(){const p=new URLSearchParams();['case_type','status','priority','q'].forEach(id=>{const v=document.getElementById(id).value;if(v)p.set(id,v)});if(PAGE_MODE==='my')p.set('scope','my');if(PAGE_MODE==='ambassador')p.set('escalation_level','ambassador_review');return p.toString()}function badge(v){return '<span class="badge '+String(v||'').replaceAll(' ','_')+'">'+(v||'-')+'</span>'}function acctBadgeHtml(reference){const ref=String(reference||'');const overdue=accountabilityData.overdueCasesByRef&&accountabilityData.overdueCasesByRef[ref];const noAction=accountabilityData.noActionCasesByRef&&accountabilityData.noActionCasesByRef[ref];let html='';if(overdue)html+='<div><span class="badge Urgent">Overdue >5 days</span></div>';if(noAction)html+='<div><span class="badge">No staff action</span></div>';return html}async function loadCases(){const errEl=document.getElementById('err');const kpiEl=document.getElementById('kpis');const rowsEl=document.getElementById('rows');try{if(errEl)errEl.textContent='';const data=await jget('/api/admin/welfare-cases?'+qs());const k=data.kpis||{};if(kpiEl)kpiEl.innerHTML=[['Total Welfare Cases',k.total],['New',k.new],['Assigned',k.assigned],['Assigned to Me',k.assigned_to_me],['Field Verification Required',k.field_verification_required],['Ambassador Review',k.ambassador_review],['Resolved This Week',k.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');const items=Array.isArray(data.items)?data.items:[];if(rowsEl)rowsEl.innerHTML=items.map(c=>'<tr><td><b>'+c.case_reference+'</b>'+acctBadgeHtml(c.case_reference)+'</td><td>'+c.case_type+'</td><td>'+c.requester_name+'<br><small>'+c.requester_phone+'</small></td><td>'+c.subject_name+'</td><td>'+c.category+'</td><td>'+badge(c.priority)+'</td><td>'+badge(c.status)+'</td><td>'+(c.assigned_to||'Unassigned')+'</td><td>'+c.escalation_level+'</td><td>'+String(c.created_at||'').slice(0,16)+'</td><td><button onclick="openCase('+c.id+')">View</button></td></tr>').join('')||'<tr><td colspan="11">No cases found.</td></tr>';}catch(e){const msg='Error loading cases: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan="11">'+esc(msg)+'</td></tr>';}}async function loadUsers(){try{const d=await jget('/api/admin/welfare-users');users=d.users||[]}catch(e){users=[]}}function rows(obj){return Object.entries(obj).map(([k,v])=>'<div class="row"><span>'+k+'</span><b>'+(v||'-')+'</b></div>').join('')}async function openCase(id){const d=await jget('/api/admin/welfare-cases/detail?id='+id);current=d.case;document.getElementById('dRef').textContent=current.case_reference;document.getElementById('dType').textContent=current.case_type;const handover=(String(current.assigned_role||'')==='counsellor_external'||String(current.escalation_level||'')==='external_handover'||String(current.assigned_to||'').indexOf('external_branch:')===0);const handoverNotes=(d.actions||[]).filter(a=>String(a.action_type||'').toLowerCase()==='external_handover'&&Number(a.visible_to_requester||0)===1).map(a=>a.note||'').join(' | ');const handoverPhone=(current.handover_phone||current.counsellor_section_phone||'').trim()||'Please contact the Embassy through official contact channels.';const handoverHtml=handover?('<div class="badge-handover">Forwarded to Counsellor Section Branch</div>'+rows({'Branch':current.handover_branch_name||current.assigned_department||current.counsellor_section_name||'Counsellor / Consular Section','Officer':current.handover_officer_name||'Concerned Branch Officer','Email':current.handover_email||current.counsellor_section_email||'parepkuwait@mofa.gov.pk','Phone':handoverPhone,'Status':'Resolved / handed over from Community Welfare','Handover note':handoverNotes||'-'})):'';const autoRoutingType=String(current.auto_routing_action_type||'');const autoRoutingState=autoRoutingType==='auto_assignment'?'Assigned':'Suggested';const autoRoutingHtml=(autoRoutingType==='auto_assignment'||autoRoutingType==='routing_suggestion')?('<div class="badge">Auto Routing</div>'+rows({'Suggested/Assigned Desk':current.auto_routing_new_value||current.assigned_department||'-','Assigned To':current.assigned_to||'-','Matched Keywords / Note':current.auto_routing_note||'-','Status':autoRoutingState})):'';const acctExtra=acctBadgeHtml(current.case_reference||'');document.getElementById('details').innerHTML=acctExtra+handoverHtml+autoRoutingHtml+rows({'Requester':current.requester_name,'Phone':current.requester_phone,'Email':current.requester_email,'Location':current.requester_location,'Person Concerned':current.subject_name,'Passport':current.subject_passport,'CNIC':current.subject_cnic,'Civil ID':current.subject_civil_id,'Last known contact':current.last_contact_date,'Summary':current.concern_summary,'Details':current.details});document.getElementById('assignee').innerHTML='<option value="">Select assignee</option>'+users.map(u=>'<option value="'+u.username+'" data-role="'+u.role+'">'+u.username+' — '+(u.full_name||'')+' — '+u.role+'</option>').join('');document.getElementById('timeline').innerHTML='<h3>Timeline</h3>'+(d.actions||[]).map(a=>'<div class="act"><b>'+a.action_type+'</b> · '+a.actor_username+' · '+a.created_at+'<br>'+((a.note||a.new_value||'')+'</div>')).join('');toggleResolvedNoteUi();document.getElementById('drawer').classList.add('open')}function closeDrawer(){document.getElementById('drawer').classList.remove('open')}async function refresh(){if(current)await openCase(current.id);await loadCases()}async function assignCase(){const sel=document.getElementById('assignee'),opt=sel.selectedOptions[0];await jpost('/api/admin/welfare-cases/assign',{case_id:current.id,assigned_to:sel.value,assigned_role:opt?opt.dataset.role:'',note:document.getElementById('assignNote').value});await refresh()}function toggleResolvedNoteUi(){const statusEl=document.getElementById('newStatus');const wrap=document.getElementById('resolvedNoteWrap');const btn=document.getElementById('statusBtn');if(!statusEl||!wrap||!btn)return;const isResolved=statusEl.value==='Resolved';wrap.style.display=isResolved?'block':'none';if(!isResolved){btn.disabled=false;return;}const t=(document.getElementById('resolvedApplicantNote').value||'').trim();btn.disabled=t.length<20}async function statusCase(){try{document.getElementById('err').textContent='';const status=document.getElementById('newStatus').value;const resolvedNote=document.getElementById('resolvedApplicantNote').value||'';if(status==='Resolved'&&resolvedNote.trim().length<20){throw new Error('Resolution note is required before marking a case as Resolved. Please write what action was taken and make it visible to the applicant.')}await jpost('/api/admin/welfare-cases/status',{case_id:current.id,status:status,note:status==='Resolved'?resolvedNote:document.getElementById('statusNote').value,visible_to_requester:status==='Resolved'});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function escalateCase(){await jpost('/api/admin/welfare-cases/escalate',{case_id:current.id,escalation_level:document.getElementById('escLevel').value,note:document.getElementById('escNote').value});await refresh()}async function addNote(){await jpost('/api/admin/welfare-cases/note',{case_id:current.id,note:document.getElementById('noteText').value,visible_to_requester:document.getElementById('visibleNote').checked});document.getElementById('noteText').value='';await refresh()}async function resolveCase(){try{document.getElementById('err').textContent='';const note=(document.getElementById('noteText').value||'').trim();if(note.length<20){throw new Error('Resolution note is required before resolving this case. Please explain the action taken so the applicant can see how the matter was resolved.')}await jpost('/api/admin/welfare-cases/resolve',{case_id:current.id,resolution_note:note});await refresh()}catch(e){document.getElementById('err').textContent=e.message||'Request failed';}}async function loadCounsellorBranches(){if(PAGE_MODE!=='welfare'||!IS_ADMIN)return;const card=document.getElementById('counsellorBranchesCard');const errEl=document.getElementById('branchErr');const rowsEl=document.getElementById('branchRows');if(!card)return;if(!rowsEl){if(errEl)errEl.textContent='Error: branch table not found';return;}try{card.style.display='block';if(errEl)errEl.textContent='';const d=await jget('/api/admin/counsellor-branches');let it=[];if(Array.isArray(d.items)&&d.items.length)it=d.items;else if(Array.isArray(d.branches)&&d.branches.length)it=d.branches;else if(Array.isArray(d.rows)&&d.rows.length)it=d.rows;branchItems=it;rowsEl.innerHTML=it.length?it.map(b=>'<tr><td>'+String(b.branch_name||b.branch_key||'-')+'</td><td>'+(b.officer_name||'-')+'</td><td>'+(b.designation||'-')+'</td><td>'+(b.email||'-')+'</td><td>'+(b.phone||'-')+'</td><td>'+((Number(b.is_active||0)===1)?'Yes':'No')+'</td><td><button class="btn2" data-key="'+String(b.branch_key||'')+'" onclick="editBranch(this.dataset.key)">Edit</button></td></tr>').join(''):'<tr><td colspan="7">No branches found.</td></tr>';}catch(e){const msg='Error loading branch settings: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan="7">'+esc(msg)+'</td></tr>';}}async function loadRoutingRules(){if(PAGE_MODE!=='welfare'||!IS_ADMIN)return;const card=document.getElementById('welfareRoutingRulesCard');const errEl=document.getElementById('routeErr');const rowsEl=document.getElementById('routeRows');if(!card)return;if(!rowsEl){if(errEl)errEl.textContent='Error: routing table not found';return;}try{card.style.display='block';if(errEl)errEl.textContent='';const d=await jget('/api/admin/welfare-routing-rules');let it=[];if(Array.isArray(d.items)&&d.items.length)it=d.items;else if(Array.isArray(d.rules)&&d.rules.length)it=d.rules;else if(Array.isArray(d.rows)&&d.rows.length)it=d.rows;routingRuleItems=it;rowsEl.innerHTML=it.length?it.map(r=>'<tr><td><b>'+(r.rule_key||'-')+'</b><br><small>'+(r.desk_name||'-')+'</small></td><td>'+(r.officer_name||'-')+'</td><td>'+(r.assigned_to||'-')+'</td><td>'+(r.assigned_department||'-')+'</td><td>'+(r.priority||'-')+'</td><td>'+((Number(r.is_active||0)===1)?'Yes':'No')+'</td><td>'+(r.sort_order==null?'-':r.sort_order)+'</td><td><button class="btn2" data-rule-key="'+String(r.rule_key||'')+'" onclick="editRoutingRule(this.dataset.ruleKey)">Edit</button></td></tr>').join(''):'<tr><td colspan="8">No routing rules found.</td></tr>';}catch(e){const msg='Error loading routing rules: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(rowsEl)rowsEl.innerHTML='<tr><td colspan="8">'+esc(msg)+'</td></tr>';}}async function loadStaffAccountability(){if(PAGE_MODE!=='welfare'||!IS_ADMIN)return;const card=document.getElementById('staffAccountabilityCard');const errEl=document.getElementById('acctErr');const kpiEl=document.getElementById('acctKpis');const officerRows=document.getElementById('acctOfficerRows');const caseRows=document.getElementById('acctCaseRows');if(!card)return;if(!officerRows||!caseRows){if(errEl)errEl.textContent='Error: accountability tables not found';if(officerRows)officerRows.innerHTML='<tr><td colspan="5">Error loading staff accountability.</td></tr>';if(caseRows)caseRows.innerHTML='<tr><td colspan="7">Error loading staff accountability.</td></tr>';return;}try{card.style.display='block';if(errEl)errEl.textContent='';const d=await jget('/api/admin/staff-accountability');const sum=(d&&d.summary)||{};const byOfficer=Array.isArray(d.by_officer)?d.by_officer:[];const overdue=Array.isArray(d.overdue_cases)?d.overdue_cases:[];const noAction=Array.isArray(d.no_action_cases)?d.no_action_cases:[];accountabilityData.overdueCasesByRef={};accountabilityData.noActionCasesByRef={};overdue.forEach(x=>{if(x&&x.reference)accountabilityData.overdueCasesByRef[String(x.reference)]=x;});noAction.forEach(x=>{if(x&&x.reference)accountabilityData.noActionCasesByRef[String(x.reference)]=x;});if(kpiEl)kpiEl.innerHTML=[['Assigned Open',sum.total_assigned_open],['Overdue >5 Days',sum.overdue_5_days],['No Action After Assignment',sum.no_action_after_assignment],['Resolved This Week',sum.resolved_this_week]].map(x=>'<div class="kpi"><b>'+Number(x[1]||0)+'</b><span>'+x[0]+'</span></div>').join('');officerRows.innerHTML=byOfficer.length?byOfficer.map(r=>'<tr><td>'+String(r.officer_name||r.assigned_to||'-')+'<br><small>'+String(r.department||'')+'</small></td><td>'+(r.assigned_open||0)+'</td><td>'+(r.overdue_5_days||0)+'</td><td>'+(r.no_action_after_assignment||0)+'</td><td>'+(r.resolved_this_week||0)+'</td></tr>').join(''):'<tr><td colspan="5">No assigned staff cases found.</td></tr>';const attention=[...overdue,...noAction].slice(0,50);caseRows.innerHTML=attention.length?attention.map(c=>'<tr><td>'+String(c.reference||'-')+'</td><td>'+String(c.module||'-')+'</td><td>'+String(c.subject||'-')+'</td><td>'+String(c.assigned_to||'-')+'</td><td>'+Number(c.days_pending||0)+'</td><td>'+badge(c.status||'-')+'</td><td>'+String(c.last_action_note||'-')+'</td></tr>').join(''):'<tr><td colspan="7">No overdue or no-action cases right now.</td></tr>';}catch(e){const msg='Error loading staff accountability: '+(e&&e.message?e.message:String(e));if(errEl)errEl.textContent=msg;if(kpiEl)kpiEl.innerHTML='';officerRows.innerHTML='<tr><td colspan="5">'+esc(msg)+'</td></tr>';caseRows.innerHTML='<tr><td colspan="7">'+esc(msg)+'</td></tr>';}}function editBranch(branchKey){const editor=document.getElementById('branchEditor');if(!editor)return;const b=(branchItems||[]).find(x=>String(x.branch_key||'')===String(branchKey||''));if(!b)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val||'';};set('branch_key',b.branch_key);set('branch_name',b.branch_name);set('branch_officer',b.officer_name);set('branch_designation',b.designation);set('branch_email',b.email);set('branch_phone',b.phone);set('branch_keywords',b.keywords);set('branch_active',String(Number(b.is_active||0)===1?1:0));}function cancelBranchEdit(){const el=document.getElementById('branchEditor');if(el)el.style.display='none';}async function saveBranch(){const errEl=document.getElementById('branchErr');const byId=id=>document.getElementById(id);if(!byId('branch_key')||!byId('branch_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/counsellor-branches/update',{branch_key:byId('branch_key').value,branch_name:byId('branch_name').value,officer_name:(byId('branch_officer')||{}).value||'',designation:(byId('branch_designation')||{}).value||'',email:(byId('branch_email')||{}).value||'',phone:(byId('branch_phone')||{}).value||'',keywords:(byId('branch_keywords')||{}).value||'',is_active:Number(((byId('branch_active')||{}).value)||0)});cancelBranchEdit();await loadCounsellorBranches();if(current)await openCase(current.id);}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}function editRoutingRule(ruleKey){const editor=document.getElementById('routeEditor');if(!editor)return;const r=(routingRuleItems||[]).find(x=>String(x.rule_key||'')===String(ruleKey||''));if(!r)return;editor.style.display='block';const set=(id,val)=>{const el=document.getElementById(id);if(el)el.value=val==null?'':String(val);};set('route_rule_key',r.rule_key);set('route_desk_name',r.desk_name);set('route_assigned_to',r.assigned_to);set('route_assigned_role',r.assigned_role);set('route_assigned_department',r.assigned_department);set('route_officer_name',r.officer_name);set('route_officer_email',r.officer_email);set('route_officer_phone',r.officer_phone);set('route_priority',r.priority||'Medium');set('route_keywords',r.keywords);set('route_case_types',r.case_types);set('route_categories',r.categories);set('route_is_active',Number(r.is_active||0)===1?'1':'0');set('route_sort_order',r.sort_order==null?100:r.sort_order);}function cancelRoutingRuleEdit(){const el=document.getElementById('routeEditor');if(el)el.style.display='none';}async function saveRoutingRule(){const errEl=document.getElementById('routeErr');const byId=id=>document.getElementById(id);if(!byId('route_rule_key')||!byId('route_desk_name'))return;try{if(errEl)errEl.textContent='';await jpost('/api/admin/welfare-routing-rules/update',{rule_key:byId('route_rule_key').value,desk_name:byId('route_desk_name').value,assigned_to:(byId('route_assigned_to')||{}).value||'',assigned_role:(byId('route_assigned_role')||{}).value||'',assigned_department:(byId('route_assigned_department')||{}).value||'',officer_name:(byId('route_officer_name')||{}).value||'',officer_email:(byId('route_officer_email')||{}).value||'',officer_phone:(byId('route_officer_phone')||{}).value||'',priority:(byId('route_priority')||{}).value||'Medium',keywords:(byId('route_keywords')||{}).value||'',case_types:(byId('route_case_types')||{}).value||'',categories:(byId('route_categories')||{}).value||'',is_active:Number(((byId('route_is_active')||{}).value)||0),sort_order:Number(((byId('route_sort_order')||{}).value)||100)});cancelRoutingRuleEdit();await loadRoutingRules();}catch(e){if(errEl)errEl.textContent=e.message||'Save failed';}}async function refreshNotificationBadges(){try{const r=await fetch('/api/admin/notification-counts',{credentials:'include'});if(!r.ok)return;const d=await r.json();const c=(d&&d.counts)||{};let total=0;document.querySelectorAll('[data-badge]').forEach(el=>{const k=el.dataset.badge;const n=Number(c[k]||0);if(k!=='community_welfare')total+=n;if(n>0){el.textContent=n>99?'99+':String(n);el.classList.remove('hidden');}else{el.textContent='';el.classList.add('hidden');}});const summary=document.getElementById('pendingSummary');if(summary){if(total>0){summary.textContent='Pending action items: '+(total>99?'99+':String(total));summary.style.display='block';}else{summary.style.display='none';}}}catch(e){}}document.getElementById('resolvedApplicantNote')&&document.getElementById('resolvedApplicantNote').addEventListener('input',toggleResolvedNoteUi);function applyPageModeVisibility(){const isAdmin=IS_ADMIN;const show=(id,yes)=>{const el=document.getElementById(id);if(el)el.style.display=yes?'block':'none';};show('printPackPanel',PAGE_MODE!=='my');show('caseListPanel',true);show('counsellorBranchesCard',isAdmin&&PAGE_MODE==='welfare');show('welfareRoutingRulesCard',isAdmin&&PAGE_MODE==='welfare');show('staffAccountabilityCard',isAdmin&&PAGE_MODE==='welfare');const pulseEl=document.getElementById('ambassadorPulseCard');if(pulseEl)pulseEl.style.display='none';}async function bootWelfarePage(){try{applyPageModeVisibility();await loadUsers();await loadCases();if(IS_ADMIN&&PAGE_MODE==='welfare'){await loadCounsellorBranches();await loadRoutingRules();await loadStaffAccountability();}refreshNotificationBadges();}catch(e){const err=document.getElementById('err');if(err)err.textContent='Page load error: '+(e&&e.message?e.message:String(e));}}bootWelfarePage();setInterval(refreshNotificationBadges,60000);window.addEventListener('focus',refreshNotificationBadges);</script></body></html></script></body></html>"""
 
+WELFARE_CASES_OFFLINE_EXPORT_CARD = """
+<div class="panel" id="pulseOfflineExportCard" style="margin-bottom:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Pulse Offline Export</strong><span style="font-size:12px;color:#64748b">Read-only CSV export for local offline pulse report generation.</span></div><div style="padding:12px 14px"><div class="filters" style="padding:0;border:0"><button type="button" class="btn2" onclick="setPulseOfflineExportDays(3)">Last 3 days</button><button type="button" class="btn2" onclick="setPulseOfflineExportDays(7)">Last 7 days</button><input id="pulseOfflineStartDate" type="date"><input id="pulseOfflineEndDate" type="date"><button type="button" onclick="downloadPulseOfflineExportSelected()">Download CSV for Offline Pulse Report</button></div><div class="hint" style="margin-top:10px">Download this CSV and place it in: Desktop/Ambassador Pulse Offline. Rename it to cases_last_7_days.csv or run the offline script with --input.</div><div class="hint" style="margin-top:6px"><a id="pulseOfflineQuick3" href="/api/admin/ambassador-pulse-export.csv?days=3">Download last 3 days</a> <span style="color:#cbd5e1">|</span> <a id="pulseOfflineQuick7" href="/api/admin/ambassador-pulse-export.csv?days=7">Download last 7 days</a></div></div></div>
+"""
+
 WELFARE_CASES_PRINT_SCRIPT = """
 <script>
 function cwaPrintTodayIso(){
@@ -31245,6 +31515,54 @@ cwaLoadPrintAssignees();
 enhancePrintRows();
 </script>
 """
+WELFARE_CASES_PULSE_OFFLINE_EXPORT_SCRIPT = """
+<script>
+(function(){
+if(window.__pulseOfflineExportInit)return;
+window.__pulseOfflineExportInit=true;
+const pageMode=typeof PAGE_MODE!=='undefined'?String(PAGE_MODE||''):'';
+const userRole=typeof USER_ROLE!=='undefined'?String(USER_ROLE||'').trim().toLowerCase():'';
+const card=document.getElementById('pulseOfflineExportCard');
+if(!card)return;
+if(!(pageMode==='welfare'&&userRole==='admin')){
+  card.style.display='none';
+  return;
+}
+card.style.display='block';
+const startEl=document.getElementById('pulseOfflineStartDate');
+const endEl=document.getElementById('pulseOfflineEndDate');
+function todayIso(){
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kuwait',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+  const map={};
+  parts.forEach(function(part){if(part.type!=='literal')map[part.type]=part.value;});
+  return (map.year||'')+'-'+(map.month||'')+'-'+(map.day||'');
+}
+function daysAgoIso(days){
+  const d=new Date();
+  d.setUTCDate(d.getUTCDate()-days);
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kuwait',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(d);
+  const map={};
+  parts.forEach(function(part){if(part.type!=='literal')map[part.type]=part.value;});
+  return (map.year||'')+'-'+(map.month||'')+'-'+(map.day||'');
+}
+window.setPulseOfflineExportDays=function(days){
+  const n=Math.max(1,parseInt(days||'7',10)||7);
+  if(startEl)startEl.value=daysAgoIso(n-1);
+  if(endEl)endEl.value=todayIso();
+};
+window.downloadPulseOfflineExportSelected=function(){
+  const qs=new URLSearchParams();
+  const start=startEl&&startEl.value?startEl.value:'';
+  const end=endEl&&endEl.value?endEl.value:'';
+  if(start)qs.set('start_date',start);
+  if(end)qs.set('end_date',end);
+  if(!start&&!end)qs.set('days','7');
+  window.location.href='/api/admin/ambassador-pulse-export.csv?'+qs.toString();
+};
+window.setPulseOfflineExportDays(7);
+})();
+</script>
+"""
 WELFARE_CASES_TRANSFER_SCRIPT = """
 <script>
 (function(){
@@ -31288,7 +31606,12 @@ WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     WELFARE_PAGE_MODE_CSS + "</style></head>",
     1
 )
-WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_TRANSFER_SCRIPT + "</body></html>")
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
+    '<div class="panel" id="printPackPanel"',
+    WELFARE_CASES_OFFLINE_EXPORT_CARD + '<div class="panel" id="printPackPanel"',
+    1
+)
+WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace("</body></html>", WELFARE_CASES_PRINT_SCRIPT + WELFARE_CASES_TRANSFER_SCRIPT + WELFARE_CASES_PULSE_OFFLINE_EXPORT_SCRIPT + "</body></html>")
 
 PUBLIC_HOME_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Community Welfare Wing Digital Services</title>
