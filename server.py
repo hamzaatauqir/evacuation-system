@@ -599,6 +599,7 @@ def init_db():
         passport_number TEXT DEFAULT '',
         civil_id TEXT DEFAULT '',
         mobile TEXT DEFAULT '',
+        emergency_contact TEXT DEFAULT '',
         email TEXT DEFAULT '',
         hospital_workplace TEXT DEFAULT '',
         designation TEXT DEFAULT '',
@@ -774,6 +775,7 @@ def init_db():
         ('whatsapp_full', "TEXT DEFAULT ''"),
         ('whatsapp_same_as_mobile', 'INTEGER DEFAULT 1'),
         ('emergency_country_code', "TEXT DEFAULT '+965'"),
+        ('emergency_contact', "TEXT DEFAULT ''"),
         ('emergency_contact_full', "TEXT DEFAULT ''"),
         ('current_status', "TEXT DEFAULT ''"),
         ('facility_status', "TEXT DEFAULT ''"),
@@ -7154,7 +7156,7 @@ def api_nurse_register(data):
             db2.commit()
         finally:
             db2.close()
-        msg = 'Your registration has been received. Please check your email inbox and verify your email address using the verification link sent to you. Once your email is verified, your portal account will be activated.'
+        msg = 'Registration submitted successfully.'
         notify_case_event(
             case_type='nurse_registration',
             case_reference=ref,
@@ -28483,8 +28485,16 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             try:
                 data = json.loads(body) if body else {}
             except json.JSONDecodeError:
-                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
-            result = api_nurse_register(data)
+                self.send_json({'success': False, 'ok': False, 'error': 'Invalid request'}, 400); return
+            try:
+                result = api_nurse_register(data)
+            except Exception as e:
+                print(f"[NurseRegistration] submit failed: {e}", flush=True)
+                result = {
+                    'success': False,
+                    'ok': False,
+                    'error': 'Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.'
+                }
             self.send_json(result, 200 if result.get('success') else 400)
             return
         elif path == '/api/nurses/track':
@@ -32232,14 +32242,16 @@ NURSES_REGISTER_PAGE = nurse_simple_page("New Nurses Registration", """
         <div class="nurses-pane" data-pane="2">
           <div class="nurses-sec">
             <h3>Contact Details</h3>
-            <div class="grid"><div><label>Phone / WhatsApp Number *</label><input id="mobile" required></div><div><label>Email Address</label><input id="email" type="email"></div></div>
-            <div class="grid"><div><label>Current Residential Address in Kuwait</label><input id="current_accommodation"></div><div><label>Applying for Accommodation?</label><select id="applying_for_accommodation"><option>No</option><option>Yes</option></select></div></div>
+            <div class="grid"><div><label>Phone / WhatsApp Number *</label><input id="mobile" required></div><div><label>Email Address *</label><input id="email" type="email" required></div></div>
+            <div class="grid"><div><label>Password *</label><input id="password" type="password" autocomplete="new-password" required></div><div><label>Confirm Password *</label><input id="confirm_password" type="password" autocomplete="new-password" required></div></div>
+            <div class="grid"><div><label>Current Stay Arrangement *</label><select id="current_arrangement" required><option value="">Select</option><option>Private (Self Arranged)</option><option>MOH Arranged</option><option>MOH Provided Hotel - Arrival Stay</option><option>Embassy Contracted / Arranged</option></select></div><div><label>Applying for Accommodation?</label><select id="applying_for_accommodation"><option>No</option><option>Yes</option></select></div></div>
           </div>
         </div>
         <div class="nurses-pane" data-pane="3">
           <div class="nurses-sec">
             <h3>Employment Details</h3>
             <div class="grid"><div><label>Hospital / Workplace Name *</label><input id="hospital" required></div><div><label>Job Title *</label><input id="designation" required></div></div>
+            <div class="grid"><div><label>Qualification / Degree *</label><input id="qualification_degree" required></div><div><label>Other Qualification / Degree</label><input id="qualification_degree_other"></div></div>
             <div class="grid"><div><label>Degree Type</label><input id="degree_type"></div><div><label>Salary on MOH Offer Letter (KWD)</label><input id="moh_offer_salary_kwd"></div></div>
             <label>Grading Letter Issued? Yes/No</label><select id="grading_letter_issued"><option>No</option><option>Yes</option></select>
           </div>
@@ -32247,7 +32259,7 @@ NURSES_REGISTER_PAGE = nurse_simple_page("New Nurses Registration", """
         <div class="nurses-pane" data-pane="4">
           <div class="nurses-sec">
             <h3>Welfare & Accommodation</h3>
-            <div class="grid"><div><label>Accommodation Status</label><input id="current_accommodation_status_v3" oninput="current_accommodation.value=this.value"></div><div><label>Emergency Contact Number</label><input id="emergency_contact_v3"></div></div>
+            <div class="grid"><div><label>Accommodation Status</label><input id="current_accommodation_status_v3"></div><div><label>Emergency Contact Number *</label><input id="emergency_contact_v3" required></div></div>
             <label>Remarks</label><textarea id="remarks"></textarea>
             <label>Remarks / Special Concerns</label><textarea id="issue_notice"></textarea>
           </div>
@@ -32344,15 +32356,22 @@ btn_back.onclick=()=>showStep(Math.max(1,currentStep-1));
 async function submitForm(e){
   e.preventDefault();
   if(!validateStep(4)) return false;
-  const p={full_name:full_name.value,passport_number:passport_number.value,cnic:cnic.value,civil_id:civil_id.value,mobile:mobile.value,email:email.value,arrival_date:arrival_date.value,batch_number:batch_number.value,hospital:hospital.value,designation:designation.value,degree_type:degree_type.value,moh_offer_salary_kwd:moh_offer_salary_kwd.value,grading_letter_issued:grading_letter_issued.value,current_accommodation:current_accommodation.value,applying_for_accommodation:applying_for_accommodation.value,remarks:remarks.value,issue_notice:issue_notice.value};
+  const networkErrorMessage='Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.';
+  const val=id=>{const el=document.getElementById(id);return el?el.value:''};
+  const p={full_name:val('full_name'),passport_number:val('passport_number'),cnic:val('cnic'),civil_id:val('civil_id'),mobile:val('mobile'),email:val('email'),password:val('password'),confirm_password:val('confirm_password'),arrival_date:val('arrival_date'),batch_number:val('batch_number'),hospital:val('hospital'),designation:val('designation'),qualification_degree:val('qualification_degree'),qualification_degree_other:val('qualification_degree_other'),degree_type:val('degree_type'),moh_offer_salary_kwd:val('moh_offer_salary_kwd'),grading_letter_issued:val('grading_letter_issued'),current_arrangement:val('current_arrangement'),current_accommodation:val('current_arrangement'),current_accommodation_status:val('current_accommodation_status_v3'),emergency_contact:val('emergency_contact_v3'),applying_for_accommodation:val('applying_for_accommodation'),remarks:val('remarks'),issue_notice:val('issue_notice')};
   for(const [k,_] of STEPS){p[k]=stepVal(k);}
-  const r=await fetch('/api/nurses/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
-  const d=await r.json();
-  if(d.success){
-    const q='?ref='+encodeURIComponent(d.reference_id)+'&name='+encodeURIComponent(full_name.value)+'&passport='+encodeURIComponent(passport_number.value);
+  msg.textContent='Submitting registration...';
+  try{
+    const r=await fetch('/api/nurses/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+    let d={};
+    try{d=await r.json();}catch(_e){}
+    if(!r.ok||!d.success){msg.textContent=d.error||networkErrorMessage;return false;}
+    const ref=d.reference||d.reference_id||'';
+    msg.textContent='Your registration has been submitted successfully. Reference: '+ref;
+    const q='?ref='+encodeURIComponent(ref)+'&name='+encodeURIComponent(p.full_name)+'&passport='+encodeURIComponent(p.passport_number);
     window.location='/nurses/register/success'+q;
-  } else {
-    msg.textContent=d.error||'Submission failed';
+  }catch(_e){
+    msg.textContent=networkErrorMessage;
   }
   return false;
 }
@@ -32410,7 +32429,7 @@ async function doTrack(e){
 """)
 
 NURSES_REGISTER_SUCCESS_PAGE = nurse_simple_page("Nurse Registration Submitted", """
-<h2>Registration Submitted Successfully</h2>
+<h2>Your registration has been submitted successfully. Reference: <span id="rid_title"></span></h2>
 <p>Please save screenshot/reference ID for future tracking.</p>
 <p><strong>Reference ID:</strong> <span id="rid"></span></p>
 <p><strong>Full Name:</strong> <span id="nname"></span></p>
@@ -32421,7 +32440,7 @@ NURSES_REGISTER_SUCCESS_PAGE = nurse_simple_page("Nurse Registration Submitted",
 <p><a href="/nurses/track">Track Registration</a> | <a href="/nurses">Back to Nurses Portal</a> | <a href="/">Back to Home</a></p>
 <script>
 const p=new URLSearchParams(location.search);const r=p.get('ref')||'';const n=p.get('name')||'';const ppv=p.get('passport')||'';
-rid.textContent=r;nname.textContent=n;pp.textContent=ppv;subj.textContent='NURSE DOCUMENTS - ['+r+'] - ['+n+'] - ['+ppv+']';
+rid.textContent=r;rid_title.textContent=r;nname.textContent=n;pp.textContent=ppv;subj.textContent='NURSE DOCUMENTS - ['+r+'] - ['+n+'] - ['+ppv+']';
 </script>
 """)
 

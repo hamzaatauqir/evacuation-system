@@ -40,6 +40,12 @@
   const nextBtn = document.getElementById('btn_next');
   const stepError = document.getElementById('step_error');
   const msg = document.getElementById('msg');
+  const networkErrorMessage = 'Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.';
+
+  function valueOf(id) {
+    const el = document.getElementById(id);
+    return el ? el.value : '';
+  }
 
   function showStep(n) {
     currentStep = n;
@@ -76,38 +82,57 @@
     e.preventDefault();
     if (!validateStep(4)) return false;
     const p = {
-      full_name: document.getElementById('full_name').value,
-      passport_number: document.getElementById('passport_number').value,
-      cnic: document.getElementById('cnic').value,
-      civil_id: document.getElementById('civil_id').value,
-      mobile: document.getElementById('mobile').value,
-      email: document.getElementById('email').value,
-      arrival_date: document.getElementById('arrival_date').value,
-      batch_number: document.getElementById('batch_number').value,
-      hospital: document.getElementById('hospital').value,
-      designation: document.getElementById('designation').value,
-      degree_type: document.getElementById('degree_type').value,
-      moh_offer_salary_kwd: document.getElementById('moh_offer_salary_kwd').value,
-      grading_letter_issued: document.getElementById('grading_letter_issued').value,
-      current_accommodation: document.getElementById('current_accommodation').value,
-      applying_for_accommodation: document.getElementById('applying_for_accommodation').value,
-      remarks: document.getElementById('remarks').value,
-      issue_notice: document.getElementById('issue_notice').value
+      full_name: valueOf('full_name'),
+      passport_number: valueOf('passport_number'),
+      cnic: valueOf('cnic'),
+      civil_id: valueOf('civil_id'),
+      mobile: valueOf('mobile'),
+      email: valueOf('email'),
+      password: valueOf('password'),
+      confirm_password: valueOf('confirm_password'),
+      arrival_date: valueOf('arrival_date'),
+      batch_number: valueOf('batch_number'),
+      hospital: valueOf('hospital'),
+      designation: valueOf('designation'),
+      qualification_degree: valueOf('qualification_degree'),
+      qualification_degree_other: valueOf('qualification_degree_other'),
+      degree_type: valueOf('degree_type'),
+      moh_offer_salary_kwd: valueOf('moh_offer_salary_kwd'),
+      grading_letter_issued: valueOf('grading_letter_issued'),
+      current_arrangement: valueOf('current_arrangement'),
+      current_accommodation: valueOf('current_arrangement'),
+      current_accommodation_status: valueOf('current_accommodation_status_v3'),
+      emergency_contact: valueOf('emergency_contact_v3'),
+      applying_for_accommodation: valueOf('applying_for_accommodation'),
+      remarks: valueOf('remarks'),
+      issue_notice: valueOf('issue_notice')
     };
     for (const [key] of STEPS) p[key] = stepVal(key);
-    const r = await fetch('/api/nurses/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(p)
-    });
-    const d = await r.json();
-    if (d.success) {
-      const q = '?ref=' + encodeURIComponent(d.reference_id) +
+    msg.textContent = 'Submitting registration...';
+    try {
+      const r = await fetch('/api/nurses/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(p)
+      });
+      let d = {};
+      try {
+        d = await r.json();
+      } catch (_e) {
+        d = {};
+      }
+      if (!r.ok || !d.success) {
+        msg.textContent = d.error || networkErrorMessage;
+        return false;
+      }
+      const reference = d.reference || d.reference_id || '';
+      msg.textContent = 'Your registration has been submitted successfully. Reference: ' + reference;
+      const q = '?ref=' + encodeURIComponent(reference) +
         '&name=' + encodeURIComponent(p.full_name) +
         '&passport=' + encodeURIComponent(p.passport_number);
       window.location = '/nurses/register/success' + q;
-    } else {
-      msg.textContent = d.error || 'Submission failed';
+    } catch (_e) {
+      msg.textContent = networkErrorMessage;
     }
     return false;
   });

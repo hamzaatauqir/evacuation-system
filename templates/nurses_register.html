@@ -61,10 +61,14 @@
                 <h3>Contact Details</h3>
                 <div class="nurses-grid">
                   <div><label>Phone / WhatsApp Number *</label><input id="mobile" required></div>
-                  <div><label>Email Address</label><input id="email" type="email"></div>
+                  <div><label>Email Address *</label><input id="email" type="email" required></div>
                 </div>
                 <div class="nurses-grid">
-                  <div><label>Current Residential Address in Kuwait</label><input id="current_accommodation"></div>
+                  <div><label>Password *</label><input id="password" type="password" autocomplete="new-password" required></div>
+                  <div><label>Confirm Password *</label><input id="confirm_password" type="password" autocomplete="new-password" required></div>
+                </div>
+                <div class="nurses-grid">
+                  <div><label>Current Stay Arrangement *</label><select id="current_arrangement" required><option value="">Select</option><option>Private (Self Arranged)</option><option>MOH Arranged</option><option>MOH Provided Hotel - Arrival Stay</option><option>Embassy Contracted / Arranged</option></select></div>
                   <div><label>Applying for Accommodation?</label><select id="applying_for_accommodation"><option>No</option><option>Yes</option></select></div>
                 </div>
               </div>
@@ -78,6 +82,10 @@
                   <div><label>Job Title *</label><input id="designation" required></div>
                 </div>
                 <div class="nurses-grid">
+                  <div><label>Qualification / Degree *</label><input id="qualification_degree" required></div>
+                  <div><label>Other Qualification / Degree</label><input id="qualification_degree_other"></div>
+                </div>
+                <div class="nurses-grid">
                   <div><label>Degree Type</label><input id="degree_type"></div>
                   <div><label>Salary on MOH Offer Letter (KWD)</label><input id="moh_offer_salary_kwd"></div>
                 </div>
@@ -89,8 +97,8 @@
               <div class="nurses-sec">
                 <h3>Welfare & Accommodation</h3>
                 <div class="nurses-grid">
-                  <div><label>Accommodation Status</label><input id="current_accommodation_status_v3" oninput="document.getElementById('current_accommodation').value=this.value"></div>
-                  <div><label>Emergency Contact Number</label><input id="emergency_contact_v3"></div>
+                  <div><label>Accommodation Status</label><input id="current_accommodation_status_v3"></div>
+                  <div><label>Emergency Contact Number *</label><input id="emergency_contact_v3" required></div>
                 </div>
                 <label>Remarks</label><textarea id="remarks"></textarea>
                 <label>Remarks / Special Concerns</label><textarea id="issue_notice"></textarea>
