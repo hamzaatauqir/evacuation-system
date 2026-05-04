@@ -470,6 +470,25 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_fee_dist_wing ON fee_distributions(wing);
     CREATE INDEX IF NOT EXISTS idx_fee_dist_action ON fee_distributions(action_type);
     CREATE INDEX IF NOT EXISTS idx_fee_dist_receipt ON fee_distributions(receipt_number);
+    CREATE TABLE IF NOT EXISTS cwa_advance_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entry_date DATE NOT NULL,
+        entry_type TEXT NOT NULL,
+        amount_kwd REAL NOT NULL DEFAULT 0,
+        description TEXT DEFAULT '',
+        receipt_no TEXT DEFAULT '',
+        bill_reference TEXT DEFAULT '',
+        created_by TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_void INTEGER DEFAULT 0,
+        void_reason TEXT DEFAULT '',
+        voided_by TEXT DEFAULT '',
+        voided_at TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_cwa_advance_date ON cwa_advance_ledger(entry_date);
+    CREATE INDEX IF NOT EXISTS idx_cwa_advance_type ON cwa_advance_ledger(entry_type);
+    CREATE INDEX IF NOT EXISTS idx_cwa_advance_void ON cwa_advance_ledger(is_void);
     CREATE TABLE IF NOT EXISTS office_expenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         record_number TEXT DEFAULT '',
@@ -4476,7 +4495,11 @@ def can_access_api_route(role, path):
     if is_full_admin_role(role):
         return True
     if role == 'fee_collector':
-        return path.startswith('/api/fee-') or path.startswith('/api/office-expense')
+        return (
+            path.startswith('/api/fee-')
+            or path.startswith('/api/office-expense')
+            or path.startswith('/api/admin/cwa-advance-ledger')
+        )
     if role == 'iraq_cwa':
         return path.startswith('/api/iraq')
     if path == '/api/admin/cases/transfer' and role in WELFARE_CASE_ACCESS_ROLES:
@@ -16335,6 +16358,203 @@ def api_fee_settlement_update(data, user):
     finally:
         db.close()
 
+CWA_ADVANCE_ENTRY_TYPES = {'advance_taken', 'bill_adjustment', 'refund_returned', 'correction'}
+
+def _user_can_view_cwa_advance(user):
+    role = (user.get('role') if isinstance(user, dict) else '') or ''
+    return role in ('admin', 'fee_collector')
+
+def _user_can_manage_cwa_advance(user):
+    role = (user.get('role') if isinstance(user, dict) else '') or ''
+    return role in ('admin', 'fee_collector')
+
+def _cwa_valid_ymd(value):
+    value = (value or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        return False
+    try:
+        datetime.strptime(value, '%Y-%m-%d')
+        return True
+    except ValueError:
+        return False
+
+def _cwa_round(value):
+    try:
+        return round(float(value or 0), 3)
+    except Exception:
+        return 0.0
+
+def _get_cwa_advance_summary(db, start_date=None, end_date=None):
+    where = ["COALESCE(is_void,0)=0"]
+    q = []
+    if _cwa_valid_ymd(start_date):
+        where.append("date(entry_date) >= date(?)")
+        q.append((start_date or '').strip())
+    if _cwa_valid_ymd(end_date):
+        where.append("date(entry_date) <= date(?)")
+        q.append((end_date or '').strip())
+    row = db.execute(f"""
+        SELECT
+          COALESCE(SUM(CASE WHEN entry_type='advance_taken' THEN amount_kwd ELSE 0 END),0) advance_taken_total,
+          COALESCE(SUM(CASE WHEN entry_type='bill_adjustment' THEN amount_kwd ELSE 0 END),0) bill_adjustment_total,
+          COALESCE(SUM(CASE WHEN entry_type='refund_returned' THEN amount_kwd ELSE 0 END),0) refund_returned_total,
+          COALESCE(SUM(CASE WHEN entry_type='correction' THEN amount_kwd ELSE 0 END),0) correction_total,
+          COUNT(*) entries_count,
+          MAX(entry_date) latest_entry_date
+        FROM cwa_advance_ledger
+        WHERE {' AND '.join(where)}
+    """, q).fetchone()
+    advance_taken_total = _cwa_round(row['advance_taken_total'] if row else 0)
+    bill_adjustment_total = _cwa_round(row['bill_adjustment_total'] if row else 0)
+    refund_returned_total = _cwa_round(row['refund_returned_total'] if row else 0)
+    correction_total = _cwa_round(row['correction_total'] if row else 0)
+    remaining = _cwa_round(
+        advance_taken_total
+        - bill_adjustment_total
+        - refund_returned_total
+        + correction_total
+    )
+    return {
+        'advance_taken_total': advance_taken_total,
+        'bill_adjustment_total': bill_adjustment_total,
+        'refund_returned_total': refund_returned_total,
+        'correction_total': correction_total,
+        'remaining_cwa_advance_balance': remaining,
+        'entries_count': int(row['entries_count'] or 0) if row else 0,
+        'latest_entry_date': row['latest_entry_date'] if row else None,
+    }
+
+def api_cwa_advance_ledger(params, user):
+    if not _user_can_view_cwa_advance(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    start_date = (params.get('start_date') or params.get('from') or '').strip()
+    end_date = (params.get('end_date') or params.get('to') or '').strip()
+    where = ["1=1"]
+    q = []
+    if _cwa_valid_ymd(start_date):
+        where.append("date(entry_date) >= date(?)")
+        q.append(start_date)
+    if _cwa_valid_ymd(end_date):
+        where.append("date(entry_date) <= date(?)")
+        q.append(end_date)
+    db = get_db()
+    try:
+        summary = _get_cwa_advance_summary(db, start_date, end_date)
+        entries = [dict(r) for r in db.execute(f"""
+            SELECT id, entry_date, entry_type, amount_kwd, description, receipt_no,
+                   bill_reference, created_by, created_at, updated_at, is_void,
+                   void_reason, voided_by, voided_at
+            FROM cwa_advance_ledger
+            WHERE {' AND '.join(where)}
+            ORDER BY date(entry_date) DESC, id DESC
+            LIMIT 2000
+        """, q).fetchall()]
+        for row in entries:
+            row['amount_kwd'] = _cwa_round(row.get('amount_kwd'))
+        return {'success': True, 'summary': summary, 'entries': entries}
+    finally:
+        db.close()
+
+def api_cwa_advance_add(data, user):
+    if not _user_can_manage_cwa_advance(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    entry_date = (data.get('entry_date') or '').strip()
+    entry_type = (data.get('entry_type') or '').strip().lower()
+    description = (data.get('description') or '').strip()
+    receipt_no = (data.get('receipt_no') or '').strip()
+    bill_reference = (data.get('bill_reference') or '').strip()
+    username = (user.get('user') if isinstance(user, dict) else '') or ''
+    if not _cwa_valid_ymd(entry_date):
+        return {'success': False, 'error': 'entry_date must be YYYY-MM-DD'}
+    if entry_type not in CWA_ADVANCE_ENTRY_TYPES:
+        return {'success': False, 'error': 'Invalid entry_type'}
+    try:
+        amount = float(data.get('amount_kwd'))
+    except Exception:
+        return {'success': False, 'error': 'amount_kwd is required'}
+    if entry_type in ('advance_taken', 'bill_adjustment', 'refund_returned') and amount <= 0:
+        return {'success': False, 'error': 'amount_kwd must be greater than 0'}
+    if entry_type == 'correction':
+        if abs(amount) < 1e-9:
+            return {'success': False, 'error': 'correction amount cannot be zero'}
+        if not description:
+            return {'success': False, 'error': 'description is required for correction entries'}
+    if len(description) > 1000:
+        return {'success': False, 'error': 'description must be 1000 characters or less'}
+    if len(receipt_no) > 100:
+        return {'success': False, 'error': 'receipt_no must be 100 characters or less'}
+    if len(bill_reference) > 100:
+        return {'success': False, 'error': 'bill_reference must be 100 characters or less'}
+
+    db = get_db()
+    try:
+        cur = db.execute("""
+            INSERT INTO cwa_advance_ledger (
+                entry_date, entry_type, amount_kwd, description, receipt_no,
+                bill_reference, created_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """, [entry_date, entry_type, amount, description, receipt_no, bill_reference, username])
+        entry_id = cur.lastrowid
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES ('cwa_advance_add', ?, ?, ?)",
+            [entry_id, username, json.dumps({
+                'entry_id': entry_id,
+                'entry_type': entry_type,
+                'amount': amount,
+                'entry_date': entry_date,
+                'receipt_no': receipt_no,
+                'bill_reference': bill_reference,
+            })]
+        )
+        db.commit()
+        return {'success': True, 'id': entry_id}
+    finally:
+        db.close()
+
+def api_cwa_advance_void(data, user):
+    if not _user_can_manage_cwa_advance(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    username = (user.get('user') if isinstance(user, dict) else '') or ''
+    try:
+        entry_id = int(str(data.get('id', '')).strip())
+    except Exception:
+        entry_id = 0
+    void_reason = (data.get('void_reason') or '').strip()
+    if entry_id <= 0:
+        return {'success': False, 'error': 'id is required'}
+    if len(void_reason) < 5:
+        return {'success': False, 'error': 'void_reason must be at least 5 characters'}
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM cwa_advance_ledger WHERE id = ?", [entry_id]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'CWA advance ledger entry not found'}
+        old_row = dict(row)
+        if int(old_row.get('is_void') or 0):
+            return {'success': False, 'error': 'Entry is already voided'}
+        db.execute("""
+            UPDATE cwa_advance_ledger
+            SET is_void = 1,
+                void_reason = ?,
+                voided_by = ?,
+                voided_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, [void_reason, username, entry_id])
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES ('cwa_advance_void', ?, ?, ?)",
+            [entry_id, username, json.dumps({
+                'entry_id': entry_id,
+                'entry_type': old_row.get('entry_type'),
+                'amount': old_row.get('amount_kwd'),
+                'reason': void_reason,
+            }, default=str)]
+        )
+        db.commit()
+        return {'success': True, 'id': entry_id}
+    finally:
+        db.close()
+
 def _office_expense_category_label(value):
     key = (value or '').strip().lower()
     labels = {
@@ -20321,6 +20541,13 @@ def api_fee_statement(params, user):
             'rows': settlement.get('rows') or [],
             'fee_activity_rows': fee_activity_rows
         }
+        if _user_can_view_cwa_advance(user):
+            cwa_summary = _get_cwa_advance_summary(db, dfrom, dto)
+            cwa_summary['expected_physical_till_cash'] = _cwa_round(
+                float(result['summary'].get('total_collected') or 0)
+                - float(cwa_summary.get('remaining_cwa_advance_balance') or 0)
+            )
+            result['summary']['cwa_advance'] = cwa_summary
 
         # operator_special: apply visibility cutoff only.
         # Do not recompute/overwrite summary totals that already come from settlement logic.
@@ -26600,6 +26827,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] not in ('admin', 'operator_special', 'fee_collector'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_fee_statement(params, user))
+        elif path == '/api/admin/cwa-advance-ledger':
+            user = self.require_auth()
+            if not user: return
+            if not _user_can_view_cwa_advance(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            result = api_cwa_advance_ledger(params, user)
+            self.send_json(result, 200 if result.get('success') else 403)
         elif path == '/api/fee-settlement-report':
             user = self.require_auth()
             if not user: return
@@ -29456,6 +29690,28 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             data = json.loads(body)
             result = api_fee_settlement_entry(data, user['user'])
             self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/admin/cwa-advance-ledger/add':
+            user = self.require_auth()
+            if not user: return
+            if not _user_can_manage_cwa_advance(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            result = api_cwa_advance_add(data, user)
+            self.send_json(result, 200 if result.get('success') else 400)
+        elif path == '/api/admin/cwa-advance-ledger/void':
+            user = self.require_auth()
+            if not user: return
+            if not _user_can_manage_cwa_advance(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid JSON'}, 400); return
+            result = api_cwa_advance_void(data, user)
+            self.send_json(result, 200 if result.get('success') else 400)
         elif path == '/api/office-expenses':
             user = self.require_auth()
             if not user: return
@@ -30565,6 +30821,46 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
       <div class="muted" style="margin-top:8px">Handed-over entries generate receipt numbers automatically. Settlement corrections are admin-only and preserve the original receipt number.</div>
     </div>
 
+    <div id="cwaAdvanceCard" class="card hidden">
+      <div class="section-title">
+        <div>
+          <h3 style="margin:0">CWA Advance Tracking</h3>
+          <p class="muted">Internal till adjustment for Community Welfare Wing advances and bill settlements.</p>
+        </div>
+      </div>
+      <div id="cwaSummaryCards" class="summary-grid"></div>
+      <div class="grid" style="margin-top:12px">
+        <label class="field">Date
+          <input id="cwaDate" type="date">
+        </label>
+        <label class="field">Type
+          <select id="cwaType">
+            <option value="advance_taken">Advance Taken by CWA</option>
+            <option value="bill_adjustment">Bill Submitted / Adjusted</option>
+            <option value="refund_returned">Cash Returned by CWA</option>
+            <option value="correction">Correction</option>
+          </select>
+        </label>
+        <label class="field">Amount KWD
+          <input id="cwaAmount" type="number" step="0.001" placeholder="0.000">
+        </label>
+        <label class="field">Receipt No / Voucher No
+          <input id="cwaReceipt" maxlength="100">
+        </label>
+        <label class="field">Bill Reference
+          <input id="cwaBill" maxlength="100">
+        </label>
+        <label class="field" style="grid-column:span 2">Description
+          <textarea id="cwaDescription" rows="2" maxlength="1000"></textarea>
+        </label>
+      </div>
+      <div class="row" style="justify-content:space-between;margin-top:12px">
+        <div class="muted">CWA Advance Tracking — internal admin/fee collector only</div>
+        <button class="btn" onclick="saveCwaAdvanceEntry()">Add Entry</button>
+      </div>
+      <div class="table-wrap" style="margin-top:12px"><table id="cwaAdvanceTbl"></table></div>
+    </div>
+
     <div class="card">
       <div class="section-title">
         <div>
@@ -30837,9 +31133,16 @@ async function api(u,o){const r=await fetch(u,o); if(r.redirected){location='/lo
 const USER_ROLE='__USER_ROLE__';
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
 function fmt(n){return Number(n||0).toFixed(2)}
+function fmtKwd3(n){return Number(n||0).toFixed(3)}
+function cwaCanView(){return USER_ROLE==='admin'||USER_ROLE==='fee_collector';}
+function cwaTypeLabel(v){
+  const labels={advance_taken:'Advance Taken by CWA',bill_adjustment:'Bill Submitted / Adjusted',refund_returned:'Cash Returned by CWA',correction:'Correction'};
+  return labels[v]||String(v||'-').replace(/_/g,' ');
+}
 let settlementSummary={};
 let officeTabLoaded=false;
 let officeTabUnlocked=USER_ROLE==='admin';
+let cwaAdvanceRows=[];
 async function showPortalTab(tab){
   if(tab==='office' && USER_ROLE==='fee_collector' && !officeTabUnlocked){
     openOfficeAccessModal();
@@ -30928,6 +31231,72 @@ function renderOfficeBalanceCards(s){
     <div class="summary-card"><div class="k">Diplomatic</div><div class="v">${fmt(s.diplomatic_total||0)}</div><div class="s">KWD assigned</div></div>
     <div class="summary-card"><div class="k">Handed Over</div><div class="v">${fmt(s.total_handed_over||0)}</div><div class="s">KWD handed over</div></div>
     <div class="summary-card"><div class="k">Cash In Hand</div><div class="v">${fmt(s.cash_in_hand||0)}</div><div class="s">KWD available</div></div>`;
+}
+async function loadCwaAdvanceLedger(totalCollected){
+  const card=document.getElementById('cwaAdvanceCard');
+  if(!cwaCanView()){
+    if(card) card.classList.add('hidden');
+    return;
+  }
+  if(card) card.classList.remove('hidden');
+  const dateEl=document.getElementById('cwaDate');
+  if(dateEl&&!dateEl.value) dateEl.value=ymdToday();
+  const d=await api('/api/admin/cwa-advance-ledger');
+  if(!d||!d.success) return;
+  cwaAdvanceRows=d.entries||[];
+  const s=d.summary||{};
+  const remaining=Number(s.remaining_cwa_advance_balance||0);
+  const expected=Number(totalCollected||0)-remaining;
+  const cards=document.getElementById('cwaSummaryCards');
+  if(cards) cards.innerHTML=`
+    <div class="summary-card"><div class="k">Total Till Collections</div><div class="v">${fmtKwd3(totalCollected)}</div><div class="s">KWD collected</div></div>
+    <div class="summary-card"><div class="k">Advance Taken</div><div class="v">${fmtKwd3(s.advance_taken_total)}</div><div class="s">KWD with CWA</div></div>
+    <div class="summary-card"><div class="k">Bills Adjusted</div><div class="v">${fmtKwd3(s.bill_adjustment_total)}</div><div class="s">KWD receipts submitted</div></div>
+    <div class="summary-card"><div class="k">Cash Returned</div><div class="v">${fmtKwd3(s.refund_returned_total)}</div><div class="s">KWD returned to till</div></div>
+    <div class="summary-card"><div class="k">Remaining with CWA</div><div class="v">${fmtKwd3(remaining)}</div><div class="s">Advance balance</div></div>
+    <div class="summary-card"><div class="k">Expected Till Cash After CWA Advance</div><div class="v">${fmtKwd3(expected)}</div><div class="s">Collection less remaining advance</div></div>`;
+  let h='<thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Description</th><th>Receipt/Bill Reference</th><th>Created By</th><th>Created At</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+  (cwaAdvanceRows||[]).forEach(r=>{
+    const isVoid=Number(r.is_void||0)===1;
+    const refs=[r.receipt_no?`Receipt/Voucher: ${esc(r.receipt_no)}`:'',r.bill_reference?`Bill: ${esc(r.bill_reference)}`:''].filter(Boolean).join('<br>')||'-';
+    const status=isVoid?`<span class="status-pill bad">Voided</span><div class="muted">${esc(r.void_reason||'')}</div>`:`<span class="status-pill ok">Active</span>`;
+    const action=isVoid?'-':`<button class="btn warn" onclick="voidCwaAdvanceEntry(${Number(r.id)||0})">Void</button>`;
+    h+=`<tr><td>${esc(r.entry_date||'-')}</td><td>${esc(cwaTypeLabel(r.entry_type))}</td><td>${fmtKwd3(r.amount_kwd)} KWD</td><td>${esc(r.description||'-')}</td><td>${refs}</td><td>${esc(r.created_by||'-')}</td><td>${esc(r.created_at||'-')}</td><td>${status}</td><td>${action}</td></tr>`;
+  });
+  if(!cwaAdvanceRows.length) h+='<tr><td colspan="9" style="text-align:center;color:#64748b;padding:18px">No CWA advance ledger entries found.</td></tr>';
+  h+='</tbody>';
+  const tbl=document.getElementById('cwaAdvanceTbl');
+  if(tbl) tbl.innerHTML=h;
+}
+async function saveCwaAdvanceEntry(){
+  if(!cwaCanView()) return;
+  const data={
+    entry_date:document.getElementById('cwaDate').value||'',
+    entry_type:document.getElementById('cwaType').value,
+    amount_kwd:Number(document.getElementById('cwaAmount').value||0),
+    description:document.getElementById('cwaDescription').value.trim(),
+    receipt_no:document.getElementById('cwaReceipt').value.trim(),
+    bill_reference:document.getElementById('cwaBill').value.trim()
+  };
+  if(!data.entry_date){alert('Date is required');return;}
+  if(data.entry_type==='correction'){
+    if(!data.description){alert('Description is required for correction entries');return;}
+    if(data.amount_kwd===0){alert('Correction amount cannot be zero');return;}
+  }else if(!(data.amount_kwd>0)){alert('Amount must be greater than 0');return;}
+  const d=await api('/api/admin/cwa-advance-ledger/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(d&&d.success){
+    alert('CWA advance ledger entry added.');
+    ['cwaAmount','cwaDescription','cwaReceipt','cwaBill'].forEach(id=>{const el=document.getElementById(id); if(el)el.value='';});
+    loadSettlement();
+  }else alert((d&&d.error)||'Failed');
+}
+async function voidCwaAdvanceEntry(id){
+  if(!cwaCanView()) return;
+  const reason=prompt('Void reason (minimum 5 characters):','')||'';
+  if(reason.trim().length<5){alert('Void reason must be at least 5 characters.');return;}
+  const d=await api('/api/admin/cwa-advance-ledger/void',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,void_reason:reason.trim()})});
+  if(d&&d.success){alert('CWA advance entry voided.');loadSettlement();}
+  else alert((d&&d.error)||'Failed');
 }
 function openOfficeAccessModal(){
   const modal=document.getElementById('officeAccessModal');
@@ -31076,6 +31445,7 @@ async function loadSettlement(){
   settlementRows=d.rows||[];
   settlementSummary=d.summary||{};
   renderOfficeBalanceCards(settlementSummary);
+  await loadCwaAdvanceLedger(settlementSummary.total_collected||0);
   let h='<thead><tr><th>Date</th><th>Action</th><th>Wing</th><th>Amount</th><th>Received By</th><th>Receipt / Voucher</th><th>Edited</th>'+(USER_ROLE==='admin'?'<th>Actions</th>':'')+'</tr></thead><tbody>';
   (d.rows||[]).slice(0,40).forEach(r=>{
     const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);
@@ -31282,6 +31652,7 @@ async function loadOfficeExpenses(){
 }
 
 document.getElementById('oeDate').value=new Date().toISOString().slice(0,10);
+const cwaDateInput=document.getElementById('cwaDate'); if(cwaDateInput)cwaDateInput.value=new Date().toISOString().slice(0,10);
 renderOfficeAccessState();
 loadSettlement();
 async function refreshAdminNotificationBadges(){
@@ -36366,6 +36737,21 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div id="feeStmtCards" class="kg" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px"></div>
 </div>
+<div id="feeCwaAdvanceSection" class="fs" style="border-left:3px solid #1565c0;display:none">
+<h3>CWA Advance Tracking</h3>
+<p class="muted" style="margin-bottom:12px">Internal till adjustment for Community Welfare Wing advances and bill settlements.</p>
+<div id="feeCwaSummaryCards" class="kg" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px"></div>
+<div class="fg" style="margin-bottom:10px">
+<div class="fgp"><label>Date</label><input id="feeCwaDate" type="date"></div>
+<div class="fgp"><label>Type</label><select id="feeCwaType"><option value="advance_taken">Advance Taken by CWA</option><option value="bill_adjustment">Bill Submitted / Adjusted</option><option value="refund_returned">Cash Returned by CWA</option><option value="correction">Correction</option></select></div>
+<div class="fgp"><label>Amount KWD</label><input id="feeCwaAmount" type="number" step="0.001" placeholder="0.000"></div>
+<div class="fgp"><label>Receipt No / Voucher No</label><input id="feeCwaReceipt" maxlength="100"></div>
+<div class="fgp"><label>Bill Reference</label><input id="feeCwaBill" maxlength="100"></div>
+<div class="fgp" style="grid-column:1/-1"><label>Description</label><textarea id="feeCwaDescription" rows="2" maxlength="1000"></textarea></div>
+</div>
+<div class="sb" style="margin-bottom:12px"><div class="muted">CWA Advance Tracking — internal admin/fee collector only</div><button class="btn btn-p" type="button" onclick="saveCwaAdvanceEntry()">Add Entry</button></div>
+<div class="scroll-t"><table id="feeCwaAdvanceTbl"></table></div>
+</div>
 <div class="fs" style="border-left:3px solid #2e7d32">
 <h3>Wing-wise Settlement Summary</h3>
 <div class="scroll-t"><table id="feeWingSummaryTbl"></table></div>
@@ -38157,7 +38543,84 @@ if(d&&d.success){toast('Assigned');loadNvLinks();}else toast((d&&d.error)||'Fail
 }
 let feeStatementRows=[];
 let feeStatementEditId=0;
+let feeCwaAdvanceRows=[];
 function feeStmtWingLabel(v){return v==='community_wing'?'Community Wing':(v==='diplomatic'?'Diplomatic Wing':String(v||'-').replace('_',' '));}
+function feeCwaCanView(){return USER_ROLE==='admin'||USER_ROLE==='fee_collector';}
+function feeCwaMoney(v){return Number(v||0).toFixed(3);}
+function feeCwaTypeLabel(v){
+const labels={advance_taken:'Advance Taken by CWA',bill_adjustment:'Bill Submitted / Adjusted',refund_returned:'Cash Returned by CWA',correction:'Correction'};
+return labels[v]||String(v||'-').replace(/_/g,' ');
+}
+function feeCwaToday(){
+const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+async function loadCwaAdvanceLedger(totalCollected){
+const sec=document.getElementById('feeCwaAdvanceSection');
+if(!feeCwaCanView()){
+if(sec)sec.style.display='none';
+return;
+}
+if(sec)sec.style.display='';
+const dateEl=document.getElementById('feeCwaDate'); if(dateEl&&!dateEl.value)dateEl.value=feeCwaToday();
+const p=new URLSearchParams();
+const f=document.getElementById('feeStmtFrom')?.value||''; if(f)p.set('start_date',f);
+const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('end_date',t);
+const d=await api('/api/admin/cwa-advance-ledger?'+p.toString());
+if(!d||!d.success)return;
+feeCwaAdvanceRows=d.entries||[];
+const s=d.summary||{};
+const remaining=Number(s.remaining_cwa_advance_balance||0);
+const expected=Number(totalCollected||0)-remaining;
+const cards=document.getElementById('feeCwaSummaryCards');
+if(cards)cards.innerHTML=`
+<div class="kc s"><div class="lb">Total Till Collections</div><div class="vl">${feeCwaMoney(totalCollected)}</div></div>
+<div class="kc w"><div class="lb">Advance Taken</div><div class="vl">${feeCwaMoney(s.advance_taken_total||0)}</div></div>
+<div class="kc i"><div class="lb">Bills Adjusted</div><div class="vl">${feeCwaMoney(s.bill_adjustment_total||0)}</div></div>
+<div class="kc i"><div class="lb">Cash Returned</div><div class="vl">${feeCwaMoney(s.refund_returned_total||0)}</div></div>
+<div class="kc w"><div class="lb">Remaining with CWA</div><div class="vl">${feeCwaMoney(remaining)}</div></div>
+<div class="kc d"><div class="lb">Expected Till Cash After CWA Advance</div><div class="vl">${feeCwaMoney(expected)}</div></div>`;
+let h='<thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Description</th><th>Receipt/Bill Reference</th><th>Created By</th><th>Created At</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+(feeCwaAdvanceRows||[]).forEach(r=>{
+const isVoid=Number(r.is_void||0)===1;
+const ref=[r.receipt_no?`Receipt/Voucher: ${escHtml(r.receipt_no)}`:'',r.bill_reference?`Bill: ${escHtml(r.bill_reference)}`:''].filter(Boolean).join('<br>')||'-';
+const status=isVoid?`<span class="bdg bdg-rej">Voided</span><div class="sub">${escHtml(r.void_reason||'')}</div>`:`<span class="bdg bdg-app">Active</span>`;
+const action=isVoid?'-':`<button class="btn btn-d" style="padding:2px 8px;font-size:.75em" onclick="voidCwaAdvanceEntry(${Number(r.id)||0})">Void</button>`;
+h+=`<tr><td>${escHtml(r.entry_date||'-')}</td><td>${escHtml(feeCwaTypeLabel(r.entry_type))}</td><td>${feeCwaMoney(r.amount_kwd)} KWD</td><td>${escHtml(r.description||'-')}</td><td>${ref}</td><td>${escHtml(r.created_by||'-')}</td><td>${escHtml(r.created_at||'-')}</td><td>${status}</td><td>${action}</td></tr>`;
+});
+if(!feeCwaAdvanceRows.length)h+='<tr><td colspan="9" style="text-align:center;color:#999;padding:18px">No CWA advance ledger entries found.</td></tr>';
+h+='</tbody>';
+const tbl=document.getElementById('feeCwaAdvanceTbl'); if(tbl)tbl.innerHTML=h;
+}
+async function saveCwaAdvanceEntry(){
+if(!feeCwaCanView())return;
+const payload={
+entry_date:document.getElementById('feeCwaDate').value||'',
+entry_type:document.getElementById('feeCwaType').value,
+amount_kwd:Number(document.getElementById('feeCwaAmount').value||0),
+description:document.getElementById('feeCwaDescription').value.trim(),
+receipt_no:document.getElementById('feeCwaReceipt').value.trim(),
+bill_reference:document.getElementById('feeCwaBill').value.trim()
+};
+if(!payload.entry_date){toast('Date is required');return;}
+if(payload.entry_type==='correction'){
+if(!payload.description){toast('Description is required for correction');return;}
+if(payload.amount_kwd===0){toast('Correction amount cannot be zero');return;}
+}else if(!(payload.amount_kwd>0)){toast('Amount must be greater than 0');return;}
+const d=await api('/api/admin/cwa-advance-ledger/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+if(d&&d.success){
+toast('CWA advance ledger entry added');
+['feeCwaAmount','feeCwaDescription','feeCwaReceipt','feeCwaBill'].forEach(id=>{const el=document.getElementById(id); if(el)el.value='';});
+loadFeeStatement();
+}else toast((d&&d.error)||'Unable to add CWA advance entry');
+}
+async function voidCwaAdvanceEntry(id){
+if(!feeCwaCanView())return;
+const reason=prompt('Void reason (minimum 5 characters):','')||'';
+if(reason.trim().length<5){toast('Void reason must be at least 5 characters');return;}
+const d=await api('/api/admin/cwa-advance-ledger/void',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,void_reason:reason.trim()})});
+if(d&&d.success){toast('CWA advance entry voided');loadFeeStatement();}
+else toast((d&&d.error)||'Unable to void entry');
+}
 function feeStmtEditedHtml(r){
 if(!r||!r.edited_at)return '-';
 return `<div style="font-weight:700;color:#7c3aed">Edited</div><div class="sub">by ${escHtml(r.edited_by||'-')}<br>${escHtml(r.edited_at||'-')}</div>${r.edit_reason?`<div class="sub">Reason: ${escHtml(r.edit_reason)}</div>`:''}`;
@@ -38407,6 +38870,7 @@ if(cards) cards.innerHTML=`
 <div class="kc i"><div class="lb">Today's Diplomatic</div><div class="vl">${money(s0.today_diplomatic||0)}</div></div>
 <div class="kc w"><div class="lb">Today's Handovers</div><div class="vl">${money(s0.today_handovers||0)}</div></div>
 <div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${money(s0.today_balance||0)}</div></div>`;
+await loadCwaAdvanceLedger(totalCollectedValue);
 
 const ws=document.getElementById('feeWingSummaryTbl');
 if(ws) ws.innerHTML=`<thead><tr><th>Wing</th><th>Total Assigned</th><th>Total Handed Over</th><th>Pending Settlement</th></tr></thead><tbody>
