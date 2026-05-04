@@ -16424,28 +16424,6 @@ def _get_cwa_advance_summary(db, start_date=None, end_date=None):
         'latest_entry_date': row['latest_entry_date'] if row else None,
     }
 
-def _add_cwa_advance_till_adjustment(db, summary, gross_cash_balance=None):
-    cwa_summary = _get_cwa_advance_summary(db)
-    if gross_cash_balance is None:
-        gross_cash_balance = summary.get('cash_in_hand') if isinstance(summary, dict) else 0
-    gross_cash_balance = _cwa_round(gross_cash_balance)
-    remaining = _cwa_round(cwa_summary.get('remaining_cwa_advance_balance'))
-    expected_physical = _cwa_round(gross_cash_balance - remaining)
-    summary.update({
-        'cwa_advance_taken_total': _cwa_round(cwa_summary.get('advance_taken_total')),
-        'cwa_bill_adjustment_total': _cwa_round(cwa_summary.get('bill_adjustment_total')),
-        'cwa_cash_returned_total': _cwa_round(cwa_summary.get('refund_returned_total')),
-        'cwa_correction_total': _cwa_round(cwa_summary.get('correction_total')),
-        'cwa_remaining_advance_balance': remaining,
-        'expected_physical_till_cash': expected_physical,
-    })
-    summary['cwa_advance'] = {
-        **cwa_summary,
-        'gross_cash_balance': gross_cash_balance,
-        'expected_physical_till_cash': expected_physical,
-    }
-    return summary
-
 def api_cwa_advance_ledger(params, user):
     if not _user_can_view_cwa_advance(user):
         return {'success': False, 'error': 'Unauthorized'}
@@ -17051,9 +17029,6 @@ def api_fee_settlement_report(params, user):
             s['community_pending_settlement'] = round(max(s.get('community_wing_total', 0) - float(s.get('community_handed_over', 0)), 0), 2)
             s['diplomatic_pending_settlement'] = round(max(s.get('diplomatic_total', 0) - float(s.get('diplomatic_handed_over', 0)), 0), 2)
             s['total_withdrawn'] = round(float(s.get('total_withdrawn', 0)), 2)
-
-        if _user_can_view_cwa_advance(user):
-            _add_cwa_advance_till_adjustment(db, result['summary'])
 
         return result
     finally:
@@ -20567,7 +20542,12 @@ def api_fee_statement(params, user):
             'fee_activity_rows': fee_activity_rows
         }
         if _user_can_view_cwa_advance(user):
-            _add_cwa_advance_till_adjustment(db, result['summary'])
+            cwa_summary = _get_cwa_advance_summary(db, dfrom, dto)
+            cwa_summary['expected_physical_till_cash'] = _cwa_round(
+                float(result['summary'].get('total_collected') or 0)
+                - float(cwa_summary.get('remaining_cwa_advance_balance') or 0)
+            )
+            result['summary']['cwa_advance'] = cwa_summary
 
         # operator_special: apply visibility cutoff only.
         # Do not recompute/overwrite summary totals that already come from settlement logic.
@@ -30845,7 +30825,7 @@ th{font-size:11px;color:#607086;text-transform:uppercase;letter-spacing:.7px}
       <div class="section-title">
         <div>
           <h3 style="margin:0">CWA Advance Tracking</h3>
-          <p class="muted">CWA advance is an internal till adjustment. It does not reduce official collection total; it reduces physical cash expected in till until bills or cash return are recorded.</p>
+          <p class="muted">Internal till adjustment for Community Welfare Wing advances and bill settlements.</p>
         </div>
       </div>
       <div id="cwaSummaryCards" class="summary-grid"></div>
@@ -31245,20 +31225,14 @@ function renderOfficeBalanceCards(s){
     cards.innerHTML='';
     return;
   }
-  const grossTill=Number(s.cash_in_hand||0);
-  const cwaRemaining=Number(s.cwa_remaining_advance_balance||0);
-  const expectedPhysical=Number(s.expected_physical_till_cash!=null?s.expected_physical_till_cash:(grossTill-cwaRemaining));
   cards.innerHTML=`
     <div class="summary-card"><div class="k">Collected</div><div class="v">${fmt(s.total_collected||0)}</div><div class="s">KWD total received</div></div>
     <div class="summary-card"><div class="k">Community</div><div class="v">${fmt(s.community_wing_total||0)}</div><div class="s">KWD assigned</div></div>
     <div class="summary-card"><div class="k">Diplomatic</div><div class="v">${fmt(s.diplomatic_total||0)}</div><div class="s">KWD assigned</div></div>
     <div class="summary-card"><div class="k">Handed Over</div><div class="v">${fmt(s.total_handed_over||0)}</div><div class="s">KWD handed over</div></div>
-    <div class="summary-card"><div class="k">Gross Till / Collection Balance</div><div class="v">${fmtKwd3(grossTill)}</div><div class="s">KWD before CWA advance</div></div>
-    <div class="summary-card"><div class="k">Less: Outstanding CWA Advance</div><div class="v">${fmtKwd3(cwaRemaining)}</div><div class="s">Current cumulative advance</div></div>
-    <div class="summary-card"><div class="k">Expected Physical Cash in Till after CWA Advance</div><div class="v">${fmtKwd3(expectedPhysical)}</div><div class="s">Gross till less outstanding CWA advance</div></div>
-    <div class="notice" style="grid-column:1/-1">CWA advance is an internal till adjustment. It does not reduce official collection total; it reduces physical cash expected in till until bills or cash return are recorded.</div>`;
+    <div class="summary-card"><div class="k">Cash In Hand</div><div class="v">${fmt(s.cash_in_hand||0)}</div><div class="s">KWD available</div></div>`;
 }
-async function loadCwaAdvanceLedger(grossTillBalance, reportSummary){
+async function loadCwaAdvanceLedger(totalCollected){
   const card=document.getElementById('cwaAdvanceCard');
   if(!cwaCanView()){
     if(card) card.classList.add('hidden');
@@ -31271,20 +31245,16 @@ async function loadCwaAdvanceLedger(grossTillBalance, reportSummary){
   if(!d||!d.success) return;
   cwaAdvanceRows=d.entries||[];
   const s=d.summary||{};
-  const rs=reportSummary||{};
-  const grossTill=Number(grossTillBalance||0);
-  const remaining=Number(rs.cwa_remaining_advance_balance!=null?rs.cwa_remaining_advance_balance:(s.remaining_cwa_advance_balance||0));
-  const expected=Number(rs.expected_physical_till_cash!=null?rs.expected_physical_till_cash:(grossTill-remaining));
+  const remaining=Number(s.remaining_cwa_advance_balance||0);
+  const expected=Number(totalCollected||0)-remaining;
   const cards=document.getElementById('cwaSummaryCards');
   if(cards) cards.innerHTML=`
-    <div class="summary-card"><div class="k">Gross Till / Collection Balance</div><div class="v">${fmtKwd3(grossTill)}</div><div class="s">KWD before CWA advance</div></div>
-    <div class="summary-card"><div class="k">Less: Outstanding CWA Advance</div><div class="v">${fmtKwd3(remaining)}</div><div class="s">Current cumulative advance</div></div>
-    <div class="summary-card"><div class="k">Expected Physical Cash in Till after CWA Advance</div><div class="v">${fmtKwd3(expected)}</div><div class="s">Gross till less outstanding CWA advance</div></div>
+    <div class="summary-card"><div class="k">Total Till Collections</div><div class="v">${fmtKwd3(totalCollected)}</div><div class="s">KWD collected</div></div>
     <div class="summary-card"><div class="k">Advance Taken</div><div class="v">${fmtKwd3(s.advance_taken_total)}</div><div class="s">KWD with CWA</div></div>
     <div class="summary-card"><div class="k">Bills Adjusted</div><div class="v">${fmtKwd3(s.bill_adjustment_total)}</div><div class="s">KWD receipts submitted</div></div>
     <div class="summary-card"><div class="k">Cash Returned</div><div class="v">${fmtKwd3(s.refund_returned_total)}</div><div class="s">KWD returned to till</div></div>
-    <div class="summary-card"><div class="k">Corrections</div><div class="v">${fmtKwd3(s.correction_total)}</div><div class="s">KWD adjustment entries</div></div>
-    <div class="notice" style="grid-column:1/-1">CWA advance is an internal till adjustment. It does not reduce official collection total; it reduces physical cash expected in till until bills or cash return are recorded.</div>`;
+    <div class="summary-card"><div class="k">Remaining with CWA</div><div class="v">${fmtKwd3(remaining)}</div><div class="s">Advance balance</div></div>
+    <div class="summary-card"><div class="k">Expected Till Cash After CWA Advance</div><div class="v">${fmtKwd3(expected)}</div><div class="s">Collection less remaining advance</div></div>`;
   let h='<thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Description</th><th>Receipt/Bill Reference</th><th>Created By</th><th>Created At</th><th>Status</th><th>Action</th></tr></thead><tbody>';
   (cwaAdvanceRows||[]).forEach(r=>{
     const isVoid=Number(r.is_void||0)===1;
@@ -31475,7 +31445,7 @@ async function loadSettlement(){
   settlementRows=d.rows||[];
   settlementSummary=d.summary||{};
   renderOfficeBalanceCards(settlementSummary);
-  await loadCwaAdvanceLedger(settlementSummary.cash_in_hand||0, settlementSummary);
+  await loadCwaAdvanceLedger(settlementSummary.total_collected||0);
   let h='<thead><tr><th>Date</th><th>Action</th><th>Wing</th><th>Amount</th><th>Received By</th><th>Receipt / Voucher</th><th>Edited</th>'+(USER_ROLE==='admin'?'<th>Actions</th>':'')+'</tr></thead><tbody>';
   (d.rows||[]).slice(0,40).forEach(r=>{
     const isVoucher=(String(r.action_type||'').toLowerCase()==='handed_over'&&!!r.receipt_number);
@@ -36769,7 +36739,7 @@ No deterioration in ground security situation so far.</textarea>
 </div>
 <div id="feeCwaAdvanceSection" class="fs" style="border-left:3px solid #1565c0;display:none">
 <h3>CWA Advance Tracking</h3>
-<p class="muted" style="margin-bottom:12px">CWA advance is an internal till adjustment. It does not reduce official collection total; it reduces physical cash expected in till until bills or cash return are recorded.</p>
+<p class="muted" style="margin-bottom:12px">Internal till adjustment for Community Welfare Wing advances and bill settlements.</p>
 <div id="feeCwaSummaryCards" class="kg" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px"></div>
 <div class="fg" style="margin-bottom:10px">
 <div class="fgp"><label>Date</label><input id="feeCwaDate" type="date"></div>
@@ -38584,7 +38554,7 @@ return labels[v]||String(v||'-').replace(/_/g,' ');
 function feeCwaToday(){
 const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
-async function loadCwaAdvanceLedger(grossTillBalance, reportSummary){
+async function loadCwaAdvanceLedger(totalCollected){
 const sec=document.getElementById('feeCwaAdvanceSection');
 if(!feeCwaCanView()){
 if(sec)sec.style.display='none';
@@ -38592,24 +38562,23 @@ return;
 }
 if(sec)sec.style.display='';
 const dateEl=document.getElementById('feeCwaDate'); if(dateEl&&!dateEl.value)dateEl.value=feeCwaToday();
-const d=await api('/api/admin/cwa-advance-ledger');
+const p=new URLSearchParams();
+const f=document.getElementById('feeStmtFrom')?.value||''; if(f)p.set('start_date',f);
+const t=document.getElementById('feeStmtTo')?.value||''; if(t)p.set('end_date',t);
+const d=await api('/api/admin/cwa-advance-ledger?'+p.toString());
 if(!d||!d.success)return;
 feeCwaAdvanceRows=d.entries||[];
 const s=d.summary||{};
-const rs=reportSummary||{};
-const grossTill=Number(grossTillBalance||0);
-const remaining=Number(rs.cwa_remaining_advance_balance!=null?rs.cwa_remaining_advance_balance:(s.remaining_cwa_advance_balance||0));
-const expected=Number(rs.expected_physical_till_cash!=null?rs.expected_physical_till_cash:(grossTill-remaining));
+const remaining=Number(s.remaining_cwa_advance_balance||0);
+const expected=Number(totalCollected||0)-remaining;
 const cards=document.getElementById('feeCwaSummaryCards');
 if(cards)cards.innerHTML=`
-<div class="kc s"><div class="lb">Gross Till / Collection Balance</div><div class="vl">${feeCwaMoney(grossTill)}</div></div>
-<div class="kc w"><div class="lb">Less: Outstanding CWA Advance</div><div class="vl">${feeCwaMoney(remaining)}</div></div>
-<div class="kc d"><div class="lb">Expected Physical Cash in Till after CWA Advance</div><div class="vl">${feeCwaMoney(expected)}</div></div>
+<div class="kc s"><div class="lb">Total Till Collections</div><div class="vl">${feeCwaMoney(totalCollected)}</div></div>
 <div class="kc w"><div class="lb">Advance Taken</div><div class="vl">${feeCwaMoney(s.advance_taken_total||0)}</div></div>
 <div class="kc i"><div class="lb">Bills Adjusted</div><div class="vl">${feeCwaMoney(s.bill_adjustment_total||0)}</div></div>
 <div class="kc i"><div class="lb">Cash Returned</div><div class="vl">${feeCwaMoney(s.refund_returned_total||0)}</div></div>
-<div class="kc i"><div class="lb">Corrections</div><div class="vl">${feeCwaMoney(s.correction_total||0)}</div></div>
-<div class="kc s" style="grid-column:1/-1"><div class="lb">Note</div><div class="vl" style="font-size:.86em;line-height:1.45;font-weight:600">CWA advance is an internal till adjustment. It does not reduce official collection total; it reduces physical cash expected in till until bills or cash return are recorded.</div></div>`;
+<div class="kc w"><div class="lb">Remaining with CWA</div><div class="vl">${feeCwaMoney(remaining)}</div></div>
+<div class="kc d"><div class="lb">Expected Till Cash After CWA Advance</div><div class="vl">${feeCwaMoney(expected)}</div></div>`;
 let h='<thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Description</th><th>Receipt/Bill Reference</th><th>Created By</th><th>Created At</th><th>Status</th><th>Action</th></tr></thead><tbody>';
 (feeCwaAdvanceRows||[]).forEach(r=>{
 const isVoid=Number(r.is_void||0)===1;
@@ -38885,13 +38854,10 @@ const s0=d.summary||{};
 const money=v=>Number(v||0).toFixed(2);
 const totalCollectedLabel='Total Fee Collected (KWD)';
 const todayCollectedLabel="Today's Collection";
-const cashLabel=feeCwaCanView()?'Gross Till / Collection Balance':'Cash in Hand / Balance';
+const cashLabel='Cash in Hand / Balance';
 const totalCollectedValue=s0.total_collected||0;
 const todayCollectedValue=s0.today_collected||0;
 const cashValue=s0.cash_in_hand||0;
-const cwaAdjustmentCards=feeCwaCanView()?`
-<div class="kc w"><div class="lb">Less: Outstanding CWA Advance</div><div class="vl">${feeCwaMoney(s0.cwa_remaining_advance_balance||0)}</div></div>
-<div class="kc d"><div class="lb">Expected Physical Cash in Till after CWA Advance</div><div class="vl">${feeCwaMoney(s0.expected_physical_till_cash||0)}</div></div>`:'';
 const cards=document.getElementById('feeStmtCards');
 if(cards) cards.innerHTML=`
 <div class="kc s"><div class="lb">${totalCollectedLabel}</div><div class="vl">${money(totalCollectedValue)}</div></div>
@@ -38899,13 +38865,12 @@ if(cards) cards.innerHTML=`
 <div class="kc i"><div class="lb">Diplomatic Total</div><div class="vl">${money(s0.diplomatic_total||0)}</div></div>
 <div class="kc w"><div class="lb">Total Handed Over</div><div class="vl">${money(s0.total_handed_over||0)}</div></div>
 <div class="kc d"><div class="lb">${cashLabel}</div><div class="vl">${money(cashValue)}</div></div>
-${cwaAdjustmentCards}
 <div class="kc s"><div class="lb">${todayCollectedLabel}</div><div class="vl">${money(todayCollectedValue)}</div></div>
 <div class="kc i"><div class="lb">Today's Community Wing</div><div class="vl">${money(s0.today_community_wing||0)}</div></div>
 <div class="kc i"><div class="lb">Today's Diplomatic</div><div class="vl">${money(s0.today_diplomatic||0)}</div></div>
 <div class="kc w"><div class="lb">Today's Handovers</div><div class="vl">${money(s0.today_handovers||0)}</div></div>
 <div class="kc d"><div class="lb">Today's Balance</div><div class="vl">${money(s0.today_balance||0)}</div></div>`;
-await loadCwaAdvanceLedger(cashValue, s0);
+await loadCwaAdvanceLedger(totalCollectedValue);
 
 const ws=document.getElementById('feeWingSummaryTbl');
 if(ws) ws.innerHTML=`<thead><tr><th>Wing</th><th>Total Assigned</th><th>Total Handed Over</th><th>Pending Settlement</th></tr></thead><tbody>
