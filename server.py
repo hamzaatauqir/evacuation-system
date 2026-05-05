@@ -51,6 +51,7 @@ FEATURE_GRADING_LETTER = True
 GRADING_LETTER_AVAILABLE = True
 FEATURE_NURSE_HOUSING = str(os.environ.get('FEATURE_NURSE_HOUSING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 FEATURE_NURSE_ONBOARDING = str(os.environ.get('FEATURE_NURSE_ONBOARDING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+FEATURE_NURSE_ACCOMMODATION_ADMIN = str(os.environ.get('FEATURE_NURSE_ACCOMMODATION_ADMIN', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 
 NH_ACCOUNT_STATUS_PENDING_ARRIVAL = 'PENDING_ARRIVAL'
 NH_ACCOUNT_STATUS_ACTIVE = 'ACTIVE'
@@ -1802,6 +1803,7 @@ def init_db():
         date_shifted_to_facility TEXT,
         contract_start_date TEXT,
         contract_end_date TEXT,
+        expected_shift_date TEXT DEFAULT '',
         notice_period_months INTEGER DEFAULT 3,
         notice_period_start_date TEXT,
         current_status TEXT DEFAULT 'Assigned',
@@ -1872,6 +1874,7 @@ def init_db():
         ('date_shifted_to_facility', 'TEXT'),
         ('contract_start_date', 'TEXT'),
         ('contract_end_date', 'TEXT'),
+        ('expected_shift_date', "TEXT DEFAULT ''"),
         ('notice_period_months', 'INTEGER DEFAULT 3'),
         ('notice_period_start_date', 'TEXT'),
         ('current_status', "TEXT DEFAULT 'Assigned'"),
@@ -5195,6 +5198,7 @@ def _facility_roster_to_dict(row):
         'facility_address', 'room_number', 'bed_number', 'transport_included',
         'transport_type',
         'date_shifted_to_facility', 'contract_start_date', 'contract_end_date',
+        'expected_shift_date',
         'notice_period_start_date', 'current_status', 'current_arrangement', 'confirmation_status',
         'last_confirmed_at', 'last_vendor_update_at', 'last_embassy_verification_at',
         'assigned_to', 'assigned_role', 'due_date', 'action_required', 'reconciliation_status',
@@ -9932,6 +9936,838 @@ def api_admin_nurse_onboarding_export_csv(params, user):
         db.close()
 
 
+def _nurse_accommodation_feature_enabled():
+    return bool(FEATURE_NURSE_ACCOMMODATION_ADMIN)
+
+
+def nurse_accommodation_user_can_manage(user):
+    if not user:
+        return False
+    role = _role_name((user or {}).get('role')).strip().lower()
+    if role in {
+        '', 'operator', 'operator_special', 'fee_collector', 'iraq_cwa',
+        'viewer', 'other', 'public', 'nurse', 'nurse_user'
+    }:
+        return False
+    if role == 'admin':
+        return True
+    return role in {
+        'community_desk',
+        'welfare_officer',
+        'nurses_desk',
+        'nurse_desk',
+        'nurses_welfare_desk',
+        'nurse_welfare_desk',
+    }
+
+
+def _nurse_accommodation_blocked_response():
+    return {'success': False, 'error': 'You do not have permission to access the nurse accommodation roster.'}
+
+
+def _nurse_accommodation_feature_blocked_response():
+    return {'success': False, 'error': 'Nurse accommodation roster is temporarily unavailable.'}
+
+
+def _nurse_accommodation_clean_text(value, max_len=300):
+    return _clean_text(value, max_len)
+
+
+def _nurse_accommodation_mask_passport(value):
+    passport = _nurse_normalize_passport(value or '')
+    if len(passport) <= 4:
+        return passport
+    return ('*' * max(1, len(passport) - 3)) + passport[-3:]
+
+
+def _nurse_accommodation_parse_dt(value):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def _nurse_accommodation_days_since(value):
+    dt = _nurse_accommodation_parse_dt(value)
+    if not dt:
+        return 9999
+    try:
+        return max(0, (_kuwait_now().date() - dt.date()).days)
+    except Exception:
+        return 9999
+
+
+def _nurse_accommodation_identity_maps(rows, ref_key='nurse_reference_id', passport_key='passport_number'):
+    by_ref, by_passport = {}, {}
+    for row in rows or []:
+        d = _row_to_dict(row)
+        ref = str(d.get(ref_key) or '').strip().upper()
+        passport = _nurse_normalize_passport(d.get(passport_key) or '')
+        if ref and ref not in by_ref:
+            by_ref[ref] = d
+        if passport and passport not in by_passport:
+            by_passport[passport] = d
+    return by_ref, by_passport
+
+
+def _nurse_accommodation_related_row(by_ref, by_passport, reference_id='', passport_number=''):
+    ref = str(reference_id or '').strip().upper()
+    passport = _nurse_normalize_passport(passport_number or '')
+    return by_ref.get(ref) or by_passport.get(passport)
+
+
+def _nurse_accommodation_find_roster(db, nurse_row):
+    nurse = _row_to_dict(nurse_row)
+    nurse_id = int(nurse.get('id') or 0)
+    if nurse_id > 0:
+        row = db.execute(
+            "SELECT * FROM facility_roster WHERE nurse_registration_id = ? ORDER BY datetime(updated_at) DESC, id DESC LIMIT 1",
+            [nurse_id]
+        ).fetchone()
+        if row:
+            return row
+    where = []
+    vals = []
+    reference_id = str(nurse.get('reference_id') or '').strip()
+    passport = _nurse_normalize_passport(nurse.get('passport_number') or '')
+    civil_id = _nurse_normalize_id_key(nurse.get('civil_id') or '')
+    phone = _nurse_normalize_id_key(nurse.get('mobile_full') or nurse.get('mobile') or '')
+    if reference_id:
+        where.append("UPPER(TRIM(COALESCE(nurse_reference,''))) = UPPER(TRIM(?))")
+        vals.append(reference_id)
+    if passport:
+        where.append("UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = ?")
+        vals.append(passport)
+    if civil_id:
+        where.append(
+            "TRIM(COALESCE(civil_id,'')) != '' AND REPLACE(REPLACE(REPLACE(UPPER(TRIM(civil_id)), '-', ''), ' ', ''), '_', '') = ?"
+        )
+        vals.append(civil_id)
+    if phone:
+        where.append(
+            "TRIM(COALESCE(phone,'')) != '' AND REPLACE(REPLACE(REPLACE(UPPER(TRIM(phone)), '-', ''), ' ', ''), '_', '') = ?"
+        )
+        vals.append(phone)
+    if not where:
+        return None
+    return db.execute(
+        f"SELECT * FROM facility_roster WHERE {' OR '.join(where)} ORDER BY datetime(updated_at) DESC, id DESC LIMIT 1",
+        vals
+    ).fetchone()
+
+
+def _nurse_accommodation_open_request_status(status):
+    return str(status or '').strip().lower() in {'pending', 'in review', 'in progress', 'submitted'}
+
+
+def _nurse_accommodation_open_leave_status(status):
+    return str(status or '').strip().lower() in {'submitted', 'pending', 'pending review', 'under review', 'in progress'}
+
+
+def _nurse_accommodation_own_arrangement_label(text):
+    label = str(text or '').strip()
+    if not label:
+        return ''
+    lowered = label.lower()
+    if 'private' in lowered or 'own' in lowered or 'self arranged' in lowered:
+        return 'Own Accommodation'
+    return label
+
+
+def _nurse_accommodation_current_type(nurse, roster_raw, roster_norm, request_row):
+    nurse = nurse or {}
+    roster_raw = roster_raw or {}
+    roster_norm = roster_norm or {}
+    request_row = request_row or {}
+    arrangement = (
+        roster_raw.get('current_arrangement')
+        or nurse.get('current_arrangement')
+        or nurse.get('current_accommodation')
+        or nurse.get('current_accommodation_status')
+        or nurse.get('accommodation_status')
+        or request_row.get('current_accommodation_status')
+        or ''
+    ).strip()
+    status = (roster_norm.get('current_status') or '').strip()
+    if not arrangement and status == 'Private Self Arranged':
+        arrangement = 'Own Accommodation'
+    elif not arrangement and status in ('MOH Arranged', 'MOH Provided Hotel - Arrival Stay'):
+        arrangement = status
+    elif not arrangement and ((roster_raw.get('vendor_name') or '').strip() or (roster_norm.get('facility_name') or '').strip()):
+        arrangement = 'Embassy Contracted / Arranged'
+    return _nurse_accommodation_own_arrangement_label(arrangement)
+
+
+def _nurse_accommodation_preference(request_row):
+    request_row = request_row or {}
+    return (
+        str(request_row.get('requested_facility') or '').strip()
+        or str(request_row.get('current_accommodation_status') or '').strip()
+    )
+
+
+def _nurse_accommodation_last_updated(*values):
+    best_text = ''
+    best_dt = None
+    for value in values:
+        text = str(value or '').strip()
+        dt = _nurse_accommodation_parse_dt(text)
+        if dt and (best_dt is None or dt > best_dt):
+            best_dt = dt
+            best_text = text
+        elif text and best_dt is None and not best_text:
+            best_text = text
+    return best_text
+
+
+def _nurse_accommodation_row_from_related(nurse_row, roster_row=None, request_row=None, leave_row=None):
+    nurse = _row_to_dict(nurse_row)
+    roster_raw = _row_to_dict(roster_row)
+    roster = _facility_roster_to_dict(roster_row) if roster_row else {}
+    request_row = _row_to_dict(request_row)
+    leave_row = _row_to_dict(leave_row)
+    nurse_id = int(nurse.get('id') or 0)
+    nurse_reference = str(nurse.get('reference_id') or '').strip()
+    passport_number = nurse.get('passport_number') or roster_raw.get('passport_number') or ''
+    vendor_name = str(roster_raw.get('vendor_name') or nurse.get('vendor_name') or '').strip()
+    facility_name = str(roster.get('facility_name') or nurse.get('current_hostel') or leave_row.get('current_facility') or '').strip()
+    current_type = _nurse_accommodation_current_type(nurse, roster_raw, roster, request_row)
+    preference = _nurse_accommodation_preference(request_row)
+    leaving_notice_status = str(leave_row.get('notice_status') or '').strip()
+    current_status = str(roster.get('current_status') or '').strip()
+    status = current_status or leaving_notice_status or str(request_row.get('request_status') or '').strip() or current_type
+    last_updated = _nurse_accommodation_last_updated(
+        roster_raw.get('updated_at'),
+        request_row.get('updated_at'),
+        leave_row.get('updated_at'),
+        nurse.get('updated_at'),
+        nurse.get('created_at'),
+    )
+    no_update_days = _nurse_accommodation_days_since(last_updated)
+    transfer_requested = (
+        current_status in {'Intends to Leave', 'Transition Planned', 'Shifted to Alternative Facility'}
+        or bool(str(leave_row.get('new_stay_arrangement') or '').strip())
+        or ('transfer' in str(leave_row.get('reason') or '').lower())
+    )
+    own_accommodation = (
+        current_type == 'Own Accommodation'
+        or current_status == 'Private Self Arranged'
+    )
+    active_occupant = bool(
+        roster_row
+        and int(roster_raw.get('active') or 0) == 1
+        and current_status not in {'Left Facility', 'Private Self Arranged', 'MOH Arranged', 'MOH Provided Hotel - Arrival Stay', 'Closed / Archived', 'Inactive'}
+    )
+    return {
+        'nurse_id': nurse_id,
+        'roster_id': int(roster.get('id') or 0) if roster else 0,
+        'accommodation_request_id': int(request_row.get('id') or 0) if request_row else 0,
+        'leave_notice_id': int(leave_row.get('id') or 0) if leave_row else 0,
+        'nurse_reference': nurse_reference,
+        'reference_id': nurse_reference,
+        'name': nurse.get('full_name') or roster.get('full_name') or '',
+        'father_name': nurse.get('father_name') or '',
+        'mton_number': nurse.get('mton_number') or '',
+        'passport_number': passport_number,
+        'passport_masked': _nurse_accommodation_mask_passport(passport_number),
+        'civil_id': nurse.get('civil_id') or roster_raw.get('civil_id') or '',
+        'mobile': nurse.get('mobile_full') or nurse.get('mobile') or roster_raw.get('mobile_full') or roster.get('phone') or '',
+        'whatsapp': nurse.get('whatsapp_full') or nurse.get('mobile_full') or nurse.get('mobile') or roster_raw.get('whatsapp_full') or roster.get('phone') or '',
+        'gender': nurse.get('gender') or '',
+        'batch': nurse.get('batch_number') or '',
+        'current_accommodation_type': current_type,
+        'vendor_name': vendor_name,
+        'facility_name': facility_name,
+        'room_no': roster.get('room_number') or nurse.get('room_number') or '',
+        'bed_no': roster.get('bed_number') or '',
+        'contract_start_date': roster.get('contract_start_date') or nurse.get('contract_start_date') or '',
+        'contract_end_date': roster.get('contract_end_date') or nurse.get('contract_end_date') or '',
+        'monthly_rate': roster_raw.get('monthly_amount_kwd'),
+        'status': status,
+        'request_status': request_row.get('request_status') or '',
+        'preference': preference,
+        'expected_shift_date': roster_raw.get('expected_shift_date') or '',
+        'leaving_notice_status': leaving_notice_status or ('Leaving Notice Submitted' if current_status == 'Leaving Notice Submitted' else ''),
+        'last_updated': last_updated,
+        'no_update_days': no_update_days,
+        'notes': (
+            roster_raw.get('remarks')
+            or request_row.get('admin_remarks')
+            or request_row.get('reason_remarks')
+            or leave_row.get('admin_remarks')
+            or leave_row.get('reason')
+            or nurse.get('admin_remarks')
+            or nurse.get('remarks')
+            or ''
+        ),
+        'is_active_occupant': active_occupant,
+        'transfer_requested': bool(transfer_requested),
+        'open_leave_notice': _nurse_accommodation_open_leave_status(leaving_notice_status),
+        'has_vendor_assignment': bool(vendor_name),
+        'is_own_accommodation': bool(own_accommodation),
+    }
+
+
+def _nurse_accommodation_matches_filters(row, params):
+    params = params or {}
+    search = str(params.get('search') or params.get('q') or '').strip().lower()
+    vendor = str(params.get('vendor') or '').strip().lower()
+    facility = str(params.get('facility') or params.get('facility_name') or '').strip().lower()
+    status = str(params.get('status') or '').strip().lower()
+    accommodation_type = str(params.get('accommodation_type') or '').strip().lower()
+    preference = str(params.get('preference') or '').strip().lower()
+    mton = str(params.get('mton') or '').strip().lower()
+    no_update_days_raw = str(params.get('no_update_days') or '').strip()
+    if search:
+        haystack = ' '.join([
+            str(row.get('nurse_reference') or ''),
+            str(row.get('name') or ''),
+            str(row.get('father_name') or ''),
+            str(row.get('passport_number') or ''),
+            str(row.get('mton_number') or ''),
+            str(row.get('mobile') or ''),
+            str(row.get('whatsapp') or ''),
+            str(row.get('batch') or ''),
+            str(row.get('vendor_name') or ''),
+            str(row.get('facility_name') or ''),
+            str(row.get('status') or ''),
+            str(row.get('preference') or ''),
+        ]).lower()
+        if search not in haystack:
+            return False
+    if vendor and str(row.get('vendor_name') or '').strip().lower() != vendor:
+        return False
+    if facility and str(row.get('facility_name') or '').strip().lower() != facility:
+        return False
+    if status and str(row.get('status') or '').strip().lower() != status:
+        return False
+    if accommodation_type and str(row.get('current_accommodation_type') or '').strip().lower() != accommodation_type:
+        return False
+    if preference and str(row.get('preference') or '').strip().lower() != preference:
+        return False
+    if mton and mton not in str(row.get('mton_number') or '').strip().lower():
+        return False
+    if no_update_days_raw:
+        try:
+            threshold = int(no_update_days_raw)
+        except Exception:
+            threshold = 0
+        if threshold > 0 and int(row.get('no_update_days') or 0) < threshold:
+            return False
+    return True
+
+
+def _nurse_accommodation_list_payload(db, params):
+    nurses = [dict(r) for r in db.execute("SELECT * FROM nurse_registrations ORDER BY id DESC LIMIT 5000").fetchall()]
+    roster_rows = [dict(r) for r in db.execute(
+        "SELECT * FROM facility_roster ORDER BY datetime(updated_at) DESC, id DESC"
+    ).fetchall()]
+    roster_by_nurse = {}
+    for row in roster_rows:
+        nurse_id = int(row.get('nurse_registration_id') or 0)
+        if nurse_id > 0 and nurse_id not in roster_by_nurse:
+            roster_by_nurse[nurse_id] = row
+    roster_by_ref, roster_by_passport = _nurse_accommodation_identity_maps(
+        roster_rows, ref_key='nurse_reference', passport_key='passport_number'
+    )
+    request_rows = [dict(r) for r in db.execute(
+        "SELECT * FROM nurse_accommodation_requests ORDER BY id DESC"
+    ).fetchall()]
+    request_by_ref, request_by_passport = _nurse_accommodation_identity_maps(request_rows)
+    leave_rows = [dict(r) for r in db.execute(
+        "SELECT * FROM nurse_leave_notices ORDER BY id DESC"
+    ).fetchall()]
+    leave_by_ref, leave_by_passport = _nurse_accommodation_identity_maps(leave_rows)
+
+    all_rows = []
+    for nurse in nurses:
+        nurse_id = int(nurse.get('id') or 0)
+        reference_id = nurse.get('reference_id') or ''
+        passport_number = nurse.get('passport_number') or ''
+        roster_row = roster_by_nurse.get(nurse_id) or _nurse_accommodation_related_row(
+            roster_by_ref, roster_by_passport, reference_id, passport_number
+        )
+        request_row = _nurse_accommodation_related_row(
+            request_by_ref, request_by_passport, reference_id, passport_number
+        )
+        leave_row = _nurse_accommodation_related_row(
+            leave_by_ref, leave_by_passport, reference_id, passport_number
+        )
+        all_rows.append(_nurse_accommodation_row_from_related(nurse, roster_row, request_row, leave_row))
+
+    filtered_rows = [r for r in all_rows if _nurse_accommodation_matches_filters(r, params)]
+    filtered_rows.sort(key=lambda r: (r.get('last_updated') or '', int(r.get('nurse_id') or 0)), reverse=True)
+    kpis = {
+        'total_records': len(filtered_rows),
+        'active_occupants': sum(1 for r in filtered_rows if r.get('is_active_occupant')),
+        'pending_preference': sum(
+            1 for r in filtered_rows
+            if _nurse_accommodation_open_request_status(r.get('request_status'))
+            or (r.get('preference') and not (r.get('vendor_name') or r.get('facility_name')))
+        ),
+        'vendor_assigned': sum(1 for r in filtered_rows if r.get('has_vendor_assignment')),
+        'transfer_requested': sum(1 for r in filtered_rows if r.get('transfer_requested')),
+        'leaving_notice_submitted': sum(1 for r in filtered_rows if r.get('open_leave_notice')),
+        'own_accommodation': sum(1 for r in filtered_rows if r.get('is_own_accommodation')),
+        'no_update_7_days': sum(1 for r in filtered_rows if int(r.get('no_update_days') or 0) >= 7),
+    }
+    filters = {
+        'vendors': sorted({str(r.get('vendor_name') or '').strip() for r in all_rows if str(r.get('vendor_name') or '').strip()}),
+        'facilities': sorted({str(r.get('facility_name') or '').strip() for r in all_rows if str(r.get('facility_name') or '').strip()}),
+        'statuses': sorted({str(r.get('status') or '').strip() for r in all_rows if str(r.get('status') or '').strip()}),
+        'accommodation_types': sorted({str(r.get('current_accommodation_type') or '').strip() for r in all_rows if str(r.get('current_accommodation_type') or '').strip()}),
+        'preferences': sorted({str(r.get('preference') or '').strip() for r in all_rows if str(r.get('preference') or '').strip()}),
+    }
+    return {'items': filtered_rows, 'kpis': kpis, 'filters': filters}
+
+
+def _nurse_accommodation_detail_payload(db, nurse_id):
+    nurse_row = db.execute("SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [int(nurse_id or 0)]).fetchone()
+    if not nurse_row:
+        return None, {'success': False, 'error': 'Nurse not found.'}
+    nurse = dict(nurse_row)
+    roster_row = _nurse_accommodation_find_roster(db, nurse)
+    request_rows = [dict(r) for r in db.execute(
+        """SELECT * FROM nurse_accommodation_requests
+           WHERE UPPER(TRIM(COALESCE(nurse_reference_id,''))) = UPPER(TRIM(?))
+              OR UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = ?
+           ORDER BY id DESC LIMIT 50""",
+        [nurse.get('reference_id') or '', _nurse_normalize_passport(nurse.get('passport_number') or '')]
+    ).fetchall()]
+    leave_rows = [dict(r) for r in db.execute(
+        """SELECT * FROM nurse_leave_notices
+           WHERE UPPER(TRIM(COALESCE(nurse_reference_id,''))) = UPPER(TRIM(?))
+              OR UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = ?
+           ORDER BY id DESC LIMIT 50""",
+        [nurse.get('reference_id') or '', _nurse_normalize_passport(nurse.get('passport_number') or '')]
+    ).fetchall()]
+    complaint_rows = [dict(r) for r in db.execute(
+        """SELECT complaint_id, COALESCE(category, complaint_category) AS category, subject, priority,
+                  COALESCE(status, complaint_status) AS status, created_at, updated_at
+           FROM nurse_complaints
+           WHERE UPPER(TRIM(COALESCE(nurse_reference_id,''))) = UPPER(TRIM(?))
+              OR UPPER(REPLACE(TRIM(COALESCE(passport_number,'')), ' ', '')) = ?
+           ORDER BY id DESC LIMIT 20""",
+        [nurse.get('reference_id') or '', _nurse_normalize_passport(nurse.get('passport_number') or '')]
+    ).fetchall()]
+    request_row = request_rows[0] if request_rows else None
+    leave_row = leave_rows[0] if leave_rows else None
+    summary_row = _nurse_accommodation_row_from_related(nurse, roster_row, request_row, leave_row)
+    actions = []
+    if roster_row and roster_row['id']:
+        actions = [dict(r) for r in db.execute(
+            """SELECT id, roster_id, actor_username, action_type, old_value, new_value, note, created_at
+               FROM facility_roster_actions
+               WHERE roster_id = ? ORDER BY id DESC LIMIT 100""",
+            [roster_row['id']]
+        ).fetchall()]
+    roster_raw = _row_to_dict(roster_row)
+    roster = _facility_roster_to_dict(roster_row) if roster_row else None
+    if roster:
+        roster['vendor_name'] = str(roster_raw.get('vendor_name') or '').strip()
+        roster['monthly_amount_kwd'] = roster_raw.get('monthly_amount_kwd')
+        roster['expected_shift_date'] = roster_raw.get('expected_shift_date') or ''
+    return {
+        'success': True,
+        'nurse': {
+            'id': int(nurse.get('id') or 0),
+            'reference_id': nurse.get('reference_id') or '',
+            'full_name': nurse.get('full_name') or '',
+            'father_name': nurse.get('father_name') or '',
+            'passport_number': nurse.get('passport_number') or '',
+            'passport_masked': _nurse_accommodation_mask_passport(nurse.get('passport_number') or ''),
+            'civil_id': nurse.get('civil_id') or '',
+            'mobile': nurse.get('mobile_full') or nurse.get('mobile') or '',
+            'whatsapp': nurse.get('whatsapp_full') or nurse.get('mobile_full') or nurse.get('mobile') or '',
+            'email': nurse.get('email') or '',
+            'mton_number': nurse.get('mton_number') or '',
+            'gender': nurse.get('gender') or '',
+            'batch_number': nurse.get('batch_number') or '',
+            'hospital': nurse.get('hospital') or '',
+        },
+        'summary': summary_row,
+        'roster': roster,
+        'actions': actions,
+        'accommodation_requests': request_rows,
+        'leave_notices': leave_rows,
+        'complaints': complaint_rows,
+    }, None
+
+
+def _nurse_accommodation_confirmation_status(status, existing=''):
+    status = str(status or '').strip()
+    if status == 'Confirmed Staying':
+        return 'Stay Confirmed'
+    if status in {'Leaving Notice Submitted', 'Intends to Leave'}:
+        return 'Intends to Leave'
+    if status in {'Left Facility', 'Private Self Arranged', 'MOH Arranged', 'MOH Provided Hotel - Arrival Stay', 'Closed / Archived', 'Inactive'}:
+        return 'Not Applicable'
+    return str(existing or '').strip() or 'Pending Nurse Confirmation'
+
+
+def _nurse_accommodation_arrangement_from_values(status, vendor_name, facility_name, existing=''):
+    status = str(status or '').strip()
+    vendor_name = str(vendor_name or '').strip()
+    facility_name = str(facility_name or '').strip()
+    if status == 'Private Self Arranged':
+        return 'Private (Self Arranged)'
+    if status in {'MOH Arranged', 'MOH Provided Hotel - Arrival Stay'}:
+        return status
+    if vendor_name or facility_name:
+        return 'Embassy Contracted / Arranged'
+    return _nurse_accommodation_own_arrangement_label(existing or '')
+
+
+def _nurse_accommodation_sync_registration(db, nurse_row, roster_payload):
+    nurse = _row_to_dict(nurse_row)
+    roster_payload = roster_payload or {}
+    nurse_id = int(nurse.get('id') or 0)
+    if nurse_id <= 0:
+        return
+    cols = _table_columns(db, 'nurse_registrations')
+    arrangement = (
+        _nurse_accommodation_arrangement_from_values(
+            roster_payload.get('current_status'),
+            roster_payload.get('vendor_name'),
+            roster_payload.get('facility_name'),
+            roster_payload.get('current_arrangement') or nurse.get('current_arrangement') or nurse.get('current_accommodation') or nurse.get('accommodation_status') or ''
+        )
+        or nurse.get('current_arrangement')
+        or nurse.get('current_accommodation')
+        or nurse.get('accommodation_status')
+        or ''
+    )
+    values = {
+        'vendor_name': str(roster_payload.get('vendor_name') or '').strip(),
+        'current_hostel': str(roster_payload.get('facility_name') or '').strip(),
+        'facility_area': str(roster_payload.get('facility_area') or roster_payload.get('area') or '').strip(),
+        'room_number': str(roster_payload.get('room_number') or '').strip(),
+        'date_shifted_to_facility': str(roster_payload.get('date_shifted_to_facility') or '').strip(),
+        'contract_start_date': str(roster_payload.get('contract_start_date') or '').strip(),
+        'contract_end_date': str(roster_payload.get('contract_end_date') or '').strip(),
+        'notice_period_start_date': str(roster_payload.get('notice_period_start_date') or '').strip(),
+        'current_accommodation': arrangement,
+        'current_arrangement': arrangement,
+        'accommodation_status': arrangement,
+        'current_status': str(roster_payload.get('current_status') or '').strip() or nurse.get('current_status') or '',
+        'facility_status': str(roster_payload.get('current_status') or '').strip() or nurse.get('facility_status') or '',
+    }
+    assignments, vals = [], []
+    for col, value in values.items():
+        if col in cols:
+            assignments.append(f"{col} = ?")
+            vals.append(value)
+    if 'updated_at' in cols:
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+    if assignments:
+        vals.append(nurse_id)
+        db.execute(f"UPDATE nurse_registrations SET {', '.join(assignments)} WHERE id = ?", vals)
+
+
+def api_admin_nurses_accommodation_list(params, user):
+    if not _nurse_accommodation_feature_enabled():
+        return _nurse_accommodation_feature_blocked_response()
+    if not nurse_accommodation_user_can_manage(user):
+        return _nurse_accommodation_blocked_response()
+    db = get_db()
+    try:
+        payload = _nurse_accommodation_list_payload(db, params or {})
+        return {'success': True, **payload}
+    except Exception as exc:
+        print(f"[NurseAccommodation] list failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Accommodation roster could not be loaded.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurses_accommodation_detail(params, user):
+    if not _nurse_accommodation_feature_enabled():
+        return _nurse_accommodation_feature_blocked_response()
+    if not nurse_accommodation_user_can_manage(user):
+        return _nurse_accommodation_blocked_response()
+    nurse_id = _nurse_int((params or {}).get('nurse_id'), 0)
+    if nurse_id <= 0:
+        return {'success': False, 'error': 'nurse_id is required.'}
+    db = get_db()
+    try:
+        payload, err = _nurse_accommodation_detail_payload(db, nurse_id)
+        return payload if not err else err
+    except Exception as exc:
+        print(f"[NurseAccommodation] detail failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Accommodation detail could not be loaded.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurses_accommodation_update(data, user):
+    if not _nurse_accommodation_feature_enabled():
+        return _nurse_accommodation_feature_blocked_response()
+    if not nurse_accommodation_user_can_manage(user):
+        return _nurse_accommodation_blocked_response()
+    nurse_id = _nurse_int((data or {}).get('nurse_id'), 0)
+    roster_id = _nurse_int((data or {}).get('roster_id'), 0)
+    if nurse_id <= 0:
+        return {'success': False, 'error': 'nurse_id is required.'}
+    db = get_db()
+    try:
+        nurse_row = db.execute("SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [nurse_id]).fetchone()
+        if not nurse_row:
+            return {'success': False, 'error': 'Nurse not found.'}
+        nurse = dict(nurse_row)
+        roster_row = None
+        if roster_id > 0:
+            roster_row = db.execute("SELECT * FROM facility_roster WHERE id = ? LIMIT 1", [roster_id]).fetchone()
+            if not roster_row:
+                return {'success': False, 'error': 'Roster record not found.'}
+        if not roster_row:
+            roster_row = _nurse_accommodation_find_roster(db, nurse)
+
+        roster_existing = _row_to_dict(roster_row)
+        status_in = _nurse_accommodation_clean_text(
+            (data or {}).get('status') or (data or {}).get('current_status'),
+            120
+        )
+        status = status_in or str(roster_existing.get('current_status') or '').strip() or 'Assigned to Facility'
+        if status_in and status_in in FACILITY_ROSTER_STATUSES:
+            status = status_in
+        vendor_name = _nurse_accommodation_clean_text((data or {}).get('vendor_name'), 220)
+        facility_name = _nurse_accommodation_clean_text((data or {}).get('facility_name'), 220)
+        room_number = _nurse_accommodation_clean_text((data or {}).get('room_no') or (data or {}).get('room_number'), 80)
+        bed_number = _nurse_accommodation_clean_text((data or {}).get('bed_no') or (data or {}).get('bed_number'), 80)
+        notes = _nurse_accommodation_clean_text((data or {}).get('notes') or (data or {}).get('remarks'), 3000)
+        expected_shift_date = _nurse_accommodation_clean_text((data or {}).get('expected_shift_date'), 40)
+        contract_start_date = _nurse_accommodation_clean_text((data or {}).get('contract_start_date'), 40)
+        contract_end_date = _nurse_accommodation_clean_text((data or {}).get('contract_end_date'), 40)
+        monthly_rate_raw = str((data or {}).get('monthly_rate') or (data or {}).get('monthly_amount_kwd') or '').strip()
+        try:
+            monthly_rate = float(monthly_rate_raw) if monthly_rate_raw else None
+        except Exception:
+            return {'success': False, 'error': 'monthly_rate must be a valid number.'}
+        current_arrangement = _nurse_accommodation_arrangement_from_values(
+            status,
+            vendor_name,
+            facility_name,
+            roster_existing.get('current_arrangement')
+            or nurse.get('current_arrangement')
+            or nurse.get('current_accommodation')
+            or nurse.get('accommodation_status')
+            or ''
+        )
+        confirmation_status = _nurse_accommodation_confirmation_status(
+            status,
+            roster_existing.get('confirmation_status') or nurse.get('stay_confirmation_status') or ''
+        )
+        active_value = 0 if status in {
+            'Left Facility', 'Private Self Arranged', 'MOH Arranged',
+            'MOH Provided Hotel - Arrival Stay', 'Closed / Archived', 'Inactive'
+        } else 1
+        roster_cols = _table_columns(db, 'facility_roster')
+        roster_values = {
+            'nurse_registration_id': nurse_id,
+            'nurse_reference': nurse.get('reference_id') or '',
+            'full_name': nurse.get('full_name') or '',
+            'passport_number': nurse.get('passport_number') or '',
+            'civil_id': nurse.get('civil_id') or '',
+            'phone': nurse.get('mobile_full') or nurse.get('mobile') or '',
+            'mobile_full': nurse.get('mobile_full') or nurse.get('mobile') or '',
+            'whatsapp_full': nurse.get('whatsapp_full') or nurse.get('mobile_full') or nurse.get('mobile') or '',
+            'email': nurse.get('email') or '',
+            'workplace': nurse.get('hospital') or '',
+            'vendor_name': vendor_name,
+            'facility_name': facility_name,
+            'room_number': room_number,
+            'bed_number': bed_number,
+            'monthly_amount_kwd': monthly_rate,
+            'contract_start_date': contract_start_date,
+            'contract_end_date': contract_end_date,
+            'expected_shift_date': expected_shift_date,
+            'current_status': status,
+            'current_arrangement': current_arrangement,
+            'confirmation_status': confirmation_status,
+            'active': active_value,
+            'remarks': notes,
+        }
+        if roster_row:
+            updates, vals = [], []
+            before = dict(roster_existing)
+            for col, value in roster_values.items():
+                if col in roster_cols:
+                    updates.append(f"{col} = ?")
+                    vals.append(value)
+            if 'updated_at' in roster_cols:
+                updates.append("updated_at = CURRENT_TIMESTAMP")
+            if not updates:
+                return {'success': False, 'error': 'facility_roster schema is missing expected columns.'}
+            vals.append(int(roster_row['id']))
+            db.execute(f"UPDATE facility_roster SET {', '.join(updates)} WHERE id = ?", vals)
+            action_note = json.dumps({
+                'vendor_name': vendor_name,
+                'facility_name': facility_name,
+                'room_number': room_number,
+                'bed_number': bed_number,
+                'monthly_rate': monthly_rate,
+                'contract_start_date': contract_start_date,
+                'contract_end_date': contract_end_date,
+                'expected_shift_date': expected_shift_date,
+                'notes': notes,
+            })
+            _facility_insert_action(
+                db,
+                int(roster_row['id']),
+                (user or {}).get('user') or 'admin',
+                'nurse_accommodation_admin_update',
+                before.get('current_status') or '',
+                status,
+                action_note,
+                False,
+            )
+            saved_roster_id = int(roster_row['id'])
+        else:
+            insert_values = {
+                'roster_reference': _next_facility_roster_reference(db),
+                **roster_values,
+            }
+            cols = [col for col in insert_values.keys() if col in roster_cols]
+            cur = db.execute(
+                f"INSERT INTO facility_roster ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})",
+                [insert_values[col] for col in cols]
+            )
+            saved_roster_id = int(cur.lastrowid)
+            _facility_insert_action(
+                db,
+                saved_roster_id,
+                (user or {}).get('user') or 'admin',
+                'nurse_accommodation_admin_create',
+                '',
+                status,
+                json.dumps({
+                    'vendor_name': vendor_name,
+                    'facility_name': facility_name,
+                    'room_number': room_number,
+                    'bed_number': bed_number,
+                    'monthly_rate': monthly_rate,
+                    'contract_start_date': contract_start_date,
+                    'contract_end_date': contract_end_date,
+                    'expected_shift_date': expected_shift_date,
+                    'notes': notes,
+                }),
+                False,
+            )
+        _nurse_accommodation_sync_registration(db, nurse, {
+            **roster_values,
+            'area': roster_existing.get('area') or '',
+            'facility_area': roster_existing.get('facility_area') or nurse.get('facility_area') or '',
+        })
+        db.commit()
+        payload, err = _nurse_accommodation_detail_payload(db, nurse_id)
+        if err:
+            return err
+        payload['message'] = 'Accommodation record updated.'
+        payload['roster_id'] = saved_roster_id
+        return payload
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[NurseAccommodation] update failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Accommodation update could not be saved.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurses_accommodation_export_csv(params, user):
+    if not _nurse_accommodation_feature_enabled():
+        return None, None, _nurse_accommodation_feature_blocked_response()
+    if not nurse_accommodation_user_can_manage(user):
+        return None, None, _nurse_accommodation_blocked_response()
+    db = get_db()
+    try:
+        payload = _nurse_accommodation_list_payload(db, params or {})
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow([
+            'Name', 'MTON', 'Passport', 'Civil ID', 'Mobile', 'WhatsApp', 'Batch',
+            'Vendor', 'Facility', 'Room', 'Bed', 'Contract Start', 'Contract End',
+            'Expected Shift Date', 'Status', 'Notes',
+        ])
+        for row in payload.get('items') or []:
+            writer.writerow([
+                row.get('name') or '',
+                row.get('mton_number') or '',
+                row.get('passport_number') or '',
+                row.get('civil_id') or '',
+                row.get('mobile') or '',
+                row.get('whatsapp') or '',
+                row.get('batch') or '',
+                row.get('vendor_name') or '',
+                row.get('facility_name') or '',
+                row.get('room_no') or '',
+                row.get('bed_no') or '',
+                row.get('contract_start_date') or '',
+                row.get('contract_end_date') or '',
+                row.get('expected_shift_date') or '',
+                row.get('status') or '',
+                (row.get('notes') or '').replace('\n', ' ').strip(),
+            ])
+        filename = f"nurse_accommodation_roster_{datetime.now().strftime('%Y%m%d')}.csv"
+        return out.getvalue().encode('utf-8-sig'), filename, None
+    except Exception as exc:
+        print(f"[NurseAccommodation] export failed: {exc}", flush=True)
+        return None, None, {'success': False, 'error': 'Accommodation export could not be generated.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurses_accommodation_request_update_message(data, user):
+    if not _nurse_accommodation_feature_enabled():
+        return _nurse_accommodation_feature_blocked_response()
+    if not nurse_accommodation_user_can_manage(user):
+        return _nurse_accommodation_blocked_response()
+    nurse_id = _nurse_int((data or {}).get('nurse_id'), 0)
+    message_type = _nurse_accommodation_clean_text((data or {}).get('message_type'), 40).upper()
+    if nurse_id <= 0:
+        return {'success': False, 'error': 'nurse_id is required.'}
+    if message_type not in {'REQUEST_PREFERENCE', 'SHIFT_NOTICE', 'TRANSFER_OPTION'}:
+        return {'success': False, 'error': 'Invalid message_type.'}
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id, full_name FROM nurse_registrations WHERE id = ? LIMIT 1",
+            [nurse_id]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Nurse not found.'}
+        name = str(row['full_name'] or '').strip() or 'Nurse'
+        portal_url = 'https://portal.cwakuwait.com/nurses/login'
+        if message_type == 'REQUEST_PREFERENCE':
+            message = (
+                f"Dear {name}, please update your accommodation status/preference in the Embassy nurse portal "
+                f"so the Nurses Welfare Desk can coordinate your hostel or own-accommodation arrangements. "
+                f"Login: {portal_url}"
+            )
+        elif message_type == 'SHIFT_NOTICE':
+            message = (
+                f"Dear {name}, your accommodation placement is being reviewed. If you are assigned to a vendor hostel, "
+                f"shifting will happen only after Embassy/vendor confirmation. Please keep your portal updated. "
+                "Embassy Community Welfare Wing."
+            )
+        else:
+            message = (
+                f"Dear {name}, if you are facing difficulty with your current accommodation or wish to shift to own "
+                "accommodation/another vendor, please submit a Leaving/Transfer Notice in your nurse portal."
+            )
+        return {'success': True, 'message': message}
+    except Exception as exc:
+        print(f"[NurseAccommodation] request-update message failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Could not generate accommodation follow-up message.'}
+    finally:
+        db.close()
+
+
 def _gl_fetch_application(db, app_id):
     return db.execute(
         """SELECT a.*,
@@ -10455,7 +11291,12 @@ def api_admin_nurses_summary(user=None):
             'total_aja_care_residents': facility_totals.get('total_aja_care_residents', 0),
             'vendor_name': vendor,
         }
-        return {'success': True, 'totals': totals}
+        return {
+            'success': True,
+            'totals': totals,
+            'user_role': (user or {}).get('role') or '',
+            'can_manage_nurse_accommodation': nurse_accommodation_user_can_manage(user),
+        }
     finally:
         db.close()
 
@@ -29131,6 +29972,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body_csv)
             return
+        elif path == '/api/admin/nurses/accommodation/list':
+            user = self.get_user()
+            if not user:
+                self.send_json(_nurse_accommodation_blocked_response(), 403)
+                return
+            res = api_admin_nurses_accommodation_list(params, user)
+            err = (res.get('error') or '').lower()
+            status = 200 if res.get('success') else (403 if 'permission' in err else (503 if 'temporarily unavailable' in err else 400))
+            self.send_json(res, status)
+            return
+        elif path == '/api/admin/nurses/accommodation/detail':
+            user = self.get_user()
+            if not user:
+                self.send_json(_nurse_accommodation_blocked_response(), 403)
+                return
+            res = api_admin_nurses_accommodation_detail(params, user)
+            err = (res.get('error') or '').lower()
+            status = 200 if res.get('success') else (403 if 'permission' in err else (503 if 'temporarily unavailable' in err else (404 if 'not found' in err else 400)))
+            self.send_json(res, status)
+            return
+        elif path == '/api/admin/nurses/accommodation/export.csv':
+            user = self.get_user()
+            if not user:
+                self.send_json(_nurse_accommodation_blocked_response(), 403)
+                return
+            body_csv, fname, err = api_admin_nurses_accommodation_export_csv(params, user)
+            if err:
+                msg = (err.get('error') or '').lower()
+                self.send_json(err, 403 if 'permission' in msg else (503 if 'temporarily unavailable' in msg else 400))
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', str(len(body_csv)))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body_csv)
+            return
         elif path == '/api/admin/nurses/leave-notices':
             user = self.require_auth()
             if not user: return
@@ -31594,6 +32473,34 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_admin_nurse_onboarding_request_update_message(data, user)
             status = 200 if result.get('success') else (403 if 'permission' in (result.get('error') or '').lower() else 400)
+            self.send_json(result, status)
+            return
+        elif path == '/api/admin/nurses/accommodation/update':
+            user = self.get_user()
+            if not user:
+                self.send_json(_nurse_accommodation_blocked_response(), 403)
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_nurses_accommodation_update(data, user)
+            err = (result.get('error') or '').lower()
+            status = 200 if result.get('success') else (403 if 'permission' in err else (503 if 'temporarily unavailable' in err else (404 if 'not found' in err else 400)))
+            self.send_json(result, status)
+            return
+        elif path == '/api/admin/nurses/accommodation/request-update-message':
+            user = self.get_user()
+            if not user:
+                self.send_json(_nurse_accommodation_blocked_response(), 403)
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_nurses_accommodation_request_update_message(data, user)
+            err = (result.get('error') or '').lower()
+            status = 200 if result.get('success') else (403 if 'permission' in err else (503 if 'temporarily unavailable' in err else (404 if 'not found' in err else 400)))
             self.send_json(result, status)
             return
         elif path == '/api/nurses/mton/save':

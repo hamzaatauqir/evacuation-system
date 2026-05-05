@@ -39,6 +39,13 @@ type SummaryTotals = {
   leave_notices?: number;
   current_accommodation_related?: number;
 };
+type SummaryResponse = {
+  success?: boolean;
+  totals?: SummaryTotals;
+  error?: string;
+  user_role?: string;
+  can_manage_nurse_accommodation?: boolean;
+};
 
 function cap(v: string = "") {
   return v ? v.charAt(0).toUpperCase() + v.slice(1) : "";
@@ -69,22 +76,25 @@ export function AdminNursesPage() {
   const [rows, setRows] = useState<NurseComplaint[]>([]);
   const [totals, setTotals] = useState<SummaryTotals>({});
   const [error, setError] = useState("");
+  const [canManageAccommodation, setCanManageAccommodation] = useState(true);
 
   useEffect(() => {
     let live = true;
     (async () => {
       try {
         const [s, c] = await Promise.all([
-          api.get<{ success?: boolean; totals?: SummaryTotals; error?: string }>("/api/admin/nurses/summary"),
+          api.get<SummaryResponse>("/api/admin/nurses/summary"),
           api.get<{ success?: boolean; items?: NurseComplaint[]; error?: string }>("/api/admin/nurses/complaints"),
         ]);
         if (!live) return;
         setTotals(s.totals || {});
+        setCanManageAccommodation(Boolean(s.can_manage_nurse_accommodation ?? true));
         setRows(c.items || []);
         setError(s.error || c.error || "");
       } catch (e) {
         if (!live) return;
         setRows([]);
+        setCanManageAccommodation(true);
         setError((e as Error).message || "Failed to load admin nurses data.");
       }
     })();
@@ -172,6 +182,15 @@ export function AdminNursesPage() {
             >
               MOH Onboarding Tracker
             </Btn>
+            {canManageAccommodation ? (
+              <Btn
+                variant="light"
+                size="sm"
+                onClick={() => navigate("/admin/nurses/accommodation")}
+              >
+                Accommodation / Hostel Roster
+              </Btn>
+            ) : null}
             <Btn variant="light" size="sm" icon="download">
               Export
             </Btn>

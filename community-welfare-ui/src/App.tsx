@@ -19,6 +19,7 @@ import { AdminNursesPage } from "./pages/AdminNursesPage";
 import { AdminNursePendingAccountsPage } from "./pages/AdminNursePendingAccountsPage";
 import { AdminNurseArrivalBatchesPage } from "./pages/AdminNurseArrivalBatchesPage";
 import { AdminNurseOnboardingPage } from "./pages/AdminNurseOnboardingPage";
+import { AdminNursesAccommodationPage } from "./pages/AdminNursesAccommodationPage";
 import { AdminLegalCasesPage } from "./pages/AdminLegalCasesPage";
 import { AdminDeathCasesPage } from "./pages/AdminDeathCasesPage";
 import { AdminWelfareCasesPage } from "./pages/AdminWelfareCasesPage";
@@ -47,6 +48,7 @@ export default function App() {
       <Route path="/admin/nurses/pending-accounts" element={<AdminNursePendingAccountsPage />} />
       <Route path="/admin/nurses/arrival-batches" element={<AdminNurseArrivalBatchesPage />} />
       <Route path="/admin/nurses/onboarding" element={<AdminNurseOnboardingPage />} />
+      <Route path="/admin/nurses/accommodation" element={<AdminNursesAccommodationPage />} />
       <Route path="/admin/legal-cases" element={<AdminLegalCasesPage />} />
       <Route path="/admin/death-cases" element={<AdminDeathCasesPage />} />
       <Route path="/admin/welfare-cases" element={<AdminWelfareCasesPage />} />
