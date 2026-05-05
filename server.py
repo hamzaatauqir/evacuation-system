@@ -47,6 +47,8 @@ PORT = int(os.environ.get('PORT', 8080))
 # preserved — set back to True to re-enable the full workflow.
 # ═══════════════════════════════════════════════════════════════
 ROUTE_REVIEW_ENABLED = False
+FEATURE_GRADING_LETTER = True
+GRADING_LETTER_AVAILABLE = True
 
 # Use /data/ for persistent Render Disk, fallback to local directory for development
 RENDER_DISK = Path('/data')
@@ -212,7 +214,188 @@ def _log_rss(tag=""):
         # If called before _mem_log is defined during import, fall back silently.
         pass
 
+def _init_grading_letter_db(db):
+    """Create the v1 Nurse Grading Letter schema. Isolated under gl_* tables."""
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS gl_applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ref_no TEXT UNIQUE,
+        nurse_id INTEGER,
+        qualification_code TEXT,
+        qualification_other TEXT DEFAULT '',
+        degree_title TEXT DEFAULT '',
+        student_no TEXT DEFAULT '',
+        institute TEXT DEFAULT '',
+        university TEXT DEFAULT '',
+        year_of_passing INTEGER,
+        mode TEXT,
+        total_marks REAL,
+        obtained_marks REAL,
+        entered_percentage REAL,
+        entered_gpa REAL,
+        computed_percentage REAL,
+        final_percentage REAL,
+        final_grade_label TEXT DEFAULT '',
+        override_reason TEXT DEFAULT '',
+        relation_override TEXT DEFAULT '',
+        scale_version_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'SUBMITTED',
+        correction_notes TEXT DEFAULT '',
+        internal_notes TEXT DEFAULT '',
+        letter_path TEXT DEFAULT '',
+        letter_pdf_path TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        submitted_at TIMESTAMP,
+        approved_at TIMESTAMP,
+        generated_at TIMESTAMP,
+        issued_at TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS gl_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER,
+        actor_role TEXT,
+        actor_id TEXT,
+        event_type TEXT,
+        field_name TEXT,
+        old_value TEXT,
+        new_value TEXT,
+        note TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS gl_grading_scale (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS gl_grading_scale_band (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scale_id INTEGER,
+        min_pct REAL,
+        max_pct REAL,
+        label TEXT
+    );
+    CREATE TABLE IF NOT EXISTS gl_gpa_conversion (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        is_active INTEGER DEFAULT 1,
+        method TEXT DEFAULT 'LINEAR',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS gl_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+    CREATE TABLE IF NOT EXISTS gl_ref_counter (
+        year INTEGER PRIMARY KEY,
+        next_seq INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_gl_app_nurse_id ON gl_applications(nurse_id);
+    CREATE INDEX IF NOT EXISTS idx_gl_app_status ON gl_applications(status);
+    CREATE INDEX IF NOT EXISTS idx_gl_app_ref_no ON gl_applications(ref_no);
+    CREATE INDEX IF NOT EXISTS idx_gl_app_submitted_at ON gl_applications(submitted_at);
+    CREATE INDEX IF NOT EXISTS idx_gl_audit_application ON gl_audit(application_id);
+    """)
+    for table_name, cols in {
+        'gl_applications': [
+            ('ref_no', 'TEXT UNIQUE'),
+            ('nurse_id', 'INTEGER'),
+            ('qualification_code', 'TEXT'),
+            ('qualification_other', "TEXT DEFAULT ''"),
+            ('degree_title', "TEXT DEFAULT ''"),
+            ('student_no', "TEXT DEFAULT ''"),
+            ('institute', "TEXT DEFAULT ''"),
+            ('university', "TEXT DEFAULT ''"),
+            ('year_of_passing', 'INTEGER'),
+            ('mode', 'TEXT'),
+            ('total_marks', 'REAL'),
+            ('obtained_marks', 'REAL'),
+            ('entered_percentage', 'REAL'),
+            ('entered_gpa', 'REAL'),
+            ('computed_percentage', 'REAL'),
+            ('final_percentage', 'REAL'),
+            ('final_grade_label', "TEXT DEFAULT ''"),
+            ('override_reason', "TEXT DEFAULT ''"),
+            ('relation_override', "TEXT DEFAULT ''"),
+            ('scale_version_id', 'INTEGER'),
+            ('status', "TEXT NOT NULL DEFAULT 'SUBMITTED'"),
+            ('correction_notes', "TEXT DEFAULT ''"),
+            ('internal_notes', "TEXT DEFAULT ''"),
+            ('letter_path', "TEXT DEFAULT ''"),
+            ('letter_pdf_path', "TEXT DEFAULT ''"),
+            ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+            ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+            ('submitted_at', 'TIMESTAMP'),
+            ('approved_at', 'TIMESTAMP'),
+            ('generated_at', 'TIMESTAMP'),
+            ('issued_at', 'TIMESTAMP'),
+        ],
+        'gl_audit': [
+            ('application_id', 'INTEGER'),
+            ('actor_role', 'TEXT'),
+            ('actor_id', 'TEXT'),
+            ('event_type', 'TEXT'),
+            ('field_name', 'TEXT'),
+            ('old_value', 'TEXT'),
+            ('new_value', 'TEXT'),
+            ('note', 'TEXT'),
+            ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ],
+    }.items():
+        for col, coltype in cols:
+            try:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
+                db.commit()
+            except sqlite3.OperationalError:
+                pass
+    active_scale = db.execute(
+        "SELECT id FROM gl_grading_scale WHERE is_active = 1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    if not active_scale:
+        cur = db.execute(
+            "INSERT INTO gl_grading_scale (name, is_active, created_by) VALUES (?, 1, ?)",
+            ['Embassy Default Scale v1', 'system']
+        )
+        scale_id = cur.lastrowid
+        db.executemany(
+            "INSERT INTO gl_grading_scale_band (scale_id, min_pct, max_pct, label) VALUES (?, ?, ?, ?)",
+            [
+                (scale_id, 80, 100, 'Excellent'),
+                (scale_id, 70, 79.99, 'Very Good'),
+                (scale_id, 60, 69.99, 'Good'),
+                (scale_id, 50, 59.99, 'Pass'),
+                (scale_id, 0, 49.99, 'Fail'),
+            ]
+        )
+    active_gpa = db.execute(
+        "SELECT id FROM gl_gpa_conversion WHERE is_active = 1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    if not active_gpa:
+        db.execute(
+            "INSERT INTO gl_gpa_conversion (name, is_active, method, created_by) VALUES (?, 1, 'LINEAR', ?)",
+            ['Embassy Linear GPA 4.00', 'system']
+        )
+    for key, value in [
+        ('rounding_dp', '2'),
+        ('allow_parallel_applications', '0'),
+        ('letter_template_path', 'letter_templates/grading_letter_v1.pdf'),
+        ('ref_no_pattern', 'GL-{year}-{seq:06d}'),
+    ]:
+        db.execute("INSERT OR IGNORE INTO gl_settings (key, value) VALUES (?, ?)", [key, value])
+    db.execute(
+        "UPDATE gl_settings SET value = ? WHERE key = 'letter_template_path' AND LOWER(COALESCE(value,'')) LIKE '%.docx'",
+        ['letter_templates/grading_letter_v1.pdf']
+    )
+    base_dir = Path(__file__).resolve().parent
+    (base_dir / 'letter_templates').mkdir(exist_ok=True)
+    (base_dir / 'generated_letters').mkdir(exist_ok=True)
+    db.commit()
+
 def init_db():
+    global GRADING_LETTER_AVAILABLE
     db = get_db()
     db.executescript("""
     CREATE TABLE IF NOT EXISTS users (
@@ -2196,6 +2379,18 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_email_verification_token ON {table_name}(email_verification_token)")
+
+    if FEATURE_GRADING_LETTER:
+        try:
+            _init_grading_letter_db(db)
+            GRADING_LETTER_AVAILABLE = True
+        except Exception as exc:
+            GRADING_LETTER_AVAILABLE = False
+            print(f"[GradingLetter] migration failed: {exc}", flush=True)
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
 
     db.commit()
     db.close()
@@ -4472,12 +4667,15 @@ def can_access_admin_route(role, path):
         allowed_pages = {
             '/admin/community-welfare',
             '/admin/nurses',
+            '/admin/gl',
             '/admin/welfare-cases',
             '/admin/my-cases',
             '/admin/aja-reconciliation',
             '/staff/my-cases',
         }
         if path in allowed_pages:
+            return True
+        if path.startswith('/admin/gl/'):
             return True
         return can_access_api_route(role, path) if path.startswith('/api/') else False
     if _staff_base_path_allowed(path):
@@ -4510,6 +4708,7 @@ def can_access_api_route(role, path):
         allowed_prefixes = (
             '/api/admin/community-welfare/',
             '/api/admin/nurses/',
+            '/api/admin/gl/',
             '/api/admin/welfare-cases',
             '/api/admin/welfare-users',
             '/api/admin/notification-counts',
@@ -7742,6 +7941,916 @@ def api_nurse_leave_notice_submit(data):
             tracking_link='https://cwakuwait.com/nurses/login'
         )
         return {'success': True}
+    finally:
+        db.close()
+
+
+GL_QUALIFICATIONS = {
+    'BSN_4Y': 'BSN Nursing 4 Years',
+    'POST_RN_BSN': 'Post RN BSN',
+    'GENERAL_NURSING_DIPLOMA': 'General Nursing Diploma',
+    'NURSING_DIPLOMA': 'Nursing Diploma',
+    'MIDWIFERY_ADDITIONAL': 'Midwifery / Additional Course',
+    'OTHER': 'Other',
+}
+GL_STATUSES = {
+    'SUBMITTED', 'UNDER_REVIEW', 'CORRECTION_REQUIRED', 'APPROVED',
+    'LETTER_GENERATED', 'ISSUED', 'REJECTED', 'CANCELLED'
+}
+GL_ACTIVE_STATUSES = {'SUBMITTED', 'UNDER_REVIEW', 'CORRECTION_REQUIRED', 'APPROVED', 'LETTER_GENERATED'}
+GL_TERMINAL_STATUSES = {'ISSUED', 'REJECTED', 'CANCELLED'}
+GL_GRADE_LABELS = {'Excellent', 'Very Good', 'Good', 'Pass', 'Fail'}
+
+
+def _gl_feature_enabled():
+    return bool(FEATURE_GRADING_LETTER and GRADING_LETTER_AVAILABLE)
+
+
+def _gl_clean_text(value, max_len=300):
+    text = str(value or '').strip()
+    if max_len and len(text) > max_len:
+        text = text[:max_len].strip()
+    return text
+
+
+def _gl_to_float(value, field_label):
+    if value in (None, ''):
+        return None
+    try:
+        return float(str(value).replace(',', '').strip())
+    except Exception:
+        raise ValueError(f'{field_label} must be a valid number.')
+
+
+def _gl_round(value, dp=2):
+    q = Decimal('1.' + ('0' * int(dp)))
+    return float(Decimal(str(value)).quantize(q, rounding=ROUND_HALF_UP))
+
+
+def _gl_setting(db, key, default=''):
+    row = db.execute("SELECT value FROM gl_settings WHERE key = ?", [key]).fetchone()
+    return (row['value'] if row else default)
+
+
+def _gl_rounding_dp(db):
+    try:
+        return max(0, min(4, int(_gl_setting(db, 'rounding_dp', '2'))))
+    except Exception:
+        return 2
+
+
+def _gl_bool_setting(db, key, default=False):
+    value = str(_gl_setting(db, key, '1' if default else '0')).strip().lower()
+    return value in ('1', 'true', 'yes', 'on')
+
+
+def gl_compute_percentage(mode, total_marks=None, obtained_marks=None, entered_percentage=None, entered_gpa=None, rounding_dp=2):
+    mode = (mode or '').strip().upper()
+    if mode == 'MARKS':
+        total = _gl_to_float(total_marks, 'Total marks')
+        obtained = _gl_to_float(obtained_marks, 'Obtained marks')
+        if total is None or total <= 0:
+            raise ValueError('Total marks must be greater than 0.')
+        if obtained is None or obtained < 0:
+            raise ValueError('Obtained marks must be 0 or greater.')
+        if obtained > total:
+            raise ValueError('Obtained marks cannot be greater than total marks.')
+        return _gl_round((obtained / total) * 100, rounding_dp)
+    if mode == 'PERCENT':
+        pct = _gl_to_float(entered_percentage, 'Percentage')
+        if pct is None or pct < 0 or pct > 100:
+            raise ValueError('Percentage must be between 0 and 100.')
+        return _gl_round(pct, rounding_dp)
+    if mode == 'GPA':
+        gpa = _gl_to_float(entered_gpa, 'GPA obtained')
+        if gpa is None or gpa < 0 or gpa > 4.0:
+            raise ValueError('GPA obtained must be between 0 and 4.00.')
+        return _gl_round((gpa / 4.0) * 100, rounding_dp)
+    raise ValueError('Please select a valid grading mode.')
+
+
+def _gl_active_scale_id(db):
+    row = db.execute("SELECT id FROM gl_grading_scale WHERE is_active = 1 ORDER BY id LIMIT 1").fetchone()
+    if row:
+        return int(row['id'])
+    _init_grading_letter_db(db)
+    row = db.execute("SELECT id FROM gl_grading_scale WHERE is_active = 1 ORDER BY id LIMIT 1").fetchone()
+    return int(row['id']) if row else None
+
+
+def gl_lookup_grade(percentage, db=None, scale_id=None):
+    close_db = False
+    if db is None:
+        db = get_db()
+        close_db = True
+    try:
+        pct = _gl_to_float(percentage, 'Percentage')
+        if pct is None or pct < 0 or pct > 100:
+            raise ValueError('Percentage must be between 0 and 100.')
+        sid = scale_id or _gl_active_scale_id(db)
+        band = db.execute(
+            """SELECT label FROM gl_grading_scale_band
+               WHERE scale_id = ? AND ? >= min_pct AND ? <= max_pct
+               ORDER BY min_pct DESC LIMIT 1""",
+            [sid, pct, pct]
+        ).fetchone()
+        return (band['label'] if band else 'Fail')
+    finally:
+        if close_db:
+            db.close()
+
+
+def _gl_next_ref_no(db, year=None):
+    year = int(year or datetime.now().year)
+    db.execute("INSERT OR IGNORE INTO gl_ref_counter (year, next_seq) VALUES (?, 1)", [year])
+    row = db.execute("SELECT next_seq FROM gl_ref_counter WHERE year = ?", [year]).fetchone()
+    seq = int(row['next_seq'] or 1)
+    db.execute("UPDATE gl_ref_counter SET next_seq = ? WHERE year = ?", [seq + 1, year])
+    return f'GL-{year}-{seq:06d}'
+
+
+def _gl_user_identity_text(user):
+    if not user:
+        return ''
+    parts = [user.get('user', ''), user.get('username', ''), user.get('name', ''), user.get('role', '')]
+    username = (user.get('user') or user.get('username') or '').strip()
+    if username:
+        try:
+            db = get_db()
+            try:
+                row = db.execute("SELECT username, full_name, role FROM users WHERE username = ? LIMIT 1", [username]).fetchone()
+                if row:
+                    parts.extend([row['username'] or '', row['full_name'] or '', row['role'] or ''])
+            finally:
+                db.close()
+        except Exception:
+            pass
+    return ' '.join(str(p or '') for p in parts).strip().lower()
+
+
+def gl_user_can_manage(user):
+    if not user:
+        return False
+    role = (user.get('role') or '').strip().lower()
+    ident = _gl_user_identity_text(user)
+    if role == 'admin':
+        return True
+    if 'awais' in ident:
+        return True
+    if role in {'nurses_desk', 'nurse_desk', 'nurses_welfare_desk', 'nurse_welfare_desk'}:
+        return True
+    return False
+
+
+def gl_user_can_view(user):
+    if gl_user_can_manage(user):
+        return True
+    role = (user or {}).get('role', '')
+    return role in {'senior_review', 'ambassador_review'}
+
+
+def _gl_write_audit(db, application_id, actor_role, actor_id, event_type, field_name='', old_value='', new_value='', note=''):
+    db.execute(
+        """INSERT INTO gl_audit
+           (application_id, actor_role, actor_id, event_type, field_name, old_value, new_value, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            application_id, actor_role or '', actor_id or '', event_type or '',
+            field_name or '', '' if old_value is None else str(old_value),
+            '' if new_value is None else str(new_value), note or ''
+        ]
+    )
+
+
+def _gl_resolve_nurse_from_payload(db, data):
+    session_marker = (data.get('session_marker') or '').strip()
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or data.get('reference') or '').strip().upper()
+    passport = (data.get('passport_number') or data.get('passport') or '').strip().upper()
+    verifier = (data.get('verifier') or data.get('identity_verifier') or '').strip()
+    if ref and session_marker:
+        rec = _nurse_session_lookup(db, ref, session_marker)
+        if rec:
+            return rec
+    nurse = _nurse_verify_for_portal_request(db, ref, passport, verifier)
+    if nurse:
+        return dict(nurse)
+    identity = (data.get('identity') or '').strip()
+    if identity and verifier:
+        row = db.execute("""SELECT * FROM nurse_registrations
+                            WHERE (UPPER(TRIM(reference_id)) = UPPER(TRIM(?)) OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?)))
+                              AND (TRIM(mobile) = TRIM(?) OR TRIM(civil_id) = TRIM(?) OR TRIM(cnic) = TRIM(?))
+                            ORDER BY id DESC LIMIT 1""",
+                         [identity, identity, verifier, verifier, verifier]).fetchone()
+        if row:
+            return dict(row)
+    return None
+
+
+def _gl_nurse_identity(nurse):
+    n = dict(nurse or {})
+    return {
+        'id': n.get('id'),
+        'reference_id': n.get('reference_id') or '',
+        'full_name': n.get('full_name') or n.get('name') or '',
+        'father_name': n.get('father_name') or n.get('father_or_husband_name') or '',
+        'passport_number': n.get('passport_number') or n.get('passport') or '',
+        'cnic': n.get('cnic') or '',
+        'civil_id': n.get('civil_id') or '',
+        'mobile': n.get('mobile_full') or n.get('mobile') or '',
+        'email': n.get('email') or '',
+    }
+
+
+def _gl_validate_year(value):
+    try:
+        year = int(str(value or '').strip())
+    except Exception:
+        raise ValueError('Year of passing is required.')
+    current_year = datetime.now().year
+    if year < 1950 or year > current_year + 1:
+        raise ValueError('Year of passing is not valid.')
+    return year
+
+
+def _gl_validate_application_payload(data, db):
+    qualification_code = _gl_clean_text(data.get('qualification_code') or data.get('qualification_type'), 60).upper()
+    if qualification_code not in GL_QUALIFICATIONS:
+        raise ValueError('Please select a qualification type.')
+    qualification_other = _gl_clean_text(data.get('qualification_other'), 160)
+    if qualification_code == 'OTHER' and not qualification_other:
+        raise ValueError('Please specify the other qualification type.')
+    degree_title = _gl_clean_text(data.get('degree_title'), 220)
+    student_no = _gl_clean_text(data.get('student_no') or data.get('roll_no'), 120)
+    institute = _gl_clean_text(data.get('institute') or data.get('college'), 220)
+    university = _gl_clean_text(data.get('university') or data.get('affiliating_body'), 220)
+    if not degree_title:
+        raise ValueError('Degree title is required.')
+    if not student_no:
+        raise ValueError('Student / Roll No. is required.')
+    if not institute:
+        raise ValueError('College / Institute is required.')
+    if not university:
+        raise ValueError('University / Affiliating Body is required.')
+    year_of_passing = _gl_validate_year(data.get('year_of_passing'))
+    mode = _gl_clean_text(data.get('mode'), 20).upper()
+    if mode not in {'MARKS', 'PERCENT', 'GPA'}:
+        raise ValueError('Please select a grading mode.')
+    total_marks = _gl_to_float(data.get('total_marks'), 'Total marks') if mode == 'MARKS' else None
+    obtained_marks = _gl_to_float(data.get('obtained_marks'), 'Obtained marks') if mode == 'MARKS' else None
+    entered_percentage = _gl_to_float(data.get('entered_percentage'), 'Percentage') if mode == 'PERCENT' else None
+    entered_gpa = _gl_to_float(data.get('entered_gpa'), 'GPA obtained') if mode == 'GPA' else None
+    rounding_dp = _gl_rounding_dp(db)
+    computed_percentage = gl_compute_percentage(
+        mode, total_marks=total_marks, obtained_marks=obtained_marks,
+        entered_percentage=entered_percentage, entered_gpa=entered_gpa,
+        rounding_dp=rounding_dp
+    )
+    scale_id = _gl_active_scale_id(db)
+    grade = gl_lookup_grade(computed_percentage, db=db, scale_id=scale_id)
+    if grade not in GL_GRADE_LABELS:
+        raise ValueError('Invalid grading scale: highest grade must be Excellent.')
+    return {
+        'qualification_code': qualification_code,
+        'qualification_other': qualification_other if qualification_code == 'OTHER' else '',
+        'degree_title': degree_title,
+        'student_no': student_no,
+        'institute': institute,
+        'university': university,
+        'year_of_passing': year_of_passing,
+        'mode': mode,
+        'total_marks': total_marks,
+        'obtained_marks': obtained_marks,
+        'entered_percentage': entered_percentage,
+        'entered_gpa': entered_gpa,
+        'computed_percentage': computed_percentage,
+        'final_percentage': computed_percentage,
+        'final_grade_label': grade,
+        'scale_version_id': scale_id,
+    }
+
+
+def _gl_application_dict(row):
+    d = dict(row or {})
+    status = d.get('status') or 'SUBMITTED'
+    d['qualification_label'] = GL_QUALIFICATIONS.get(d.get('qualification_code') or '', d.get('qualification_code') or '')
+    d['letter_available'] = bool((d.get('letter_pdf_path') or '').strip())
+    d['can_nurse_edit'] = status == 'CORRECTION_REQUIRED'
+    d['can_nurse_cancel'] = status in {'SUBMITTED', 'CORRECTION_REQUIRED'}
+    return d
+
+
+def _gl_active_application(db, nurse_id):
+    return db.execute(
+        f"""SELECT * FROM gl_applications
+            WHERE nurse_id = ? AND status IN ({','.join(['?'] * len(GL_ACTIVE_STATUSES))})
+            ORDER BY id DESC LIMIT 1""",
+        [nurse_id, *sorted(GL_ACTIVE_STATUSES)]
+    ).fetchone()
+
+
+def api_gl_nurse_summary(data):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    db = get_db()
+    try:
+        nurse = _gl_resolve_nurse_from_payload(db, data)
+        if not nurse:
+            return {'success': False, 'error': 'Unable to verify nurse record.'}
+        active = _gl_active_application(db, nurse.get('id'))
+        apps = db.execute(
+            "SELECT * FROM gl_applications WHERE nurse_id = ? ORDER BY id DESC LIMIT 20",
+            [nurse.get('id')]
+        ).fetchall()
+        return {
+            'success': True,
+            'profile': _gl_nurse_identity(nurse),
+            'active_application': _gl_application_dict(active) if active else None,
+            'applications': [_gl_application_dict(a) for a in apps],
+            'grade_bands': [
+                {'min': 80, 'max': 100, 'label': 'Excellent'},
+                {'min': 70, 'max': 79.99, 'label': 'Very Good'},
+                {'min': 60, 'max': 69.99, 'label': 'Good'},
+                {'min': 50, 'max': 59.99, 'label': 'Pass'},
+                {'min': 0, 'max': 49.99, 'label': 'Fail'},
+            ],
+        }
+    except Exception as exc:
+        print(f"[GradingLetter] nurse summary failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Grading letter details could not be loaded.'}
+    finally:
+        db.close()
+
+
+def api_gl_nurse_submit(data):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    db = get_db()
+    try:
+        nurse = _gl_resolve_nurse_from_payload(db, data)
+        if not nurse:
+            return {'success': False, 'error': 'Unable to verify nurse record.'}
+        payload = _gl_validate_application_payload(data, db)
+        db.execute("BEGIN IMMEDIATE")
+        allow_parallel = _gl_bool_setting(db, 'allow_parallel_applications', False)
+        active = _gl_active_application(db, nurse.get('id'))
+        if active and not allow_parallel:
+            db.rollback()
+            return {'success': False, 'error': 'You already have an active grading letter request. Please wait until it is issued, rejected, or cancelled.'}
+        if active and allow_parallel:
+            dup = db.execute(
+                f"""SELECT id, ref_no FROM gl_applications
+                    WHERE nurse_id = ? AND qualification_code = ?
+                      AND status IN ({','.join(['?'] * len(GL_ACTIVE_STATUSES))})
+                    ORDER BY id DESC LIMIT 1""",
+                [nurse.get('id'), payload['qualification_code'], *sorted(GL_ACTIVE_STATUSES)]
+            ).fetchone()
+            if dup:
+                db.rollback()
+                return {'success': False, 'error': 'An active request already exists for this qualification.'}
+        ref_no = _gl_next_ref_no(db)
+        cols = [
+            'ref_no', 'nurse_id', 'qualification_code', 'qualification_other', 'degree_title',
+            'student_no', 'institute', 'university', 'year_of_passing', 'mode', 'total_marks',
+            'obtained_marks', 'entered_percentage', 'entered_gpa', 'computed_percentage',
+            'final_percentage', 'final_grade_label', 'scale_version_id', 'status', 'submitted_at'
+        ]
+        vals = [
+            ref_no, nurse.get('id'), payload['qualification_code'], payload['qualification_other'],
+            payload['degree_title'], payload['student_no'], payload['institute'], payload['university'],
+            payload['year_of_passing'], payload['mode'], payload['total_marks'], payload['obtained_marks'],
+            payload['entered_percentage'], payload['entered_gpa'], payload['computed_percentage'],
+            payload['final_percentage'], payload['final_grade_label'], payload['scale_version_id'],
+            'SUBMITTED', datetime.utcnow().isoformat(timespec='seconds')
+        ]
+        cur = db.execute(
+            f"INSERT INTO gl_applications ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})",
+            vals
+        )
+        app_id = cur.lastrowid
+        _gl_write_audit(db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'), 'submitted', note='Submitted by nurse portal')
+        db.commit()
+        return {
+            'success': True,
+            'reference': ref_no,
+            'message': 'Grading letter request submitted successfully.'
+        }
+    except ValueError as exc:
+        try: db.rollback()
+        except Exception: pass
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try: db.rollback()
+        except Exception: pass
+        print(f"[GradingLetter] nurse submit failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.'}
+    finally:
+        db.close()
+
+
+def api_gl_nurse_resubmit(data):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    db = get_db()
+    try:
+        nurse = _gl_resolve_nurse_from_payload(db, data)
+        if not nurse:
+            return {'success': False, 'error': 'Unable to verify nurse record.'}
+        app_id = int(data.get('id') or data.get('application_id') or 0)
+        row = db.execute("SELECT * FROM gl_applications WHERE id = ? AND nurse_id = ?", [app_id, nurse.get('id')]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Request not found.'}
+        old = dict(row)
+        if old.get('status') != 'CORRECTION_REQUIRED':
+            return {'success': False, 'error': 'Only correction-required requests can be resubmitted.'}
+        payload = _gl_validate_application_payload(data, db)
+        fields = dict(payload)
+        fields.update({'status': 'SUBMITTED', 'submitted_at': datetime.utcnow().isoformat(timespec='seconds')})
+        sets = [f"{k} = ?" for k in fields]
+        db.execute(
+            f"UPDATE gl_applications SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [*fields.values(), app_id]
+        )
+        for k, new_v in fields.items():
+            if str(old.get(k) or '') != str(new_v or ''):
+                _gl_write_audit(db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'), 'resubmitted', k, old.get(k), new_v, 'Nurse resubmitted after correction request')
+        db.commit()
+        return {'success': True, 'reference': old.get('ref_no'), 'message': 'Grading letter request resubmitted successfully.'}
+    except ValueError as exc:
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        print(f"[GradingLetter] nurse resubmit failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.'}
+    finally:
+        db.close()
+
+
+def api_gl_nurse_cancel(data):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    db = get_db()
+    try:
+        nurse = _gl_resolve_nurse_from_payload(db, data)
+        if not nurse:
+            return {'success': False, 'error': 'Unable to verify nurse record.'}
+        app_id = int(data.get('id') or data.get('application_id') or 0)
+        row = db.execute("SELECT * FROM gl_applications WHERE id = ? AND nurse_id = ?", [app_id, nurse.get('id')]).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Request not found.'}
+        old = dict(row)
+        if old.get('status') not in {'SUBMITTED', 'CORRECTION_REQUIRED'}:
+            return {'success': False, 'error': 'This request can no longer be cancelled from the nurse portal.'}
+        db.execute("UPDATE gl_applications SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [app_id])
+        _gl_write_audit(db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'), 'cancelled', 'status', old.get('status'), 'CANCELLED', 'Cancelled by nurse')
+        db.commit()
+        return {'success': True, 'message': 'Grading letter request cancelled.'}
+    except Exception as exc:
+        print(f"[GradingLetter] nurse cancel failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Request could not be cancelled. Please try again.'}
+    finally:
+        db.close()
+
+
+def _gl_fetch_application(db, app_id):
+    return db.execute(
+        """SELECT a.*,
+                  n.reference_id AS nurse_reference_id,
+                  n.full_name AS nurse_full_name,
+                  n.passport_number AS nurse_passport_number,
+                  n.cnic AS nurse_cnic,
+                  n.civil_id AS nurse_civil_id,
+                  n.mobile AS nurse_mobile,
+                  n.email AS nurse_email
+           FROM gl_applications a
+           LEFT JOIN nurse_registrations n ON n.id = a.nurse_id
+           WHERE a.id = ? LIMIT 1""",
+        [int(app_id or 0)]
+    ).fetchone()
+
+
+def _gl_admin_app_dict(row):
+    d = _gl_application_dict(row)
+    d['nurse'] = {
+        'reference_id': d.get('nurse_reference_id') or '',
+        'full_name': d.get('nurse_full_name') or '',
+        'father_name': '',
+        'passport_number': d.get('nurse_passport_number') or '',
+        'cnic': d.get('nurse_cnic') or '',
+        'civil_id': d.get('nurse_civil_id') or '',
+        'mobile': d.get('nurse_mobile') or '',
+        'email': d.get('nurse_email') or '',
+    }
+    return d
+
+
+def _gl_list_rows(db, params, limit=50, offset=0):
+    where = ['1=1']
+    vals = []
+    status = _gl_clean_text(params.get('status'), 40).upper()
+    qualification = _gl_clean_text(params.get('qualification') or params.get('qualification_code'), 80).upper()
+    search = _gl_clean_text(params.get('search') or params.get('q'), 120)
+    date_from = _gl_clean_text(params.get('date_from'), 20)
+    date_to = _gl_clean_text(params.get('date_to'), 20)
+    if status:
+        where.append('a.status = ?')
+        vals.append(status)
+    if qualification:
+        where.append('a.qualification_code = ?')
+        vals.append(qualification)
+    if search:
+        where.append("""(
+            UPPER(COALESCE(a.ref_no,'')) LIKE UPPER(?)
+            OR UPPER(COALESCE(n.full_name,'')) LIKE UPPER(?)
+            OR UPPER(COALESCE(n.passport_number,'')) LIKE UPPER(?)
+            OR UPPER(COALESCE(a.degree_title,'')) LIKE UPPER(?)
+            OR UPPER(COALESCE(a.student_no,'')) LIKE UPPER(?)
+        )""")
+        sv = f'%{search}%'
+        vals.extend([sv] * 5)
+    if date_from:
+        where.append("date(COALESCE(a.submitted_at, a.created_at)) >= date(?)")
+        vals.append(date_from)
+    if date_to:
+        where.append("date(COALESCE(a.submitted_at, a.created_at)) <= date(?)")
+        vals.append(date_to)
+    where_sql = ' AND '.join(where)
+    from_sql = "gl_applications a LEFT JOIN nurse_registrations n ON n.id = a.nurse_id"
+    total = int(db.execute(f"SELECT COUNT(*) c FROM {from_sql} WHERE {where_sql}", vals).fetchone()['c'] or 0)
+    rows = db.execute(
+        f"""SELECT a.*,
+                  n.reference_id AS nurse_reference_id,
+                  n.full_name AS nurse_full_name,
+                  n.passport_number AS nurse_passport_number,
+                  n.cnic AS nurse_cnic,
+                  n.civil_id AS nurse_civil_id,
+                  n.mobile AS nurse_mobile,
+                  n.email AS nurse_email
+           FROM {from_sql}
+           WHERE {where_sql}
+           ORDER BY a.id DESC LIMIT ? OFFSET ?""",
+        vals + [limit, offset]
+    ).fetchall()
+    return total, rows
+
+
+def api_admin_gl_list(params, user):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    if not gl_user_can_view(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    page = max(1, _nurse_int(params.get('page', 1), 1, 1, 100000))
+    page_size = _nurse_int(params.get('page_size', 25), 25, 1, 200)
+    db = get_db()
+    try:
+        total, rows = _gl_list_rows(db, params, page_size, (page - 1) * page_size)
+        return {'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [_gl_admin_app_dict(r) for r in rows]}
+    finally:
+        db.close()
+
+
+def api_admin_gl_export_csv(params, user):
+    if not _gl_feature_enabled():
+        return None, None, {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    if not gl_user_can_view(user):
+        return None, None, {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        _total, rows = _gl_list_rows(db, params, 10000, 0)
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(['Ref No', 'Nurse Name', 'Passport', 'Qualification', 'Mode', 'Computed %', 'Final %', 'Grade', 'Status', 'Submitted'])
+        for r in rows:
+            d = _gl_admin_app_dict(r)
+            writer.writerow([
+                d.get('ref_no') or '',
+                d.get('nurse', {}).get('full_name') or '',
+                d.get('nurse', {}).get('passport_number') or '',
+                d.get('qualification_label') or '',
+                d.get('mode') or '',
+                d.get('computed_percentage') if d.get('computed_percentage') is not None else '',
+                d.get('final_percentage') if d.get('final_percentage') is not None else '',
+                d.get('final_grade_label') or '',
+                d.get('status') or '',
+                d.get('submitted_at') or d.get('created_at') or '',
+            ])
+        return out.getvalue().encode('utf-8'), f"nurse_grading_letters_{datetime.now().strftime('%Y%m%d')}.csv", None
+    finally:
+        db.close()
+
+
+def _gl_letter_text(app):
+    d = _gl_admin_app_dict(app)
+    nurse = d.get('nurse') or {}
+    pct = '' if d.get('final_percentage') is None else f"{float(d.get('final_percentage')):.2f}"
+    relation = _gl_clean_text(d.get('relation_override'), 160)
+    if not relation:
+        father = _gl_clean_text(nurse.get('father_name'), 140)
+        relation = f"D/o/S/o {father}".strip()
+    return (
+        "Embassy of Islamic Republic of Pakistan\n"
+        "Kuwait\n\n"
+        f"No. {d.get('ref_no') or ''}\n\n"
+        "TO WHOM IT MAY CONCERN\n\n"
+        "This is to certify that according to the documents produced in this Embassy, "
+        f"{nurse.get('full_name') or ''} {relation} "
+        f"and holding Pakistani Passport No. {nurse.get('passport_number') or ''}, passed the examination of:\n\n"
+        f"{d.get('degree_title') or ''}\n"
+        f"Student No. {d.get('student_no') or ''}\n\n"
+        f"{d.get('institute') or ''}\n"
+        f"Affiliated with {d.get('university') or ''}\n"
+        f"{d.get('year_of_passing') or ''}\n"
+        f"{pct}% \"{d.get('final_grade_label') or ''}\"\n\n"
+        "This certificate is issued on the request of the applicant without any liability on the part of this Embassy whatsoever."
+    )
+
+
+def _gl_pdf_escape(value):
+    text = str(value or '').replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    return text.encode('latin-1', 'replace').decode('latin-1')
+
+
+def _gl_pdf_wrap(text, max_chars=86):
+    words = str(text or '').split()
+    if not words:
+        return ['']
+    lines = []
+    cur = ''
+    for word in words:
+        candidate = (cur + ' ' + word).strip()
+        if len(candidate) > max_chars and cur:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = candidate
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _gl_build_pdf_bytes(letter_text):
+    """Build a simple one-page PDF using standard Type1 fonts only."""
+    raw_lines = (letter_text or '').split('\n')
+    content_lines = []
+    for line in raw_lines:
+        if len(line) > 88:
+            content_lines.extend(_gl_pdf_wrap(line, 88))
+        else:
+            content_lines.append(line)
+
+    stream_parts = []
+    y = 742
+    for idx, line in enumerate(content_lines):
+        clean = line.strip()
+        if not clean:
+            y -= 16
+            continue
+        if idx in (0, 1) or clean == 'TO WHOM IT MAY CONCERN':
+            font = 'F2'
+            size = 13 if idx == 0 else 12
+            width_guess = len(clean) * size * 0.28
+            x_pos = max(72, (612 - width_guess) / 2)
+        else:
+            font = 'F1'
+            size = 11
+            x_pos = 72
+        stream_parts.append(f"BT /{font} {size} Tf {x_pos:.2f} {y:.2f} Td ({_gl_pdf_escape(clean)}) Tj ET\n")
+        y -= 18 if font == 'F2' else 16
+        if y < 72:
+            break
+    content = ''.join(stream_parts).encode('latin-1', 'replace')
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+        b"<< /Length " + str(len(content)).encode('ascii') + b" >>\nstream\n" + content + b"endstream",
+    ]
+    buf = io.BytesIO()
+    buf.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, start=1):
+        offsets.append(buf.tell())
+        buf.write(f"{number} 0 obj\n".encode('ascii'))
+        buf.write(obj)
+        buf.write(b"\nendobj\n")
+    xref_start = buf.tell()
+    buf.write(f"xref\n0 {len(objects) + 1}\n".encode('ascii'))
+    buf.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        buf.write(f"{off:010d} 00000 n \n".encode('ascii'))
+    buf.write(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n".encode('ascii')
+    )
+    return buf.getvalue()
+
+
+def _gl_generate_letter_file(app):
+    d = _gl_admin_app_dict(app)
+    if d.get('status') == 'ISSUED':
+        raise ValueError('Issued letters cannot be regenerated.')
+    if not d.get('final_grade_label') or d.get('final_percentage') is None:
+        raise ValueError('Final percentage and grade are required before letter generation.')
+    ref = d.get('ref_no') or f"GL-{d.get('id')}"
+    safe_ref = re.sub(r'[^A-Za-z0-9_.-]', '_', ref)
+    rel_path = f'generated_letters/{safe_ref}.pdf'
+    target = Path(__file__).resolve().parent / rel_path
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(_gl_build_pdf_bytes(_gl_letter_text(app)))
+    return rel_path
+
+
+def api_admin_gl_detail(app_id, user):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    if not gl_user_can_view(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        row = _gl_fetch_application(db, app_id)
+        if not row:
+            return {'success': False, 'error': 'Application not found.'}
+        audit = db.execute(
+            "SELECT * FROM gl_audit WHERE application_id = ? ORDER BY id DESC LIMIT 200",
+            [int(app_id)]
+        ).fetchall()
+        return {
+            'success': True,
+            'application': _gl_admin_app_dict(row),
+            'audit': [dict(a) for a in audit],
+            'letter_preview': _gl_letter_text(row),
+            'can_manage': gl_user_can_manage(user),
+        }
+    finally:
+        db.close()
+
+
+def _gl_transition(db, app, user, new_status, event_type, note=''):
+    old_status = app.get('status') or ''
+    app_id = app.get('id')
+    ts_col = {
+        'APPROVED': 'approved_at',
+        'LETTER_GENERATED': 'generated_at',
+        'ISSUED': 'issued_at',
+    }.get(new_status)
+    extra = f", {ts_col} = CURRENT_TIMESTAMP" if ts_col else ''
+    db.execute(
+        f"UPDATE gl_applications SET status = ?, updated_at = CURRENT_TIMESTAMP{extra} WHERE id = ?",
+        [new_status, app_id]
+    )
+    _gl_write_audit(db, app_id, user.get('role'), user.get('user'), event_type, 'status', old_status, new_status, note)
+
+
+def api_admin_gl_action(data, user):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    if not gl_user_can_manage(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    action = _gl_clean_text(data.get('action'), 40).lower().replace('_', '-')
+    app_id = int(data.get('id') or data.get('application_id') or 0)
+    if not app_id or not action:
+        return {'success': False, 'error': 'Application id and action are required.'}
+    db = get_db()
+    try:
+        row = _gl_fetch_application(db, app_id)
+        if not row:
+            return {'success': False, 'error': 'Application not found.'}
+        app = dict(row)
+        status = app.get('status') or ''
+        if action == 'start-review':
+            if status != 'SUBMITTED':
+                return {'success': False, 'error': 'Only submitted requests can be moved under review.'}
+            _gl_transition(db, app, user, 'UNDER_REVIEW', 'start_review')
+        elif action == 'edit':
+            if status in {'APPROVED', 'LETTER_GENERATED', 'ISSUED', 'REJECTED', 'CANCELLED'}:
+                return {'success': False, 'error': 'This request cannot be edited in its current status.'}
+            payload = _gl_validate_application_payload(data, db)
+            internal_notes = _gl_clean_text(data.get('internal_notes'), 2000)
+            if 'internal_notes' in data:
+                payload['internal_notes'] = internal_notes
+            if 'relation_override' in data:
+                payload['relation_override'] = _gl_clean_text(data.get('relation_override'), 180)
+            payload['override_reason'] = ''
+            sets = [f"{k} = ?" for k in payload]
+            db.execute(
+                f"UPDATE gl_applications SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [*payload.values(), app_id]
+            )
+            for k, new_v in payload.items():
+                if str(app.get(k) or '') != str(new_v or ''):
+                    _gl_write_audit(db, app_id, user.get('role'), user.get('user'), 'field_edit', k, app.get(k), new_v, 'Admin/Nurses desk correction')
+        elif action == 'override':
+            if status != 'UNDER_REVIEW':
+                return {'success': False, 'error': 'Start review before applying an override.'}
+            reason = _gl_clean_text(data.get('override_reason') or data.get('reason'), 1000)
+            if not reason:
+                return {'success': False, 'error': 'Override reason is required.'}
+            final_pct = _gl_to_float(data.get('final_percentage'), 'Final percentage')
+            if final_pct is None or final_pct < 0 or final_pct > 100:
+                return {'success': False, 'error': 'Final percentage must be between 0 and 100.'}
+            final_pct = _gl_round(final_pct, _gl_rounding_dp(db))
+            final_grade = _gl_clean_text(data.get('final_grade_label'), 80)
+            if not final_grade:
+                final_grade = gl_lookup_grade(final_pct, db=db, scale_id=app.get('scale_version_id'))
+            if final_grade not in GL_GRADE_LABELS:
+                return {'success': False, 'error': 'Final grade must be Excellent, Very Good, Good, Pass, or Fail.'}
+            db.execute(
+                """UPDATE gl_applications
+                   SET final_percentage = ?, final_grade_label = ?, override_reason = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [final_pct, final_grade, reason, app_id]
+            )
+            _gl_write_audit(db, app_id, user.get('role'), user.get('user'), 'override', 'final_percentage', app.get('final_percentage'), final_pct, reason)
+            _gl_write_audit(db, app_id, user.get('role'), user.get('user'), 'override', 'final_grade_label', app.get('final_grade_label'), final_grade, reason)
+        elif action == 'request-correction':
+            if status != 'UNDER_REVIEW':
+                return {'success': False, 'error': 'Only under-review requests can be sent for correction.'}
+            note = _gl_clean_text(data.get('correction_notes') or data.get('note'), 2000)
+            if not note:
+                return {'success': False, 'error': 'Correction notes are required.'}
+            db.execute("UPDATE gl_applications SET correction_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [note, app_id])
+            _gl_transition(db, app, user, 'CORRECTION_REQUIRED', 'correction_required', note)
+        elif action == 'approve':
+            if status != 'UNDER_REVIEW':
+                return {'success': False, 'error': 'Only under-review requests can be approved.'}
+            if not app.get('final_grade_label') or app.get('final_percentage') is None:
+                return {'success': False, 'error': 'Final percentage and grade are required before approval.'}
+            _gl_transition(db, app, user, 'APPROVED', 'approved', f"Final: {app.get('final_percentage')}% {app.get('final_grade_label')}")
+        elif action == 'reopen':
+            if status != 'APPROVED':
+                return {'success': False, 'error': 'Only approved requests can be reopened.'}
+            reason = _gl_clean_text(data.get('reason') or data.get('note'), 1000)
+            if not reason:
+                return {'success': False, 'error': 'Reopen reason is required.'}
+            _gl_transition(db, app, user, 'UNDER_REVIEW', 'reopened', reason)
+        elif action == 'generate':
+            if status != 'APPROVED':
+                return {'success': False, 'error': 'Only approved requests can generate a letter.'}
+            rel_path = _gl_generate_letter_file(row)
+            db.execute(
+                "UPDATE gl_applications SET letter_pdf_path = ?, letter_path = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [rel_path, app_id]
+            )
+            _gl_transition(db, app, user, 'LETTER_GENERATED', 'generated', rel_path)
+        elif action == 'mark-issued':
+            if status != 'LETTER_GENERATED':
+                return {'success': False, 'error': 'Only generated letters can be marked issued.'}
+            _gl_transition(db, app, user, 'ISSUED', 'issued')
+            letter_path = (app.get('letter_pdf_path') or '').strip()
+            if letter_path:
+                try:
+                    os.chmod(Path(__file__).resolve().parent / letter_path, 0o444)
+                except Exception:
+                    pass
+        elif action == 'reject':
+            if status in GL_TERMINAL_STATUSES:
+                return {'success': False, 'error': 'Terminal requests cannot be rejected again.'}
+            note = _gl_clean_text(data.get('note') or data.get('reason'), 1000)
+            _gl_transition(db, app, user, 'REJECTED', 'rejected', note)
+        elif action == 'cancel':
+            if status not in {'SUBMITTED', 'CORRECTION_REQUIRED'}:
+                return {'success': False, 'error': 'Only submitted or correction-required requests can be cancelled.'}
+            note = _gl_clean_text(data.get('note') or data.get('reason'), 1000)
+            _gl_transition(db, app, user, 'CANCELLED', 'cancelled', note)
+        else:
+            return {'success': False, 'error': 'Unknown grading letter action.'}
+        db.commit()
+        fresh = _gl_fetch_application(db, app_id)
+        return {'success': True, 'application': _gl_admin_app_dict(fresh)}
+    except ValueError as exc:
+        try: db.rollback()
+        except Exception: pass
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try: db.rollback()
+        except Exception: pass
+        print(f"[GradingLetter] admin action failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Action could not be completed.'}
+    finally:
+        db.close()
+
+
+def api_admin_gl_letter(app_id, user):
+    if not _gl_feature_enabled():
+        return None, None, {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    if not gl_user_can_view(user):
+        return None, None, {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        row = _gl_fetch_application(db, app_id)
+        if not row:
+            return None, None, {'success': False, 'error': 'Application not found.'}
+        app = dict(row)
+        rel = (app.get('letter_pdf_path') or '').strip()
+        if not rel:
+            return None, None, {'success': False, 'error': 'PDF letter has not been generated yet.'}
+        path = (Path(__file__).resolve().parent / rel).resolve()
+        root = Path(__file__).resolve().parent
+        if root not in path.parents:
+            return None, None, {'success': False, 'error': 'Invalid letter path.'}
+        if not path.exists():
+            return None, None, {'success': False, 'error': 'Letter file not found.'}
+        return path.read_bytes(), f"{app.get('ref_no') or 'grading-letter'}.pdf", None
     finally:
         db.close()
 
@@ -25348,6 +26457,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path in ('/nurses/track', '/nurses/login'):
             if not self.render_template('nurses_login.html'):
                 self.send_html(NURSES_TRACK_PAGE)
+        elif path == '/nurses/grading-letter':
+            if not self.render_template('nurses_login.html'):
+                self.send_html(NURSES_TRACK_PAGE)
         elif path == '/nurses/accommodation':
             if not self.render_template('nurses_accommodation.html'):
                 self.send_html(NURSES_ACCOMMODATION_PAGE)
@@ -25451,6 +26563,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_html(ADMIN_NURSES_PAGE)
+        elif path == '/admin/gl':
+            user = self.require_auth()
+            if not user: return
+            if not _gl_feature_enabled() or not gl_user_can_view(user):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            if not self.render_template_with_context('admin_gl.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
+                self.send_html('<html><body><h1>Nurse Grading Letters</h1><p>Template unavailable.</p><a href="/admin/nurses">Back to Nurses</a></body></html>')
+        elif path in ('/admin/gl/list', '/api/admin/gl/list'):
+            user = self.require_auth()
+            if not user: return
+            res = api_admin_gl_list(params, user)
+            self.send_json(res, 200 if res.get('success') else (403 if res.get('error') == 'Unauthorized' else 400))
+        elif path in ('/admin/gl/list.csv', '/api/admin/gl/list.csv'):
+            user = self.require_auth()
+            if not user: return
+            body_csv, fname, err = api_admin_gl_export_csv(params, user)
+            if err:
+                self.send_json(err, 403 if err.get('error') == 'Unauthorized' else 400); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', str(len(body_csv)))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body_csv)
+        elif path == '/api/admin/gl/detail' or re.match(r'^/admin/gl/\d+$', path):
+            user = self.require_auth()
+            if not user: return
+            app_id = params.get('id') or (path.rsplit('/', 1)[-1] if path.startswith('/admin/gl/') else '')
+            res = api_admin_gl_detail(app_id, user)
+            self.send_json(res, 200 if res.get('success') else (403 if res.get('error') == 'Unauthorized' else 404))
+        elif path == '/api/admin/gl/letter' or re.match(r'^/admin/gl/\d+/letter\.pdf$', path):
+            user = self.require_auth()
+            if not user: return
+            if path.startswith('/admin/gl/'):
+                app_id = path.strip('/').split('/')[2]
+            else:
+                app_id = params.get('id')
+            body_pdf, fname, err = api_admin_gl_letter(app_id, user)
+            if err:
+                self.send_json(err, 403 if err.get('error') == 'Unauthorized' else 404); return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/pdf')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', str(len(body_pdf)))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body_pdf)
         elif path == '/admin/facility-roster':
             user = self.require_auth()
             if not user: return
@@ -28592,6 +29752,48 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_nurse_leave_notice_submit(data)
             self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path in ('/api/nurses/grading-letter', '/api/nurses/grading-letter/summary'):
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_gl_nurse_summary(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/grading-letter/submit':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_gl_nurse_submit(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/grading-letter/resubmit':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_gl_nurse_resubmit(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/grading-letter/cancel':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_gl_nurse_cancel(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/gl/action':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_gl_action(data, user)
+            self.send_json(result, 200 if result.get('success') else (403 if result.get('error') == 'Unauthorized' else 400))
             return
         elif path == '/api/admin/facility-occupancy/send-confirmation-campaign':
             user = self.require_auth()
