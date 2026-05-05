@@ -67,9 +67,11 @@ type FilterOptions = {
 
 type ListResponse = {
   success?: boolean;
-  items?: AccommodationRow[];
-  kpis?: Kpis;
-  filters?: FilterOptions;
+  items?: AccommodationRow[] | null;
+  rows?: AccommodationRow[] | null;
+  kpis?: Kpis | null;
+  summary?: Kpis | null;
+  filters?: FilterOptions | null;
   error?: string;
 };
 
@@ -218,6 +220,47 @@ function formatUpdated(value?: string) {
   return value.replace("T", " ").slice(0, 16);
 }
 
+function asArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function asStringArray(value: string[] | null | undefined) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function normalizeFilterOptions(value: FilterOptions | null | undefined): FilterOptions {
+  return {
+    vendors: asStringArray(value?.vendors),
+    facilities: asStringArray(value?.facilities),
+    statuses: asStringArray(value?.statuses),
+    accommodation_types: asStringArray(value?.accommodation_types),
+    preferences: asStringArray(value?.preferences),
+  };
+}
+
+function normalizeListResponse(res: ListResponse | null | undefined) {
+  const items = asArray(res?.items).length ? asArray(res?.items) : asArray(res?.rows);
+  const kpis = res?.kpis && typeof res.kpis === "object" ? res.kpis : res?.summary && typeof res.summary === "object" ? res.summary : {};
+  return {
+    items,
+    kpis,
+    filters: normalizeFilterOptions(res?.filters),
+  };
+}
+
+function normalizeDetailResponse(res: DetailResponse | null | undefined): DetailResponse {
+  return {
+    ...(res || {}),
+    nurse: res?.nurse && typeof res.nurse === "object" ? res.nurse : undefined,
+    summary: res?.summary && typeof res.summary === "object" ? res.summary : undefined,
+    roster: res?.roster && typeof res.roster === "object" ? res.roster : null,
+    actions: asArray(res?.actions),
+    accommodation_requests: asArray(res?.accommodation_requests),
+    leave_notices: asArray(res?.leave_notices),
+    complaints: asArray(res?.complaints),
+  };
+}
+
 function statusType(status?: string): "pending" | "processing" | "resolved" | "closed" | "info" {
   const s = (status || "").toLowerCase();
   if (!s) return "info";
@@ -307,9 +350,10 @@ export function AdminNursesAccommodationPage() {
       if (!res?.success) {
         throw new Error(res?.error || "Could not load accommodation roster.");
       }
-      setRows(res.items || []);
-      setKpis(res.kpis || {});
-      setFilterOptions(res.filters || {});
+      const normalized = normalizeListResponse(res);
+      setRows(normalized.items);
+      setKpis(normalized.kpis);
+      setFilterOptions(normalized.filters);
     } catch (err) {
       const msg = (err as Error).message || "Could not load accommodation roster.";
       setRows([]);
@@ -361,8 +405,9 @@ export function AdminNursesAccommodationPage() {
       if (!res?.success) {
         throw new Error(res?.error || "Could not load nurse accommodation detail.");
       }
-      setDetailData(res);
-      setForm(detailToForm(res));
+      const normalized = normalizeDetailResponse(res);
+      setDetailData(normalized);
+      setForm(detailToForm(normalized));
     } catch (err) {
       setDetailData(null);
       setForm(EMPTY_FORM);
@@ -395,8 +440,9 @@ export function AdminNursesAccommodationPage() {
       if (!res?.success) {
         throw new Error(res?.error || "Could not save accommodation details.");
       }
-      setDetailData(res);
-      setForm(detailToForm(res));
+      const normalized = normalizeDetailResponse(res);
+      setDetailData(normalized);
+      setForm(detailToForm(normalized));
       setFlash(res.message || "Accommodation record updated.");
       await loadList();
     } catch (err) {
@@ -497,6 +543,23 @@ export function AdminNursesAccommodationPage() {
             </div>
           ) : null}
 
+          {error && !accessDenied ? (
+            <Card
+              style={{
+                marginBottom: 18,
+                borderTop: `3px solid ${T.error}`,
+              }}
+            >
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.error, marginBottom: 8 }}>
+                Could not load accommodation roster
+              </div>
+              <p style={{ fontSize: 13, color: T.muted, marginBottom: 12 }}>{error}</p>
+              <Btn variant="light" size="sm" onClick={() => void loadList()}>
+                Retry
+              </Btn>
+            </Card>
+          ) : null}
+
           <div
             style={{
               display: "grid",
@@ -543,7 +606,7 @@ export function AdminNursesAccommodationPage() {
                 <label className="f-label">Vendor</label>
                 <select className="f-input" value={vendor} onChange={(e) => setVendor(e.target.value)}>
                   <option value="">All vendors</option>
-                  {(filterOptions.vendors || []).map((item) => (
+                  {asStringArray(filterOptions.vendors).map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
@@ -554,7 +617,7 @@ export function AdminNursesAccommodationPage() {
                 <label className="f-label">Facility</label>
                 <select className="f-input" value={facility} onChange={(e) => setFacility(e.target.value)}>
                   <option value="">All facilities</option>
-                  {(filterOptions.facilities || []).map((item) => (
+                  {asStringArray(filterOptions.facilities).map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
@@ -565,7 +628,7 @@ export function AdminNursesAccommodationPage() {
                 <label className="f-label">Status</label>
                 <select className="f-input" value={status} onChange={(e) => setStatus(e.target.value)}>
                   <option value="">All statuses</option>
-                  {(filterOptions.statuses || []).map((item) => (
+                  {asStringArray(filterOptions.statuses).map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
@@ -580,7 +643,7 @@ export function AdminNursesAccommodationPage() {
                   onChange={(e) => setAccommodationType(e.target.value)}
                 >
                   <option value="">All types</option>
-                  {(filterOptions.accommodation_types || []).map((item) => (
+                  {asStringArray(filterOptions.accommodation_types).map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
@@ -591,7 +654,7 @@ export function AdminNursesAccommodationPage() {
                 <label className="f-label">Preference</label>
                 <select className="f-input" value={preference} onChange={(e) => setPreference(e.target.value)}>
                   <option value="">All preferences</option>
-                  {(filterOptions.preferences || []).map((item) => (
+                  {asStringArray(filterOptions.preferences).map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
@@ -978,3 +1041,5 @@ export function AdminNursesAccommodationPage() {
     </AdminLayout>
   );
 }
+
+export default AdminNursesAccommodationPage;

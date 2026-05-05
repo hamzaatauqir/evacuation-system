@@ -11,7 +11,7 @@ MOFA approval PDF parsing order: (1) pypdf text layer, (2) Poppler pdftotext CLI
 pip install pypdf. macOS: brew install poppler gives pdftotext without extra pip packages.
 """
 
-import http.server, sqlite3, json, hashlib, hmac, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback, gc, calendar
+import http.server, sqlite3, json, hashlib, hmac, uuid, csv, io, os, re, time, secrets, shutil, subprocess, threading, base64, smtplib, ssl, urllib.request, urllib.error, math, traceback, gc, calendar, mimetypes
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse, urlencode, unquote, quote
 from datetime import datetime, timedelta, date
@@ -66,6 +66,13 @@ if RENDER_DISK.exists() and RENDER_DISK.is_dir():
 else:
     DB_PATH = Path(__file__).parent / 'evacuation.db'
     BACKUP_DIR = Path(__file__).parent / 'backups'
+COMMUNITY_WELFARE_UI_DIST = (Path(__file__).parent / 'community-welfare-ui' / 'dist').resolve()
+COMMUNITY_WELFARE_UI_REACT_ROUTES = {
+    '/admin/nurses/pending-accounts',
+    '/admin/nurses/arrival-batches',
+    '/admin/nurses/onboarding',
+    '/admin/nurses/accommodation',
+}
 LOCAL_BACKUP_KEEP_COUNT = 5
 SESSIONS = {}  # token -> {user, role, expires}
 SESSIONS_LOCK = threading.Lock()  # guards SESSIONS under ThreadingHTTPServer
@@ -4948,6 +4955,11 @@ def can_access_admin_route(role, path):
         allowed_pages = {
             '/admin/community-welfare',
             '/admin/nurses',
+            '/admin/nurses/my-complaints',
+            '/admin/nurses/pending-accounts',
+            '/admin/nurses/arrival-batches',
+            '/admin/nurses/onboarding',
+            '/admin/nurses/accommodation',
             '/admin/gl',
             '/admin/welfare-cases',
             '/admin/my-cases',
@@ -28755,6 +28767,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             return False
 
+    def community_welfare_ui_target(self, rel_path: str):
+        target = (COMMUNITY_WELFARE_UI_DIST / rel_path.lstrip('/')).resolve()
+        if COMMUNITY_WELFARE_UI_DIST not in target.parents and target != COMMUNITY_WELFARE_UI_DIST:
+            return None
+        return target
+
+    def send_community_welfare_ui_asset(self, rel_path: str):
+        target = self.community_welfare_ui_target(rel_path)
+        if not target:
+            self.send_json({'success': False, 'error': 'Forbidden'}, 403)
+            return
+        if not target.is_file():
+            self.send_json({'success': False, 'error': 'File not found'}, 404)
+            return
+        content_type = mimetypes.guess_type(str(target))[0] or 'application/octet-stream'
+        if content_type.startswith('text/') or content_type in ('application/javascript', 'image/svg+xml'):
+            content_type = f'{content_type}; charset=utf-8'
+        self.send_file(target, content_type)
+
+    def send_community_welfare_ui_index(self):
+        index_path = self.community_welfare_ui_target('index.html')
+        if not index_path.is_file():
+            self.send_html(
+                '<html><body style="font-family:Arial,sans-serif;padding:40px">'
+                '<h1>Community Welfare UI build missing</h1>'
+                '<p>The bundled React build was not found on this server.</p>'
+                '</body></html>',
+                500,
+            )
+            return
+        self.send_file(index_path, 'text/html; charset=utf-8')
+
     def read_body(self):
         length = int(self.headers.get('Content-Length', 0))
         if length > MAX_REQUEST_BODY_BYTES:
@@ -28811,6 +28855,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self.send_headers_only(200, 'text/css; charset=utf-8', content_length)
             return
+        if path.startswith('/assets/') or path.startswith('/images/') or path in ('/favicon.svg', '/icons.svg'):
+            target = self.community_welfare_ui_target(path.lstrip('/'))
+            if not target or not target.is_file():
+                self.send_headers_only(404, 'text/plain; charset=utf-8', 0)
+                return
+            content_type = mimetypes.guess_type(str(target))[0] or 'application/octet-stream'
+            if content_type.startswith('text/') or content_type in ('application/javascript', 'image/svg+xml'):
+                content_type = f'{content_type}; charset=utf-8'
+            self.send_headers_only(200, content_type, target.stat().st_size)
+            return
+        if path in COMMUNITY_WELFARE_UI_REACT_ROUTES:
+            user = self.get_user()
+            if not user:
+                self.send_redirect('/login')
+                return
+            allowed = can_access_admin_route(user.get('role') or '', path)
+            if not allowed:
+                self.send_redirect(_default_redirect_for_role(user.get('role') or ''))
+                return
+            index_path = self.community_welfare_ui_target('index.html')
+            if not index_path or not index_path.is_file():
+                self.send_headers_only(500, 'text/plain; charset=utf-8', 0)
+                return
+            self.send_headers_only(200, 'text/html; charset=utf-8', index_path.stat().st_size)
+            return
         self.send_headers_only(404, 'text/plain; charset=utf-8', 0)
 
     def do_GET(self):
@@ -28858,6 +28927,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_file(target, 'image/svg+xml')
             else:
                 self.send_json({'success': False, 'error': 'Unsupported static type'}, 415)
+            return
+
+        if path.startswith('/assets/'):
+            self.send_community_welfare_ui_asset(path.lstrip('/'))
+            return
+        if path.startswith('/images/'):
+            self.send_community_welfare_ui_asset(path.lstrip('/'))
+            return
+        if path in ('/favicon.svg', '/icons.svg'):
+            self.send_community_welfare_ui_asset(path.lstrip('/'))
             return
 
         if path in ('/track-application', '/embassy-registration/track'):
@@ -29164,6 +29243,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             if not self.render_template_with_context('admin_nurses.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
                 self.send_html(ADMIN_NURSES_PAGE)
+        elif path in COMMUNITY_WELFARE_UI_REACT_ROUTES:
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_community_welfare_ui_index()
         elif path == '/admin/nurses/my-complaints':
             user = self.require_auth()
             if not user: return
