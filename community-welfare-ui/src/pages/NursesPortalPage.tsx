@@ -15,7 +15,53 @@ import {
   type NursePortalContext,
 } from "../lib/nursePortal";
 
-type PortalTab = "overview" | "stay" | "complaint" | "grading" | "leaving" | "requests" | "password";
+type PortalTab = "overview" | "stay" | "complaint" | "grading" | "onboarding" | "leaving" | "requests" | "password";
+
+type OnboardingStep = {
+  step_code: string;
+  step_name: string;
+  short_guidance?: string;
+  sort_order?: number;
+  expected_days_after_arrival?: number;
+};
+
+type OnboardingProgress = {
+  has_row?: boolean;
+  current_stage_code?: string;
+  issue_status?: string;
+  nurse_note?: string;
+  progress_percent?: number;
+  completed_steps_count?: number;
+  total_steps_count?: number;
+  help_needed?: boolean;
+  last_updated_at?: string;
+  current_step_name?: string;
+  current_step_guidance?: string;
+  next_step_code?: string;
+  next_step_name?: string;
+  next_step_guidance?: string;
+};
+
+type OnboardingHelpRequest = {
+  id?: number;
+  status?: string;
+  issue_note?: string;
+  assigned_to?: string;
+  assigned_role?: string;
+  created_at?: string;
+  updated_at?: string;
+  escalation_note?: string;
+};
+
+type OnboardingSummaryResponse = {
+  success?: boolean;
+  feature_enabled?: boolean;
+  steps?: OnboardingStep[];
+  progress?: OnboardingProgress;
+  open_help_request?: OnboardingHelpRequest | null;
+  latest_help_request?: OnboardingHelpRequest | null;
+  error?: string;
+};
 type GradingMode = "MARKS" | "PERCENT" | "GPA";
 
 type GradingIdentity = {
@@ -155,6 +201,33 @@ function gradingSummaryPath(ctx: NursePortalContext) {
   if (ctx.mobile || ctx.civilId) params.set("verifier", ctx.mobile || ctx.civilId);
   if (ctx.sessionMarker) params.set("session_marker", ctx.sessionMarker);
   return `/api/nurses/grading-letter/summary?${params.toString()}`;
+}
+
+function onboardingSummaryPath(ctx: NursePortalContext) {
+  const params = new URLSearchParams();
+  if (ctx.referenceId) params.set("nurse_reference_id", ctx.referenceId);
+  if (ctx.passportNumber) params.set("passport_number", ctx.passportNumber);
+  if (ctx.mobile || ctx.civilId) params.set("verifier", ctx.mobile || ctx.civilId);
+  if (ctx.sessionMarker) params.set("session_marker", ctx.sessionMarker);
+  return `/api/nurses/onboarding/summary?${params.toString()}`;
+}
+
+function onboardingIdentityPayload(ctx: NursePortalContext) {
+  return {
+    nurse_reference_id: ctx.referenceId,
+    passport_number: ctx.passportNumber,
+    verifier: ctx.mobile || ctx.civilId || "",
+    session_marker: ctx.sessionMarker,
+  };
+}
+
+function prettifyOnboardingHelpStatus(status: string) {
+  if (!status) return "";
+  return status
+    .toLowerCase()
+    .split("_")
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(" ");
 }
 
 function gradingGradeLabel(percentage: number) {
@@ -319,6 +392,14 @@ export function NursesPortalPage() {
   const [showEmailEditor, setShowEmailEditor] = useState(false);
   const [newEmail, setNewEmail] = useState("");
   const [confirmNewEmail, setConfirmNewEmail] = useState("");
+  const [onboardingSummary, setOnboardingSummary] = useState<OnboardingSummaryResponse | null>(null);
+  const [onboardingLoading, setOnboardingLoading] = useState(false);
+  const [onboardingError, setOnboardingError] = useState("");
+  const [onboardingFlash, setOnboardingFlash] = useState("");
+  const [onboardingBusy, setOnboardingBusy] = useState(false);
+  const [onboardingForm, setOnboardingForm] = useState<{ current_stage_code: string; issue_status: string; nurse_note: string }>(
+    { current_stage_code: "", issue_status: "NO_ISSUE", nurse_note: "" }
+  );
 
   function commitPortalContext(next: NursePortalContext | ((prev: NursePortalContext) => NursePortalContext)) {
     setCtx((prev) => {
@@ -337,8 +418,8 @@ export function NursesPortalPage() {
   const isDoctor = (ctx.professionalCategory || "").toLowerCase() === "doctor";
   const tab = (params.get("tab") || "overview") as PortalTab;
   const tabs = isDoctor
-    ? (["overview", "complaint", "grading", "requests", "password"] as PortalTab[])
-    : (["overview", "stay", "complaint", "grading", "leaving", "requests", "password"] as PortalTab[]);
+    ? (["overview", "complaint", "grading", "onboarding", "requests", "password"] as PortalTab[])
+    : (["overview", "stay", "complaint", "grading", "onboarding", "leaving", "requests", "password"] as PortalTab[]);
   const activeTab = tabs.includes(tab) ? tab : "overview";
 
   const statusType = (ctx.registrationStatus || "").toLowerCase().includes("resolved")
@@ -436,6 +517,71 @@ export function NursesPortalPage() {
     }
   });
 
+  const refreshOnboardingSummary = useEffectEvent(async (showLoading = true) => {
+    if (!ctx) return;
+    if (showLoading) setOnboardingLoading(true);
+    setOnboardingError("");
+    try {
+      const res = await api.get<OnboardingSummaryResponse>(onboardingSummaryPath(ctx));
+      if (!res?.success) {
+        throw new Error(res?.error || "Could not load onboarding status. Please try again.");
+      }
+      setOnboardingSummary(res);
+      const progress = res.progress || {};
+      setOnboardingForm({
+        current_stage_code: progress.current_stage_code || "",
+        issue_status: (progress.issue_status as string) || "NO_ISSUE",
+        nurse_note: progress.nurse_note || "",
+      });
+    } catch (error) {
+      setOnboardingSummary(null);
+      setOnboardingError(
+        (error as Error)?.message || "Could not load onboarding status. Please try again."
+      );
+    } finally {
+      setOnboardingLoading(false);
+    }
+  });
+
+  async function submitOnboardingUpdate() {
+    if (!ctx) return;
+    if (!onboardingForm.current_stage_code) {
+      setOnboardingError("Please select your current onboarding stage.");
+      return;
+    }
+    setOnboardingBusy(true);
+    setOnboardingError("");
+    setOnboardingFlash("");
+    try {
+      const res = await api.post<OnboardingSummaryResponse & { message?: string }>(
+        "/api/nurses/onboarding/update",
+        {
+          ...onboardingIdentityPayload(ctx),
+          current_stage_code: onboardingForm.current_stage_code,
+          issue_status: onboardingForm.issue_status || "NO_ISSUE",
+          nurse_note: onboardingForm.nurse_note || "",
+        }
+      );
+      if (!res?.success) {
+        throw new Error(res?.error || "Update could not be saved. Please try again.");
+      }
+      setOnboardingSummary(res);
+      const progress = res.progress || {};
+      setOnboardingForm({
+        current_stage_code: progress.current_stage_code || "",
+        issue_status: (progress.issue_status as string) || "NO_ISSUE",
+        nurse_note: progress.nurse_note || "",
+      });
+      setOnboardingFlash(res.message || "Onboarding status updated.");
+    } catch (error) {
+      setOnboardingError(
+        (error as Error)?.message || "Update could not be saved. Please try again."
+      );
+    } finally {
+      setOnboardingBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (!locationPortalContext) return;
     setCtx(locationPortalContext);
@@ -482,6 +628,12 @@ export function NursesPortalPage() {
     if (activeTab !== "grading" || gradingAccessBlocked) return;
     void refreshGradingSummary();
   }, [activeTab, gradingAccessBlocked]);
+
+  useEffect(() => {
+    if (activeTab !== "onboarding") return;
+    if (pendingArrival) return;
+    void refreshOnboardingSummary();
+  }, [activeTab, pendingArrival]);
 
   async function submitFacilityRequest() {
     setBusy(true); setErr(""); setMsg("");
@@ -772,6 +924,8 @@ export function NursesPortalPage() {
                     ? "Complaint"
                     : t === "grading"
                       ? "Grading Letter"
+                    : t === "onboarding"
+                      ? "MOH Onboarding"
                     : t === "leaving"
                       ? "Leaving Notice"
                       : t === "requests"
@@ -1357,6 +1511,155 @@ export function NursesPortalPage() {
               )}
             </FormCard>
           </div>
+          )
+        ) : null}
+
+        {activeTab === "onboarding" ? (
+          pendingArrival ? (
+            <PendingArrivalPanel title="MOH Onboarding Tracker" message={complaintBlockedMessage} />
+          ) : (
+            <div style={{ display: "grid", gap: 14 }}>
+              <FormCard title="MOH Onboarding Tracker">
+                <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6, marginTop: 0 }}>
+                  Please select your current stage so the Embassy Nurses Welfare Desk can guide and assist you if you are stuck.
+                </p>
+
+                {onboardingError ? (
+                  <div style={{ marginBottom: 10, background: "#fff4f4", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 10, padding: 10, fontSize: 13 }}>
+                    {onboardingError}
+                  </div>
+                ) : null}
+                {onboardingFlash ? (
+                  <div style={{ marginBottom: 10, background: "#f3fff4", color: "#166534", border: "1px solid #bbf7d0", borderRadius: 10, padding: 10, fontSize: 13 }}>
+                    {onboardingFlash}
+                  </div>
+                ) : null}
+
+                {onboardingLoading ? (
+                  <p style={{ color: "#5B6773", margin: 0 }}>Loading onboarding status...</p>
+                ) : (
+                  <>
+                    <label>
+                      Current Stage
+                      <select
+                        className="f-input"
+                        value={onboardingForm.current_stage_code}
+                        onChange={(e) => setOnboardingForm({ ...onboardingForm, current_stage_code: e.target.value })}
+                      >
+                        <option value="">Select your current stage</option>
+                        {(onboardingSummary?.steps || []).map((s) => (
+                          <option key={s.step_code} value={s.step_code}>
+                            {(s.sort_order || 0)}. {s.step_name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <div style={{ marginTop: 8 }}>
+                      <div style={{ fontSize: 13, color: "#334155", marginBottom: 6 }}>Issue status</div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {[
+                          { value: "NO_ISSUE", label: "No issue" },
+                          { value: "WAITING", label: "Waiting / pending" },
+                          { value: "NEED_HELP", label: "Need Embassy help" },
+                        ].map((opt) => (
+                          <label
+                            key={opt.value}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 6,
+                              padding: "6px 10px",
+                              border: `1px solid ${onboardingForm.issue_status === opt.value ? "#2D4A6B" : "#E3EBF0"}`,
+                              background: onboardingForm.issue_status === opt.value ? "#EEF4FB" : "#fff",
+                              borderRadius: 999,
+                              cursor: "pointer",
+                              fontSize: 13,
+                              color: "#1f2937",
+                            }}
+                          >
+                            <input
+                              type="radio"
+                              name="onboarding-issue-status"
+                              value={opt.value}
+                              checked={onboardingForm.issue_status === opt.value}
+                              onChange={(e) => setOnboardingForm({ ...onboardingForm, issue_status: e.target.value })}
+                              style={{ margin: 0 }}
+                            />
+                            {opt.label}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+
+                    <label style={{ marginTop: 10 }}>
+                      Optional note
+                      <textarea
+                        className="f-input"
+                        rows={3}
+                        placeholder="Optional: briefly explain if you are waiting or need help."
+                        value={onboardingForm.nurse_note}
+                        onChange={(e) => setOnboardingForm({ ...onboardingForm, nurse_note: e.target.value })}
+                      />
+                    </label>
+
+                    <Btn variant="primary" disabled={onboardingBusy} onClick={submitOnboardingUpdate}>
+                      {onboardingBusy ? "Updating..." : "Update"}
+                    </Btn>
+                  </>
+                )}
+              </FormCard>
+
+              <FormCard title="Your Progress">
+                {onboardingSummary?.progress?.has_row ? (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 12 }}>
+                      <Field
+                        label="Progress"
+                        value={`${onboardingSummary.progress?.completed_steps_count || 0} of ${onboardingSummary.progress?.total_steps_count || 17} steps completed (${(onboardingSummary.progress?.progress_percent || 0).toFixed(0)}%)`}
+                      />
+                      <Field
+                        label="Current stage"
+                        value={onboardingSummary.progress?.current_step_name || DASH_VALUE}
+                      />
+                      <Field
+                        label="Next step"
+                        value={onboardingSummary.progress?.next_step_name || (onboardingSummary.progress?.completed_steps_count === onboardingSummary.progress?.total_steps_count ? "All steps completed" : DASH_VALUE)}
+                      />
+                      <Field
+                        label="Last updated"
+                        value={onboardingSummary.progress?.last_updated_at || DASH_VALUE}
+                      />
+                    </div>
+
+                    {onboardingSummary.progress?.next_step_guidance ? (
+                      <div style={{ background: "#F7FAFC", border: "1px solid #E3EBF0", borderRadius: 10, padding: 12, marginTop: 4 }}>
+                        <div style={{ fontSize: 12, color: "#5B6773", marginBottom: 4 }}>What happens next</div>
+                        <div style={{ color: "#2D4A6B", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                          {onboardingSummary.progress?.next_step_name || ""}
+                        </div>
+                        <div style={{ color: "#1f2937", fontSize: 13, lineHeight: 1.6 }}>
+                          {onboardingSummary.progress?.next_step_guidance}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {onboardingSummary.open_help_request ? (
+                      <div style={{ marginTop: 12, background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 10, padding: 12 }}>
+                        <div style={{ color: "#92400E", fontWeight: 600, marginBottom: 4, fontSize: 14 }}>
+                          Help request status: {prettifyOnboardingHelpStatus(onboardingSummary.open_help_request.status || "NEW")}
+                        </div>
+                        <div style={{ color: "#92400E", fontSize: 13, lineHeight: 1.6 }}>
+                          Your request for help has been recorded. The Nurses Welfare Desk may contact you for follow-up.
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <p style={{ color: "#5B6773", margin: 0 }}>No status saved yet. Select your current stage and click Update.</p>
+                )}
+              </FormCard>
+            </div>
           )
         ) : null}
 

@@ -50,6 +50,7 @@ ROUTE_REVIEW_ENABLED = False
 FEATURE_GRADING_LETTER = True
 GRADING_LETTER_AVAILABLE = True
 FEATURE_NURSE_HOUSING = str(os.environ.get('FEATURE_NURSE_HOUSING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+FEATURE_NURSE_ONBOARDING = str(os.environ.get('FEATURE_NURSE_ONBOARDING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 
 NH_ACCOUNT_STATUS_PENDING_ARRIVAL = 'PENDING_ARRIVAL'
 NH_ACCOUNT_STATUS_ACTIVE = 'ACTIVE'
@@ -114,6 +115,8 @@ _DB_WAL_LOCK = threading.Lock()
 MONTHLY_WELFARE_CHECKIN_LOCK = threading.Lock()
 _NH_SCHEMA_READY = False
 _NH_SCHEMA_LOCK = threading.Lock()
+_NO_SCHEMA_READY = False
+_NO_SCHEMA_LOCK = threading.Lock()
 
 
 def _apply_wal_once():
@@ -463,6 +466,149 @@ def _nh_ensure_schema(db):
     (base_dir / 'letter_templates').mkdir(exist_ok=True)
     (base_dir / 'generated_letters').mkdir(exist_ok=True)
     db.commit()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Nurse MOH Onboarding Tracker (additive, behind FEATURE_NURSE_ONBOARDING).
+# Tables are prefixed `nurse_onboarding_*` to keep them clearly separate
+# from existing nurse, housing, complaint, and grading-letter tables.
+# ═══════════════════════════════════════════════════════════════
+NURSE_ONBOARDING_DEFAULT_STEPS = [
+    ('GRADING_DATA_SUBMITTED', 'Grading Letter Data Submitted to Embassy', 'Submit your grading letter data through the nurse portal or Embassy desk.', 0),
+    ('GRADING_LETTER_COLLECTED', 'Grading Letter Collected from Embassy', 'Collect the grading letter from the Embassy when informed.', 7),
+    ('MOFA_ATTESTATION', 'Attestation by MOFA Kuwait', 'Complete MOFA Kuwait attestation if required for your documents.', 14),
+    ('DOCS_SUBMITTED_TO_STAFF', 'Documents Submitted to Staff / MOH Coordinator', 'Submit required documents to the concerned staff or MOH coordinator.', 21),
+    ('FINGERPRINT_SCANNING', 'Fingerprint Scanning', 'Complete fingerprint scanning when instructed.', 28),
+    ('MEDICAL_REPORT_ISSUED', 'Medical Report Issuance', 'Update this when your medical report is issued.', 35),
+    ('CIVIL_ID_GENERATED', 'Civil ID Number Generation', 'Update this when your Civil ID number is generated.', 45),
+    ('FIRST_SALARY_CHEQUE', 'First Salary Cheque / Locum Received', 'Update this when you receive your first salary cheque or locum payment.', 60),
+    ('COMMITTEE_PAPER_RECEIVED', 'Committee Paper Received', 'Update this when your committee paper is received.', 75),
+    ('IQAMA_APPLICATION_FILED', 'Iqama Application Filed', 'Update this when your iqama/residency application is filed.', 90),
+    ('CIVIL_ID_APPLICATION_SUBMITTED', 'Civil ID Application Submitted', 'Update this when your Civil ID application is submitted.', 105),
+    ('SECOND_SALARY_CHEQUE', 'Second Salary Cheque / Locum Received', 'Update this when you receive the second salary cheque or locum payment.', 120),
+    ('MEDICAL_LICENSE_APPLICATION_FILED', 'Medical License Application Filed', 'Update this when your medical license application is filed.', 135),
+    ('BARATEEN_PAPER_SUBMISSION', 'Barateen Paper Submission', 'Update this when Barateen paper submission is completed.', 150),
+    ('SALARY_REGULAR_DISBURSEMENT', 'Salary Regular Disbursement', 'Update this when regular salary disbursement starts.', 165),
+    ('FINAL_MEDICAL_LICENSE_ISSUED', 'Final Medical License Issued', 'Update this when your final medical license is issued.', 180),
+    ('RESIDENCY_IQAMA_COMPLETED', 'Residency / Iqama Completed', 'Update this when your residency / iqama process is completed.', 210),
+]
+NURSE_ONBOARDING_TOTAL_STEPS = len(NURSE_ONBOARDING_DEFAULT_STEPS)
+NURSE_ONBOARDING_VALID_ISSUE_STATUSES = {'NO_ISSUE', 'WAITING', 'NEED_HELP'}
+NURSE_ONBOARDING_HELP_STATUSES = {
+    'NEW',
+    'ASSIGNED_TO_NURSES_DESK',
+    'ASSIGNED_TO_VOLUNTEER',
+    'CONTACTED',
+    'GUIDANCE_GIVEN',
+    'ESCALATED_TO_EMBASSY',
+    'RESOLVED',
+    'CLOSED',
+}
+NURSE_ONBOARDING_HELP_OPEN_STATUSES = {
+    'NEW',
+    'ASSIGNED_TO_NURSES_DESK',
+    'ASSIGNED_TO_VOLUNTEER',
+    'CONTACTED',
+    'GUIDANCE_GIVEN',
+    'ESCALATED_TO_EMBASSY',
+}
+
+
+def _nurse_onboarding_feature_enabled():
+    return bool(FEATURE_NURSE_ONBOARDING)
+
+
+def _nurse_onboarding_ensure_schema(db):
+    """Idempotent migrations + step seed for the MOH Onboarding Tracker."""
+    global _NO_SCHEMA_READY
+    if _NO_SCHEMA_READY:
+        return
+    with _NO_SCHEMA_LOCK:
+        if _NO_SCHEMA_READY:
+            return
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS nurse_onboarding_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            step_code TEXT UNIQUE,
+            step_name TEXT,
+            short_guidance TEXT DEFAULT '',
+            sort_order INTEGER,
+            is_active INTEGER DEFAULT 1,
+            expected_days_after_arrival INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS nurse_onboarding_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nurse_id INTEGER UNIQUE,
+            current_stage_code TEXT,
+            issue_status TEXT DEFAULT 'NO_ISSUE',
+            nurse_note TEXT DEFAULT '',
+            progress_percent REAL DEFAULT 0,
+            completed_steps_count INTEGER DEFAULT 0,
+            total_steps_count INTEGER DEFAULT 17,
+            help_needed INTEGER DEFAULT 0,
+            last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT DEFAULT '',
+            updated_by_role TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS nurse_onboarding_help_request (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nurse_id INTEGER,
+            current_stage_code TEXT,
+            issue_note TEXT DEFAULT '',
+            status TEXT DEFAULT 'NEW',
+            assigned_to TEXT DEFAULT '',
+            assigned_role TEXT DEFAULT '',
+            contact_sharing_allowed INTEGER DEFAULT 0,
+            volunteer_visible INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TIMESTAMP,
+            escalation_note TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS nurse_onboarding_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nurse_id INTEGER,
+            event_type TEXT,
+            old_stage_code TEXT,
+            new_stage_code TEXT,
+            old_issue_status TEXT,
+            new_issue_status TEXT,
+            old_note TEXT,
+            new_note TEXT,
+            actor TEXT,
+            actor_role TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_no_progress_nurse ON nurse_onboarding_progress(nurse_id);
+        CREATE INDEX IF NOT EXISTS idx_no_progress_stage ON nurse_onboarding_progress(current_stage_code);
+        CREATE INDEX IF NOT EXISTS idx_no_progress_issue ON nurse_onboarding_progress(issue_status);
+        CREATE INDEX IF NOT EXISTS idx_no_progress_help ON nurse_onboarding_progress(help_needed);
+        CREATE INDEX IF NOT EXISTS idx_no_help_nurse ON nurse_onboarding_help_request(nurse_id);
+        CREATE INDEX IF NOT EXISTS idx_no_help_status ON nurse_onboarding_help_request(status);
+        CREATE INDEX IF NOT EXISTS idx_no_help_assigned ON nurse_onboarding_help_request(assigned_to);
+        CREATE INDEX IF NOT EXISTS idx_no_audit_nurse ON nurse_onboarding_audit(nurse_id);
+        """)
+        # Seed default 17-step plan if absent.
+        for sort_order, (code, name, guidance, expected_days) in enumerate(NURSE_ONBOARDING_DEFAULT_STEPS, start=1):
+            existing = db.execute(
+                "SELECT id, step_name, short_guidance, sort_order, expected_days_after_arrival, is_active "
+                "FROM nurse_onboarding_steps WHERE step_code = ? LIMIT 1",
+                [code]
+            ).fetchone()
+            if existing is None:
+                db.execute(
+                    "INSERT INTO nurse_onboarding_steps "
+                    "(step_code, step_name, short_guidance, sort_order, is_active, expected_days_after_arrival) "
+                    "VALUES (?, ?, ?, ?, 1, ?)",
+                    [code, name, guidance, sort_order, expected_days]
+                )
+        try:
+            db.commit()
+        except Exception:
+            pass
+        _NO_SCHEMA_READY = True
+
 
 def init_db():
     global GRADING_LETTER_AVAILABLE
@@ -2507,6 +2653,16 @@ def init_db():
         except Exception as exc:
             GRADING_LETTER_AVAILABLE = False
             print(f"[GradingLetter] migration failed: {exc}", flush=True)
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
+
+    if FEATURE_NURSE_ONBOARDING:
+        try:
+            _nurse_onboarding_ensure_schema(db)
+        except Exception as exc:
+            print(f"[NurseOnboarding] migration failed: {exc}", flush=True)
             try:
                 traceback.print_exc()
             except Exception:
@@ -8969,6 +9125,809 @@ def api_gl_nurse_cancel(data):
     except Exception as exc:
         print(f"[GradingLetter] nurse cancel failed: {exc}", flush=True)
         return {'success': False, 'error': 'Request could not be cancelled. Please try again.'}
+    finally:
+        db.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Nurse MOH Onboarding Tracker — helpers and APIs.
+# Designed to be additive: never mutates existing nurse, complaint, or
+# grading-letter rows. Reads nurse identity through the same
+# _gl_resolve_nurse_from_payload helper used by grading letters.
+#
+# TODO: future nurse_volunteer role should only access assigned help
+# requests with restricted fields (no passport, no civil_id, no email
+# unless contact_sharing_allowed is set on the help request row).
+# ═══════════════════════════════════════════════════════════════
+def _nurse_onboarding_clean_text(value, max_len=600):
+    text = str(value or '').strip()
+    if max_len and len(text) > max_len:
+        text = text[:max_len].strip()
+    return text
+
+
+def _nurse_onboarding_actor_text(actor):
+    if isinstance(actor, dict):
+        return _nurse_onboarding_clean_text(
+            actor.get('user') or actor.get('username') or actor.get('full_name') or actor.get('name') or 'system',
+            120
+        )
+    return _nurse_onboarding_clean_text(actor or 'system', 120)
+
+
+def _nurse_onboarding_actor_role(actor):
+    if isinstance(actor, dict):
+        return _nurse_onboarding_clean_text(actor.get('role') or '', 60)
+    return ''
+
+
+def _nurse_onboarding_load_active_steps(db):
+    rows = db.execute(
+        "SELECT id, step_code, step_name, short_guidance, sort_order, is_active, expected_days_after_arrival "
+        "FROM nurse_onboarding_steps WHERE COALESCE(is_active,1) = 1 ORDER BY sort_order ASC, id ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _nurse_onboarding_calculate_progress(current_stage_code, steps=None, db=None):
+    """v1 calculation: completed_steps_count = (selected stage's 1-based index) - 1.
+    Example: if selected stage is the 5th step, completed=4 (steps 1..4 are done).
+    progress_percent = completed_steps_count / total_steps_count * 100.
+    Final-step special case: if the selected stage is the final step we still
+    use completed=total-1 so admin must explicitly mark complete via
+    issue_status=NO_ISSUE on the final step or via the admin update endpoint.
+    """
+    if steps is None:
+        if db is None:
+            steps = []
+        else:
+            steps = _nurse_onboarding_load_active_steps(db)
+    total = len(steps) or NURSE_ONBOARDING_TOTAL_STEPS
+    if total <= 0:
+        total = NURSE_ONBOARDING_TOTAL_STEPS
+    selected_index = None
+    for idx, step in enumerate(steps, start=1):
+        if (step.get('step_code') or '') == current_stage_code:
+            selected_index = idx
+            break
+    if selected_index is None:
+        return {
+            'completed_steps_count': 0,
+            'total_steps_count': total,
+            'progress_percent': 0.0,
+            'selected_index': 0,
+        }
+    completed = max(0, selected_index - 1)
+    pct = round((completed / total) * 100.0, 2) if total else 0.0
+    return {
+        'completed_steps_count': completed,
+        'total_steps_count': total,
+        'progress_percent': pct,
+        'selected_index': selected_index,
+    }
+
+
+def calculate_onboarding_progress(current_stage_code, steps=None, db=None):
+    """Public name preserved for tests / future callers."""
+    return _nurse_onboarding_calculate_progress(current_stage_code, steps=steps, db=db)
+
+
+def _nurse_onboarding_step_index(steps, code):
+    for idx, step in enumerate(steps, start=1):
+        if (step.get('step_code') or '') == code:
+            return idx
+    return 0
+
+
+def _nurse_onboarding_get_progress_row(db, nurse_id):
+    if not nurse_id:
+        return None
+    row = db.execute(
+        "SELECT * FROM nurse_onboarding_progress WHERE nurse_id = ? LIMIT 1",
+        [int(nurse_id)]
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _nurse_onboarding_open_help_request(db, nurse_id):
+    if not nurse_id:
+        return None
+    placeholders = ','.join(['?'] * len(NURSE_ONBOARDING_HELP_OPEN_STATUSES))
+    row = db.execute(
+        f"SELECT * FROM nurse_onboarding_help_request "
+        f"WHERE nurse_id = ? AND status IN ({placeholders}) "
+        f"ORDER BY id DESC LIMIT 1",
+        [int(nurse_id), *sorted(NURSE_ONBOARDING_HELP_OPEN_STATUSES)]
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _nurse_onboarding_latest_help_request(db, nurse_id):
+    if not nurse_id:
+        return None
+    row = db.execute(
+        "SELECT * FROM nurse_onboarding_help_request WHERE nurse_id = ? ORDER BY id DESC LIMIT 1",
+        [int(nurse_id)]
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _nurse_onboarding_write_audit(db, nurse_id, event_type, old_progress, new_progress, actor, actor_role):
+    db.execute(
+        """INSERT INTO nurse_onboarding_audit
+           (nurse_id, event_type, old_stage_code, new_stage_code,
+            old_issue_status, new_issue_status, old_note, new_note,
+            actor, actor_role)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            int(nurse_id or 0),
+            _nurse_onboarding_clean_text(event_type, 80),
+            (old_progress or {}).get('current_stage_code') or '',
+            (new_progress or {}).get('current_stage_code') or '',
+            (old_progress or {}).get('issue_status') or '',
+            (new_progress or {}).get('issue_status') or '',
+            (old_progress or {}).get('nurse_note') or '',
+            (new_progress or {}).get('nurse_note') or '',
+            _nurse_onboarding_actor_text(actor),
+            _nurse_onboarding_clean_text(actor_role, 60),
+        ]
+    )
+
+
+def _nurse_onboarding_summary_payload(db, nurse, steps=None):
+    nurse_id = int((nurse or {}).get('id') or 0)
+    if steps is None:
+        steps = _nurse_onboarding_load_active_steps(db)
+    progress_row = _nurse_onboarding_get_progress_row(db, nurse_id)
+    help_row = _nurse_onboarding_latest_help_request(db, nurse_id)
+    open_help_row = None
+    if help_row and (help_row.get('status') or '') in NURSE_ONBOARDING_HELP_OPEN_STATUSES:
+        open_help_row = help_row
+    current_stage_code = (progress_row or {}).get('current_stage_code') or ''
+    progress_calc = _nurse_onboarding_calculate_progress(current_stage_code, steps=steps)
+    current_index = progress_calc.get('selected_index') or 0
+    current_step = steps[current_index - 1] if current_index else None
+    next_step = steps[current_index] if current_index and current_index < len(steps) else None
+    issue_status = (progress_row or {}).get('issue_status') or 'NO_ISSUE'
+    return {
+        'nurse_id': nurse_id,
+        'reference_id': (nurse or {}).get('reference_id') or '',
+        'feature_enabled': True,
+        'steps': [
+            {
+                'step_code': s.get('step_code') or '',
+                'step_name': s.get('step_name') or '',
+                'short_guidance': s.get('short_guidance') or '',
+                'sort_order': int(s.get('sort_order') or 0),
+                'expected_days_after_arrival': int(s.get('expected_days_after_arrival') or 0),
+            }
+            for s in steps
+        ],
+        'progress': {
+            'has_row': bool(progress_row),
+            'current_stage_code': current_stage_code,
+            'issue_status': issue_status,
+            'nurse_note': (progress_row or {}).get('nurse_note') or '',
+            'progress_percent': float((progress_row or {}).get('progress_percent') or progress_calc['progress_percent'] or 0.0),
+            'completed_steps_count': int((progress_row or {}).get('completed_steps_count') or progress_calc['completed_steps_count'] or 0),
+            'total_steps_count': int((progress_row or {}).get('total_steps_count') or progress_calc['total_steps_count'] or NURSE_ONBOARDING_TOTAL_STEPS),
+            'help_needed': bool((progress_row or {}).get('help_needed') or 0),
+            'last_updated_at': (progress_row or {}).get('last_updated_at') or '',
+            'updated_by': (progress_row or {}).get('updated_by') or '',
+            'updated_by_role': (progress_row or {}).get('updated_by_role') or '',
+            'current_step_name': current_step.get('step_name') if current_step else '',
+            'current_step_guidance': current_step.get('short_guidance') if current_step else '',
+            'next_step_code': next_step.get('step_code') if next_step else '',
+            'next_step_name': next_step.get('step_name') if next_step else '',
+            'next_step_guidance': next_step.get('short_guidance') if next_step else '',
+        },
+        'open_help_request': {
+            'id': int(open_help_row.get('id')) if open_help_row else 0,
+            'status': open_help_row.get('status') if open_help_row else '',
+            'issue_note': open_help_row.get('issue_note') if open_help_row else '',
+            'assigned_to': open_help_row.get('assigned_to') if open_help_row else '',
+            'assigned_role': open_help_row.get('assigned_role') if open_help_row else '',
+            'created_at': open_help_row.get('created_at') if open_help_row else '',
+            'updated_at': open_help_row.get('updated_at') if open_help_row else '',
+            'escalation_note': open_help_row.get('escalation_note') if open_help_row else '',
+        } if open_help_row else None,
+        'latest_help_request': {
+            'id': int(help_row.get('id')) if help_row else 0,
+            'status': help_row.get('status') if help_row else '',
+            'created_at': help_row.get('created_at') if help_row else '',
+            'updated_at': help_row.get('updated_at') if help_row else '',
+            'resolved_at': help_row.get('resolved_at') if help_row else '',
+        } if help_row else None,
+    }
+
+
+def _nurse_onboarding_apply_update(db, nurse, current_stage_code, issue_status, note, actor, actor_role):
+    """Upsert nurse_onboarding_progress + manage open help request. Returns updated summary."""
+    steps = _nurse_onboarding_load_active_steps(db)
+    if not steps:
+        raise ValueError('Onboarding steps are not configured. Please contact the Embassy.')
+    valid_codes = {s.get('step_code') for s in steps}
+    if not current_stage_code or current_stage_code not in valid_codes:
+        raise ValueError('Please select your current onboarding stage.')
+    issue_status = (issue_status or 'NO_ISSUE').strip().upper()
+    if issue_status not in NURSE_ONBOARDING_VALID_ISSUE_STATUSES:
+        raise ValueError('Issue status is not valid.')
+    nurse_id = int((nurse or {}).get('id') or 0)
+    if not nurse_id:
+        raise ValueError('Nurse identity could not be resolved.')
+    note_clean = _nurse_onboarding_clean_text(note, 600)
+    progress_calc = _nurse_onboarding_calculate_progress(current_stage_code, steps=steps)
+    completed = progress_calc['completed_steps_count']
+    total = progress_calc['total_steps_count']
+    pct = progress_calc['progress_percent']
+    help_needed = 1 if issue_status == 'NEED_HELP' else 0
+    actor_text = _nurse_onboarding_actor_text(actor)
+    actor_role_text = _nurse_onboarding_clean_text(actor_role, 60)
+    existing = _nurse_onboarding_get_progress_row(db, nurse_id)
+    if existing:
+        db.execute(
+            """UPDATE nurse_onboarding_progress
+               SET current_stage_code = ?,
+                   issue_status = ?,
+                   nurse_note = ?,
+                   progress_percent = ?,
+                   completed_steps_count = ?,
+                   total_steps_count = ?,
+                   help_needed = ?,
+                   last_updated_at = CURRENT_TIMESTAMP,
+                   updated_by = ?,
+                   updated_by_role = ?
+               WHERE nurse_id = ?""",
+            [
+                current_stage_code, issue_status, note_clean, pct, completed, total,
+                help_needed, actor_text, actor_role_text, nurse_id
+            ]
+        )
+    else:
+        db.execute(
+            """INSERT INTO nurse_onboarding_progress
+               (nurse_id, current_stage_code, issue_status, nurse_note,
+                progress_percent, completed_steps_count, total_steps_count,
+                help_needed, last_updated_at, updated_by, updated_by_role)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)""",
+            [
+                nurse_id, current_stage_code, issue_status, note_clean, pct,
+                completed, total, help_needed, actor_text, actor_role_text
+            ]
+        )
+    new_progress_row = {
+        'current_stage_code': current_stage_code,
+        'issue_status': issue_status,
+        'nurse_note': note_clean,
+    }
+    _nurse_onboarding_write_audit(
+        db, nurse_id, 'progress_update',
+        existing or {}, new_progress_row,
+        actor, actor_role_text
+    )
+    if issue_status == 'NEED_HELP':
+        existing_help = _nurse_onboarding_open_help_request(db, nurse_id)
+        if existing_help:
+            db.execute(
+                """UPDATE nurse_onboarding_help_request
+                   SET current_stage_code = ?,
+                       issue_note = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [current_stage_code, note_clean, existing_help['id']]
+            )
+        else:
+            db.execute(
+                """INSERT INTO nurse_onboarding_help_request
+                   (nurse_id, current_stage_code, issue_note, status,
+                    assigned_to, assigned_role, contact_sharing_allowed,
+                    volunteer_visible)
+                   VALUES (?, ?, ?, 'NEW', '', 'nurses_welfare_desk', 0, 0)""",
+                [nurse_id, current_stage_code, note_clean]
+            )
+            _nurse_onboarding_write_audit(
+                db, nurse_id, 'help_request_created',
+                {}, {'current_stage_code': current_stage_code, 'issue_status': issue_status, 'nurse_note': note_clean},
+                actor, actor_role_text
+            )
+    db.commit()
+    return _nurse_onboarding_summary_payload(db, nurse, steps=steps)
+
+
+def api_nurse_onboarding_summary(data):
+    if not _nurse_onboarding_feature_enabled():
+        return {'success': False, 'error': 'MOH Onboarding tracker is temporarily unavailable.'}
+    db = get_db()
+    try:
+        _nurse_onboarding_ensure_schema(db)
+        nurse = _gl_resolve_nurse_from_payload(db, data or {})
+        if not nurse:
+            return {'success': False, 'error': 'Unable to verify nurse record.'}
+        blocked = nh_block_if_pending_arrival(db, nurse, 'MOH onboarding tracker')
+        if blocked:
+            return blocked
+        payload = _nurse_onboarding_summary_payload(db, nurse)
+        return {'success': True, **payload}
+    except Exception as exc:
+        print(f"[NurseOnboarding] summary failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Onboarding details could not be loaded. Please try again.'}
+    finally:
+        db.close()
+
+
+def api_nurse_onboarding_update(data):
+    if not _nurse_onboarding_feature_enabled():
+        return {'success': False, 'error': 'MOH Onboarding tracker is temporarily unavailable.'}
+    db = get_db()
+    try:
+        _nurse_onboarding_ensure_schema(db)
+        nurse = _gl_resolve_nurse_from_payload(db, data or {})
+        if not nurse:
+            return {'success': False, 'error': 'Unable to verify nurse record.'}
+        blocked = nh_block_if_pending_arrival(db, nurse, 'MOH onboarding tracker')
+        if blocked:
+            return blocked
+        current_stage_code = _nurse_onboarding_clean_text((data or {}).get('current_stage_code'), 80)
+        issue_status = _nurse_onboarding_clean_text((data or {}).get('issue_status'), 32) or 'NO_ISSUE'
+        note = _nurse_onboarding_clean_text((data or {}).get('nurse_note'), 600)
+        if not current_stage_code:
+            return {'success': False, 'error': 'Please select your current onboarding stage.'}
+        actor = nurse.get('reference_id') or nurse.get('id') or 'nurse'
+        summary = _nurse_onboarding_apply_update(
+            db, nurse, current_stage_code, issue_status, note,
+            actor=actor, actor_role='nurse'
+        )
+        return {
+            'success': True,
+            'message': 'Onboarding status updated.',
+            **summary,
+        }
+    except ValueError as exc:
+        try: db.rollback()
+        except Exception: pass
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try: db.rollback()
+        except Exception: pass
+        print(f"[NurseOnboarding] update failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Update could not be saved. Please try again.'}
+    finally:
+        db.close()
+
+
+def _nurse_onboarding_admin_role_allowed(user):
+    if not user:
+        return False
+    role = (user.get('role') or '').strip().lower()
+    if is_full_admin_role(role) or is_community_desk_role(role):
+        return True
+    if role in {'nurses_desk', 'nurse_desk', 'nurses_welfare_desk', 'nurse_welfare_desk'}:
+        return True
+    return False
+
+
+def _nurse_onboarding_admin_blocked_response():
+    return {'success': False, 'error': 'You do not have permission to access the MOH Onboarding tracker.'}
+
+
+def _nurse_onboarding_int(value, default=0):
+    try:
+        return int(str(value or '').strip() or default)
+    except Exception:
+        return default
+
+
+def _nurse_onboarding_admin_row(db, nurse_row, steps_by_code, total_steps):
+    nd = dict(nurse_row or {})
+    nurse_id = int(nd.get('nurse_id') or nd.get('id') or 0)
+    progress_row = _nurse_onboarding_get_progress_row(db, nurse_id)
+    open_help = _nurse_onboarding_open_help_request(db, nurse_id) if nurse_id else None
+    latest_help = _nurse_onboarding_latest_help_request(db, nurse_id) if nurse_id else None
+    current_stage_code = (progress_row or {}).get('current_stage_code') or ''
+    current_step = steps_by_code.get(current_stage_code) if current_stage_code else None
+    completed = int((progress_row or {}).get('completed_steps_count') or 0)
+    pct = float((progress_row or {}).get('progress_percent') or 0.0)
+    issue_status = (progress_row or {}).get('issue_status') or 'NO_ISSUE'
+    last_updated = (progress_row or {}).get('last_updated_at') or ''
+    no_update_days = 0
+    if last_updated:
+        try:
+            ts = last_updated[:19].replace('T', ' ')
+            dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+            no_update_days = max(0, (datetime.utcnow() - dt).days)
+        except Exception:
+            no_update_days = 0
+    passport = (nd.get('passport_number') or '').strip()
+    if passport and len(passport) > 4:
+        passport_masked = '*' * (len(passport) - 3) + passport[-3:]
+    else:
+        passport_masked = passport
+    return {
+        'nurse_id': nurse_id,
+        'reference_id': nd.get('reference_id') or '',
+        'name': nd.get('full_name') or '',
+        'father_name': nd.get('father_name') or '',
+        'passport_masked': passport_masked,
+        'passport_number': passport,
+        'mobile': nd.get('mobile_full') or nd.get('mobile') or '',
+        'whatsapp': nd.get('whatsapp_full') or nd.get('mobile_full') or nd.get('mobile') or '',
+        'email': nd.get('email') or '',
+        'mton_number': nd.get('mton_number') or '',
+        'arrival_batch': nd.get('arrival_batch_code') or nd.get('batch_code') or nd.get('batch_number') or '',
+        'current_stage_code': current_stage_code,
+        'current_stage_name': (current_step or {}).get('step_name') or '',
+        'issue_status': issue_status,
+        'nurse_note': (progress_row or {}).get('nurse_note') or '',
+        'progress_percent': pct,
+        'completed_steps_count': completed,
+        'total_steps_count': int((progress_row or {}).get('total_steps_count') or total_steps or NURSE_ONBOARDING_TOTAL_STEPS),
+        'help_needed': bool((progress_row or {}).get('help_needed') or 0),
+        'last_updated_at': last_updated,
+        'no_update_days': no_update_days,
+        'has_progress_row': bool(progress_row),
+        'help_request_status': (open_help or {}).get('status') or (latest_help or {}).get('status') or '',
+        'help_request_id': int((open_help or latest_help or {}).get('id') or 0) if (open_help or latest_help) else 0,
+    }
+
+
+def _nurse_onboarding_admin_query_rows(db, params):
+    """Return joined nurse + onboarding rows with optional filters."""
+    sql = (
+        "SELECT n.id AS nurse_id, n.reference_id, n.full_name, n.father_name, "
+        "n.passport_number, n.mobile, n.email, n.mton_number, "
+        "COALESCE(n.batch_number, '') AS batch_number, "
+        "(SELECT batch_code FROM nh_arrival_batch WHERE id = a.arrival_batch_id) AS arrival_batch_code, "
+        "p.current_stage_code, p.issue_status, p.help_needed, p.last_updated_at, "
+        "p.completed_steps_count, p.progress_percent "
+        "FROM nurse_registrations n "
+        "LEFT JOIN nh_nurse_account a ON a.nurse_registration_id = n.id "
+        "LEFT JOIN nurse_onboarding_progress p ON p.nurse_id = n.id "
+    )
+    where = []
+    args = []
+    search = _nurse_onboarding_clean_text((params or {}).get('search'), 120)
+    stage_code = _nurse_onboarding_clean_text((params or {}).get('stage_code'), 80)
+    issue_status = _nurse_onboarding_clean_text((params or {}).get('issue_status'), 32)
+    help_needed = (params or {}).get('help_needed')
+    no_update_days_s = _nurse_onboarding_clean_text((params or {}).get('no_update_days'), 8)
+    batch = _nurse_onboarding_clean_text((params or {}).get('batch'), 80)
+    mton = _nurse_onboarding_clean_text((params or {}).get('mton'), 60)
+    if search:
+        where.append(
+            "(UPPER(COALESCE(n.full_name,'')) LIKE ? "
+            "OR UPPER(COALESCE(n.passport_number,'')) LIKE ? "
+            "OR UPPER(COALESCE(n.reference_id,'')) LIKE ? "
+            "OR UPPER(COALESCE(n.mton_number,'')) LIKE ?)"
+        )
+        like = f"%{search.upper()}%"
+        args.extend([like, like, like, like])
+    if stage_code:
+        where.append("p.current_stage_code = ?")
+        args.append(stage_code)
+    if issue_status:
+        where.append("UPPER(COALESCE(p.issue_status,'')) = ?")
+        args.append(issue_status.upper())
+    if help_needed is not None:
+        try:
+            help_int = 1 if str(help_needed).strip() in ('1', 'true', 'yes') else 0
+        except Exception:
+            help_int = 0
+        where.append("COALESCE(p.help_needed,0) = ?")
+        args.append(help_int)
+    if no_update_days_s:
+        try:
+            days = int(no_update_days_s)
+        except Exception:
+            days = 0
+        if days > 0:
+            where.append(
+                "(p.last_updated_at IS NULL "
+                "OR julianday('now') - julianday(p.last_updated_at) >= ?)"
+            )
+            args.append(days)
+    if batch:
+        where.append(
+            "(UPPER(COALESCE(n.batch_number,'')) = ? "
+            "OR UPPER(COALESCE((SELECT batch_code FROM nh_arrival_batch WHERE id = a.arrival_batch_id),'')) = ?)"
+        )
+        args.append(batch.upper())
+        args.append(batch.upper())
+    if mton:
+        where.append("UPPER(COALESCE(n.mton_number,'')) = ?")
+        args.append(mton.upper())
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY (p.last_updated_at IS NULL) DESC, p.last_updated_at DESC, n.id DESC LIMIT 5000"
+    return [dict(r) for r in db.execute(sql, args).fetchall()]
+
+
+def api_admin_nurse_onboarding_list(params, user):
+    if not _nurse_onboarding_feature_enabled():
+        return {'success': False, 'error': 'MOH Onboarding tracker is temporarily unavailable.'}
+    if not _nurse_onboarding_admin_role_allowed(user):
+        return _nurse_onboarding_admin_blocked_response()
+    db = get_db()
+    try:
+        _nurse_onboarding_ensure_schema(db)
+        steps = _nurse_onboarding_load_active_steps(db)
+        steps_by_code = {s.get('step_code'): s for s in steps}
+        total = len(steps)
+        rows_raw = _nurse_onboarding_admin_query_rows(db, params or {})
+        rows = [_nurse_onboarding_admin_row(db, r, steps_by_code, total) for r in rows_raw]
+        # KPI counts
+        total_tracked = sum(1 for r in rows if r['has_progress_row'])
+        need_help = sum(1 for r in rows if r['issue_status'] == 'NEED_HELP')
+        waiting = sum(1 for r in rows if r['issue_status'] == 'WAITING')
+        no_update_7 = sum(1 for r in rows if r['has_progress_row'] and r['no_update_days'] >= 7)
+        no_update_14 = sum(1 for r in rows if r['has_progress_row'] and r['no_update_days'] >= 14)
+        salary_idx = _nurse_onboarding_step_index(steps, 'FIRST_SALARY_CHEQUE')
+        civil_idx = _nurse_onboarding_step_index(steps, 'CIVIL_ID_GENERATED')
+        license_idx = _nurse_onboarding_step_index(steps, 'FINAL_MEDICAL_LICENSE_ISSUED')
+        salary_pending = 0
+        civil_pending = 0
+        license_pending = 0
+        for r in rows:
+            if not r['has_progress_row']:
+                continue
+            cur_idx = _nurse_onboarding_step_index(steps, r['current_stage_code'])
+            if cur_idx and salary_idx and cur_idx < salary_idx:
+                salary_pending += 1
+            if cur_idx and civil_idx and cur_idx < civil_idx:
+                civil_pending += 1
+            if cur_idx and license_idx and cur_idx < license_idx:
+                license_pending += 1
+        return {
+            'success': True,
+            'items': rows,
+            'kpis': {
+                'total_tracked_nurses': total_tracked,
+                'need_embassy_help': need_help,
+                'waiting_pending': waiting,
+                'no_update_7_days': no_update_7,
+                'no_update_14_days': no_update_14,
+                'salary_pending': salary_pending,
+                'civil_id_pending': civil_pending,
+                'medical_license_pending': license_pending,
+            },
+            'steps': [
+                {
+                    'step_code': s.get('step_code') or '',
+                    'step_name': s.get('step_name') or '',
+                    'sort_order': int(s.get('sort_order') or 0),
+                }
+                for s in steps
+            ],
+        }
+    except Exception as exc:
+        print(f"[NurseOnboarding] admin list failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Onboarding list could not be loaded.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurse_onboarding_detail(params, user):
+    if not _nurse_onboarding_feature_enabled():
+        return {'success': False, 'error': 'MOH Onboarding tracker is temporarily unavailable.'}
+    if not _nurse_onboarding_admin_role_allowed(user):
+        return _nurse_onboarding_admin_blocked_response()
+    nurse_id = _nurse_onboarding_int((params or {}).get('nurse_id'), 0)
+    if nurse_id <= 0:
+        return {'success': False, 'error': 'nurse_id is required.'}
+    db = get_db()
+    try:
+        _nurse_onboarding_ensure_schema(db)
+        nurse_row = db.execute(
+            "SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1",
+            [nurse_id]
+        ).fetchone()
+        if not nurse_row:
+            return {'success': False, 'error': 'Nurse not found.'}
+        nurse = dict(nurse_row)
+        steps = _nurse_onboarding_load_active_steps(db)
+        progress_row = _nurse_onboarding_get_progress_row(db, nurse_id)
+        current_code = (progress_row or {}).get('current_stage_code') or ''
+        cur_idx = _nurse_onboarding_step_index(steps, current_code)
+        derived_steps = []
+        for idx, step in enumerate(steps, start=1):
+            if cur_idx == 0:
+                state = 'not_started'
+            elif idx < cur_idx:
+                state = 'completed'
+            elif idx == cur_idx:
+                state = 'current'
+            else:
+                state = 'upcoming'
+            derived_steps.append({
+                'step_code': step.get('step_code') or '',
+                'step_name': step.get('step_name') or '',
+                'short_guidance': step.get('short_guidance') or '',
+                'sort_order': int(step.get('sort_order') or 0),
+                'state': state,
+            })
+        help_row = _nurse_onboarding_latest_help_request(db, nurse_id)
+        audit_rows = db.execute(
+            "SELECT * FROM nurse_onboarding_audit WHERE nurse_id = ? ORDER BY id DESC LIMIT 100",
+            [nurse_id]
+        ).fetchall()
+        audits = [dict(r) for r in audit_rows]
+        return {
+            'success': True,
+            'nurse': {
+                'id': nurse_id,
+                'reference_id': nurse.get('reference_id') or '',
+                'full_name': nurse.get('full_name') or '',
+                'father_name': nurse.get('father_name') or '',
+                'passport_number': nurse.get('passport_number') or '',
+                'mobile': nurse.get('mobile_full') or nurse.get('mobile') or '',
+                'whatsapp': nurse.get('whatsapp_full') or nurse.get('mobile_full') or nurse.get('mobile') or '',
+                'email': nurse.get('email') or '',
+                'mton_number': nurse.get('mton_number') or '',
+                'batch_number': nurse.get('batch_number') or '',
+            },
+            'progress': progress_row or {},
+            'steps': derived_steps,
+            'help_request': help_row,
+            'audit': [
+                {
+                    'id': int(a.get('id') or 0),
+                    'event_type': a.get('event_type') or '',
+                    'old_stage_code': a.get('old_stage_code') or '',
+                    'new_stage_code': a.get('new_stage_code') or '',
+                    'old_issue_status': a.get('old_issue_status') or '',
+                    'new_issue_status': a.get('new_issue_status') or '',
+                    'old_note': a.get('old_note') or '',
+                    'new_note': a.get('new_note') or '',
+                    'actor': a.get('actor') or '',
+                    'actor_role': a.get('actor_role') or '',
+                    'created_at': a.get('created_at') or '',
+                }
+                for a in audits
+            ],
+        }
+    except Exception as exc:
+        print(f"[NurseOnboarding] admin detail failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Onboarding detail could not be loaded.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurse_onboarding_update(data, user):
+    if not _nurse_onboarding_feature_enabled():
+        return {'success': False, 'error': 'MOH Onboarding tracker is temporarily unavailable.'}
+    if not _nurse_onboarding_admin_role_allowed(user):
+        return _nurse_onboarding_admin_blocked_response()
+    db = get_db()
+    try:
+        _nurse_onboarding_ensure_schema(db)
+        nurse_id = _nurse_onboarding_int((data or {}).get('nurse_id'), 0)
+        if nurse_id <= 0:
+            return {'success': False, 'error': 'nurse_id is required.'}
+        nurse_row = db.execute("SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [nurse_id]).fetchone()
+        if not nurse_row:
+            return {'success': False, 'error': 'Nurse not found.'}
+        nurse = dict(nurse_row)
+        current_stage_code = _nurse_onboarding_clean_text((data or {}).get('current_stage_code'), 80)
+        issue_status = _nurse_onboarding_clean_text((data or {}).get('issue_status'), 32) or 'NO_ISSUE'
+        admin_note = _nurse_onboarding_clean_text((data or {}).get('admin_note'), 600)
+        nurse_note_in = _nurse_onboarding_clean_text((data or {}).get('nurse_note'), 600)
+        existing = _nurse_onboarding_get_progress_row(db, nurse_id) or {}
+        # Preserve nurse note unless admin supplied an override note explicitly.
+        note_to_store = nurse_note_in or existing.get('nurse_note') or ''
+        if admin_note:
+            prefix = note_to_store + '\n\n' if note_to_store else ''
+            note_to_store = (prefix + f'[Admin note] {admin_note}')[:600]
+        actor = (user or {}).get('username') or (user or {}).get('full_name') or 'admin'
+        actor_role = (user or {}).get('role') or 'admin'
+        summary = _nurse_onboarding_apply_update(
+            db, nurse, current_stage_code, issue_status, note_to_store,
+            actor=actor, actor_role=actor_role
+        )
+        return {
+            'success': True,
+            'message': 'Nurse onboarding status updated.',
+            **summary,
+        }
+    except ValueError as exc:
+        try: db.rollback()
+        except Exception: pass
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try: db.rollback()
+        except Exception: pass
+        print(f"[NurseOnboarding] admin update failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Onboarding update could not be saved.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurse_onboarding_request_update_message(data, user):
+    if not _nurse_onboarding_feature_enabled():
+        return {'success': False, 'error': 'MOH Onboarding tracker is temporarily unavailable.'}
+    if not _nurse_onboarding_admin_role_allowed(user):
+        return _nurse_onboarding_admin_blocked_response()
+    db = get_db()
+    try:
+        _nurse_onboarding_ensure_schema(db)
+        nurse_id = _nurse_onboarding_int((data or {}).get('nurse_id'), 0)
+        if nurse_id <= 0:
+            return {'success': False, 'error': 'nurse_id is required.'}
+        row = db.execute(
+            "SELECT id, full_name, mobile, mobile_full, whatsapp_full FROM nurse_registrations WHERE id = ? LIMIT 1",
+            [nurse_id]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Nurse not found.'}
+        nurse = dict(row)
+        name = (nurse.get('full_name') or '').strip() or 'Nurse'
+        whatsapp = (nurse.get('whatsapp_full') or nurse.get('mobile_full') or nurse.get('mobile') or '').strip()
+        portal_url = 'https://portal.cwakuwait.com/nurses/login'
+        message = (
+            f"Dear {name}, please update your MOH onboarding status in the Embassy nurse portal. "
+            f"This helps the Nurses Welfare Desk know whether you are stuck and what support is required. "
+            f"Login: {portal_url}"
+        )
+        return {
+            'success': True,
+            'message_text': message,
+            'whatsapp': whatsapp,
+            'portal_url': portal_url,
+        }
+    except Exception as exc:
+        print(f"[NurseOnboarding] request-update msg failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Could not generate request-update message.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurse_onboarding_export_csv(params, user):
+    if not _nurse_onboarding_feature_enabled():
+        return None, None, {'success': False, 'error': 'MOH Onboarding tracker is temporarily unavailable.'}
+    if not _nurse_onboarding_admin_role_allowed(user):
+        return None, None, _nurse_onboarding_admin_blocked_response()
+    db = get_db()
+    try:
+        _nurse_onboarding_ensure_schema(db)
+        steps = _nurse_onboarding_load_active_steps(db)
+        steps_by_code = {s.get('step_code'): s for s in steps}
+        total = len(steps)
+        rows_raw = _nurse_onboarding_admin_query_rows(db, params or {})
+        rows = [_nurse_onboarding_admin_row(db, r, steps_by_code, total) for r in rows_raw]
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow([
+            'Reference ID', 'Name', 'Passport (masked)', 'Mobile', 'WhatsApp',
+            'MTON Number', 'Arrival Batch',
+            'Current Stage Code', 'Current Stage Name', 'Issue Status',
+            'Progress %', 'Completed Steps', 'Total Steps',
+            'Help Needed', 'Help Status', 'Last Updated', 'Days Since Update',
+            'Note',
+        ])
+        for r in rows:
+            writer.writerow([
+                r.get('reference_id') or '',
+                r.get('name') or '',
+                r.get('passport_masked') or '',
+                r.get('mobile') or '',
+                r.get('whatsapp') or '',
+                r.get('mton_number') or '',
+                r.get('arrival_batch') or '',
+                r.get('current_stage_code') or '',
+                r.get('current_stage_name') or '',
+                r.get('issue_status') or '',
+                f"{float(r.get('progress_percent') or 0):.2f}",
+                r.get('completed_steps_count') or 0,
+                r.get('total_steps_count') or 0,
+                'Yes' if r.get('help_needed') else 'No',
+                r.get('help_request_status') or '',
+                r.get('last_updated_at') or '',
+                r.get('no_update_days') or 0,
+                (r.get('nurse_note') or '').replace('\n', ' ').strip()[:400],
+            ])
+        fname = f"nurse_moh_onboarding_{datetime.now().strftime('%Y%m%d')}.csv"
+        return out.getvalue().encode('utf-8'), fname, None
+    except Exception as exc:
+        print(f"[NurseOnboarding] export csv failed: {exc}", flush=True)
+        return None, None, {'success': False, 'error': 'Export could not be generated.'}
     finally:
         db.close()
 
@@ -28138,6 +29097,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(body)
             finally:
                 db.close()
+        elif path == '/api/nurses/onboarding/summary':
+            params_data = dict(params or {})
+            result = api_nurse_onboarding_summary(params_data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/nurses/onboarding/list':
+            user = self.require_auth()
+            if not user: return
+            res = api_admin_nurse_onboarding_list(params, user)
+            status = 200 if res.get('success') else (403 if 'permission' in (res.get('error') or '').lower() else 400)
+            self.send_json(res, status)
+            return
+        elif path == '/api/admin/nurses/onboarding/detail':
+            user = self.require_auth()
+            if not user: return
+            res = api_admin_nurse_onboarding_detail(params, user)
+            status = 200 if res.get('success') else (403 if 'permission' in (res.get('error') or '').lower() else 404)
+            self.send_json(res, status)
+            return
+        elif path == '/api/admin/nurses/onboarding/export.csv':
+            user = self.require_auth()
+            if not user: return
+            body_csv, fname, err = api_admin_nurse_onboarding_export_csv(params, user)
+            if err:
+                self.send_json(err, 403 if 'permission' in (err.get('error') or '').lower() else 400)
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', str(len(body_csv)))
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(body_csv)
+            return
         elif path == '/api/admin/nurses/leave-notices':
             user = self.require_auth()
             if not user: return
@@ -30564,6 +31557,44 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_gl_nurse_cancel(data)
             self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/onboarding/summary':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_onboarding_summary(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/onboarding/update':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_onboarding_update(data)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/admin/nurses/onboarding/update':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_nurse_onboarding_update(data, user)
+            status = 200 if result.get('success') else (403 if 'permission' in (result.get('error') or '').lower() else 400)
+            self.send_json(result, status)
+            return
+        elif path == '/api/admin/nurses/onboarding/request-update':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_nurse_onboarding_request_update_message(data, user)
+            status = 200 if result.get('success') else (403 if 'permission' in (result.get('error') or '').lower() else 400)
+            self.send_json(result, status)
             return
         elif path == '/api/nurses/mton/save':
             try:

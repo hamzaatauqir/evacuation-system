@@ -165,6 +165,13 @@ export function AdminNursesPage() {
             >
               Arrival Batches {totals.arrival_batches ? `(${totals.arrival_batches})` : ""}
             </Btn>
+            <Btn
+              variant="light"
+              size="sm"
+              onClick={() => navigate("/admin/nurses/onboarding")}
+            >
+              MOH Onboarding Tracker
+            </Btn>
             <Btn variant="light" size="sm" icon="download">
               Export
             </Btn>
