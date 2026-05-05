@@ -70,8 +70,14 @@ type GradingIdentity = {
   mton_number?: string;
   passport_number?: string;
   cnic?: string;
+  civil_id?: string;
   mobile?: string;
+  whatsapp?: string;
   email?: string;
+  gender?: string;
+  workplace?: string;
+  qualification_degree?: string;
+  qualification_degree_other?: string;
 };
 
 type GradingApplication = {
@@ -100,6 +106,7 @@ type GradingApplication = {
   created_at?: string;
   correction_notes?: string;
   can_nurse_edit?: boolean;
+  can_nurse_cancel?: boolean;
 };
 
 type GradingSummaryResponse = {
@@ -126,6 +133,20 @@ type GradingFormState = {
   entered_percentage: string;
   entered_gpa: string;
   declaration_accepted: boolean;
+  preview_confirmed: boolean;
+};
+
+type ProfileFormState = {
+  father_name: string;
+  email: string;
+  primary_mobile: string;
+  whatsapp: string;
+  civil_id: string;
+  cnic: string;
+  mton_number: string;
+  qualification_degree: string;
+  qualification_degree_other: string;
+  workplace: string;
 };
 
 const DASH_VALUE = "—";
@@ -148,6 +169,13 @@ const GRADING_IDENTIFIER_TYPES = [
   "Roll Number",
 ] as const;
 const GRADING_IDENTIFIER_TYPE_SET = new Set<string>(GRADING_IDENTIFIER_TYPES);
+const PROFILE_QUALIFICATION_OPTIONS = [
+  "Diploma Nurse",
+  "BSN Nursing",
+  "Doctor MBBS",
+  "Doctor BDS",
+  "Other",
+] as const;
 
 function normalizeMtonNumber(value: string) {
   const raw = (value || "").trim().toUpperCase();
@@ -211,6 +239,22 @@ function createGradingForm(application?: GradingApplication | null): GradingForm
     entered_percentage: application?.entered_percentage == null ? "" : String(application.entered_percentage),
     entered_gpa: application?.entered_gpa == null ? "" : String(application.entered_gpa),
     declaration_accepted: false,
+    preview_confirmed: false,
+  };
+}
+
+function createProfileForm(ctx: NursePortalContext): ProfileFormState {
+  return {
+    father_name: ctx.fatherName || "",
+    email: ctx.email || "",
+    primary_mobile: ctx.mobileFull || ctx.mobile || "",
+    whatsapp: ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "",
+    civil_id: ctx.civilId || "",
+    cnic: ctx.cnic || "",
+    mton_number: normalizeMtonNumber(ctx.mtonNumber || ""),
+    qualification_degree: ctx.qualificationDegree || "",
+    qualification_degree_other: ctx.qualificationDegreeOther || "",
+    workplace: ctx.hospital || "",
   };
 }
 
@@ -349,12 +393,261 @@ function computeGradingPreview(form: GradingFormState) {
         ? !!form.entered_percentage.trim()
         : !!form.entered_gpa.trim();
 
+  if (!validationMessage && commonComplete && modeReady && percentage != null && !form.preview_confirmed) {
+    validationMessage = "Please review the preview and confirm the information before submission.";
+  }
+  if (!validationMessage && commonComplete && modeReady && percentage != null && !form.declaration_accepted) {
+    validationMessage = "Please accept the declaration before submission.";
+  }
+
   return {
     percentage,
     gradeLabel: percentage != null ? gradingGradeLabel(percentage) : DASH_VALUE,
     validationMessage,
-    canSubmit: commonComplete && modeReady && form.declaration_accepted && percentage != null && !validationMessage,
+    canSubmit:
+      commonComplete &&
+      modeReady &&
+      form.declaration_accepted &&
+      form.preview_confirmed &&
+      percentage != null &&
+      !validationMessage,
   };
+}
+
+function relationLabelForGender(gender?: string) {
+  const normalized = (gender || "").trim().toLowerCase();
+  return normalized === "male" || normalized === "m" ? "S/o" : "D/o";
+}
+
+function qualificationSubtitleFromForm(form: GradingFormState) {
+  const title = form.degree_title.trim().toLowerCase();
+  if (form.qualification_code === "SPECIALIZATION_MIDWIFERY" && !title.includes("midwifery")) {
+    return "Specialization / Midwifery";
+  }
+  if (form.qualification_code === "POST_RN_BSN" && !title.includes("post rn")) {
+    return "Post RN BSN";
+  }
+  return "";
+}
+
+function gradingModeSummary(form: GradingFormState) {
+  if (form.mode === "MARKS") {
+    return form.total_marks.trim() && form.obtained_marks.trim()
+      ? `Marks: ${form.obtained_marks.trim()} out of ${form.total_marks.trim()}`
+      : "Marks: —";
+  }
+  if (form.mode === "PERCENT") {
+    return form.entered_percentage.trim() ? `Entered percentage: ${form.entered_percentage.trim()}%` : "Entered percentage: —";
+  }
+  return form.entered_gpa.trim() ? `GPA: ${form.entered_gpa.trim()} out of 4.00` : "GPA: —";
+}
+
+function buildGradingPreviewLetterModel(
+  ctx: NursePortalContext,
+  profile: GradingIdentity,
+  form: GradingFormState,
+  computed: ReturnType<typeof computeGradingPreview>
+) {
+  const applicantName = (profile.full_name || ctx.fullName || "").trim() || DASH_VALUE;
+  const fatherName = (profile.father_name || ctx.fatherName || "").trim() || DASH_VALUE;
+  const passportNumber = (profile.passport_number || ctx.passportNumber || "").trim() || DASH_VALUE;
+  const degreeTitle = form.degree_title.trim() || DASH_VALUE;
+  const identifierLabel = normalizeGradingIdentifierType(form.student_identifier_type || "Student Number")
+    .replace("Number", "No.");
+  return {
+    applicantName,
+    fatherName,
+    relationText: `${relationLabelForGender(profile.gender || ctx.gender)} ${fatherName}`,
+    passportNumber,
+    degreeTitle,
+    qualificationSubtitle: qualificationSubtitleFromForm(form),
+    identifierLabel,
+    identifierValue: form.student_no.trim() || DASH_VALUE,
+    institute: form.institute.trim() || DASH_VALUE,
+    university: form.university.trim() || DASH_VALUE,
+    yearOfPassing: form.year_of_passing.trim() || DASH_VALUE,
+    finalPercentage: computed.percentage != null ? `${computed.percentage.toFixed(2)}%` : DASH_VALUE,
+    finalGradeLabel: computed.gradeLabel || DASH_VALUE,
+    finalResultText:
+      computed.percentage != null && computed.gradeLabel && computed.gradeLabel !== DASH_VALUE
+        ? `${computed.percentage.toFixed(2)}% "${computed.gradeLabel}"`
+        : DASH_VALUE,
+    cnic: (profile.cnic || ctx.cnic || "").trim() || DASH_VALUE,
+    civilId: (profile.civil_id || ctx.civilId || "").trim() || DASH_VALUE,
+    mobile: (profile.mobile || ctx.mobileFull || ctx.mobile || "").trim() || DASH_VALUE,
+    whatsapp: (profile.whatsapp || ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "").trim() || DASH_VALUE,
+    email: (profile.email || ctx.email || "").trim() || DASH_VALUE,
+    mtonNumber: normalizeMtonNumber(profile.mton_number || ctx.mtonNumber || "") || DASH_VALUE,
+    qualificationType: qualificationLabelFromCode(form.qualification_code || "", ""),
+    gradingMode: form.mode,
+    gradingModeSummary: gradingModeSummary(form),
+    workplace: (profile.workplace || ctx.hospital || "").trim() || DASH_VALUE,
+  };
+}
+
+function OfficialLetterPreview(props: {
+  ctx: NursePortalContext;
+  profile: GradingIdentity;
+  form: GradingFormState;
+  computed: ReturnType<typeof computeGradingPreview>;
+}) {
+  const letter = buildGradingPreviewLetterModel(props.ctx, props.profile, props.form, props.computed);
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div
+        className="grading-preview-print-hide"
+        style={{
+          border: "1px solid #D9E2EC",
+          borderRadius: 12,
+          background: "#F8FAFC",
+          padding: 14,
+          display: "grid",
+          gap: 10,
+        }}
+      >
+        <div style={{ fontWeight: 700, color: "#2D4A6B" }}>Application details for internal review</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10 }}>
+          <Field label="CNIC" value={letter.cnic} />
+          <Field label="Civil ID" value={letter.civilId} />
+          <Field label="MOH / MTON Number" value={letter.mtonNumber} />
+          <Field label="Primary Mobile" value={letter.mobile} />
+          <Field label="WhatsApp" value={letter.whatsapp} />
+          <Field label="Email" value={letter.email} />
+          <Field label="Qualification Type" value={letter.qualificationType} />
+          <Field label="Grading Mode" value={letter.gradingMode} />
+          <Field label="Marks / GPA / %" value={letter.gradingModeSummary} />
+          <Field label="Computed Percentage" value={letter.finalPercentage} />
+          <Field label="Provisional Grade" value={letter.finalGradeLabel} />
+          <Field label="Current Workplace / Hospital" value={letter.workplace} />
+        </div>
+      </div>
+
+      <div
+        className="grading-preview-shell"
+        style={{
+          position: "relative",
+          background: "#fff",
+          border: "1px solid #D9E2EC",
+          borderRadius: 12,
+          padding: "32px 22px 20px",
+          color: "#000",
+          overflow: "hidden",
+          boxShadow: "0 18px 44px rgba(15, 23, 42, 0.08)",
+          fontFamily: '"Times New Roman", Georgia, serif',
+        }}
+      >
+        <div
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+            opacity: 0.12,
+          }}
+        >
+          <div
+            style={{
+              transform: "rotate(-28deg)",
+              textAlign: "center",
+              fontSize: "clamp(24px, 5vw, 42px)",
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              color: "#163d63",
+              lineHeight: 1.35,
+            }}
+          >
+            NOT OFFICIAL USE ONLY
+            <br />
+            للاطلاع فقط - غير رسمي
+          </div>
+        </div>
+
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 12, alignItems: "start" }}>
+            <div style={{ display: "flex", justifyContent: "flex-start" }}>
+              <img src="/images/pakistan-emblem.png" alt="Embassy crest" style={{ width: 82, height: "auto" }} />
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.2 }}>
+                Embassy of Islamic Republic of Pakistan
+                <br />
+                Kuwait
+              </div>
+              <div dir="rtl" style={{ marginTop: 8, fontSize: 17, fontWeight: 700, lineHeight: 1.35 }}>
+                سفارة جمهورية باكستان الإسلامية
+                <br />
+                الكويت
+              </div>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 26, fontSize: 18 }}>No. Pol-II/18/2021 (Attestation)</div>
+
+          <div style={{ margin: "22px 0 18px", textAlign: "center", fontSize: 22, fontWeight: 700, textDecoration: "underline" }}>
+            TO WHOM IT MAY CONCERN
+          </div>
+
+          <div style={{ fontSize: 18, lineHeight: 1.95, maxWidth: 760, margin: "0 auto 18px" }}>
+            This is to certify that according to the documents produced in this Embassy, {letter.applicantName}
+            <br />
+            {letter.relationText} and holding Pakistani Passport No. {letter.passportNumber}, passed
+            <br />
+            the examination of.
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))",
+              gap: 18,
+              margin: "22px 0 28px",
+              textAlign: "center",
+              fontSize: 17,
+              lineHeight: 1.45,
+            }}
+          >
+            <div>
+              <div>{letter.degreeTitle}</div>
+              {letter.qualificationSubtitle ? <div>({letter.qualificationSubtitle})</div> : null}
+              <div>{letter.identifierLabel} {letter.identifierValue}</div>
+            </div>
+            <div>
+              <div>{letter.institute}</div>
+              <div>Affiliated with {letter.university}</div>
+              <div>{letter.yearOfPassing}</div>
+              <div>{letter.finalResultText}</div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: 18, lineHeight: 1.95, maxWidth: 760, margin: "0 auto" }}>
+            This certificate is issued on the request of the applicant without any liability on the part
+            <br />
+            of this Embassy whatsoever.
+          </div>
+
+          <div style={{ height: 180 }} />
+
+          <div
+            style={{
+              borderTop: "1px solid #111",
+              paddingTop: 8,
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+              gap: 8,
+              fontSize: 15,
+            }}
+          >
+            <div>Telephone: 00965-25354073/25327651</div>
+            <div style={{ textAlign: "center" }}>Fax: 00965-25327648</div>
+            <div style={{ textAlign: "right" }}>Email: parepkuwait@mofa.gov.pk</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function buildPendingArrivalFeatureMessage(baseMessage: string, featureName: string) {
@@ -386,6 +679,22 @@ export function NursesPortalPage() {
   const [gradingMtonError, setGradingMtonError] = useState("");
   const [gradingMtonFlash, setGradingMtonFlash] = useState("");
   const [gradingForm, setGradingForm] = useState<GradingFormState>(() => createGradingForm());
+  const [showProfileEditor, setShowProfileEditor] = useState(false);
+  const [profileForm, setProfileForm] = useState<ProfileFormState>(() => (ctx ? createProfileForm(ctx) : {
+    father_name: "",
+    email: "",
+    primary_mobile: "",
+    whatsapp: "",
+    civil_id: "",
+    cnic: "",
+    mton_number: "",
+    qualification_degree: "",
+    qualification_degree_other: "",
+    workplace: "",
+  }));
+  const [profileSaveBusy, setProfileSaveBusy] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [profileFlash, setProfileFlash] = useState("");
 
   const [facilityReq, setFacilityReq] = useState({
     category: "",
@@ -419,9 +728,6 @@ export function NursesPortalPage() {
   const [newPwd, setNewPwd] = useState("");
   const [confirmNew, setConfirmNew] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [showEmailEditor, setShowEmailEditor] = useState(false);
-  const [newEmail, setNewEmail] = useState("");
-  const [confirmNewEmail, setConfirmNewEmail] = useState("");
   const [onboardingSummary, setOnboardingSummary] = useState<OnboardingSummaryResponse | null>(null);
   const [onboardingLoading, setOnboardingLoading] = useState(false);
   const [onboardingError, setOnboardingError] = useState("");
@@ -527,6 +833,12 @@ export function NursesPortalPage() {
   const gradingProfile = gradingSummary?.profile || {};
   const savedMtonNumber = normalizeMtonNumber(gradingProfile.mton_number || ctx.mtonNumber || "");
   const hasSavedMtonNumber = isValidMtonNumber(savedMtonNumber);
+  const canEditActiveGradingRequest = Boolean(gradingActiveRequest?.can_nurse_edit);
+  const gradingSubmitLabel = !canEditActiveGradingRequest
+    ? "Submit Grading Letter Request"
+    : (gradingActiveRequest?.status || "").toUpperCase() === "CORRECTION_REQUIRED"
+      ? "Resubmit Corrected Request"
+      : "Update Submitted Request";
 
   const refreshGradingSummary = useEffectEvent(async (showLoading = true) => {
     if (!ctx) return;
@@ -626,7 +938,8 @@ export function NursesPortalPage() {
     setCurrentEmail(ctx.email || "");
     setCurrentEmailStatus(ctx.emailStatus || "");
     setGradingMtonInput(normalizeMtonNumber(ctx.mtonNumber || ""));
-  }, [ctx.email, ctx.emailStatus, ctx.mtonNumber]);
+    setProfileForm(createProfileForm(ctx));
+  }, [ctx]);
 
   useEffect(() => {
     let live = true;
@@ -804,7 +1117,8 @@ export function NursesPortalPage() {
       obtained_marks: gradingForm.mode === "MARKS" ? gradingForm.obtained_marks.trim() : "",
       entered_percentage: gradingForm.mode === "PERCENT" ? gradingForm.entered_percentage.trim() : "",
       entered_gpa: gradingForm.mode === "GPA" ? gradingForm.entered_gpa.trim() : "",
-      declaration_accepted: true,
+      declaration_accepted: gradingForm.declaration_accepted,
+      preview_confirmed: gradingForm.preview_confirmed,
     };
 
     try {
@@ -813,7 +1127,7 @@ export function NursesPortalPage() {
         : "/api/nurses/grading-letter/submit";
       const res = await api.post<{ success?: boolean; reference?: string; message?: string; error?: string }>(endpoint, payload);
       const successMessage = gradingActiveRequest?.can_nurse_edit
-        ? `Grading letter request resubmitted successfully. Reference: ${res.reference || DASH_VALUE}`
+        ? `${res.message || "Grading letter request updated successfully."} Reference: ${res.reference || DASH_VALUE}`
         : `Grading letter request submitted successfully. Reference: ${res.reference || DASH_VALUE}`;
       setGradingFlash(successMessage);
       setGradingForm(createGradingForm());
@@ -858,6 +1172,31 @@ export function NursesPortalPage() {
     }
   }
 
+  async function cancelGradingRequest() {
+    if (!gradingActiveRequest?.id) return;
+    const confirmed = window.confirm("Cancel this grading letter request? You can submit a fresh request later.");
+    if (!confirmed) return;
+    setGradingSubmitBusy(true);
+    setGradingError("");
+    setGradingFlash("");
+    try {
+      const res = await api.post<{ success?: boolean; message?: string; error?: string }>("/api/nurses/grading-letter/cancel", {
+        nurse_reference_id: ctx.referenceId,
+        passport_number: ctx.passportNumber,
+        verifier: ctx.mobile || ctx.civilId || "",
+        session_marker: ctx.sessionMarker || "",
+        id: gradingActiveRequest.id,
+      });
+      setGradingFlash(res.message || "Grading letter request cancelled.");
+      setGradingForm(createGradingForm());
+      await refreshGradingSummary(false);
+    } catch (error) {
+      setGradingError(normalizeRequestError(error, "Request could not be cancelled. Please try again."));
+    } finally {
+      setGradingSubmitBusy(false);
+    }
+  }
+
   async function submitChangePassword() {
     setBusy(true);
     setErr("");
@@ -880,36 +1219,52 @@ export function NursesPortalPage() {
     }
   }
 
-  async function submitEmailUpdate() {
-    setBusy(true);
-    setErr("");
-    setMsg("");
+  async function submitProfileUpdate() {
+    setProfileSaveBusy(true);
+    setProfileError("");
+    setProfileFlash("");
     try {
-      const email = newEmail.trim().toLowerCase();
-      const email2 = confirmNewEmail.trim().toLowerCase();
+      const email = profileForm.email.trim().toLowerCase();
       const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!email || !re.test(email)) throw new Error("Please enter a valid email address.");
-      if (email !== email2) throw new Error("New email and confirmation email do not match.");
-      const res = await api.post<{ success?: boolean; message?: string; warning?: string; error?: string }>("/api/nurses/update-email", {
+      const mton = normalizeMtonNumber(profileForm.mton_number);
+      if (mton && !isValidMtonNumber(mton)) {
+        throw new Error("Please enter a valid MTON number in this format: MTON-E-145");
+      }
+      const res = await api.post<{ success?: boolean; message?: string; warning?: string; profile?: unknown; error?: string }>("/api/nurses/profile/update", {
         nurse_reference_id: ctx.referenceId,
         session_marker: ctx.sessionMarker || "",
+        father_name: profileForm.father_name.trim(),
         email,
+        primary_mobile: profileForm.primary_mobile.trim(),
+        whatsapp: profileForm.whatsapp.trim(),
+        civil_id: profileForm.civil_id.trim(),
+        cnic: profileForm.cnic.trim(),
+        mton_number: mton,
+        qualification_degree: profileForm.qualification_degree,
+        qualification_degree_other: profileForm.qualification_degree_other.trim(),
+        workplace: profileForm.workplace.trim(),
       });
-      commitPortalContext((prev) => ({ ...prev, email, emailStatus: "Verification Pending" }));
-      setCurrentEmail(email);
-      setCurrentEmailStatus("Verification Pending");
-      setMsg(
-        (res.message || "Your email address has been updated. Please check your new inbox and verify your email address.") +
-        " Please check your spam/junk folder if you do not see the verification email."
-      );
-      if (res.warning) setErr(res.warning);
-      setShowEmailEditor(false);
-      setNewEmail("");
-      setConfirmNewEmail("");
+      const updatedProfile = buildPortalContextFromApiData(res.profile || {});
+      commitPortalContext((prev) => ({
+        ...prev,
+        ...updatedProfile,
+        sessionMarker: prev.sessionMarker,
+      }));
+      setQualificationInfo({
+        degree: updatedProfile.qualificationDegree || "",
+        other: updatedProfile.qualificationDegreeOther || "",
+      });
+      setCurrentEmail(updatedProfile.email || email);
+      setCurrentEmailStatus(updatedProfile.emailStatus || (updatedProfile.email === email && updatedProfile.email ? "Verification Pending" : currentEmailStatus));
+      setProfileFlash(res.message || "Profile updated. Embassy may verify changes before using them for official documents.");
+      if (res.warning) setProfileError(res.warning);
+      setShowProfileEditor(false);
+      await refreshGradingSummary(false);
     } catch (e) {
-      setErr((e as Error).message || "Could not update email.");
+      setProfileError((e as Error).message || "Profile changes could not be saved.");
     } finally {
-      setBusy(false);
+      setProfileSaveBusy(false);
     }
   }
 
@@ -1078,22 +1433,55 @@ export function NursesPortalPage() {
               <p style={{ color: "#5B6773" }}>{ctx.remarks || "Embassy messages and remarks will appear here after review."}</p>
             </div>
             <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: "clamp(14px, 3vw, 16px)", marginTop: 14, minWidth: 0 }}>
-              <h3 style={{ marginBottom: 8, color: "#2D4A6B" }}>Contact Details</h3>
-              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Current Email Address:</strong> {currentEmail || "—"}</p>
-              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Email Status:</strong> {emailStatusText}</p>
-              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Primary Mobile Number:</strong> {ctx.mobileFull || ctx.mobile || "—"}</p>
-              <p style={{ fontSize: 13, color: "#5B6773" }}><strong>WhatsApp Number:</strong> {ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "—"}</p>
+              <h3 style={{ marginBottom: 8, color: "#2D4A6B" }}>Profile & Contact Details</h3>
+              <p style={{ fontSize: 13, color: "#5B6773", lineHeight: 1.6 }}>
+                You can update your current biodata here for future Embassy review. Name and passport number stay read-only to avoid identity mismatch.
+              </p>
+              {profileFlash ? <NoticeBox tone="success">{profileFlash}</NoticeBox> : null}
+              {profileError ? <NoticeBox tone="error">{profileError}</NoticeBox> : null}
+              <div style={{ display: "grid", gridTemplateColumns: detailGridColumns, gap: 10, marginTop: 10 }}>
+                <Field label="Read-only Name" value={ctx.fullName || "—"} />
+                <Field label="Read-only Passport" value={ctx.passportMasked || "—"} />
+                <Field label="Current Email" value={currentEmail || "—"} />
+                <Field label="Email Status" value={emailStatusText} />
+                <Field label="Current Qualification" value={qualificationDisplay} />
+                <Field label="Current Workplace / Hospital" value={ctx.hospital || "—"} />
+              </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-                <Btn variant="light" onClick={() => setShowEmailEditor((s) => !s)}>Change Email Address</Btn>
+                <Btn variant="light" onClick={() => { setShowProfileEditor((s) => !s); setProfileError(""); setProfileFlash(""); }}>
+                  {showProfileEditor ? "Close Profile Editor" : "Edit Profile"}
+                </Btn>
                 {(emailStatus || "").toLowerCase() !== "verified" ? (
                   <Btn variant="light" onClick={resendEmailVerification} disabled={busy}>Resend Verification Email</Btn>
                 ) : null}
               </div>
-              {showEmailEditor ? (
-                <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-                  <label>New Email Address<input className="f-input" type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} /></label>
-                  <label>Confirm New Email Address<input className="f-input" type="email" value={confirmNewEmail} onChange={(e) => setConfirmNewEmail(e.target.value)} /></label>
-                  <Btn variant="primary" onClick={submitEmailUpdate} disabled={busy}>Save & Send Verification Email</Btn>
+              {showProfileEditor ? (
+                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: detailGridColumns, gap: 10 }}>
+                    <label>Father Name<input className="f-input" value={profileForm.father_name} onChange={(e) => setProfileForm({ ...profileForm, father_name: e.target.value })} /></label>
+                    <label>Email<input className="f-input" type="email" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} /></label>
+                    <label>Primary Mobile<input className="f-input" value={profileForm.primary_mobile} onChange={(e) => setProfileForm({ ...profileForm, primary_mobile: e.target.value })} /></label>
+                    <label>WhatsApp<input className="f-input" value={profileForm.whatsapp} onChange={(e) => setProfileForm({ ...profileForm, whatsapp: e.target.value })} /></label>
+                    <label>Civil ID<input className="f-input" value={profileForm.civil_id} onChange={(e) => setProfileForm({ ...profileForm, civil_id: e.target.value })} /></label>
+                    <label>CNIC<input className="f-input" value={profileForm.cnic} onChange={(e) => setProfileForm({ ...profileForm, cnic: e.target.value })} /></label>
+                    <label>MOH / MTON Number<input className="f-input" placeholder="MTON-E-145" value={profileForm.mton_number} onChange={(e) => setProfileForm({ ...profileForm, mton_number: e.target.value })} /></label>
+                    <label>
+                      Qualification / Degree
+                      <select className="f-input" value={profileForm.qualification_degree} onChange={(e) => setProfileForm({ ...profileForm, qualification_degree: e.target.value })}>
+                        <option value="">Select</option>
+                        {PROFILE_QUALIFICATION_OPTIONS.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </label>
+                    {profileForm.qualification_degree === "Other" ? (
+                      <label>Other Qualification / Degree<input className="f-input" value={profileForm.qualification_degree_other} onChange={(e) => setProfileForm({ ...profileForm, qualification_degree_other: e.target.value })} /></label>
+                    ) : null}
+                    <label>Current Workplace / Hospital<input className="f-input" value={profileForm.workplace} onChange={(e) => setProfileForm({ ...profileForm, workplace: e.target.value })} /></label>
+                  </div>
+                  <Btn variant="primary" onClick={submitProfileUpdate} disabled={profileSaveBusy}>
+                    {profileSaveBusy ? "Saving..." : "Save Changes"}
+                  </Btn>
                 </div>
               ) : null}
             </div>
@@ -1227,6 +1615,7 @@ export function NursesPortalPage() {
             <PendingArrivalPanel title="Grading Letter Request" message={gradingBlockedMessage} />
           ) : (
           <div style={{ display: "grid", gap: 14 }}>
+            <style>{`@media print {.grading-preview-print-hide{display:none!important}.grading-preview-shell{display:none!important}}`}</style>
             <FormCard title="Grading Letter Request">
               <NoticeBox>
                 Use this form to request an Embassy grading letter for one nursing qualification. One qualification
@@ -1299,11 +1688,24 @@ export function NursesPortalPage() {
                       Correction notes: {gradingActiveRequest.correction_notes}
                     </p>
                   ) : null}
-                  {!gradingActiveRequest.can_nurse_edit ? (
+                  {gradingActiveRequest.can_nurse_edit ? (
+                    <p style={{ margin: 0, color: "#2D4A6B", fontSize: 13 }}>
+                      {(gradingActiveRequest.status || "").toUpperCase() === "CORRECTION_REQUIRED"
+                        ? "Please correct the request details below, review the preview again, and resubmit."
+                        : "You can still update this submitted request until Embassy review begins."}
+                    </p>
+                  ) : (
                     <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
                       You already have an active grading letter request. You can submit a new request after the current
                       one is issued, rejected, or cancelled.
                     </p>
+                  )}
+                  {gradingActiveRequest.can_nurse_cancel ? (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <Btn variant="light" onClick={cancelGradingRequest} disabled={gradingSubmitBusy}>
+                        Cancel Current Request
+                      </Btn>
+                    </div>
                   ) : null}
                 </div>
               ) : null}
@@ -1532,6 +1934,30 @@ export function NursesPortalPage() {
                     ) : null}
                   </div>
 
+                  <div className="grading-preview-print-hide" style={{ display: "grid", gap: 10 }}>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: "#2D4A6B" }}>Preview for Checking Only</div>
+                    <NoticeBox tone="warning">
+                      This preview is only for checking spelling and data before submission. It is not an official Embassy
+                      letter and cannot be used for any official purpose. The Embassy/Nurses Desk will verify the details
+                      before issuing the final letter.
+                    </NoticeBox>
+                    <OfficialLetterPreview ctx={ctx} profile={gradingProfile} form={gradingForm} computed={gradingPreview} />
+                  </div>
+
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start", color: "#334155" }}>
+                    <input
+                      type="checkbox"
+                      checked={gradingForm.preview_confirmed}
+                      onChange={(e) =>
+                        setGradingForm({ ...gradingForm, preview_confirmed: e.target.checked })
+                      }
+                      style={{ marginTop: 3 }}
+                    />
+                    <span>
+                      I have reviewed the preview and confirm the information is correct to the best of my knowledge.
+                    </span>
+                  </label>
+
                   <label style={{ display: "flex", gap: 8, alignItems: "flex-start", color: "#334155" }}>
                     <input
                       type="checkbox"
@@ -1548,11 +1974,7 @@ export function NursesPortalPage() {
                   </label>
 
                   <Btn variant="primary" disabled={gradingSubmitBusy || !gradingPreview.canSubmit} onClick={submitGradingLetter}>
-                    {gradingSubmitBusy
-                      ? "Submitting..."
-                      : gradingActiveRequest?.can_nurse_edit
-                        ? "Resubmit Grading Letter Request"
-                        : "Submit Grading Letter Request"}
+                    {gradingSubmitBusy ? "Submitting..." : gradingSubmitLabel}
                   </Btn>
                 </>
               ) : null}

@@ -334,6 +334,102 @@ def _init_grading_letter_db(db):
     CREATE INDEX IF NOT EXISTS idx_gl_app_submitted_at ON gl_applications(submitted_at);
     CREATE INDEX IF NOT EXISTS idx_gl_audit_application ON gl_audit(application_id);
     """)
+    for table_name, cols in {
+        'gl_applications': [
+            ('ref_no', 'TEXT UNIQUE'),
+            ('nurse_id', 'INTEGER'),
+            ('qualification_code', 'TEXT'),
+            ('qualification_other', "TEXT DEFAULT ''"),
+            ('degree_title', "TEXT DEFAULT ''"),
+            ('student_no', "TEXT DEFAULT ''"),
+            ('student_identifier_type', "TEXT DEFAULT 'Student Number'"),
+            ('institute', "TEXT DEFAULT ''"),
+            ('university', "TEXT DEFAULT ''"),
+            ('year_of_passing', 'INTEGER'),
+            ('mode', 'TEXT'),
+            ('total_marks', 'REAL'),
+            ('obtained_marks', 'REAL'),
+            ('entered_percentage', 'REAL'),
+            ('entered_gpa', 'REAL'),
+            ('computed_percentage', 'REAL'),
+            ('final_percentage', 'REAL'),
+            ('final_grade_label', "TEXT DEFAULT ''"),
+            ('override_reason', "TEXT DEFAULT ''"),
+            ('relation_override', "TEXT DEFAULT ''"),
+            ('applicant_name_snapshot', "TEXT DEFAULT ''"),
+            ('father_name_snapshot', "TEXT DEFAULT ''"),
+            ('passport_number_snapshot', "TEXT DEFAULT ''"),
+            ('passport_issue_date_snapshot', "TEXT DEFAULT ''"),
+            ('cnic_snapshot', "TEXT DEFAULT ''"),
+            ('civil_id_snapshot', "TEXT DEFAULT ''"),
+            ('mobile_snapshot', "TEXT DEFAULT ''"),
+            ('whatsapp_snapshot', "TEXT DEFAULT ''"),
+            ('email_snapshot', "TEXT DEFAULT ''"),
+            ('mton_number_snapshot', "TEXT DEFAULT ''"),
+            ('workplace_snapshot', "TEXT DEFAULT ''"),
+            ('gender_snapshot', "TEXT DEFAULT ''"),
+            ('declaration_confirmed', 'INTEGER DEFAULT 0'),
+            ('preview_confirmed', 'INTEGER DEFAULT 0'),
+            ('scale_version_id', 'INTEGER'),
+            ('status', "TEXT NOT NULL DEFAULT 'SUBMITTED'"),
+            ('correction_notes', "TEXT DEFAULT ''"),
+            ('internal_notes', "TEXT DEFAULT ''"),
+            ('letter_path', "TEXT DEFAULT ''"),
+            ('letter_pdf_path', "TEXT DEFAULT ''"),
+            ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+            ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+            ('submitted_at', 'TIMESTAMP'),
+            ('approved_at', 'TIMESTAMP'),
+            ('generated_at', 'TIMESTAMP'),
+            ('issued_at', 'TIMESTAMP'),
+        ],
+        'gl_audit': [
+            ('application_id', 'INTEGER'),
+            ('actor_role', 'TEXT'),
+            ('actor_id', 'TEXT'),
+            ('event_type', 'TEXT'),
+            ('field_name', 'TEXT'),
+            ('old_value', 'TEXT'),
+            ('new_value', 'TEXT'),
+            ('note', 'TEXT'),
+            ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ],
+    }.items():
+        for col, coltype in cols:
+            try:
+                db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
+                db.commit()
+            except sqlite3.OperationalError:
+                pass
+    active_scale = db.execute(
+        "SELECT id FROM gl_grading_scale WHERE is_active = 1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    if not active_scale:
+        cur = db.execute(
+            "INSERT INTO gl_grading_scale (name, is_active, created_by) VALUES (?, 1, ?)",
+            ['Embassy Default Scale v1', 'system']
+        )
+        scale_id = cur.lastrowid
+        db.executemany(
+            "INSERT INTO gl_grading_scale_band (scale_id, min_pct, max_pct, label) VALUES (?, ?, ?, ?)",
+            [
+                (scale_id, 80, 100, 'Excellent'),
+                (scale_id, 70, 79.99, 'Very Good'),
+                (scale_id, 60, 69.99, 'Good'),
+                (scale_id, 50, 59.99, 'Pass'),
+                (scale_id, 0, 49.99, 'Fail'),
+            ]
+        )
+        db.commit()
+    for key, value in (
+        ('rounding_dp', '2'),
+        ('allow_parallel_applications', '0'),
+    ):
+        db.execute(
+            "INSERT OR IGNORE INTO gl_settings (key, value) VALUES (?, ?)",
+            [key, value]
+        )
+    db.commit()
 
 
 def _nh_ensure_schema(db):
@@ -8209,6 +8305,185 @@ def api_nurse_change_password(data):
         db.close()
 
 
+def _nurse_portal_phone_value(value, fallback_code='+965', field_label='Phone number'):
+    raw = str(value or '').strip()
+    if not raw:
+        return {'full': '', 'country_code': fallback_code, 'number': ''}
+    digits = _phone_digits(raw)
+    if len(digits) < 7 or len(digits) > 15:
+        raise ValueError(f'{field_label} must contain 7 to 15 digits.')
+    normalized_full = ('+' + digits) if raw.startswith('+') else _compose_phone(fallback_code, digits)
+    return {
+        'full': normalized_full,
+        'country_code': fallback_code,
+        'number': digits,
+    }
+
+
+def api_nurse_profile_update(data):
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip().upper()
+    session_marker = (data.get('session_marker') or '').strip()
+    if not ref or not session_marker:
+        return {'success': False, 'error': 'Session required. Please sign in again.', 'status_code': 403}
+    db = get_db()
+    try:
+        rec = _nurse_session_lookup(db, ref, session_marker)
+        if not rec:
+            return {'success': False, 'error': 'Session expired. Please sign in again.', 'status_code': 403}
+        old = dict(rec)
+        father_name = _nurse_clean_text(data.get('father_name') or old.get('father_name'), 160)
+        email = _nurse_normalize_email(data.get('email') or old.get('email') or '')
+        if email and not _is_valid_email_loose(email):
+            return {'success': False, 'error': 'Please enter a valid email address.'}
+        dup_email = None
+        if email and email != _nurse_normalize_email(old.get('email') or ''):
+            dup_email = db.execute(
+                "SELECT id FROM nurse_registrations WHERE LOWER(TRIM(COALESCE(email,''))) = ? AND id != ? LIMIT 1",
+                [email, old.get('id')]
+            ).fetchone()
+            if dup_email:
+                return {'success': False, 'error': 'This email is already used by another nurse account.'}
+        mton_number = _normalize_mton_number(data.get('mton_number') or old.get('mton_number') or '')
+        if mton_number and not _valid_mton_number(mton_number):
+            return {'success': False, 'error': 'Please enter a valid MTON number in this format: MTON-E-145'}
+        warning = ''
+        if mton_number and mton_number != _normalize_mton_number(old.get('mton_number') or ''):
+            dup_mton = db.execute(
+                """SELECT reference_id, full_name FROM nurse_registrations
+                   WHERE UPPER(TRIM(COALESCE(mton_number,''))) = UPPER(TRIM(?))
+                     AND id != ?
+                   ORDER BY id DESC LIMIT 1""",
+                [mton_number, old.get('id')]
+            ).fetchone()
+            if dup_mton:
+                warning = 'This MTON number is already present on another nurse record and may need Embassy review.'
+        mobile_value = _nurse_portal_phone_value(
+            data.get('primary_mobile') or data.get('mobile') or old.get('mobile_full') or old.get('mobile') or '',
+            old.get('mobile_country_code') or '+965',
+            'Primary mobile'
+        )
+        whatsapp_value = _nurse_portal_phone_value(
+            data.get('whatsapp') or old.get('whatsapp_full') or mobile_value['full'],
+            old.get('whatsapp_country_code') or old.get('mobile_country_code') or '+965',
+            'WhatsApp number'
+        )
+        civil_id = _nurse_clean_text(data.get('civil_id') or old.get('civil_id'), 80)
+        cnic = _nurse_clean_text(data.get('cnic') or old.get('cnic'), 40)
+        qualification_degree = _nurse_clean_text(data.get('qualification_degree') or old.get('qualification_degree'), 80)
+        if qualification_degree and qualification_degree not in GL_PROFILE_QUALIFICATION_OPTIONS:
+            qualification_degree = 'Other'
+        qualification_degree_other = _nurse_clean_text(data.get('qualification_degree_other') or old.get('qualification_degree_other'), 120)
+        if qualification_degree != 'Other':
+            qualification_degree_other = ''
+        workplace = _nurse_clean_text(
+            data.get('workplace')
+            or data.get('hospital')
+            or old.get('hospital')
+            or old.get('hospital_workplace')
+            or old.get('hospital_or_medical_center'),
+            180
+        )
+        email_changed = email != _nurse_normalize_email(old.get('email') or '')
+        whatsapp_same_as_mobile = 1 if whatsapp_value['full'] and whatsapp_value['full'] == mobile_value['full'] else 0
+        updates = {
+            'father_name': father_name,
+            'email': email,
+            'mobile': mobile_value['full'],
+            'mobile_full': mobile_value['full'],
+            'mobile_country_code': mobile_value['country_code'],
+            'mobile_number': mobile_value['number'],
+            'whatsapp_full': whatsapp_value['full'],
+            'whatsapp_country_code': whatsapp_value['country_code'],
+            'whatsapp_number': whatsapp_value['number'],
+            'whatsapp_same_as_mobile': whatsapp_same_as_mobile,
+            'civil_id': civil_id,
+            'cnic': cnic,
+            'mton_number': mton_number,
+            'qualification_degree': qualification_degree,
+            'qualification_degree_other': qualification_degree_other,
+            'hospital': workplace,
+            'hospital_or_medical_center': workplace,
+            'hospital_workplace': workplace,
+        }
+        if email_changed:
+            updates.update({
+                'email_verified': 0,
+                'email_verified_at': None,
+                'email_verification_token': '',
+                'email_last_status': 'pending',
+            })
+        changed = {}
+        for key, new_value in updates.items():
+            old_value = old.get(key)
+            if str(old_value or '') != str(new_value or ''):
+                changed[key] = {'old': old_value or '', 'new': new_value or ''}
+        if not changed:
+            bundle = _build_nurse_public_profile_bundle(db, old)
+            bundle['session_marker'] = session_marker
+            return {'success': True, 'message': 'No profile changes were detected.', 'profile': bundle}
+        sets = [f"{field} = ?" for field in updates]
+        db.execute(
+            f"UPDATE nurse_registrations SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [*updates.values(), old.get('id')]
+        )
+        _nurse_log(
+            db,
+            'profile_updated',
+            old.get('reference_id', ''),
+            old.get('passport_number', ''),
+            'nurse_portal',
+            {'changes': changed}
+        )
+        db.commit()
+        email_warning = ''
+        if email_changed and email:
+            send_result = _send_email_verification_for_record(
+                'nurse_registrations',
+                old.get('id'),
+                old.get('reference_id', ''),
+                old.get('full_name', ''),
+                email,
+                'nurse_registration'
+            )
+            _nurse_log(
+                db,
+                'email_verification_sent',
+                old.get('reference_id', ''),
+                old.get('passport_number', ''),
+                'system',
+                {'status': send_result.get('status', ''), 'email': email}
+            )
+            db.commit()
+            if send_result.get('status') != 'sent':
+                email_warning = 'Verification email could not be sent at this time.'
+        fresh = db.execute("SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [old.get('id')]).fetchone()
+        bundle = _build_nurse_public_profile_bundle(db, dict(fresh or old))
+        bundle['session_marker'] = session_marker
+        message = 'Profile updated. Embassy may verify changes before using them for official documents.'
+        if email_changed and email:
+            message += ' Please verify your updated email address.'
+        result = {
+            'success': True,
+            'message': message,
+            'profile': bundle,
+        }
+        final_warning = ' '.join(part for part in (warning, email_warning) if part).strip()
+        if final_warning:
+            result['warning'] = final_warning
+        return result
+    except ValueError as exc:
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[NursePortal] profile update failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Profile changes could not be saved. Please try again.'}
+    finally:
+        db.close()
+
+
 def api_nurse_mton_save(data):
     ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip().upper()
     session_marker = (data.get('session_marker') or '').strip()
@@ -8682,6 +8957,17 @@ GL_STUDENT_IDENTIFIER_TYPES = (
     'Roll Number',
 )
 GL_DEFAULT_STUDENT_IDENTIFIER_TYPE = 'Student Number'
+GL_OFFICIAL_REFERENCE_LINE = 'No. Pol-II/18/2021 (Attestation)'
+GL_OFFICIAL_TELEPHONE = '00965-25354073/25327651'
+GL_OFFICIAL_FAX = '00965-25327648'
+GL_OFFICIAL_EMAIL = 'parepkuwait@mofa.gov.pk'
+GL_PROFILE_QUALIFICATION_OPTIONS = (
+    'Diploma Nurse',
+    'BSN Nursing',
+    'Doctor MBBS',
+    'Doctor BDS',
+    'Other',
+)
 
 
 def _gl_feature_enabled():
@@ -8728,6 +9014,98 @@ def _gl_student_identifier_type(value, legacy_label=GL_DEFAULT_STUDENT_IDENTIFIE
         return _gl_normalize_student_identifier_type(value, required=False) or legacy_label
     except ValueError:
         return legacy_label
+
+
+def _gl_truthy(value):
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _gl_identifier_print_label(value):
+    label = _gl_student_identifier_type(value)
+    return {
+        'Student Number': 'Student No.',
+        'Seat Number': 'Seat No.',
+        'Registration Number': 'Registration No.',
+        'Enrollment Number': 'Enrollment No.',
+        'Roll Number': 'Roll No.',
+    }.get(label, label)
+
+
+def _gl_relation_label(gender=''):
+    raw = _gl_clean_text(gender, 40).lower()
+    if raw in ('male', 'm'):
+        return 'S/o'
+    return 'D/o'
+
+
+def _gl_qualification_subtitle(app):
+    code = _gl_normalize_qualification_code((app or {}).get('qualification_code') or '')
+    title = _gl_clean_text((app or {}).get('degree_title'), 220).lower()
+    if code == 'SPECIALIZATION_MIDWIFERY' and 'midwifery' not in title:
+        return 'Specialization / Midwifery'
+    if code == 'POST_RN_BSN' and 'post rn' not in title:
+        return 'Post RN BSN'
+    return ''
+
+
+def _gl_format_official_date(value):
+    raw = _gl_clean_text(value, 60)
+    if not raw:
+        return ''
+    candidates = [raw]
+    if 'T' in raw:
+        candidates.append(raw.split('T', 1)[0])
+    if ' ' in raw:
+        candidates.append(raw.split(' ', 1)[0])
+    for candidate in candidates:
+        for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%d %b %Y', '%d %B %Y'):
+            try:
+                return datetime.strptime(candidate, fmt).strftime('%d %b %Y').upper()
+            except Exception:
+                continue
+    return raw
+
+
+def _gl_snapshot_from_nurse(nurse):
+    # Snapshot biodata at submission/update time so later profile edits do not
+    # silently change previously submitted or issued official letters.
+    n = dict(nurse or {})
+    mobile = _first_value(n.get('mobile_full'), n.get('mobile'))
+    whatsapp = _first_value(n.get('whatsapp_full'), mobile)
+    workplace = _first_value(
+        n.get('hospital'),
+        n.get('hospital_workplace'),
+        n.get('hospital_or_medical_center'),
+    )
+    return {
+        'applicant_name_snapshot': _first_value(n.get('full_name'), n.get('name')),
+        'father_name_snapshot': _first_value(n.get('father_name'), n.get('father_or_husband_name')),
+        'passport_number_snapshot': _first_value(n.get('passport_number'), n.get('passport')),
+        'passport_issue_date_snapshot': _first_value(n.get('passport_issue_date')),
+        'cnic_snapshot': _first_value(n.get('cnic')),
+        'civil_id_snapshot': _first_value(n.get('civil_id')),
+        'mobile_snapshot': mobile,
+        'whatsapp_snapshot': whatsapp,
+        'email_snapshot': _first_value(n.get('email')),
+        'mton_number_snapshot': _first_value(n.get('mton_number')),
+        'workplace_snapshot': workplace,
+        'gender_snapshot': _first_value(n.get('gender')),
+    }
+
+
+def _gl_validate_submission_flags(data):
+    if not _gl_truthy((data or {}).get('declaration_accepted')):
+        raise ValueError('Please confirm the declaration before submission.')
+    if not _gl_truthy(
+        (data or {}).get('preview_confirmed')
+        or (data or {}).get('preview_reviewed')
+        or (data or {}).get('preview_checked')
+    ):
+        raise ValueError('Please review the preview and confirm the information before submission.')
+    return {
+        'declaration_confirmed': 1,
+        'preview_confirmed': 1,
+    }
 
 
 def _gl_to_float(value, field_label):
@@ -8905,6 +9283,11 @@ def _gl_resolve_nurse_from_payload(db, data):
 
 def _gl_nurse_identity(nurse):
     n = dict(nurse or {})
+    workplace = _first_value(
+        n.get('hospital'),
+        n.get('hospital_workplace'),
+        n.get('hospital_or_medical_center'),
+    )
     return {
         'id': n.get('id'),
         'reference_id': n.get('reference_id') or '',
@@ -8915,7 +9298,12 @@ def _gl_nurse_identity(nurse):
         'cnic': n.get('cnic') or '',
         'civil_id': n.get('civil_id') or '',
         'mobile': n.get('mobile_full') or n.get('mobile') or '',
+        'whatsapp': n.get('whatsapp_full') or n.get('mobile_full') or n.get('mobile') or '',
         'email': n.get('email') or '',
+        'gender': n.get('gender') or '',
+        'workplace': workplace,
+        'qualification_degree': n.get('qualification_degree') or '',
+        'qualification_degree_other': n.get('qualification_degree_other') or '',
     }
 
 
@@ -8999,8 +9387,22 @@ def _gl_application_dict(row):
     d['student_no_label'] = d['student_identifier_type']
     d['qualification_label'] = _gl_qualification_label(d.get('qualification_code') or '', d.get('qualification_other') or '')
     d['letter_available'] = bool((d.get('letter_pdf_path') or '').strip())
-    d['can_nurse_edit'] = status == 'CORRECTION_REQUIRED'
+    d['can_nurse_edit'] = status in {'SUBMITTED', 'CORRECTION_REQUIRED'}
     d['can_nurse_cancel'] = status in {'SUBMITTED', 'CORRECTION_REQUIRED'}
+    d['letter_identity'] = {
+        'full_name': _first_value(d.get('applicant_name_snapshot'), d.get('nurse_full_name')),
+        'father_name': _first_value(d.get('father_name_snapshot'), d.get('nurse_father_name')),
+        'passport_number': _first_value(d.get('passport_number_snapshot'), d.get('nurse_passport_number')),
+        'passport_issue_date': _first_value(d.get('passport_issue_date_snapshot')),
+        'cnic': _first_value(d.get('cnic_snapshot'), d.get('nurse_cnic')),
+        'civil_id': _first_value(d.get('civil_id_snapshot'), d.get('nurse_civil_id')),
+        'mobile': _first_value(d.get('mobile_snapshot'), d.get('nurse_mobile')),
+        'whatsapp': _first_value(d.get('whatsapp_snapshot'), d.get('nurse_whatsapp'), d.get('nurse_mobile')),
+        'email': _first_value(d.get('email_snapshot'), d.get('nurse_email')),
+        'mton_number': _first_value(d.get('mton_number_snapshot'), d.get('nurse_mton_number')),
+        'workplace': _first_value(d.get('workplace_snapshot'), d.get('nurse_workplace')),
+        'gender': _first_value(d.get('gender_snapshot'), d.get('nurse_gender')),
+    }
     return d
 
 
@@ -9071,6 +9473,8 @@ def api_gl_nurse_submit(data):
         if not _valid_mton_number(_normalize_mton_number(nurse.get('mton_number') or '')):
             return _gl_invalid_mton_response()
         payload = _gl_validate_application_payload(data, db)
+        submission_flags = _gl_validate_submission_flags(data)
+        snapshot = _gl_snapshot_from_nurse(nurse)
         db.execute("BEGIN IMMEDIATE")
         allow_parallel = _gl_bool_setting(db, 'allow_parallel_applications', False)
         active = _gl_active_application(db, nurse.get('id'))
@@ -9093,7 +9497,12 @@ def api_gl_nurse_submit(data):
             'ref_no', 'nurse_id', 'qualification_code', 'qualification_other', 'degree_title',
             'student_no', 'student_identifier_type', 'institute', 'university', 'year_of_passing', 'mode', 'total_marks',
             'obtained_marks', 'entered_percentage', 'entered_gpa', 'computed_percentage',
-            'final_percentage', 'final_grade_label', 'scale_version_id', 'status', 'submitted_at'
+            'final_percentage', 'final_grade_label', 'scale_version_id',
+            'applicant_name_snapshot', 'father_name_snapshot', 'passport_number_snapshot', 'passport_issue_date_snapshot',
+            'cnic_snapshot', 'civil_id_snapshot', 'mobile_snapshot', 'whatsapp_snapshot',
+            'email_snapshot', 'mton_number_snapshot', 'workplace_snapshot', 'gender_snapshot',
+            'declaration_confirmed', 'preview_confirmed',
+            'status', 'submitted_at'
         ]
         vals = [
             ref_no, nurse.get('id'), payload['qualification_code'], payload['qualification_other'],
@@ -9101,6 +9510,11 @@ def api_gl_nurse_submit(data):
             payload['year_of_passing'], payload['mode'], payload['total_marks'], payload['obtained_marks'],
             payload['entered_percentage'], payload['entered_gpa'], payload['computed_percentage'],
             payload['final_percentage'], payload['final_grade_label'], payload['scale_version_id'],
+            snapshot['applicant_name_snapshot'], snapshot['father_name_snapshot'], snapshot['passport_number_snapshot'],
+            snapshot['passport_issue_date_snapshot'], snapshot['cnic_snapshot'], snapshot['civil_id_snapshot'],
+            snapshot['mobile_snapshot'], snapshot['whatsapp_snapshot'], snapshot['email_snapshot'],
+            snapshot['mton_number_snapshot'], snapshot['workplace_snapshot'], snapshot['gender_snapshot'],
+            submission_flags['declaration_confirmed'], submission_flags['preview_confirmed'],
             'SUBMITTED', datetime.utcnow().isoformat(timespec='seconds')
         ]
         cur = db.execute(
@@ -9146,10 +9560,14 @@ def api_gl_nurse_resubmit(data):
         if not row:
             return {'success': False, 'error': 'Request not found.'}
         old = dict(row)
-        if old.get('status') != 'CORRECTION_REQUIRED':
-            return {'success': False, 'error': 'Only correction-required requests can be resubmitted.'}
+        if old.get('status') not in {'SUBMITTED', 'CORRECTION_REQUIRED'}:
+            return {'success': False, 'error': 'Only submitted or correction-required requests can be updated from the nurse portal.'}
         payload = _gl_validate_application_payload(data, db)
+        submission_flags = _gl_validate_submission_flags(data)
+        snapshot = _gl_snapshot_from_nurse(nurse)
         fields = dict(payload)
+        fields.update(snapshot)
+        fields.update(submission_flags)
         fields.update({'status': 'SUBMITTED', 'submitted_at': datetime.utcnow().isoformat(timespec='seconds')})
         sets = [f"{k} = ?" for k in fields]
         db.execute(
@@ -9158,9 +9576,11 @@ def api_gl_nurse_resubmit(data):
         )
         for k, new_v in fields.items():
             if str(old.get(k) or '') != str(new_v or ''):
-                _gl_write_audit(db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'), 'resubmitted', k, old.get(k), new_v, 'Nurse resubmitted after correction request')
+                note = 'Nurse corrected and resubmitted the request' if old.get('status') == 'CORRECTION_REQUIRED' else 'Nurse updated submitted request before review'
+                _gl_write_audit(db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'), 'resubmitted', k, old.get(k), new_v, note)
         db.commit()
-        return {'success': True, 'reference': old.get('ref_no'), 'message': 'Grading letter request resubmitted successfully.'}
+        success_message = 'Grading letter request resubmitted successfully.' if old.get('status') == 'CORRECTION_REQUIRED' else 'Submitted grading letter request updated successfully.'
+        return {'success': True, 'reference': old.get('ref_no'), 'message': success_message}
     except ValueError as exc:
         return {'success': False, 'error': str(exc)}
     except Exception as exc:
@@ -10844,8 +11264,12 @@ def _gl_fetch_application(db, app_id):
                   n.cnic AS nurse_cnic,
                   n.civil_id AS nurse_civil_id,
                   n.mobile AS nurse_mobile,
+                  n.mobile_full AS nurse_mobile_full,
+                  n.whatsapp_full AS nurse_whatsapp,
                   n.email AS nurse_email,
-                  n.mton_number AS nurse_mton_number
+                  n.mton_number AS nurse_mton_number,
+                  '' AS nurse_gender,
+                  COALESCE(n.hospital, n.hospital_workplace, n.hospital_or_medical_center, '') AS nurse_workplace
            FROM gl_applications a
            LEFT JOIN nurse_registrations n ON n.id = a.nurse_id
            WHERE a.id = ? LIMIT 1""",
@@ -10862,9 +11286,12 @@ def _gl_admin_app_dict(row):
         'passport_number': d.get('nurse_passport_number') or '',
         'cnic': d.get('nurse_cnic') or '',
         'civil_id': d.get('nurse_civil_id') or '',
-        'mobile': d.get('nurse_mobile') or '',
+        'mobile': d.get('nurse_mobile_full') or d.get('nurse_mobile') or '',
+        'whatsapp': d.get('nurse_whatsapp') or d.get('nurse_mobile_full') or d.get('nurse_mobile') or '',
         'email': d.get('nurse_email') or '',
         'mton_number': d.get('nurse_mton_number') or '',
+        'gender': d.get('nurse_gender') or '',
+        'workplace': d.get('nurse_workplace') or '',
     }
     return d
 
@@ -10911,8 +11338,12 @@ def _gl_list_rows(db, params, limit=50, offset=0):
                   n.cnic AS nurse_cnic,
                   n.civil_id AS nurse_civil_id,
                   n.mobile AS nurse_mobile,
+                  n.mobile_full AS nurse_mobile_full,
+                  n.whatsapp_full AS nurse_whatsapp,
                   n.email AS nurse_email,
-                  n.mton_number AS nurse_mton_number
+                  n.mton_number AS nurse_mton_number,
+                  '' AS nurse_gender,
+                  COALESCE(n.hospital, n.hospital_workplace, n.hospital_or_medical_center, '') AS nurse_workplace
            FROM {from_sql}
            WHERE {where_sql}
            ORDER BY a.id DESC LIMIT ? OFFSET ?""",
@@ -10983,31 +11414,220 @@ def api_admin_gl_export_csv(params, user):
         db.close()
 
 
-def _gl_letter_text(app):
+def _gl_letter_context(app):
     d = _gl_admin_app_dict(app)
-    nurse = d.get('nurse') or {}
-    pct = '' if d.get('final_percentage') is None else f"{float(d.get('final_percentage')):.2f}"
-    relation = _gl_clean_text(d.get('relation_override'), 160)
-    identifier_label = _gl_student_identifier_type(d.get('student_identifier_type'))
-    if not relation:
-        father = _gl_clean_text(nurse.get('father_name'), 140)
-        relation = f"D/o/S/o {father}".strip()
+    identity = d.get('letter_identity') or {}
+    applicant_name = _gl_clean_text(identity.get('full_name'), 220)
+    father_name = _gl_clean_text(identity.get('father_name'), 180)
+    passport_number = _gl_clean_text(identity.get('passport_number'), 80)
+    passport_issue_date = _gl_format_official_date(identity.get('passport_issue_date'))
+    relation_text = _gl_clean_text(d.get('relation_override'), 180)
+    if not relation_text:
+        relation_text = f"{_gl_relation_label(identity.get('gender'))} {father_name or '—'}".strip()
+    degree_title = _gl_clean_text(d.get('degree_title'), 220)
+    identifier_type = _gl_student_identifier_type(d.get('student_identifier_type'))
+    identifier_value = _gl_clean_text(d.get('student_no'), 120)
+    institute = _gl_clean_text(d.get('institute'), 220)
+    university = _gl_clean_text(d.get('university'), 220)
+    year_of_passing = _gl_clean_text(d.get('year_of_passing'), 20)
+    subtitle = _gl_qualification_subtitle(d)
+    final_percentage_value = d.get('final_percentage')
+    final_percentage = '—'
+    if final_percentage_value is not None:
+        try:
+            final_percentage = f"{float(final_percentage_value):.2f}"
+        except Exception:
+            final_percentage = _gl_clean_text(final_percentage_value, 20) or '—'
+    final_grade_label = _gl_clean_text(d.get('final_grade_label'), 80)
+    final_result_text = (
+        f'{final_percentage}% "{final_grade_label}"'
+        if final_percentage != '—' and final_grade_label
+        else '—'
+    )
+    warning_and_blocker_checks = [
+        ('Missing Father Name', father_name),
+        ('Missing Identifier Value', identifier_value),
+        ('Missing Institute', institute),
+        ('Missing University', university),
+        ('Missing Year', year_of_passing),
+    ]
+    warnings = [label for label, value in warning_and_blocker_checks if not value]
+    blockers = list(warnings)
+    for label, value in (
+        ('Missing Applicant Name', applicant_name),
+        ('Missing Passport Number', passport_number),
+        ('Missing Degree Title', degree_title),
+        ('Missing Final Percentage', '' if final_percentage == '—' else final_percentage),
+        ('Missing Final Grade', final_grade_label),
+    ):
+        if not value:
+            blockers.append(label)
+    certificate_line_2 = f"{relation_text} and holding Pakistani Passport No. {passport_number or '—'}"
+    if passport_issue_date:
+        certificate_line_2 += f" Dated {passport_issue_date}"
+    certificate_line_2 += ", passed"
+    return {
+        'application': d,
+        'identity': identity,
+        'applicant_name': applicant_name or '—',
+        'father_name': father_name or '—',
+        'passport_number': passport_number or '—',
+        'passport_issue_date': passport_issue_date,
+        'degree_title': degree_title or '—',
+        'qualification_subtitle': subtitle or '',
+        'identifier_label': _gl_identifier_print_label(identifier_type),
+        'identifier_value': identifier_value or '—',
+        'institute': institute or '—',
+        'university': university or '—',
+        'year_of_passing': year_of_passing or '—',
+        'final_percentage': final_percentage,
+        'final_grade_label': final_grade_label or '—',
+        'final_result_text': final_result_text,
+        'warnings': warnings,
+        'generation_blockers': blockers,
+        'relation_text': relation_text,
+        'certificate_line_1': 'This is to certify that according to the documents produced in this Embassy,',
+        'certificate_line_2': certificate_line_2,
+        'certificate_line_3': 'the examination of.',
+        'footer_telephone': GL_OFFICIAL_TELEPHONE,
+        'footer_fax': GL_OFFICIAL_FAX,
+        'footer_email': GL_OFFICIAL_EMAIL,
+        'reference_line': GL_OFFICIAL_REFERENCE_LINE,
+        'can_generate_official': not blockers,
+    }
+
+
+def _gl_letter_text(app):
+    letter = _gl_letter_context(app)
+    subtitle_line = f"({letter['qualification_subtitle']})\n" if letter.get('qualification_subtitle') else ''
+    passport_line = f"Pakistani Passport No. {letter.get('passport_number') or '—'}"
+    if letter.get('passport_issue_date'):
+        passport_line += f" Dated {letter['passport_issue_date']}"
     return (
         "Embassy of Islamic Republic of Pakistan\n"
-        "Kuwait\n\n"
-        f"No. {d.get('ref_no') or ''}\n\n"
+        "Kuwait\n"
+        "سفارة جمهورية باكستان الإسلامية\n"
+        "الكويت\n\n"
+        f"{letter['reference_line']}\n\n"
         "TO WHOM IT MAY CONCERN\n\n"
-        "This is to certify that according to the documents produced in this Embassy, "
-        f"{nurse.get('full_name') or ''} {relation} "
-        f"and holding Pakistani Passport No. {nurse.get('passport_number') or ''}, passed the examination of:\n\n"
-        f"{d.get('degree_title') or ''}\n"
-        f"{identifier_label}: {d.get('student_no') or ''}\n\n"
-        f"{d.get('institute') or ''}\n"
-        f"Affiliated with {d.get('university') or ''}\n"
-        f"{d.get('year_of_passing') or ''}\n"
-        f"{pct}% \"{d.get('final_grade_label') or ''}\"\n\n"
-        "This certificate is issued on the request of the applicant without any liability on the part of this Embassy whatsoever."
+        f"{letter['certificate_line_1']}\n"
+        f"{letter['applicant_name']}\n"
+        f"{letter['relation_text']} and holding {passport_line}, passed\n"
+        f"{letter['certificate_line_3']}\n\n"
+        f"{letter['degree_title']}\n"
+        f"{subtitle_line}"
+        f"{letter['identifier_label']} {letter['identifier_value']}\n\n"
+        f"{letter['institute']}\n"
+        f"Affiliated with {letter['university']}\n"
+        f"{letter['year_of_passing']}\n"
+        f"{letter['final_result_text']}\n\n"
+        "This certificate is issued on the request of the applicant without any liability on the part\n"
+        "of this Embassy whatsoever."
     )
+
+
+def _gl_preview_html(letter, include_watermark=False, preview_title=''):
+    emblem = _embassy_letterhead_data_url()
+    watermark_html = ''
+    if include_watermark:
+        watermark_html = (
+            '<div class="gl-official-letter__watermark">'
+            '<div>NOT OFFICIAL USE ONLY<br>للاطلاع فقط - غير رسمي</div>'
+            '</div>'
+        )
+    preview_banner = (
+        f'<div class="gl-official-letter__preview-title">{esc(preview_title)}</div>' if preview_title else ''
+    )
+    subtitle_html = (
+        f'<div class="gl-official-letter__cell-line">({esc(letter.get("qualification_subtitle") or "")})</div>'
+        if letter.get('qualification_subtitle') else ''
+    )
+    return f"""
+<style>
+.gl-official-letter__preview-title{{font-family:Georgia,"Times New Roman",serif;font-size:18px;font-weight:700;color:#102a43;margin:0 0 10px;text-align:left}}
+.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:8px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:36px 34px 24px;font-family:"Times New Roman",Georgia,serif;line-height:1.42;max-width:920px;margin:0 auto;box-sizing:border-box;overflow:hidden}}
+.gl-official-letter__watermark{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0}}
+.gl-official-letter__watermark div{{transform:rotate(-28deg);font-size:40px;line-height:1.3;text-align:center;font-weight:700;letter-spacing:.08em;color:rgba(11,54,97,.12)}}
+.gl-official-letter > *{{position:relative;z-index:1}}
+.gl-official-letter table{{width:100%;border-collapse:collapse}}
+.gl-official-letter__header td{{vertical-align:top}}
+.gl-official-letter__crest{{width:150px;text-align:left}}
+.gl-official-letter__crest img{{width:86px;height:auto;display:block}}
+.gl-official-letter__heading{{text-align:center}}
+.gl-official-letter__heading-en{{font-size:20px;font-weight:700;line-height:1.2}}
+.gl-official-letter__heading-ar{{margin-top:8px;font-size:18px;font-weight:700;line-height:1.35;direction:rtl}}
+.gl-official-letter__ref{{margin-top:28px;font-size:18px}}
+.gl-official-letter__title{{margin:22px 0 20px;text-align:center;font-size:22px;font-weight:700;text-decoration:underline}}
+.gl-official-letter__para{{font-size:18px;line-height:1.95;text-align:left;margin:0 auto 20px;max-width:760px}}
+.gl-official-letter__grid{{margin:22px 0 30px}}
+.gl-official-letter__grid td{{width:50%;padding:0 14px;text-align:center;vertical-align:top;font-size:17px;line-height:1.4}}
+.gl-official-letter__cell-line{{display:block}}
+.gl-official-letter__liability{{margin-top:18px;max-width:760px}}
+.gl-official-letter__spacer{{height:280px}}
+.gl-official-letter__footer td{{font-size:15px;padding-top:8px;border-top:1px solid #111}}
+.gl-official-letter__footer-mid{{text-align:center}}
+.gl-official-letter__footer-right{{text-align:right}}
+@media (max-width: 760px) {{
+  .gl-official-letter{{padding:24px 18px 18px}}
+  .gl-official-letter__heading-en{{font-size:18px}}
+  .gl-official-letter__heading-ar{{font-size:16px}}
+  .gl-official-letter__ref{{font-size:16px}}
+  .gl-official-letter__title{{font-size:20px}}
+  .gl-official-letter__para{{font-size:16px;line-height:1.8}}
+  .gl-official-letter__grid td{{display:block;width:100%;padding:0 0 18px}}
+  .gl-official-letter__spacer{{height:140px}}
+  .gl-official-letter__footer td{{display:block;text-align:left!important;padding-top:4px;border-top:none}}
+  .gl-official-letter__footer-mid,.gl-official-letter__footer-right{{text-align:left}}
+}}
+</style>
+{preview_banner}
+<div class="gl-official-letter">
+  {watermark_html}
+  <table class="gl-official-letter__header">
+    <tr>
+      <td class="gl-official-letter__crest">{f'<img src="{emblem}" alt="Embassy crest">' if emblem else ''}</td>
+      <td class="gl-official-letter__heading">
+        <div class="gl-official-letter__heading-en">Embassy of Islamic Republic of Pakistan<br>Kuwait</div>
+        <div class="gl-official-letter__heading-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
+      </td>
+    </tr>
+  </table>
+  <div class="gl-official-letter__ref">{esc(letter['reference_line'])}</div>
+  <div class="gl-official-letter__title">TO WHOM IT MAY CONCERN</div>
+  <div class="gl-official-letter__para">
+    {esc(letter['certificate_line_1'])} {esc(letter['applicant_name'])}<br>
+    {esc(letter['certificate_line_2'])}<br>
+    {esc(letter['certificate_line_3'])}
+  </div>
+  <table class="gl-official-letter__grid">
+    <tr>
+      <td>
+        <span class="gl-official-letter__cell-line">{esc(letter['degree_title'])}</span>
+        {subtitle_html}
+        <span class="gl-official-letter__cell-line">{esc(letter['identifier_label'])} {esc(letter['identifier_value'])}</span>
+      </td>
+      <td>
+        <span class="gl-official-letter__cell-line">{esc(letter['institute'])}</span>
+        <span class="gl-official-letter__cell-line">Affiliated with {esc(letter['university'])}</span>
+        <span class="gl-official-letter__cell-line">{esc(letter['year_of_passing'])}</span>
+        <span class="gl-official-letter__cell-line">{esc(letter['final_result_text'])}</span>
+      </td>
+    </tr>
+  </table>
+  <div class="gl-official-letter__para gl-official-letter__liability">
+    This certificate is issued on the request of the applicant without any liability on the part<br>
+    of this Embassy whatsoever.
+  </div>
+  <div class="gl-official-letter__spacer"></div>
+  <table class="gl-official-letter__footer">
+    <tr>
+      <td>Telephone: {esc(letter['footer_telephone'])}</td>
+      <td class="gl-official-letter__footer-mid">Fax: {esc(letter['footer_fax'])}</td>
+      <td class="gl-official-letter__footer-right">Email: {esc(letter['footer_email'])}</td>
+    </tr>
+  </table>
+</div>
+""".strip()
 
 
 def _gl_pdf_escape(value):
@@ -11033,8 +11653,8 @@ def _gl_pdf_wrap(text, max_chars=86):
     return lines
 
 
-def _gl_build_pdf_bytes(letter_text):
-    """Build a simple one-page PDF using standard Type1 fonts only."""
+def _gl_build_plain_pdf_bytes(letter_text):
+    """Fallback plain PDF builder when richer HTML/PDF rendering is unavailable."""
     raw_lines = (letter_text or '').split('\n')
     content_lines = []
     for line in raw_lines:
@@ -11091,18 +11711,33 @@ def _gl_build_pdf_bytes(letter_text):
     return buf.getvalue()
 
 
+def _gl_build_pdf_bytes(app):
+    if HAVE_PYMUPDF and fitz is not None:
+        letter = _gl_letter_context(app)
+        doc = fitz.open()
+        try:
+            page = doc.new_page(width=595, height=842)
+            html = _gl_preview_html(letter, include_watermark=False)
+            page.insert_htmlbox(fitz.Rect(20, 18, 575, 824), html)
+            return doc.tobytes(garbage=3, deflate=True)
+        finally:
+            doc.close()
+    return _gl_build_plain_pdf_bytes(_gl_letter_text(app))
+
+
 def _gl_generate_letter_file(app):
-    d = _gl_admin_app_dict(app)
+    letter = _gl_letter_context(app)
+    d = letter.get('application') or {}
     if d.get('status') == 'ISSUED':
         raise ValueError('Issued letters cannot be regenerated.')
-    if not d.get('final_grade_label') or d.get('final_percentage') is None:
-        raise ValueError('Final percentage and grade are required before letter generation.')
+    if letter.get('generation_blockers'):
+        raise ValueError('Official letter cannot be generated until the required fields are completed.')
     ref = d.get('ref_no') or f"GL-{d.get('id')}"
     safe_ref = re.sub(r'[^A-Za-z0-9_.-]', '_', ref)
     rel_path = f'generated_letters/{safe_ref}.pdf'
     target = Path(__file__).resolve().parent / rel_path
     target.parent.mkdir(exist_ok=True)
-    target.write_bytes(_gl_build_pdf_bytes(_gl_letter_text(app)))
+    target.write_bytes(_gl_build_pdf_bytes(app))
     return rel_path
 
 
@@ -11116,15 +11751,24 @@ def api_admin_gl_detail(app_id, user):
         row = _gl_fetch_application(db, app_id)
         if not row:
             return {'success': False, 'error': 'Application not found.'}
+        letter = _gl_letter_context(row)
+        application = _gl_admin_app_dict(row)
+        application['preview_warnings'] = list(letter.get('warnings') or [])
+        application['generation_blockers'] = list(letter.get('generation_blockers') or [])
+        application['can_generate_official'] = bool(letter.get('can_generate_official'))
         audit = db.execute(
             "SELECT * FROM gl_audit WHERE application_id = ? ORDER BY id DESC LIMIT 200",
             [int(app_id)]
         ).fetchall()
         return {
             'success': True,
-            'application': _gl_admin_app_dict(row),
+            'application': application,
             'audit': [dict(a) for a in audit],
             'letter_preview': _gl_letter_text(row),
+            'letter_preview_html': _gl_preview_html(letter, include_watermark=False),
+            'preview_warnings': list(letter.get('warnings') or []),
+            'generation_blockers': list(letter.get('generation_blockers') or []),
+            'can_generate_official': bool(letter.get('can_generate_official')),
             'can_manage': gl_user_can_manage(user),
             'qualification_options': [{'code': code, 'label': label} for code, label in GL_QUALIFICATIONS.items()],
             'student_identifier_options': list(GL_STUDENT_IDENTIFIER_TYPES),
@@ -11178,6 +11822,8 @@ def api_admin_gl_action(data, user):
                 payload['internal_notes'] = internal_notes
             if 'relation_override' in data:
                 payload['relation_override'] = _gl_clean_text(data.get('relation_override'), 180)
+            if 'father_name' in data:
+                payload['father_name_snapshot'] = _gl_clean_text(data.get('father_name'), 180)
             payload['override_reason'] = ''
             sets = [f"{k} = ?" for k in payload]
             db.execute(
@@ -11235,6 +11881,9 @@ def api_admin_gl_action(data, user):
         elif action == 'generate':
             if status != 'APPROVED':
                 return {'success': False, 'error': 'Only approved requests can generate a letter.'}
+            fresh_letter = _gl_letter_context(row)
+            if fresh_letter.get('generation_blockers'):
+                return {'success': False, 'error': 'Official letter cannot be generated until all required fields are completed: ' + ', '.join(fresh_letter['generation_blockers'])}
             rel_path = _gl_generate_letter_file(row)
             db.execute(
                 "UPDATE gl_applications SET letter_pdf_path = ?, letter_path = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -32492,6 +33141,14 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_nurse_change_password(data)
             self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/profile/update':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_profile_update(data)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
             return
         elif path == '/api/nurses/update-email':
             try:

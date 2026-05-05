@@ -14,6 +14,8 @@ export type NursePortalContext = {
   nurseDbId?: number;
   fullName: string;
   fatherName?: string;
+  cnic?: string;
+  gender?: string;
   professionalCategory?: string;
   email: string;
   emailStatus?: string;
@@ -27,6 +29,9 @@ export type NursePortalContext = {
   whatsappFull?: string;
   emergencyContactFull?: string;
   hospital: string;
+  qualificationDegree?: string;
+  qualificationDegreeOther?: string;
+  jobTitleMoh?: string;
   registrationStatus: string;
   lastUpdated: string;
   remarks: string;
@@ -153,6 +158,8 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     nurseDbId: typeof data?.nurse_db_id === "number" ? data.nurse_db_id : undefined,
     fullName: (data?.full_name || '').toString(),
     fatherName: (data?.father_name || '').toString(),
+    cnic: (data?.cnic || '').toString(),
+    gender: (data?.gender || '').toString(),
     professionalCategory: (data?.professional_category || '').toString(),
     email: (data?.email || '').toString(),
     emailStatus: (data?.email_status || '').toString(),
@@ -166,6 +173,9 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     whatsappFull: (data?.whatsapp_full || data?.mobile_full || data?.mobile || '').toString(),
     emergencyContactFull: (data?.emergency_contact_full || '').toString(),
     hospital: (data?.hospital || '').toString(),
+    qualificationDegree: (data?.qualification_degree || '').toString(),
+    qualificationDegreeOther: (data?.qualification_degree_other || '').toString(),
+    jobTitleMoh: (data?.job_title_moh || '').toString(),
     registrationStatus: (data?.registration_status || '').toString(),
     lastUpdated: (data?.process_last_updated_at || '').toString(),
     remarks: (data?.latest_admin_remarks || data?.remarks || '').toString(),
