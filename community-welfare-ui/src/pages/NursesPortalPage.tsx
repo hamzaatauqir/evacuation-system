@@ -1,23 +1,256 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useEffectEvent, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { StatusBadge } from "../components/StatusBadge";
 import { api, BACKEND_PORTAL } from "../lib/api";
-import { addLocalPortalRequest, clearNursePortal, getLocalPortalRequests, getNursePortal } from "../lib/nursePortal";
+import {
+  addLocalPortalRequest,
+  clearNursePortal,
+  getLocalPortalRequests,
+  getNursePortal,
+  type NursePortalContext,
+} from "../lib/nursePortal";
+
+type PortalTab = "overview" | "stay" | "complaint" | "grading" | "leaving" | "requests" | "password";
+type GradingMode = "MARKS" | "PERCENT" | "GPA";
+
+type GradingIdentity = {
+  full_name?: string;
+  father_name?: string;
+  passport_number?: string;
+  cnic?: string;
+  mobile?: string;
+  email?: string;
+};
+
+type GradingApplication = {
+  id?: number;
+  ref_no?: string;
+  reference?: string;
+  status?: string;
+  qualification_code?: string;
+  qualification_other?: string;
+  qualification_label?: string;
+  degree_title?: string;
+  student_no?: string;
+  institute?: string;
+  university?: string;
+  year_of_passing?: number | string;
+  mode?: string;
+  total_marks?: number | string | null;
+  obtained_marks?: number | string | null;
+  entered_percentage?: number | string | null;
+  entered_gpa?: number | string | null;
+  final_percentage?: number | null;
+  final_grade_label?: string;
+  submitted_at?: string;
+  created_at?: string;
+  correction_notes?: string;
+  can_nurse_edit?: boolean;
+};
+
+type GradingSummaryResponse = {
+  success?: boolean;
+  profile?: GradingIdentity;
+  active_application?: GradingApplication | null;
+  applications?: GradingApplication[];
+  history?: GradingApplication[];
+  error?: string;
+};
+
+type GradingFormState = {
+  application_id: number | null;
+  qualification_code: string;
+  qualification_other: string;
+  degree_title: string;
+  student_no: string;
+  institute: string;
+  university: string;
+  year_of_passing: string;
+  mode: GradingMode;
+  total_marks: string;
+  obtained_marks: string;
+  entered_percentage: string;
+  entered_gpa: string;
+  declaration_accepted: boolean;
+};
+
+const DASH_VALUE = "—";
+const GRADING_SUMMARY_FALLBACK = "Could not load grading letter status. Please try again.";
+const GRADING_SUBMIT_FALLBACK =
+  "Request could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.";
+const GRADING_QUALIFICATIONS = [
+  { value: "BSN_4Y", label: "BSN Nursing 4 Years" },
+  { value: "POST_RN_BSN", label: "Post RN BSN" },
+  { value: "GENERAL_NURSING_DIPLOMA", label: "General Nursing Diploma" },
+  { value: "NURSING_DIPLOMA", label: "Nursing Diploma" },
+  { value: "MIDWIFERY_ADDITIONAL", label: "Midwifery / Additional Course" },
+  { value: "OTHER", label: "Other" },
+];
+
+function normalizeRequestError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : "";
+  if (!message || /failed to fetch|networkerror|load failed/i.test(message)) {
+    return fallback;
+  }
+  return message;
+}
+
+function displayValue(value: unknown) {
+  const text = String(value ?? "").trim();
+  return text || DASH_VALUE;
+}
+
+function qualificationLabelFromCode(code: string, other = "") {
+  if (code === "OTHER") return other || "Other";
+  return GRADING_QUALIFICATIONS.find((item) => item.value === code)?.label || code || DASH_VALUE;
+}
+
+function createGradingForm(application?: GradingApplication | null): GradingFormState {
+  return {
+    application_id: typeof application?.id === "number" ? application.id : null,
+    qualification_code: application?.qualification_code || "",
+    qualification_other: application?.qualification_other || "",
+    degree_title: application?.degree_title || "",
+    student_no: application?.student_no || "",
+    institute: application?.institute || "",
+    university: application?.university || "",
+    year_of_passing: application?.year_of_passing ? String(application.year_of_passing) : "",
+    mode: (application?.mode as GradingMode) || "MARKS",
+    total_marks: application?.total_marks == null ? "" : String(application.total_marks),
+    obtained_marks: application?.obtained_marks == null ? "" : String(application.obtained_marks),
+    entered_percentage: application?.entered_percentage == null ? "" : String(application.entered_percentage),
+    entered_gpa: application?.entered_gpa == null ? "" : String(application.entered_gpa),
+    declaration_accepted: false,
+  };
+}
+
+function gradingSummaryPath(ctx: NursePortalContext) {
+  const params = new URLSearchParams();
+  if (ctx.referenceId) params.set("nurse_reference_id", ctx.referenceId);
+  if (ctx.passportNumber) params.set("passport_number", ctx.passportNumber);
+  if (ctx.mobile || ctx.civilId) params.set("verifier", ctx.mobile || ctx.civilId);
+  if (ctx.sessionMarker) params.set("session_marker", ctx.sessionMarker);
+  return `/api/nurses/grading-letter/summary?${params.toString()}`;
+}
+
+function gradingGradeLabel(percentage: number) {
+  if (percentage >= 80) return "Excellent";
+  if (percentage >= 70) return "Very Good";
+  if (percentage >= 60) return "Good";
+  if (percentage >= 50) return "Pass";
+  return "Fail";
+}
+
+function prettifyGradingStatus(status: string) {
+  return status
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function gradingStatusType(status: string) {
+  const normalized = status.toUpperCase();
+  if (normalized === "ISSUED") return "resolved";
+  if (normalized === "REJECTED" || normalized === "CANCELLED") return "rejected";
+  if (normalized === "CORRECTION_REQUIRED") return "urgent";
+  if (normalized === "APPROVED" || normalized === "LETTER_GENERATED" || normalized === "UNDER_REVIEW") return "processing";
+  return "pending";
+}
+
+function formatGradingPercent(value: number | string | null | undefined) {
+  const num = Number(value);
+  return Number.isFinite(num) ? `${num.toFixed(2)}%` : DASH_VALUE;
+}
+
+function computeGradingPreview(form: GradingFormState) {
+  const commonComplete =
+    !!form.qualification_code.trim() &&
+    !!form.degree_title.trim() &&
+    !!form.student_no.trim() &&
+    !!form.institute.trim() &&
+    !!form.university.trim() &&
+    !!form.year_of_passing.trim() &&
+    (form.qualification_code !== "OTHER" || !!form.qualification_other.trim());
+
+  let percentage: number | null = null;
+  let validationMessage = "";
+
+  if (form.mode === "MARKS") {
+    const totalRaw = form.total_marks.trim();
+    const obtainedRaw = form.obtained_marks.trim();
+    if (totalRaw || obtainedRaw) {
+      const total = Number(totalRaw);
+      const obtained = Number(obtainedRaw);
+      if (!Number.isFinite(total) || total <= 0) {
+        validationMessage = "Total marks must be greater than zero.";
+      } else if (!Number.isFinite(obtained) || obtained < 0 || obtained > total) {
+        validationMessage = "Obtained marks cannot exceed total marks.";
+      } else {
+        percentage = (obtained / total) * 100;
+      }
+    }
+  } else if (form.mode === "PERCENT") {
+    const percentRaw = form.entered_percentage.trim();
+    if (percentRaw) {
+      const percent = Number(percentRaw);
+      if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+        validationMessage = "Percentage must be between 0 and 100.";
+      } else {
+        percentage = percent;
+      }
+    }
+  } else {
+    const gpaRaw = form.entered_gpa.trim();
+    if (gpaRaw) {
+      const gpa = Number(gpaRaw);
+      if (!Number.isFinite(gpa) || gpa < 0 || gpa > 4) {
+        validationMessage = "GPA cannot exceed 4.00.";
+      } else {
+        percentage = (gpa / 4) * 100;
+      }
+    }
+  }
+
+  if (percentage != null) {
+    percentage = Number(percentage.toFixed(2));
+  }
+
+  const modeReady =
+    form.mode === "MARKS"
+      ? !!form.total_marks.trim() && !!form.obtained_marks.trim()
+      : form.mode === "PERCENT"
+        ? !!form.entered_percentage.trim()
+        : !!form.entered_gpa.trim();
+
+  return {
+    percentage,
+    gradeLabel: percentage != null ? gradingGradeLabel(percentage) : DASH_VALUE,
+    validationMessage,
+    canSubmit: commonComplete && modeReady && form.declaration_accepted && percentage != null && !validationMessage,
+  };
+}
 
 export function NursesPortalPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [ctx] = useState(() => getNursePortal());
-  const requests = useMemo(() => getLocalPortalRequests(), []);
+  const [requests, setRequests] = useState(() => getLocalPortalRequests());
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [qualificationInfo, setQualificationInfo] = useState({ degree: "", other: "" });
   const [currentEmail, setCurrentEmail] = useState(ctx?.email || "");
   const [currentEmailStatus, setCurrentEmailStatus] = useState(ctx?.emailStatus || "");
+  const [gradingSummary, setGradingSummary] = useState<GradingSummaryResponse | null>(null);
+  const [gradingLoading, setGradingLoading] = useState(false);
+  const [gradingError, setGradingError] = useState("");
+  const [gradingFlash, setGradingFlash] = useState("");
+  const [gradingSubmitBusy, setGradingSubmitBusy] = useState(false);
+  const [gradingForm, setGradingForm] = useState<GradingFormState>(() => createGradingForm());
 
   const [facilityReq, setFacilityReq] = useState({
     category: "",
@@ -61,10 +294,10 @@ export function NursesPortalPage() {
   }
 
   const isDoctor = (ctx.professionalCategory || "").toLowerCase() === "doctor";
-  const tab = params.get("tab") || "overview";
+  const tab = (params.get("tab") || "overview") as PortalTab;
   const tabs = isDoctor
-    ? ["overview", "complaint", "requests", "password"]
-    : ["overview", "stay", "complaint", "leaving", "requests", "password"];
+    ? (["overview", "complaint", "grading", "requests", "password"] as PortalTab[])
+    : (["overview", "stay", "complaint", "grading", "leaving", "requests", "password"] as PortalTab[]);
   const activeTab = tabs.includes(tab) ? tab : "overview";
 
   const statusType = (ctx.registrationStatus || "").toLowerCase().includes("resolved")
@@ -107,6 +340,33 @@ export function NursesPortalPage() {
     : emailStatus.toLowerCase().includes("failed")
       ? "Delivery Failed"
       : "Email verification pending. Please verify your email address to activate your portal account and receive official updates.";
+  const gradingPreview = useMemo(() => computeGradingPreview(gradingForm), [gradingForm]);
+  const gradingActiveRequest = gradingSummary?.active_application || null;
+  const gradingHistory = gradingSummary?.applications || gradingSummary?.history || [];
+  const gradingProfile = gradingSummary?.profile || {};
+
+  const refreshGradingSummary = useEffectEvent(async (showLoading = true) => {
+    if (!ctx) return;
+    if (showLoading) setGradingLoading(true);
+    setGradingError("");
+    try {
+      const res = await api.get<GradingSummaryResponse>(gradingSummaryPath(ctx));
+      if (!res?.success) {
+        throw new Error(res?.error || GRADING_SUMMARY_FALLBACK);
+      }
+      setGradingSummary(res);
+      if (res.active_application?.can_nurse_edit) {
+        setGradingForm(createGradingForm(res.active_application));
+      } else if (res.active_application) {
+        setGradingForm(createGradingForm());
+      }
+    } catch (_error) {
+      setGradingSummary(null);
+      setGradingError(GRADING_SUMMARY_FALLBACK);
+    } finally {
+      setGradingLoading(false);
+    }
+  });
 
   useEffect(() => {
     let live = true;
@@ -133,6 +393,11 @@ export function NursesPortalPage() {
     };
   }, [ctx.referenceId, ctx.passportNumber, ctx.mobile, ctx.civilId]);
 
+  useEffect(() => {
+    if (activeTab !== "grading") return;
+    void refreshGradingSummary();
+  }, [activeTab]);
+
   async function submitFacilityRequest() {
     setBusy(true); setErr(""); setMsg("");
     try {
@@ -147,6 +412,7 @@ export function NursesPortalPage() {
         preferred_contact_method: facilityReq.preferred_contact_method,
       });
       addLocalPortalRequest({ type: "Facility Assistance", summary: `Category: ${facilityReq.category || "N/A"}` });
+      setRequests(getLocalPortalRequests());
       setMsg("Facility assistance request submitted for Community Welfare Wing review.");
       setFacilityReq({ category: "", urgency: "Normal", subject: "", details: "", preferred_contact_method: "WhatsApp" });
       setParams({ tab: "requests" });
@@ -167,6 +433,7 @@ export function NursesPortalPage() {
         ...stay,
       });
       addLocalPortalRequest({ type: "Stay Confirmation", summary: "Stay arrangement update submitted." });
+      setRequests(getLocalPortalRequests());
       setMsg("Stay arrangement confirmation submitted for Community Welfare Wing review.");
       setParams({ tab: "requests" });
     } catch (e) {
@@ -191,6 +458,7 @@ export function NursesPortalPage() {
         consent: true,
       });
       addLocalPortalRequest({ type: "Complaint", summary: `Subject: ${complaint.subject || "N/A"}` });
+      setRequests(getLocalPortalRequests());
       setMsg("Complaint submitted. Marked as pending official review.");
       setComplaint({ complaint_category: "", priority: "Normal", subject: "", description: "" });
       setParams({ tab: "requests" });
@@ -218,6 +486,7 @@ export function NursesPortalPage() {
         reason: leaving.remarks,
       });
       addLocalPortalRequest({ type: "Leaving Notice", summary: `Move out date: ${leaving.intended_leaving_date || "N/A"}` });
+      setRequests(getLocalPortalRequests());
       setMsg("Leaving notice submitted for Community Welfare Wing review.");
       setLeaving({ current_facility: ctx.facilityRoster?.facility_name || "", date_shifted_to_facility: ctx.facilityRoster?.date_shifted_to_facility || "", intended_leaving_date: "", reason_category: "", new_stay_arrangement: "", new_area: "", assistance_required: "No", remarks: "" });
       setParams({ tab: "requests" });
@@ -225,6 +494,56 @@ export function NursesPortalPage() {
       setErr((e as Error).message || "Could not submit leaving notice.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function submitGradingLetter() {
+    setGradingSubmitBusy(true);
+    setGradingError("");
+    setGradingFlash("");
+
+    if (!gradingPreview.canSubmit) {
+      setGradingError(gradingPreview.validationMessage || "Please complete all required grading letter fields.");
+      setGradingSubmitBusy(false);
+      return;
+    }
+
+    const payload = {
+      nurse_reference_id: ctx.referenceId,
+      passport_number: ctx.passportNumber,
+      verifier: ctx.mobile || ctx.civilId || "",
+      session_marker: ctx.sessionMarker || "",
+      id: gradingForm.application_id || undefined,
+      qualification_code: gradingForm.qualification_code,
+      qualification_other: gradingForm.qualification_other.trim(),
+      degree_title: gradingForm.degree_title.trim(),
+      student_no: gradingForm.student_no.trim(),
+      institute: gradingForm.institute.trim(),
+      university: gradingForm.university.trim(),
+      year_of_passing: gradingForm.year_of_passing.trim(),
+      mode: gradingForm.mode,
+      total_marks: gradingForm.mode === "MARKS" ? gradingForm.total_marks.trim() : "",
+      obtained_marks: gradingForm.mode === "MARKS" ? gradingForm.obtained_marks.trim() : "",
+      entered_percentage: gradingForm.mode === "PERCENT" ? gradingForm.entered_percentage.trim() : "",
+      entered_gpa: gradingForm.mode === "GPA" ? gradingForm.entered_gpa.trim() : "",
+      declaration_accepted: true,
+    };
+
+    try {
+      const endpoint = gradingActiveRequest?.can_nurse_edit
+        ? "/api/nurses/grading-letter/resubmit"
+        : "/api/nurses/grading-letter/submit";
+      const res = await api.post<{ success?: boolean; reference?: string; message?: string; error?: string }>(endpoint, payload);
+      const successMessage = gradingActiveRequest?.can_nurse_edit
+        ? `Grading letter request resubmitted successfully. Reference: ${res.reference || DASH_VALUE}`
+        : `Grading letter request submitted successfully. Reference: ${res.reference || DASH_VALUE}`;
+      setGradingFlash(successMessage);
+      setGradingForm(createGradingForm());
+      await refreshGradingSummary(false);
+    } catch (error) {
+      setGradingError(normalizeRequestError(error, GRADING_SUBMIT_FALLBACK));
+    } finally {
+      setGradingSubmitBusy(false);
     }
   }
 
@@ -326,6 +645,8 @@ export function NursesPortalPage() {
                   ? "Stay Arrangement"
                   : t === "complaint"
                     ? "Complaint"
+                    : t === "grading"
+                      ? "Grading Letter"
                     : t === "leaving"
                       ? "Leaving Notice"
                       : t === "requests"
@@ -551,6 +872,324 @@ export function NursesPortalPage() {
           </FormCard>
         ) : null}
 
+        {activeTab === "grading" ? (
+          <div style={{ display: "grid", gap: 14 }}>
+            <FormCard title="Grading Letter Request">
+              <NoticeBox>
+                Use this form to request an Embassy grading letter for one nursing qualification. One qualification
+                requires one application. Midwifery or additional qualification should be submitted as a separate
+                request.
+              </NoticeBox>
+              <NoticeBox tone="warning">
+                Submitting this form does not generate the official letter automatically. Embassy/Nurses Desk will
+                verify the details before issuing the final letter.
+              </NoticeBox>
+              <NoticeBox tone="info">
+                Please bring original degree/transcript/marksheet for verification when requested by Embassy.
+              </NoticeBox>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 }}>
+                <Field label="Name" value={displayValue(gradingProfile.full_name || ctx.fullName)} />
+                <Field label="Father Name" value={displayValue(gradingProfile.father_name)} />
+                <Field label="Passport No." value={displayValue(gradingProfile.passport_number || ctx.passportNumber)} />
+                <Field label="CNIC" value={displayValue(gradingProfile.cnic)} />
+                <Field label="Mobile" value={displayValue(gradingProfile.mobile || ctx.mobileFull || ctx.mobile)} />
+                <Field label="Email" value={displayValue(gradingProfile.email || currentEmail)} />
+              </div>
+
+              {gradingFlash ? <NoticeBox tone="success">{gradingFlash}</NoticeBox> : null}
+              {gradingError ? <NoticeBox tone="error">{gradingError}</NoticeBox> : null}
+
+              {gradingLoading ? (
+                <p style={{ color: "#5B6773", margin: 0 }}>Loading grading letter details...</p>
+              ) : null}
+
+              {!gradingLoading && gradingActiveRequest ? (
+                <div
+                  style={{
+                    border: "1px solid #E3EBF0",
+                    borderRadius: 10,
+                    padding: 14,
+                    background: "#F7FAFC",
+                    display: "grid",
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                    <strong>{gradingActiveRequest.ref_no || gradingActiveRequest.reference || "Active Request"}</strong>
+                    <StatusBadge
+                      type={gradingStatusType(gradingActiveRequest.status || "") as any}
+                      label={prettifyGradingStatus(gradingActiveRequest.status || "SUBMITTED")}
+                    />
+                  </div>
+                  <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                    Qualification:{" "}
+                    {qualificationLabelFromCode(
+                      gradingActiveRequest.qualification_code || "",
+                      gradingActiveRequest.qualification_other || ""
+                    )}
+                  </p>
+                  <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                    Submitted date: {gradingActiveRequest.submitted_at || gradingActiveRequest.created_at || DASH_VALUE}
+                  </p>
+                  {gradingActiveRequest.correction_notes ? (
+                    <p style={{ margin: 0, color: "#8A5C00", fontSize: 13 }}>
+                      Correction notes: {gradingActiveRequest.correction_notes}
+                    </p>
+                  ) : null}
+                  {!gradingActiveRequest.can_nurse_edit ? (
+                    <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                      You already have an active grading letter request. You can submit a new request after the current
+                      one is issued, rejected, or cancelled.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {!gradingLoading && !gradingError && (!gradingActiveRequest || gradingActiveRequest.can_nurse_edit) ? (
+                <>
+                  <label>
+                    Qualification Type
+                    <select
+                      className="f-input"
+                      value={gradingForm.qualification_code}
+                      onChange={(e) =>
+                        setGradingForm({
+                          ...gradingForm,
+                          qualification_code: e.target.value,
+                          qualification_other: e.target.value === "OTHER" ? gradingForm.qualification_other : "",
+                        })
+                      }
+                    >
+                      <option value="">Select</option>
+                      {GRADING_QUALIFICATIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {gradingForm.qualification_code === "OTHER" ? (
+                    <label>
+                      Other qualification text
+                      <input
+                        className="f-input"
+                        value={gradingForm.qualification_other}
+                        onChange={(e) => setGradingForm({ ...gradingForm, qualification_other: e.target.value })}
+                      />
+                    </label>
+                  ) : null}
+
+                  <label>
+                    Degree Title as printed on certificate
+                    <input
+                      className="f-input"
+                      value={gradingForm.degree_title}
+                      onChange={(e) => setGradingForm({ ...gradingForm, degree_title: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Student / Roll No.
+                    <input
+                      className="f-input"
+                      value={gradingForm.student_no}
+                      onChange={(e) => setGradingForm({ ...gradingForm, student_no: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    College / Institute
+                    <input
+                      className="f-input"
+                      value={gradingForm.institute}
+                      onChange={(e) => setGradingForm({ ...gradingForm, institute: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    University / Affiliating Body
+                    <input
+                      className="f-input"
+                      value={gradingForm.university}
+                      onChange={(e) => setGradingForm({ ...gradingForm, university: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Year of Passing
+                    <input
+                      className="f-input"
+                      type="number"
+                      min="1950"
+                      max={new Date().getFullYear() + 1}
+                      value={gradingForm.year_of_passing}
+                      onChange={(e) => setGradingForm({ ...gradingForm, year_of_passing: e.target.value })}
+                    />
+                  </label>
+
+                  <label>
+                    Grading Mode
+                    <select
+                      className="f-input"
+                      value={gradingForm.mode}
+                      onChange={(e) =>
+                        setGradingForm({
+                          ...gradingForm,
+                          mode: e.target.value as GradingMode,
+                          total_marks: e.target.value === "MARKS" ? gradingForm.total_marks : "",
+                          obtained_marks: e.target.value === "MARKS" ? gradingForm.obtained_marks : "",
+                          entered_percentage: e.target.value === "PERCENT" ? gradingForm.entered_percentage : "",
+                          entered_gpa: e.target.value === "GPA" ? gradingForm.entered_gpa : "",
+                        })
+                      }
+                    >
+                      <option value="MARKS">Marks</option>
+                      <option value="PERCENT">Percentage</option>
+                      <option value="GPA">GPA out of 4.00</option>
+                    </select>
+                  </label>
+
+                  {gradingForm.mode === "MARKS" ? (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <label>
+                        Total Marks
+                        <input
+                          className="f-input"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={gradingForm.total_marks}
+                          onChange={(e) => setGradingForm({ ...gradingForm, total_marks: e.target.value })}
+                        />
+                      </label>
+                      <label>
+                        Obtained Marks
+                        <input
+                          className="f-input"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={gradingForm.obtained_marks}
+                          onChange={(e) => setGradingForm({ ...gradingForm, obtained_marks: e.target.value })}
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+
+                  {gradingForm.mode === "PERCENT" ? (
+                    <label>
+                      Percentage
+                      <input
+                        className="f-input"
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.01"
+                        value={gradingForm.entered_percentage}
+                        onChange={(e) => setGradingForm({ ...gradingForm, entered_percentage: e.target.value })}
+                      />
+                    </label>
+                  ) : null}
+
+                  {gradingForm.mode === "GPA" ? (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      <label>
+                        GPA Obtained
+                        <input
+                          className="f-input"
+                          type="number"
+                          min="0"
+                          max="4"
+                          step="0.01"
+                          value={gradingForm.entered_gpa}
+                          onChange={(e) => setGradingForm({ ...gradingForm, entered_gpa: e.target.value })}
+                        />
+                      </label>
+                      <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>Maximum GPA: 4.00</p>
+                    </div>
+                  ) : null}
+
+                  <div
+                    style={{
+                      border: "1px solid #E3EBF0",
+                      borderRadius: 10,
+                      padding: 14,
+                      background: "#F7FAFC",
+                      display: "grid",
+                      gap: 6,
+                    }}
+                  >
+                    <div style={{ color: "#2D4A6B", fontWeight: 700 }}>Computed Percentage</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: "#1F2933" }}>
+                      {gradingPreview.percentage != null ? `${gradingPreview.percentage.toFixed(2)}%` : DASH_VALUE}
+                    </div>
+                    <div style={{ color: "#2D4A6B", fontWeight: 700 }}>Provisional Grade Label</div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: "#1F2933" }}>{gradingPreview.gradeLabel}</div>
+                    <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                      Final grade is verified by Embassy/Nurses Desk before letter is issued.
+                    </p>
+                    {gradingPreview.validationMessage ? (
+                      <p style={{ margin: 0, color: "#C0392B", fontSize: 13 }}>{gradingPreview.validationMessage}</p>
+                    ) : null}
+                  </div>
+
+                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start", color: "#334155" }}>
+                    <input
+                      type="checkbox"
+                      checked={gradingForm.declaration_accepted}
+                      onChange={(e) =>
+                        setGradingForm({ ...gradingForm, declaration_accepted: e.target.checked })
+                      }
+                      style={{ marginTop: 3 }}
+                    />
+                    <span>
+                      I confirm the information is true and based on my documents. I understand the Embassy issues
+                      this letter on request without liability.
+                    </span>
+                  </label>
+
+                  <Btn variant="primary" disabled={gradingSubmitBusy || !gradingPreview.canSubmit} onClick={submitGradingLetter}>
+                    {gradingSubmitBusy
+                      ? "Submitting..."
+                      : gradingActiveRequest?.can_nurse_edit
+                        ? "Resubmit Grading Letter Request"
+                        : "Submit Grading Letter Request"}
+                  </Btn>
+                </>
+              ) : null}
+            </FormCard>
+
+            <FormCard title="Grading Letter History">
+              {gradingLoading ? (
+                <p style={{ color: "#5B6773", margin: 0 }}>Loading grading letter details...</p>
+              ) : gradingHistory.length ? (
+                <div style={{ display: "grid", gap: 8 }}>
+                  {gradingHistory.map((item, index) => (
+                    <div key={`${item.id || item.ref_no || "gl"}-${index}`} style={{ border: "1px solid #E3EBF0", borderRadius: 10, padding: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                        <strong>{item.ref_no || item.reference || "Grading Letter Request"}</strong>
+                        <StatusBadge
+                          type={gradingStatusType(item.status || "") as any}
+                          label={prettifyGradingStatus(item.status || "SUBMITTED")}
+                        />
+                      </div>
+                      <p style={{ fontSize: 12, color: "#5B6773", margin: "8px 0 4px" }}>
+                        Qualification: {qualificationLabelFromCode(item.qualification_code || "", item.qualification_other || "")}
+                      </p>
+                      <p style={{ fontSize: 12, color: "#5B6773", margin: 0 }}>
+                        Final %: {formatGradingPercent(item.final_percentage)} | Grade: {item.final_grade_label || DASH_VALUE}
+                      </p>
+                      <p style={{ fontSize: 12, color: "#5B6773", margin: "4px 0 0" }}>
+                        Submitted: {item.submitted_at || item.created_at || DASH_VALUE}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ color: "#5B6773", margin: 0 }}>No previous grading letter requests found.</p>
+              )}
+            </FormCard>
+          </div>
+        ) : null}
+
         {activeTab === "leaving" ? (
           <FormCard title="Leaving Notice / Change of Stay Arrangement">
             <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
@@ -652,6 +1291,24 @@ export function NursesPortalPage() {
                 ))}
               </div>
             ) : null}
+            {gradingHistory.length ? (
+              <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
+                {gradingHistory.map((item, index) => (
+                  <div key={`req-${item.id || item.ref_no || "gl"}-${index}`} style={{ border: "1px solid #E3EBF0", borderRadius: 10, padding: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                      <strong>{item.ref_no || item.reference || "Grading Letter Request"}</strong>
+                      <StatusBadge
+                        type={gradingStatusType(item.status || "") as any}
+                        label={prettifyGradingStatus(item.status || "SUBMITTED")}
+                      />
+                    </div>
+                    <p style={{ fontSize: 12, color: "#5B6773", margin: "8px 0 0" }}>
+                      Qualification: {qualificationLabelFromCode(item.qualification_code || "", item.qualification_other || "")}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {requests.length ? (
               <div style={{ display: "grid", gap: 8 }}>
                 {requests.map((r) => (
@@ -665,9 +1322,9 @@ export function NursesPortalPage() {
                   </div>
                 ))}
               </div>
-            ) : (
+            ) : !ctx.complaints?.length && !gradingHistory.length ? (
               <p style={{ color: "#5B6773" }}>Submitted requests will appear here once processed by the Embassy.</p>
-            )}
+            ) : null}
           </div>
         ) : null}
       </main>
@@ -676,7 +1333,38 @@ export function NursesPortalPage() {
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
+function NoticeBox({
+  tone = "info",
+  children,
+}: {
+  tone?: "info" | "warning" | "success" | "error";
+  children: ReactNode;
+}) {
+  const palette = {
+    info: { background: "#F7FAFC", border: "#E3EBF0", color: "#334155" },
+    warning: { background: "#FFF7E6", border: "#F3D19C", color: "#8A5C00" },
+    success: { background: "#EAF7EE", border: "#BBF7D0", color: "#166534" },
+    error: { background: "#FEF2F1", border: "#FECACA", color: "#991B1B" },
+  }[tone];
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${palette.border}`,
+        borderRadius: 10,
+        padding: 12,
+        background: palette.background,
+        color: palette.color,
+        fontSize: 13,
+        lineHeight: 1.6,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string | number }) {
   return <div><div style={{ fontSize: 11, color: '#7A8A96', marginBottom: 2 }}>{label}</div><div style={{ fontSize: 13, fontWeight: 600 }}>{value}</div></div>;
 }
 
