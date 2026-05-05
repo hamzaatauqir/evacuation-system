@@ -8502,7 +8502,24 @@ def api_admin_gl_list(params, user):
     db = get_db()
     try:
         total, rows = _gl_list_rows(db, params, page_size, (page - 1) * page_size)
-        return {'success': True, 'total': total, 'page': page, 'page_size': page_size, 'items': [_gl_admin_app_dict(r) for r in rows]}
+        status_rows = db.execute("SELECT status, COUNT(*) c FROM gl_applications GROUP BY status").fetchall()
+        status_counts = {str(r['status'] or '').lower(): int(r['c'] or 0) for r in status_rows}
+        kpis = {
+            'total_requests': sum(status_counts.values()),
+            'submitted': status_counts.get('submitted', 0),
+            'under_review': status_counts.get('under_review', 0),
+            'approved': status_counts.get('approved', 0),
+            'letter_generated': status_counts.get('letter_generated', 0),
+            'issued': status_counts.get('issued', 0),
+        }
+        return {
+            'success': True,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': [_gl_admin_app_dict(r) for r in rows],
+            'kpis': kpis,
+        }
     finally:
         db.close()
 
@@ -26269,6 +26286,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/public-request-track':
             # Community Welfare public request tracking API — no login needed
             self.send_json(api_public_request_track(params))
+        elif path in ('/api/nurses/grading-letter', '/api/nurses/grading-letter/summary'):
+            result = api_gl_nurse_summary(params)
+            self.send_json(result, 200 if result.get('success') else 400)
+            return
         elif path == '/api/public-track':
             # Public tracking API — no login needed
             search_val = params.get('q', '').strip()
@@ -26568,8 +26589,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if not _gl_feature_enabled() or not gl_user_can_view(user):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            if not self.render_template_with_context('admin_gl.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
-                self.send_html('<html><body><h1>Nurse Grading Letters</h1><p>Template unavailable.</p><a href="/admin/nurses">Back to Nurses</a></body></html>')
+            template_name = 'admin_nurse_grading_letters.html'
+            if not self.render_template_with_context(template_name, {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
+                print(f"[GradingLetter] admin template render failed: templates/{template_name}", flush=True)
+                self.send_html('<html><body style="font-family:Arial,sans-serif;padding:40px"><h1>Nurse Grading Letters</h1><p>The grading letters page could not be loaded. Please contact the system administrator.</p><a href="/admin/nurses">Back to Nurses</a></body></html>', 500)
         elif path in ('/admin/gl/list', '/api/admin/gl/list'):
             user = self.require_auth()
             if not user: return

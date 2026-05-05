@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nurses Login / Track</title>
+  <link rel="stylesheet" href="/static/css/cwa-ui.css">
+  <style>
+    .nurse-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px}
+    .nurse-tabs .tab.is-active{background:var(--cwa-navy);border-color:var(--cwa-navy);color:#fff}
+    .nurse-tab-panel{display:none}
+    .nurse-tab-panel.is-active{display:block}
+    .nurse-info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:12px 0}
+    .nurse-info-grid div{border:1px solid #d8e3ea;border-radius:8px;background:#f8fbfd;padding:10px}
+    .nurse-info-grid strong{display:block;color:var(--cwa-navy);margin-bottom:4px}
+    .nurse-alert{padding:12px;border-radius:8px;margin-bottom:12px;border:1px solid #d8e3ea;background:#f8fbfd}
+    .nurse-alert.success{background:#f0fff4;border-color:#b7e4c7}
+    .nurse-alert.warn{background:#fff7ed;border-color:#fed7aa}
+    .nurse-alert.error{background:#fee2e2;border-color:#fecaca;color:#991b1b}
+    .portal-table-wrap{overflow:auto}
+    .portal-table-wrap table{width:100%;border-collapse:collapse}
+    .portal-table-wrap th,.portal-table-wrap td{border-bottom:1px solid #e2e8f0;padding:8px;text-align:left;font-size:13px}
+    @media(max-width:640px){.nurse-tabs .tab{flex:1 1 100%;text-align:center}.nurse-info-grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body class="cwa-ui">
+  <header class="cwa-topbar">
+    <div class="cwa-shell">
+      <div class="cwa-logo-strip">Embassy of Pakistan, Kuwait · Community Welfare Wing</div>
+      <nav class="cwa-nav">
+        <a href="/">Home</a>
+        <a href="/nurses">Nurses Home</a>
+        <a href="/nurses/register">Register</a>
+      </nav>
+      <a class="cwa-login" href="/login">Official Login</a>
+    </div>
+  </header>
+  <section class="nurses-register-wrap">
+    <div class="cwa-shell">
+      <div class="panel">
+        <h2 style="margin-top:0">Existing Nurse Login / Track Registration</h2>
+        <form id="trackForm" class="nurses-grid">
+          <div><label>Reference ID or Passport Number</label><input id="identity" required></div>
+          <div><label>Mobile Number, Civil ID, or CNIC</label><input id="verifier" required></div>
+          <div class="actions" style="grid-column:1/-1">
+            <button type="submit">Open Nurse Dashboard</button>
+            <a class="btn-outline" href="/nurses">Back</a>
+            <a class="btn-outline" href="/">Home</a>
+          </div>
+        </form>
+      </div>
+      <div id="out" class="panel muted">Enter your details to view your nurse dashboard.</div>
+    </div>
+  </section>
+  <script>
+  let nurseProfile=null;
+  let nurseVerifier='';
+  let glFlash='';
+  let glLoaded=false;
+  let latestGlSummary=null;
+  function esc(v){return String(v||'').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
+  function friendlyError(msg,fallback){
+    const text=String(msg||'');
+    if(!text || /failed to fetch|networkerror|load failed/i.test(text)){
+      return fallback || 'Request could not be completed. Please check your connection and try again.';
+    }
+    return text;
+  }
+  async function postJson(url,payload,networkMessage){
+    try{
+      const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});
+      let d={};
+      try{d=await r.json();}catch(_e){d={success:false,error:'Server returned an invalid response.'};}
+      if(!r.ok || d.success===false){throw new Error(d.error||'Request failed');}
+      return d;
+    }catch(e){
+      return {success:false,error:friendlyError(e.message,networkMessage)};
+    }
+  }
+  async function getJson(url,params,networkMessage){
+    try{
+      const q=new URLSearchParams(params||{}).toString();
+      const r=await fetch(url+(q?'?'+q:''));
+      let d={};
+      try{d=await r.json();}catch(_e){d={success:false,error:'Server returned an invalid response.'};}
+      if(!r.ok || d.success===false){throw new Error(d.error||'Request failed');}
+      return d;
+    }catch(e){
+      return {success:false,error:friendlyError(e.message,networkMessage)};
+    }
+  }
+  function glBase(){
+    return {
+      nurse_reference_id:(nurseProfile&&nurseProfile.reference_id)||identity.value,
+      passport_number:(nurseProfile&&nurseProfile.passport_number)||'',
+      verifier:nurseVerifier||verifier.value,
+      session_marker:(nurseProfile&&nurseProfile.session_marker)||''
+    };
+  }
+  function identityGrid(p){
+    p=p||{};
+    const labels={full_name:'Name',father_name:'Father Name',passport_number:'Passport No.',cnic:'CNIC',civil_id:'Civil ID',mobile:'Mobile',email:'Email'};
+    return '<div class="nurse-info-grid">'+Object.keys(labels).map(k=>'<div><strong>'+labels[k]+'</strong>'+esc(p[k]||'—')+'</div>').join('')+'</div>';
+  }
+  function glGrade(pct){
+    const p=Number(pct);
+    if(!isFinite(p)) return '';
+    if(p>=80) return 'Excellent';
+    if(p>=70) return 'Very Good';
+    if(p>=60) return 'Good';
+    if(p>=50) return 'Pass';
+    return 'Fail';
+  }
+  function qualificationOptions(selected){
+    const opts=[
+      ['BSN_4Y','BSN Nursing 4 Years'],
+      ['POST_RN_BSN','Post RN BSN'],
+      ['GENERAL_NURSING_DIPLOMA','General Nursing Diploma'],
+      ['NURSING_DIPLOMA','Nursing Diploma'],
+      ['MIDWIFERY_ADDITIONAL','Midwifery / Additional Course'],
+      ['OTHER','Other']
+    ];
+    return opts.map(o=>'<option value="'+o[0]+'" '+(selected===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
+  }
+  function appRows(apps){
+    if(!apps||!apps.length) return '<p class="muted">No previous grading letter requests found.</p>';
+    return '<h4>Previous Grading Letter Requests</h4><div class="portal-table-wrap"><table><thead><tr><th>Reference</th><th>Qualification</th><th>Final %</th><th>Grade</th><th>Status</th></tr></thead><tbody>'
+      +apps.map(a=>'<tr><td>'+esc(a.ref_no)+'</td><td>'+esc(a.qualification_label)+'</td><td>'+esc(a.final_percentage==null?'':Number(a.final_percentage).toFixed(2))+'</td><td>'+esc(a.final_grade_label)+'</td><td>'+esc(a.status)+'</td></tr>').join('')
+      +'</tbody></table></div>';
+  }
+  function glFormHtml(app){
+    app=app||{};
+    const mode=app.mode||'MARKS';
+    return '<form id="glForm" class="nurses-grid" data-app-id="'+esc(app.id||'')+'" data-status="'+esc(app.status||'')+'">'
+      +'<div><label>Qualification Type</label><select id="gl_qualification_code">'+qualificationOptions(app.qualification_code||'')+'</select></div>'
+      +'<div id="glOtherWrap" style="display:none"><label>Other qualification text</label><input id="gl_qualification_other" value="'+esc(app.qualification_other)+'"></div>'
+      +'<div><label>Degree Title as printed on certificate</label><input id="gl_degree_title" value="'+esc(app.degree_title)+'"></div>'
+      +'<div><label>Student / Roll No.</label><input id="gl_student_no" value="'+esc(app.student_no)+'"></div>'
+      +'<div><label>College / Institute</label><input id="gl_institute" value="'+esc(app.institute)+'"></div>'
+      +'<div><label>University / Affiliating Body</label><input id="gl_university" value="'+esc(app.university)+'"></div>'
+      +'<div><label>Year of Passing</label><input id="gl_year_of_passing" type="number" min="1950" max="2030" value="'+esc(app.year_of_passing)+'"></div>'
+      +'<div style="grid-column:1/-1"><label>Grading Mode</label><div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px">'
+      +'<label><input type="radio" name="gl_mode" value="MARKS" '+(mode==='MARKS'?'checked':'')+'> Marks</label>'
+      +'<label><input type="radio" name="gl_mode" value="PERCENT" '+(mode==='PERCENT'?'checked':'')+'> Percentage</label>'
+      +'<label><input type="radio" name="gl_mode" value="GPA" '+(mode==='GPA'?'checked':'')+'> GPA out of 4.00</label>'
+      +'</div></div>'
+      +'<div data-mode-wrap="MARKS"><label>Total Marks</label><input id="gl_total_marks" type="number" step="0.01" min="0" value="'+esc(app.total_marks)+'"></div>'
+      +'<div data-mode-wrap="MARKS"><label>Obtained Marks</label><input id="gl_obtained_marks" type="number" step="0.01" min="0" value="'+esc(app.obtained_marks)+'"></div>'
+      +'<div data-mode-wrap="PERCENT"><label>Percentage</label><input id="gl_entered_percentage" type="number" step="0.01" min="0" max="100" value="'+esc(app.entered_percentage)+'"></div>'
+      +'<div data-mode-wrap="GPA"><label>GPA Obtained</label><input id="gl_entered_gpa" type="number" step="0.01" min="0" max="4" value="'+esc(app.entered_gpa)+'"><p class="muted" style="margin:6px 0 0">Maximum GPA: 4.00</p></div>'
+      +'<div style="grid-column:1/-1;padding:12px;border:1px solid #d8e3ea;border-radius:8px;background:#f8fbfd"><strong>Computed Percentage:</strong> <span id="glPreviewPct">—</span><br><strong>Provisional Grade Label:</strong> <span id="glPreviewGrade">—</span><p class="muted" style="margin:8px 0 0">Final grade is verified by Embassy/Nurses Desk before letter is issued.</p><div id="glValidationMsg" class="muted" style="margin-top:8px"></div></div>'
+      +'<div style="grid-column:1/-1" class="nurse-alert">Please bring original degree/transcript/marksheet for verification when requested by Embassy.</div>'
+      +'<label style="grid-column:1/-1"><input id="gl_declaration" type="checkbox"> I confirm the information is true and based on my documents. I understand the Embassy issues this letter on request without liability.</label>'
+      +'<div class="actions" style="grid-column:1/-1"><button id="glSubmitBtn" type="submit" disabled>'+(app.status==='CORRECTION_REQUIRED'?'Resubmit':'Submit Grading Letter Request')+'</button><span id="glMsg" class="muted"></span></div>'
+      +'</form>';
+  }
+  function collectGlPayload(){
+    const mode=(document.querySelector('input[name="gl_mode"]:checked')||{}).value||'MARKS';
+    const form=document.getElementById('glForm');
+    return Object.assign(glBase(),{
+      id:form.dataset.appId||'',
+      qualification_code:gl_qualification_code.value,
+      qualification_other:gl_qualification_other.value,
+      degree_title:gl_degree_title.value,
+      student_no:gl_student_no.value,
+      institute:gl_institute.value,
+      university:gl_university.value,
+      year_of_passing:gl_year_of_passing.value,
+      mode:mode,
+      total_marks:gl_total_marks.value,
+      obtained_marks:gl_obtained_marks.value,
+      entered_percentage:gl_entered_percentage.value,
+      entered_gpa:gl_entered_gpa.value,
+      declaration_accepted:true
+    });
+  }
+  function wireGlForm(){
+    const form=document.getElementById('glForm');
+    if(!form) return;
+    const update=()=>{
+      const mode=(document.querySelector('input[name="gl_mode"]:checked')||{}).value||'MARKS';
+      document.querySelectorAll('[data-mode-wrap]').forEach(el=>{el.style.display=el.getAttribute('data-mode-wrap')===mode?'block':'none';});
+      glOtherWrap.style.display=gl_qualification_code.value==='OTHER'?'block':'none';
+      let pct=NaN, validation='';
+      if(mode==='MARKS'){
+        const total=parseFloat(gl_total_marks.value), got=parseFloat(gl_obtained_marks.value);
+        if(total>0 && got>=0 && got<=total) pct=got/total*100;
+        else if(gl_total_marks.value || gl_obtained_marks.value) validation='Obtained marks cannot exceed total marks, and total marks must be greater than zero.';
+      }else if(mode==='PERCENT'){
+        const p=parseFloat(gl_entered_percentage.value);
+        if(p>=0 && p<=100) pct=p;
+        else if(gl_entered_percentage.value) validation='Percentage must be between 0 and 100.';
+      }else{
+        const g=parseFloat(gl_entered_gpa.value);
+        if(g>=0 && g<=4) pct=g/4*100;
+        else if(gl_entered_gpa.value) validation='GPA cannot exceed 4.00.';
+      }
+      const required=[gl_degree_title.value,gl_student_no.value,gl_institute.value,gl_university.value,gl_year_of_passing.value,gl_qualification_code.value];
+      if(gl_qualification_code.value==='OTHER') required.push(gl_qualification_other.value);
+      const complete=required.every(v=>String(v||'').trim()) && isFinite(pct) && gl_declaration.checked;
+      glPreviewPct.textContent=isFinite(pct)?pct.toFixed(2)+'%':'—';
+      glPreviewGrade.textContent=isFinite(pct)?glGrade(pct):'—';
+      glValidationMsg.textContent=validation;
+      glSubmitBtn.disabled=!complete;
+    };
+    form.addEventListener('input',update);
+    form.addEventListener('change',update);
+    form.addEventListener('submit',async function(e){
+      e.preventDefault();
+      glMsg.textContent='Submitting...';
+      const endpoint=form.dataset.status==='CORRECTION_REQUIRED'?'/api/nurses/grading-letter/resubmit':'/api/nurses/grading-letter/submit';
+      const d=await postJson(endpoint,collectGlPayload(),'Request could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.');
+      if(!d.success){glMsg.textContent=friendlyError(d.error);return false;}
+      const msg=d.message || (form.dataset.status==='CORRECTION_REQUIRED'?'Grading letter request resubmitted successfully.':'Grading letter request submitted successfully.');
+      glFlash=msg+' Reference: '+(d.reference||'');
+      glMsg.textContent=glFlash;
+      await loadGradingLetter(true);
+      return false;
+    });
+    update();
+  }
+  async function glCancel(id){
+    if(!confirm('Cancel this grading letter request?')) return;
+    const d=await postJson('/api/nurses/grading-letter/cancel',Object.assign(glBase(),{id:id}));
+    alert(d.success?'Request cancelled.':friendlyError(d.error));
+    await loadGradingLetter(true);
+  }
+  function renderGradingLetter(d){
+    latestGlSummary=d||{};
+    const p=d.profile||nurseProfile||{};
+    const a=d.active_application||d.active_request||d.activeRequest||null;
+    const history=d.applications||d.history||[];
+    let html='<h3>Grading Letter Request</h3>'
+      +'<div class="nurse-alert">Use this form to request an Embassy grading letter for one nursing qualification. One qualification requires one application. Midwifery or additional qualification should be submitted as a separate request.</div>'
+      +'<div class="nurse-alert warn">Submitting this form does not generate the official letter automatically. Embassy/Nurses Desk will verify the details before issuing the final letter.</div>'
+      +(glFlash?'<div class="nurse-alert success">'+esc(glFlash)+'</div>':'')
+      +identityGrid(p);
+    if(a){
+      html+='<div class="nurse-alert"><strong>Reference No.:</strong> '+esc(a.ref_no||a.reference||'')+'<br><strong>Status:</strong> '+esc(a.status||'')+'<br><strong>Qualification:</strong> '+esc(a.qualification_label||a.qualification_code||'')+'<br><strong>Submitted date:</strong> '+esc(a.submitted_at||a.created_at||'')+(a.correction_notes?'<br><strong>Admin correction notes:</strong> '+esc(a.correction_notes):'')+'</div>';
+      if(a.letter_download_url){html+='<p><a class="btn-outline" href="'+esc(a.letter_download_url)+'">Download Letter</a></p>';}
+      if(a.status==='CORRECTION_REQUIRED'){html+=glFormHtml(a);}
+      if(a.status==='SUBMITTED'||a.status==='CORRECTION_REQUIRED'){html+='<p><button class="btn-outline" type="button" onclick="glCancel('+Number(a.id)+')">Cancel Request</button></p>';}
+      if(a.status!=='CORRECTION_REQUIRED'){html+='<p class="muted">You already have an active grading letter request. You can submit a new request after the current one is issued, rejected, or cancelled.</p>';}
+    }else{
+      html+=glFormHtml(null);
+    }
+    html+=appRows(history);
+    glPanel.innerHTML=html;
+    wireGlForm();
+    renderMyRequests();
+  }
+  async function loadGradingLetter(force){
+    if(!nurseProfile) return;
+    if(glLoaded && !force) return;
+    glPanel.textContent='Loading grading letter details...';
+    const d=await getJson('/api/nurses/grading-letter/summary',glBase());
+    if(!d.success){glPanel.innerHTML='<div class="nurse-alert error">'+esc(friendlyError(d.error))+'</div>';return;}
+    glLoaded=true;
+    renderGradingLetter(d);
+  }
+  function renderOverview(x){
+    const steps=(x.steps||[]).map(s=>'<tr><td>'+esc(s.label)+'</td><td>'+esc(s.status)+'</td></tr>').join('');
+    return '<h3>Nurse Profile</h3>'+identityGrid(x)
+      +'<h3>Progress</h3><p><strong>'+esc(x.steps_completed)+' / '+esc(x.steps_total)+'</strong> completed ('+esc(x.progress_percent)+'%)</p>'
+      +'<div class="portal-table-wrap"><table><thead><tr><th>Step</th><th>Status</th></tr></thead><tbody>'+steps+'</tbody></table></div>';
+  }
+  function renderStay(x){
+    const f=x.facility_record||{};
+    return '<h3>Stay Arrangement</h3><div class="nurse-info-grid">'
+      +'<div><strong>Current Stay Arrangement</strong>'+esc(f.current_arrangement||x.current_arrangement||'—')+'</div>'
+      +'<div><strong>Facility</strong>'+esc(f.facility_name||x.facility_name||'—')+'</div>'
+      +'<div><strong>Area</strong>'+esc(f.facility_area||x.facility_area||'—')+'</div>'
+      +'<div><strong>Status</strong>'+esc(f.current_status||'—')+'</div></div>'
+      +'<p><a class="btn-outline" href="/nurses/accommodation">Submit Accommodation Request</a></p>';
+  }
+  function renderComplaintTab(){
+    return '<h3>Complaint</h3><form id="portalComplaintForm" class="nurses-grid">'
+      +'<div><label>Category</label><select id="pc_category"><option>Accommodation</option><option>Maintenance</option><option>Hospital / Workplace Concern</option><option>Welfare Assistance</option><option>Grading Letter / OEC Issue</option><option selected>General Request</option><option>Other</option></select></div>'
+      +'<div><label>Priority</label><select id="pc_priority"><option>Normal</option><option>Important</option><option>Urgent</option></select></div>'
+      +'<div><label>Preferred Contact</label><select id="pc_contact"><option>WhatsApp</option><option>Phone</option><option>Email</option></select></div>'
+      +'<div><label>Subject</label><input id="pc_subject"></div>'
+      +'<div style="grid-column:1/-1"><label>Description</label><textarea id="pc_description" rows="4"></textarea></div>'
+      +'<label style="grid-column:1/-1"><input id="pc_consent" type="checkbox"> I confirm this information is correct and may be reviewed by Embassy staff.</label>'
+      +'<div class="actions" style="grid-column:1/-1"><button type="submit">Submit Complaint / Request</button><span id="pc_msg" class="muted"></span></div></form>';
+  }
+  function wireComplaintTab(){
+    const form=document.getElementById('portalComplaintForm');
+    if(!form) return;
+    form.addEventListener('submit',async e=>{
+      e.preventDefault();
+      pc_msg.textContent='Submitting...';
+      const d=await postJson('/api/nurses/complaint',Object.assign(glBase(),{complaint_category:pc_category.value,category:pc_category.value,priority:pc_priority.value,preferred_contact_method:pc_contact.value,subject:pc_subject.value,description:pc_description.value,consent:pc_consent.checked}));
+      pc_msg.textContent=d.success?'Complaint submitted. Reference: '+(d.complaint_id||''):friendlyError(d.error);
+    });
+  }
+  function renderLeavingTab(){
+    const f=(nurseProfile&&nurseProfile.facility_record)||{};
+    return '<h3>Leaving Notice</h3><form id="portalLeaveForm" class="nurses-grid">'
+      +'<div><label>Current Facility</label><input id="pl_facility" value="'+esc(f.facility_name||'')+'"></div>'
+      +'<div><label>Intended Leaving Date</label><input id="pl_date" type="date"></div>'
+      +'<div><label>Reason Category</label><select id="pl_category"><option>Private Self Arranged</option><option>MOH Arranged</option><option>Shifted to Alternative Facility</option><option>Leaving Kuwait</option><option>Other</option></select></div>'
+      +'<div><label>New Stay Arrangement</label><input id="pl_new_stay"></div>'
+      +'<div><label>New Area</label><input id="pl_new_area"></div>'
+      +'<div><label>Embassy Assistance Required</label><select id="pl_assistance"><option>No</option><option>Yes</option></select></div>'
+      +'<div style="grid-column:1/-1"><label>Reason / Remarks</label><textarea id="pl_reason" rows="4"></textarea></div>'
+      +'<div class="actions" style="grid-column:1/-1"><button type="submit">Submit Leaving Notice</button><span id="pl_msg" class="muted"></span></div></form>';
+  }
+  function wireLeavingTab(){
+    const form=document.getElementById('portalLeaveForm');
+    if(!form) return;
+    form.addEventListener('submit',async e=>{
+      e.preventDefault();
+      pl_msg.textContent='Submitting...';
+      const d=await postJson('/api/nurses/leave-notice',Object.assign(glBase(),{current_facility:pl_facility.value,intended_leaving_date:pl_date.value,reason_category:pl_category.value,new_stay_arrangement:pl_new_stay.value,new_area:pl_new_area.value,assistance_required:pl_assistance.value,reason:pl_reason.value,remarks:pl_reason.value}));
+      pl_msg.textContent=d.success?'Leaving notice submitted.':friendlyError(d.error);
+    });
+  }
+  function renderMyRequests(){
+    const target=document.getElementById('requestsPanel');
+    if(!target || !nurseProfile) return;
+    const complaints=nurseProfile.complaints||[];
+    const complaintRows=complaints.length?'<h4>Complaints / Requests</h4><div class="portal-table-wrap"><table><thead><tr><th>Reference</th><th>Subject</th><th>Category</th><th>Status</th><th>Submitted</th></tr></thead><tbody>'+complaints.map(c=>'<tr><td>'+esc(c.complaint_id)+'</td><td>'+esc(c.subject)+'</td><td>'+esc(c.category)+'</td><td>'+esc(c.status)+'</td><td>'+esc(c.submitted_date)+'</td></tr>').join('')+'</tbody></table></div>':'<p class="muted">No complaint requests found.</p>';
+    target.innerHTML='<h3>My Requests</h3>'+complaintRows+(latestGlSummary?appRows(latestGlSummary.applications||latestGlSummary.history||[]):'<p class="muted">Open the Grading Letter tab to load grading letter requests.</p>');
+  }
+  function renderPasswordTab(){
+    return '<h3>Change password</h3><form id="portalPasswordForm" class="nurses-grid">'
+      +'<div><label>Current Password</label><input id="pp_current" type="password"></div>'
+      +'<div><label>New Password</label><input id="pp_new" type="password"></div>'
+      +'<div><label>Confirm New Password</label><input id="pp_confirm" type="password"></div>'
+      +'<div class="actions" style="grid-column:1/-1"><button type="submit">Change password</button><span id="pp_msg" class="muted"></span></div></form>';
+  }
+  function wirePasswordTab(){
+    const form=document.getElementById('portalPasswordForm');
+    if(!form) return;
+    form.addEventListener('submit',async e=>{
+      e.preventDefault();
+      pp_msg.textContent='Updating...';
+      const d=await postJson('/api/nurses/change-password',{nurse_reference_id:nurseProfile.reference_id,current_password:pp_current.value,new_password:pp_new.value,confirm_password:pp_confirm.value});
+      pp_msg.textContent=d.success?(d.message||'Password updated.'):friendlyError(d.error);
+    });
+  }
+  function switchNurseTab(tab){
+    document.querySelectorAll('.nurse-tabs .tab').forEach(b=>b.classList.toggle('is-active',b.dataset.tab===tab));
+    document.querySelectorAll('.nurse-tab-panel').forEach(p=>p.classList.toggle('is-active',p.id==='panel-'+tab));
+    if(tab==='grading') loadGradingLetter(false);
+    if(tab==='requests') renderMyRequests();
+  }
+  function renderPortal(x){
+    out.className='panel';
+    out.innerHTML='<div><h3 style="margin-top:0">Nurse Dashboard</h3><p class="muted">Reference: '+esc(x.reference_id)+' | '+esc(x.full_name)+' | Passport: '+esc(x.passport_number)+'</p></div>'
+      +'<div class="nurse-tabs">'
+      +'<button type="button" class="tab is-active" data-tab="overview" onclick="switchNurseTab(\'overview\')">Overview</button>'
+      +'<button type="button" class="tab" data-tab="stay" onclick="switchNurseTab(\'stay\')">Stay Arrangement</button>'
+      +'<button type="button" class="tab" data-tab="complaint" onclick="switchNurseTab(\'complaint\')">Complaint</button>'
+      +'<button type="button" class="tab" data-tab="grading" onclick="switchNurseTab(\'grading\')">Grading Letter</button>'
+      +'<button type="button" class="tab" data-tab="leaving" onclick="switchNurseTab(\'leaving\')">Leaving Notice</button>'
+      +'<button type="button" class="tab" data-tab="requests" onclick="switchNurseTab(\'requests\')">My Requests</button>'
+      +'<button type="button" class="tab" data-tab="password" onclick="switchNurseTab(\'password\')">Change password</button>'
+      +'</div>'
+      +'<section id="panel-overview" class="nurse-tab-panel is-active">'+renderOverview(x)+'</section>'
+      +'<section id="panel-stay" class="nurse-tab-panel">'+renderStay(x)+'</section>'
+      +'<section id="panel-complaint" class="nurse-tab-panel">'+renderComplaintTab()+'</section>'
+      +'<section id="panel-grading" class="nurse-tab-panel"><div id="glPanel">Select the Grading Letter tab to load details.</div></section>'
+      +'<section id="panel-leaving" class="nurse-tab-panel">'+renderLeavingTab()+'</section>'
+      +'<section id="panel-requests" class="nurse-tab-panel"><div id="requestsPanel"></div></section>'
+      +'<section id="panel-password" class="nurse-tab-panel">'+renderPasswordTab()+'</section>';
+    wireComplaintTab();
+    wireLeavingTab();
+    wirePasswordTab();
+    renderMyRequests();
+    if(location.hash==='#grading-letter' || location.pathname.indexOf('/nurses/grading-letter')===0) switchNurseTab('grading');
+  }
+  document.getElementById('trackForm').addEventListener('submit', async function(e){
+    e.preventDefault();
+    out.textContent='Opening dashboard...';
+    const d=await postJson('/api/nurses/track',{identity:identity.value,verifier:verifier.value});
+    if(!d.success){out.textContent='No matching registration found. Please check your details.';return false;}
+    const x=d.data||{};
+    nurseProfile=x;
+    nurseVerifier=verifier.value;
+    glLoaded=false;
+    latestGlSummary=null;
+    renderPortal(x);
+    return false;
+  });
+  </script>
+</body>
+</html>

@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nurse Grading Letters - Embassy of Pakistan, Kuwait</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+  <style>
+    .gl-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:14px}
+    .gl-kpi{background:#fff;border:1px solid var(--cwa-border);border-radius:8px;padding:12px;box-shadow:var(--cwa-shadow)}
+    .gl-kpi span{display:block;font-size:11px;text-transform:uppercase;color:var(--cwa-muted);letter-spacing:.03em}
+    .gl-kpi strong{display:block;margin-top:6px;font-size:24px;color:var(--cwa-navy)}
+    .gl-status{display:inline-flex;align-items:center;border:1px solid #cbd5e1;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:700;background:#f8fafc}
+    .gl-detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0}
+    .gl-info{border:1px solid var(--cwa-border);border-radius:8px;padding:10px;background:#fff}
+    .gl-info b{display:block;margin-bottom:6px;color:var(--cwa-navy)}
+    .gl-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .gl-actions .cwa-btn{margin-top:0}
+    .gl-error{color:#991b1b;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:10px}
+    .gl-empty{color:var(--cwa-muted);padding:16px;text-align:center}
+    @media(max-width:1024px){.gl-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    @media(max-width:640px){.gl-kpis{grid-template-columns:1fr}.gl-actions{align-items:stretch}.gl-actions .cwa-btn{width:100%}}
+  </style>
+</head>
+<body class="cwa-admin-body">
+<div class="cwa-admin">
+  <header class="cwa-admin-header">
+    <div class="cwa-admin-header__brand">
+      <div class="cwa-admin-header__logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="26" height="26"><path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#fff"/><polygon points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5" fill="#fff"/></svg>
+      </div>
+      <div class="cwa-admin-header__titles">
+        <div class="cwa-admin-header__gov">Government of Pakistan</div>
+        <div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div>
+        <div class="cwa-admin-header__wing">Admin - Community Welfare Wing</div>
+      </div>
+    </div>
+    <div class="cwa-admin-header__actions">
+      <a class="cwa-admin-header__logout" href="/admin/dashboard" data-community-hide>Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/logout">Logout</a>
+    </div>
+  </header>
+
+  <div class="cwa-admin-shell">
+    <aside class="cwa-admin-sidebar">
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
+        <a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">OV</span><span>Overview</span></a>
+        <a href="/admin/nurses"><span class="cwa-admin-sidebar__icon">NR</span><span>Nurses</span></a>
+        <a href="/admin/gl" class="is-active"><span class="cwa-admin-sidebar__icon">GL</span><span>Nurse Grading Letters</span></a>
+        <a href="/admin/legal-cases" data-community-hide><span class="cwa-admin-sidebar__icon">LG</span><span>Legal Cases</span></a>
+        <a href="/admin/death-cases" data-community-hide><span class="cwa-admin-sidebar__icon">DC</span><span>Death Cases</span></a>
+        <a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">WF</span><span>Welfare Cases</span></a>
+        <a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">MC</span><span>My Assigned Cases</span></a>
+        <a href="/admin/ambassador-review" data-community-hide><span class="cwa-admin-sidebar__icon">AR</span><span>Ambassador Review</span></a>
+      </div>
+    </aside>
+
+    <main class="cwa-admin-main">
+      <div class="cwa-admin-subhead">
+        <div>
+          <h1>Nurse Grading Letters</h1>
+          <p>Review, approve, generate, and issue nurse grading letters.</p>
+        </div>
+        <div class="gl-actions">
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="exportCsv()">Export CSV</button>
+        </div>
+      </div>
+
+      <div class="cwa-admin-content cwa-fade-in">
+        <div class="gl-kpis" aria-label="Grading letter summary">
+          <div class="gl-kpi"><span>Total Requests</span><strong id="kpiTotal">0</strong></div>
+          <div class="gl-kpi"><span>Submitted</span><strong id="kpiSubmitted">0</strong></div>
+          <div class="gl-kpi"><span>Under Review</span><strong id="kpiUnderReview">0</strong></div>
+          <div class="gl-kpi"><span>Approved</span><strong id="kpiApproved">0</strong></div>
+          <div class="gl-kpi"><span>Letter Generated</span><strong id="kpiGenerated">0</strong></div>
+          <div class="gl-kpi"><span>Issued</span><strong id="kpiIssued">0</strong></div>
+        </div>
+
+        <section class="cwa-card">
+          <div class="cwa-card__head">
+            <div>
+              <div class="cwa-card__title">Queue</div>
+              <div id="totalLine" style="font-size:12px;color:var(--cwa-muted)">Loading requests...</div>
+            </div>
+          </div>
+          <div class="cwa-form-row">
+            <input id="search" class="cwa-input" placeholder="Search by reference, nurse name, passport, or degree" style="flex:1 1 260px">
+            <select id="status" class="cwa-select" style="width:190px">
+              <option value="">All Status</option>
+              <option>SUBMITTED</option>
+              <option>UNDER_REVIEW</option>
+              <option>CORRECTION_REQUIRED</option>
+              <option>APPROVED</option>
+              <option>LETTER_GENERATED</option>
+              <option>ISSUED</option>
+              <option>REJECTED</option>
+              <option>CANCELLED</option>
+            </select>
+            <select id="qualification" class="cwa-select" style="width:230px">
+              <option value="">All Qualifications</option>
+              <option value="BSN_4Y">BSN Nursing 4 Years</option>
+              <option value="POST_RN_BSN">Post RN BSN</option>
+              <option value="GENERAL_NURSING_DIPLOMA">General Nursing Diploma</option>
+              <option value="NURSING_DIPLOMA">Nursing Diploma</option>
+              <option value="MIDWIFERY_ADDITIONAL">Midwifery / Additional Course</option>
+              <option value="OTHER">Other</option>
+            </select>
+            <input id="date_from" class="cwa-input" type="date" style="width:160px" aria-label="Date from">
+            <input id="date_to" class="cwa-input" type="date" style="width:160px" aria-label="Date to">
+            <button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="loadList(1)">Search</button>
+          </div>
+
+          <div class="cwa-table-wrap">
+            <table class="cwa-table">
+              <thead>
+                <tr>
+                  <th>Reference</th>
+                  <th>Nurse Name</th>
+                  <th>Passport</th>
+                  <th>Qualification</th>
+                  <th>Mode</th>
+                  <th>Final %</th>
+                  <th>Grade</th>
+                  <th>Status</th>
+                  <th>Submitted</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="rows"><tr><td colspan="10">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="detail" class="cwa-card" style="display:none"></section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+const USER_NAME='__USER_NAME__';
+const USER_ROLE='__USER_ROLE__';
+let state={page:1, selected:null};
+function esc(v){return String(v ?? '').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
+function moneylessPct(v){const n=Number(v);return Number.isFinite(n)?n.toFixed(2)+'%':'—';}
+function statusText(s){return String(s||'').replace(/_/g,' ');}
+async function api(url, opts){
+  try{
+    const r=await fetch(url,opts||{});
+    const d=await r.json().catch(()=>({success:false,error:'Server returned an invalid response.'}));
+    if(!r.ok || d.success===false) throw new Error(d.error||'Request failed.');
+    return d;
+  }catch(e){
+    const m=String(e.message||'');
+    throw new Error(/failed to fetch|networkerror|load failed/i.test(m) ? 'Request could not be completed. Please check your connection and try again.' : m);
+  }
+}
+function qs(page){
+  const p=new URLSearchParams();
+  p.set('page',page||state.page||1);
+  p.set('page_size',25);
+  ['search','status','qualification','date_from','date_to'].forEach(id=>{
+    const el=document.getElementById(id);
+    const v=(el&&el.value||'').trim();
+    if(v) p.set(id==='qualification'?'qualification_code':id,v);
+  });
+  return p.toString();
+}
+function normalizeItems(d){return Array.isArray(d.items)?d.items:(Array.isArray(d.rows)?d.rows:[]);}
+function updateKpis(d, items){
+  const k=d.kpis||d.summary||{};
+  const counts={};
+  items.forEach(a=>{const s=String(a.status||'').toLowerCase();counts[s]=(counts[s]||0)+1;});
+  kpiTotal.textContent=k.total_requests ?? k.total ?? d.total ?? items.length;
+  kpiSubmitted.textContent=k.submitted ?? counts.submitted ?? 0;
+  kpiUnderReview.textContent=k.under_review ?? counts.under_review ?? 0;
+  kpiApproved.textContent=k.approved ?? counts.approved ?? 0;
+  kpiGenerated.textContent=k.letter_generated ?? counts.letter_generated ?? 0;
+  kpiIssued.textContent=k.issued ?? counts.issued ?? 0;
+}
+async function loadList(page){
+  state.page=page||1;
+  rows.innerHTML='<tr><td colspan="10">Loading...</td></tr>';
+  try{
+    const d=await api('/api/admin/gl/list?'+qs(state.page));
+    const items=normalizeItems(d);
+    updateKpis(d, items);
+    totalLine.textContent=(d.total ?? items.length)+' matching grading letter request(s)';
+    if(!items.length){
+      rows.innerHTML='<tr><td colspan="10" class="gl-empty">No grading letter requests found.</td></tr>';
+      return;
+    }
+    rows.innerHTML=items.map(a=>'<tr>'
+      +'<td>'+esc(a.ref_no||a.reference||'')+'</td>'
+      +'<td>'+esc((a.nurse&&a.nurse.full_name)||a.nurse_name||a.full_name||'')+'</td>'
+      +'<td>'+esc((a.nurse&&a.nurse.passport_number)||a.passport_number||a.passport||'')+'</td>'
+      +'<td>'+esc(a.qualification_label||a.qualification||a.qualification_code||'')+'</td>'
+      +'<td>'+esc(a.mode||'')+'</td>'
+      +'<td>'+esc(moneylessPct(a.final_percentage ?? a.computed_percentage))+'</td>'
+      +'<td>'+esc(a.final_grade_label||a.grade||'')+'</td>'
+      +'<td><span class="gl-status">'+esc(statusText(a.status))+'</span></td>'
+      +'<td>'+esc(a.submitted_at||a.created_at||'')+'</td>'
+      +'<td><button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="loadDetail('+Number(a.id||0)+')">View</button></td>'
+      +'</tr>').join('');
+  }catch(e){
+    totalLine.textContent='Unable to load grading letter requests.';
+    rows.innerHTML='<tr><td colspan="10"><div class="gl-error">'+esc(e.message)+'</div></td></tr>';
+  }
+}
+function exportCsv(){window.location='/api/admin/gl/list.csv?'+qs(1);}
+function gradeOptions(selected){
+  return ['Excellent','Very Good','Good','Pass','Fail'].map(g=>'<option '+(selected===g?'selected':'')+'>'+g+'</option>').join('');
+}
+function qOptions(selected){
+  const opts=[['BSN_4Y','BSN Nursing 4 Years'],['POST_RN_BSN','Post RN BSN'],['GENERAL_NURSING_DIPLOMA','General Nursing Diploma'],['NURSING_DIPLOMA','Nursing Diploma'],['MIDWIFERY_ADDITIONAL','Midwifery / Additional Course'],['OTHER','Other']];
+  return opts.map(o=>'<option value="'+o[0]+'" '+(selected===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
+}
+function modeRadios(mode){
+  return ['MARKS','PERCENT','GPA'].map(m=>'<label style="display:inline-block;margin-right:12px"><input type="radio" name="e_mode" value="'+m+'" '+(mode===m?'checked':'')+'> '+m+'</label>').join('');
+}
+async function loadDetail(id){
+  if(!id) return;
+  detail.style.display='block';
+  detail.innerHTML='<div class="gl-empty">Loading detail...</div>';
+  try{
+    const d=await api('/api/admin/gl/detail?id='+encodeURIComponent(id));
+    state.selected=d.application||d.item||null;
+    renderDetail(d);
+  }catch(e){
+    detail.innerHTML='<div class="gl-error">'+esc(e.message)+'</div>';
+  }
+}
+function actionButtons(a, canManage){
+  if(!canManage) return '';
+  let b='';
+  if(a.status==='SUBMITTED') b+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'start-review\')">Start Review</button>';
+  if(a.status==='UNDER_REVIEW') b+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="approve()">Approve</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="requestCorrection()">Request Correction</button>';
+  if(a.status==='APPROVED') b+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'generate\')">Generate PDF</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reopen()">Reopen</button>';
+  if(a.status==='LETTER_GENERATED') b+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'mark-issued\')">Mark Issued</button>';
+  if(a.letter_available) b+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/api/admin/gl/letter?id='+Number(a.id)+'">Download PDF</a>';
+  if(!['ISSUED','REJECTED','CANCELLED'].includes(a.status)) b+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reject()">Reject</button>';
+  if(['SUBMITTED','CORRECTION_REQUIRED'].includes(a.status)) b+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="cancelReq()">Cancel</button>';
+  return b;
+}
+function renderDetail(d){
+  const a=d.application||d.item||{}, n=a.nurse||{}, canManage=!!d.can_manage;
+  state.selected=a;
+  detail.innerHTML='<div class="cwa-card__head"><div><div class="cwa-card__title">'+esc(a.ref_no||'Grading Letter')+' <span class="gl-status">'+esc(statusText(a.status))+'</span></div><div style="font-size:12px;color:var(--cwa-muted)">Final data: '+esc(moneylessPct(a.final_percentage))+' '+esc(a.final_grade_label||'')+'</div></div><div class="gl-actions">'+actionButtons(a,canManage)+'</div></div>'
+    +'<div class="gl-detail-grid">'
+    +'<div class="gl-info"><b>Nurse Identity</b>'+esc(n.full_name||'—')+'<br>Passport: '+esc(n.passport_number||'—')+'<br>CNIC: '+esc(n.cnic||'—')+'<br>Civil ID: '+esc(n.civil_id||'—')+'<br>Mobile: '+esc(n.mobile||'—')+'<br>Email: '+esc(n.email||'—')+'</div>'
+    +'<div class="gl-info"><b>Qualification</b>'+esc(a.qualification_label||a.qualification_code||'—')+'<br>'+esc(a.degree_title||'—')+'<br>Student No. '+esc(a.student_no||'—')+'<br>'+esc(a.institute||'—')+'<br>Affiliated with '+esc(a.university||'—')+'<br>'+esc(a.year_of_passing||'—')+'</div>'
+    +'<div class="gl-info"><b>Grading</b>Mode: '+esc(a.mode||'—')+'<br>Computed: '+esc(moneylessPct(a.computed_percentage))+'<br>Final: '+esc(moneylessPct(a.final_percentage))+'<br>Grade: '+esc(a.final_grade_label||'—')+'</div>'
+    +'</div>'
+    +'<h3>Edit / Correct Data</h3>'
+    +'<div class="cwa-form-row">'
+    +'<select id="e_qualification_code" class="cwa-select">'+qOptions(a.qualification_code)+'</select><input id="e_qualification_other" class="cwa-input" placeholder="Other qualification" value="'+esc(a.qualification_other)+'">'
+    +'<input id="e_degree_title" class="cwa-input" placeholder="Degree title" value="'+esc(a.degree_title)+'"><input id="e_student_no" class="cwa-input" placeholder="Student / Roll No." value="'+esc(a.student_no)+'">'
+    +'<input id="e_institute" class="cwa-input" placeholder="College / Institute" value="'+esc(a.institute)+'"><input id="e_university" class="cwa-input" placeholder="University / Body" value="'+esc(a.university)+'">'
+    +'<input id="e_year_of_passing" class="cwa-input" type="number" placeholder="Year" value="'+esc(a.year_of_passing)+'"><input id="e_relation_override" class="cwa-input" placeholder="Relation text for letter" value="'+esc(a.relation_override)+'"></div>'
+    +'<div class="cwa-form-row"><div>'+modeRadios(a.mode)+'</div><input id="e_total_marks" class="cwa-input" placeholder="Total marks" value="'+esc(a.total_marks)+'"><input id="e_obtained_marks" class="cwa-input" placeholder="Obtained marks" value="'+esc(a.obtained_marks)+'"><input id="e_entered_percentage" class="cwa-input" placeholder="Percentage" value="'+esc(a.entered_percentage)+'"><input id="e_entered_gpa" class="cwa-input" placeholder="GPA obtained (max 4.00)" value="'+esc(a.entered_gpa)+'"></div>'
+    +'<div class="cwa-form-row"><textarea id="e_internal_notes" class="cwa-input" placeholder="Internal notes" style="min-height:72px;flex:1 1 360px">'+esc(a.internal_notes)+'</textarea><button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="saveEdit()" '+(!canManage||['APPROVED','LETTER_GENERATED','ISSUED','REJECTED','CANCELLED'].includes(a.status)?'disabled':'')+'>Save Correction</button></div>'
+    +'<h3>Override Final Result</h3><div class="cwa-form-row"><input id="o_final_percentage" class="cwa-input" type="number" min="0" max="100" step="0.01" value="'+esc(a.final_percentage)+'"><select id="o_final_grade_label" class="cwa-select">'+gradeOptions(a.final_grade_label)+'</select><input id="o_override_reason" class="cwa-input" placeholder="Required override reason" value="'+esc(a.override_reason)+'"><button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="overrideFinal()" '+(!canManage||a.status!=='UNDER_REVIEW'?'disabled':'')+'>Apply Override</button></div>'
+    +'<h3>Correction / Notes</h3><div class="cwa-form-row"><textarea id="correction_notes" class="cwa-input" style="min-height:72px;flex:1 1 360px">'+esc(a.correction_notes)+'</textarea></div>'
+    +'<h3>Letter Preview</h3><pre style="white-space:pre-wrap;background:#f8fafc;border:1px solid #e2e8f0;padding:12px;border-radius:8px">'+esc(d.letter_preview||'')+'</pre>'
+    +'<h3>Audit Log</h3><div class="cwa-table-wrap"><table class="cwa-table"><thead><tr><th>Time</th><th>Actor</th><th>Event</th><th>Field</th><th>Old</th><th>New</th><th>Note</th></tr></thead><tbody>'
+    +(d.audit||[]).map(x=>'<tr><td>'+esc(x.created_at)+'</td><td>'+esc(x.actor_id||x.actor_role)+'</td><td>'+esc(x.event_type)+'</td><td>'+esc(x.field_name)+'</td><td>'+esc(x.old_value)+'</td><td>'+esc(x.new_value)+'</td><td>'+esc(x.note)+'</td></tr>').join('')
+    +'</tbody></table></div>';
+}
+function editPayload(){
+  const mode=(document.querySelector('input[name="e_mode"]:checked')||{}).value||'MARKS';
+  return {id:state.selected.id,action:'edit',qualification_code:e_qualification_code.value,qualification_other:e_qualification_other.value,degree_title:e_degree_title.value,student_no:e_student_no.value,institute:e_institute.value,university:e_university.value,year_of_passing:e_year_of_passing.value,relation_override:e_relation_override.value,mode,total_marks:e_total_marks.value,obtained_marks:e_obtained_marks.value,entered_percentage:e_entered_percentage.value,entered_gpa:e_entered_gpa.value,internal_notes:e_internal_notes.value};
+}
+async function doAction(action, extra){
+  if(!state.selected) return;
+  try{
+    const d=await api('/api/admin/gl/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({id:state.selected.id,action},extra||{}))});
+    await loadDetail((d.application&&d.application.id)||state.selected.id);
+    await loadList(state.page);
+  }catch(e){alert(e.message);}
+}
+async function saveEdit(){await doAction('edit',editPayload());}
+async function overrideFinal(){await doAction('override',{final_percentage:o_final_percentage.value,final_grade_label:o_final_grade_label.value,override_reason:o_override_reason.value});}
+async function requestCorrection(){await doAction('request-correction',{correction_notes:correction_notes.value});}
+async function approve(){
+  const a=state.selected||{};
+  const summary='Approve this grading letter with final percentage '+moneylessPct(a.final_percentage)+' and grade '+(a.final_grade_label||'')+'?';
+  if(confirm(summary)) await doAction('approve');
+}
+async function reopen(){const reason=prompt('Reason for reopening approved request'); if(reason) await doAction('reopen',{reason});}
+async function reject(){const note=prompt('Reason / note for rejection'); if(note!==null) await doAction('reject',{note});}
+async function cancelReq(){const note=prompt('Reason / note for cancellation'); if(note!==null) await doAction('cancel',{note});}
+['status','qualification','date_from','date_to'].forEach(id=>document.getElementById(id).addEventListener('change',()=>loadList(1)));
+search.addEventListener('keydown',e=>{if(e.key==='Enter')loadList(1);});
+loadList(1);
+</script>
+</body>
+</html>
