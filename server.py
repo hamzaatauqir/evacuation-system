@@ -35928,9 +35928,32 @@ WELFARE_PAGE_MODE_CSS = (
     "body[data-page-mode=\"ambassador\"] #welfareRoutingRulesCard,"
     "body[data-page-mode=\"ambassador\"] #staffAccountabilityCard{display:none!important}"
 )
+WELFARE_CASES_MOBILE_CSS = (
+    "@media(max-width:768px){"
+    ".top{height:auto;padding:12px 14px;align-items:flex-start;gap:10px;flex-wrap:wrap}"
+    ".top>div:last-child{width:100%;overflow-wrap:anywhere}"
+    ".shell{flex-direction:column}"
+    ".side{width:100%;min-height:0;display:flex;gap:8px;overflow-x:auto;flex-wrap:nowrap;padding:12px 14px}"
+    ".side h3{display:none}"
+    ".side a{white-space:nowrap;flex-shrink:0;margin:0}"
+    ".head{padding:16px}"
+    ".head h1{font-size:18px;line-height:1.25}"
+    ".content{padding:16px}"
+    ".filters{flex-direction:column;align-items:stretch}"
+    ".filters>*{width:100%!important;max-width:100%;min-width:0}"
+    ".kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}"
+    ".kpi{padding:12px}"
+    ".panel{min-width:0}"
+    ".row{grid-template-columns:1fr}"
+    ".drawer{width:100%}"
+    ".drawerHead,.drawerBody{padding:16px}"
+    "table{min-width:860px}"
+    "td,th{overflow-wrap:anywhere}"
+    "}"
+)
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(
     "</style></head>",
-    WELFARE_PAGE_MODE_CSS + "</style></head>",
+    WELFARE_PAGE_MODE_CSS + WELFARE_CASES_MOBILE_CSS + "</style></head>",
     1
 )
 WELFARE_CASES_ADMIN_PAGE = WELFARE_CASES_ADMIN_PAGE.replace(

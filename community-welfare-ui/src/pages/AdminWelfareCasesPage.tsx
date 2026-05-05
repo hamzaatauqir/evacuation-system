@@ -81,23 +81,14 @@ export function AdminWelfareCasesPage() {
 
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto" }} className="fade-in">
-        <div
-          style={{
-            background: T.surface,
-            borderBottom: `1px solid ${T.borderLt}`,
-            padding: "16px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
+      <div className="fade-in admin-page-shell">
+        <div className="admin-page-header">
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 800, color: T.navy }}>{title}</h1>
             <p style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>Unified assignment and action tracking</p>
           </div>
         </div>
-        <div style={{ padding: "20px 24px" }}>
+        <div className="admin-page-content">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 20 }}>
             <AdminKpiCard label="Total Welfare Cases" value={kpis.total || 0} accent={T.navy} icon="heart" />
             <AdminKpiCard label="New" value={kpis.new || 0} accent="#2563eb" icon="note" />

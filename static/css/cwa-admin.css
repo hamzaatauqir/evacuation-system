@@ -471,12 +471,123 @@ body.cwa-admin-body, .cwa-admin-body * { box-sizing: border-box; }
 
 /* ── Responsive ────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  .cwa-admin-sidebar { width: 64px; }
-  .cwa-admin-sidebar a span:not(.cwa-admin-sidebar__icon) { display: none; }
+  .cwa-admin-header {
+    height: auto;
+    min-height: 58px;
+    padding: 10px 14px;
+    align-items: flex-start;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .cwa-admin-header__brand,
+  .cwa-admin-header__actions,
+  .cwa-admin-main,
+  .cwa-admin-content,
+  .cwa-admin-subhead {
+    min-width: 0;
+  }
+  .cwa-admin-header__actions {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .cwa-admin-header__logout {
+    flex: 1 1 160px;
+    justify-content: center;
+  }
+  .cwa-admin-shell {
+    flex-direction: column;
+    min-width: 0;
+  }
+  .cwa-admin-sidebar {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    border-right: 0;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+  .cwa-admin-sidebar::-webkit-scrollbar { height: 6px; }
+  .cwa-admin-sidebar::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.18);
+    border-radius: 999px;
+  }
+  .cwa-admin-sidebar__group {
+    display: flex;
+    gap: 8px;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .cwa-admin-sidebar__divider {
+    margin: 0;
+    border-top: 0;
+    border-left: 1px solid rgba(255,255,255,.08);
+    align-self: stretch;
+  }
   .cwa-admin-sidebar__section-title { display: none; }
-  .cwa-admin-content { padding: 16px; }
-  .cwa-admin-subhead { padding: 14px 16px; }
+  .cwa-admin-sidebar a {
+    margin-bottom: 0;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .cwa-admin-main { width: 100%; }
+  .cwa-admin-subhead {
+    padding: 14px 16px;
+    align-items: flex-start;
+  }
+  .cwa-admin-subhead h1 {
+    font-size: 18px;
+    line-height: 1.25;
+  }
+  .cwa-admin-subhead > div:last-child {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .cwa-admin-subhead > div:last-child > * {
+    flex: 1 1 160px;
+  }
+  .cwa-admin-content {
+    padding: 16px;
+    overflow-wrap: anywhere;
+  }
+  .cwa-kpi-grid {
+    grid-template-columns: repeat(auto-fit,minmax(140px,1fr));
+    gap: 12px;
+  }
+  .cwa-kpi { padding: 16px; }
+  .cwa-card { padding: 16px; }
+  .cwa-card--p0 { padding: 0; }
+  .cwa-card__head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .cwa-module { padding: 14px 16px; }
+  .cwa-form-row {
+    flex-direction: column;
+    gap: 10px;
+  }
+  .cwa-form-row > * {
+    flex: 1 1 100% !important;
+    width: 100% !important;
+    min-width: 0;
+  }
+  .cwa-input, .cwa-select, .cwa-textarea { font-size: 14px; }
+  .cwa-table-wrap { -webkit-overflow-scrolling: touch; }
+  .cwa-drawer { width: 100vw; }
+  .cwa-drawer__head,
+  .cwa-drawer__body { padding: 18px 16px; }
   .cwa-drawer__profile { grid-template-columns: 1fr; }
-  .cwa-admin-header { padding: 0 14px; }
   .cwa-admin-header__user-meta { display: none; }
+}
+
+@media (max-width: 540px) {
+  .cwa-admin-header__logout {
+    width: 100%;
+  }
 }

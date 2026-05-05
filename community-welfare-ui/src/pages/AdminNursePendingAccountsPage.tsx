@@ -88,7 +88,7 @@ export function AdminNursePendingAccountsPage() {
 
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto", padding: 24 }} className="fade-in">
+      <div className="fade-in admin-page-shell admin-page-content">
         <div
           style={{
             display: "flex",
@@ -105,7 +105,7 @@ export function AdminNursePendingAccountsPage() {
               New nurse registrations stay here until their arrival batch is marked ARRIVED.
             </p>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div className="admin-page-actions">
             <Btn variant="light" onClick={() => navigate("/admin/nurses")}>Back to Nurses</Btn>
             <Btn variant="navy" onClick={() => navigate("/admin/nurses/arrival-batches")}>Arrival Batches</Btn>
           </div>

@@ -44,7 +44,7 @@ export function AdminCwaDashboard() {
   const navigate = useNavigate();
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto", padding: 24 }} className="fade-in">
+      <div className="fade-in admin-page-shell admin-page-content">
         <div style={{ marginBottom: 24 }}>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: T.navy }}>
             Community Welfare Overview
@@ -105,13 +105,7 @@ export function AdminCwaDashboard() {
           />
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 2fr) minmax(0, 1fr)",
-            gap: 20,
-          }}
-        >
+        <div className="admin-two-col-grid">
           <Card>
             <div
               style={{
@@ -119,6 +113,8 @@ export function AdminCwaDashboard() {
                 justifyContent: "space-between",
                 alignItems: "center",
                 marginBottom: 16,
+                gap: 12,
+                flexWrap: "wrap",
               }}
             >
               <div style={{ fontSize: 15, fontWeight: 700, color: T.navy }}>Recent Activity</div>

@@ -87,7 +87,7 @@ export function AdminNurseArrivalBatchesPage() {
 
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto", padding: 24 }} className="fade-in">
+      <div className="fade-in admin-page-shell admin-page-content">
         <div
           style={{
             display: "flex",
@@ -104,7 +104,7 @@ export function AdminNurseArrivalBatchesPage() {
               Marking a batch ARRIVED activates all linked nurse accounts still waiting in PENDING_ARRIVAL.
             </p>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div className="admin-page-actions">
             <Btn variant="light" onClick={() => navigate("/admin/nurses")}>Back to Nurses</Btn>
             <Btn variant="navy" onClick={() => navigate("/admin/nurses/pending-accounts")}>Pending Accounts</Btn>
           </div>

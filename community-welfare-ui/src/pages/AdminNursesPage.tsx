@@ -142,25 +142,14 @@ export function AdminNursesPage() {
 
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }} className="fade-in">
+      <div className="fade-in admin-page-shell">
         {/* Subheader */}
-        <div
-          style={{
-            background: T.surface,
-            borderBottom: `1px solid ${T.borderLt}`,
-            padding: "16px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: 12,
-          }}
-        >
+        <div className="admin-page-header">
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 800, color: T.navy }}>Nurses Management</h1>
             <p style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{rows.length} total complaint records</p>
           </div>
-          <div style={{ display: "flex", gap: 10 }}>
+          <div className="admin-page-actions">
             <Btn
               variant="light"
               size="sm"
@@ -197,7 +186,7 @@ export function AdminNursesPage() {
           </div>
         </div>
 
-        <div style={{ padding: "20px 24px", flex: 1 }}>
+        <div className="admin-page-content">
           {/* KPI row */}
           <div
             style={{
@@ -260,7 +249,7 @@ export function AdminNursesPage() {
           </div>
 
           {/* Search + filters */}
-          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+          <div className="admin-page-row" style={{ marginBottom: 16 }}>
             <div style={{ flex: "1 1 220px", position: "relative" }}>
               <div
                 style={{
@@ -440,7 +429,7 @@ export function AdminNursesPage() {
               <div style={{ height: 3, background: `linear-gradient(90deg,${T.green},#106e09)` }} />
 
               <div style={{ padding: 24 }}>
-                <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
                   <StatusBadge type={toStatus(selected.status || selected.complaint_status)} label={cap(toStatus(selected.status || selected.complaint_status))} />
                   <StatusBadge type={toPriority(selected.priority)} label={`${cap(toPriority(selected.priority))} Priority`} />
                 </div>
@@ -458,7 +447,7 @@ export function AdminNursesPage() {
                   >
                     Nurse Profile
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <div className="admin-detail-grid">
                     {([
                       ["Passport", selected.passport_number || "-"],
                       ["Reference", selected.nurse_reference_id || "-"],

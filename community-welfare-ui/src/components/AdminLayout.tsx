@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { T } from "../lib/tokens";
 import { Icon, type IconName } from "./Icon";
@@ -13,12 +13,18 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/admin/ambassador-review", label: "Ambassador Review", icon: "flag" },
 ];
 
-function AdminHeader() {
+function AdminHeader({
+  mobileNavOpen,
+  onToggleMobileNav,
+}: {
+  mobileNavOpen: boolean;
+  onToggleMobileNav: () => void;
+}) {
   const navigate = useNavigate();
   const [logoError, setLogoError] = useState(false);
   return (
     <header
-      className="cwa-admin-topbar"
+      className="cwa-admin-topbar cwa-admin-topbar--app"
       style={{
         minHeight: 58,
         display: "flex",
@@ -30,7 +36,20 @@ function AdminHeader() {
         flexShrink: 0,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
+      <button
+        type="button"
+        className="cwa-admin-menu-toggle"
+        onClick={onToggleMobileNav}
+        aria-controls="cwa-admin-react-sidebar"
+        aria-expanded={mobileNavOpen}
+        aria-label={mobileNavOpen ? "Close navigation menu" : "Open navigation menu"}
+      >
+        <Icon name={mobileNavOpen ? "x" : "menu"} size={18} color={T.navy} />
+      </button>
+      <div
+        className="cwa-admin-topbar__brand"
+        style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}
+      >
         {logoError ? (
           <div className="cwa-admin-topbar__logo-fallback" aria-hidden="true" />
         ) : (
@@ -57,8 +76,11 @@ function AdminHeader() {
           <div style={{ fontSize: 10, color: T.mutedLt, fontWeight: 500 }}>Admin — Community Welfare Wing</div>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 14, alignItems: "center", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div
+        className="cwa-admin-topbar__actions"
+        style={{ display: "flex", gap: 14, alignItems: "center", flexShrink: 0 }}
+      >
+        <div className="cwa-admin-topbar__user" style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div
             style={{
               width: 30,
@@ -72,13 +94,14 @@ function AdminHeader() {
           >
             <Icon name="user" size={15} color="white" />
           </div>
-          <div>
+          <div className="cwa-admin-topbar__user-meta">
             <div style={{ fontSize: 12, fontWeight: 600, color: T.navy }}>Officer Khalid</div>
             <div style={{ fontSize: 10, color: T.muted }}>Welfare Officer</div>
           </div>
         </div>
         <button
           type="button"
+          className="cwa-admin-topbar__logout"
           onClick={() => navigate("/")}
           style={{
             background: T.surfaceLow,
@@ -111,12 +134,27 @@ function AdminHeader() {
   );
 }
 
-function AdminSidebar() {
+function AdminSidebar({
+  mobileNavOpen,
+  onNavigate,
+}: {
+  mobileNavOpen: boolean;
+  onNavigate: () => void;
+}) {
   const location = useLocation();
   const isActive = (to: string) =>
     location.pathname === to || location.pathname.startsWith(to + "/");
+  const handleNavigate = () => {
+    const activeEl = document.activeElement;
+    if (activeEl instanceof HTMLElement) {
+      activeEl.blur();
+    }
+    onNavigate();
+  };
   return (
     <aside
+      id="cwa-admin-react-sidebar"
+      className={`cwa-admin-react-sidebar${mobileNavOpen ? " is-open" : ""}`}
       style={{
         width: 212,
         flexShrink: 0,
@@ -147,6 +185,7 @@ function AdminSidebar() {
             <Link
               key={it.to}
               to={it.to}
+              onClick={handleNavigate}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -192,6 +231,7 @@ function AdminSidebar() {
         </div>
         <Link
           to="/"
+          onClick={handleNavigate}
           style={{
             display: "flex",
             alignItems: "center",
@@ -218,15 +258,63 @@ function AdminSidebar() {
 }
 
 export function AdminLayout({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    document.body.classList.toggle("cwa-admin-nav-open", mobileNavOpen);
+    return () => {
+      document.body.classList.remove("cwa-admin-nav-open");
+    };
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth > 768) {
+        setMobileNavOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileNavOpen(false);
+      }
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
   return (
     <div
       style={{ display: "flex", flexDirection: "column", minHeight: "100vh", background: "#F2F7FA" }}
-      className="fade-in"
+      className="fade-in cwa-admin-app"
     >
-      <AdminHeader />
-      <div style={{ display: "flex", flex: 1 }}>
-        <AdminSidebar />
-        <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }}>
+      <AdminHeader
+        mobileNavOpen={mobileNavOpen}
+        onToggleMobileNav={() => setMobileNavOpen((open) => !open)}
+      />
+      <div className="cwa-admin-app-shell" style={{ display: "flex", flex: 1 }}>
+        <button
+          type="button"
+          className={`cwa-admin-react-backdrop${mobileNavOpen ? " is-open" : ""}`}
+          aria-label="Close navigation menu"
+          onClick={() => setMobileNavOpen(false)}
+        />
+        <AdminSidebar
+          mobileNavOpen={mobileNavOpen}
+          onNavigate={() => setMobileNavOpen(false)}
+        />
+        <div
+          className="cwa-admin-react-main"
+          style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }}
+        >
           {children}
         </div>
       </div>

@@ -12,17 +12,8 @@ export function AdminLegalCasesPage() {
   const [selected, setSelected] = useState<LegalCase | null>(null);
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto" }} className="fade-in">
-        <div
-          style={{
-            background: T.surface,
-            borderBottom: `1px solid ${T.borderLt}`,
-            padding: "16px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
+      <div className="fade-in admin-page-shell">
+        <div className="admin-page-header">
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 800, color: T.navy }}>Legal Cases</h1>
             <p style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>
@@ -33,7 +24,7 @@ export function AdminLegalCasesPage() {
             Export
           </Btn>
         </div>
-        <div style={{ padding: "20px 24px" }}>
+        <div className="admin-page-content">
           <div
             style={{
               display: "grid",
@@ -164,7 +155,7 @@ export function AdminLegalCasesPage() {
                 </button>
               </div>
               <div style={{ padding: 24 }}>
-                <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
                   <StatusBadge type={selected.status} label={cap(selected.status)} />
                   <StatusBadge type={selected.priority} label={`${cap(selected.priority)} Priority`} />
                 </div>

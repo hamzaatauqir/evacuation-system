@@ -19,17 +19,8 @@ export function AdminDeathCasesPage() {
   const [selected, setSelected] = useState<DeathCase | null>(null);
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto" }} className="fade-in">
-        <div
-          style={{
-            background: T.surface,
-            borderBottom: `1px solid ${T.borderLt}`,
-            padding: "16px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
+      <div className="fade-in admin-page-shell">
+        <div className="admin-page-header">
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 800, color: T.navy }}>Death Cases</h1>
             <p style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>
@@ -40,7 +31,7 @@ export function AdminDeathCasesPage() {
             Export
           </Btn>
         </div>
-        <div style={{ padding: "20px 24px" }}>
+        <div className="admin-page-content">
           <div style={{ marginBottom: 16 }}>
             <NoticeCard type="warning" title="Sensitive Cases">
               These cases require urgent attention and respectful handling. Ensure family contact is
@@ -195,7 +186,7 @@ export function AdminDeathCasesPage() {
                 </button>
               </div>
               <div style={{ padding: 24 }}>
-                <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
                   <StatusBadge type={selected.status} label={cap(selected.status)} />
                   <StatusBadge type={selected.priority} label={`${cap(selected.priority)} Priority`} />
                 </div>

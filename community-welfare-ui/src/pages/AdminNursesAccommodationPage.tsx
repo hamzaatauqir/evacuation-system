@@ -439,19 +439,8 @@ export function AdminNursesAccommodationPage() {
 
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }} className="fade-in">
-        <div
-          style={{
-            background: T.surface,
-            borderBottom: `1px solid ${T.borderLt}`,
-            padding: "16px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: 12,
-          }}
-        >
+      <div className="fade-in admin-page-shell">
+        <div className="admin-page-header">
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
               <button
@@ -480,7 +469,7 @@ export function AdminNursesAccommodationPage() {
               </div>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div className="admin-page-actions">
             <Btn variant="light" size="sm" onClick={() => navigate("/admin/nurses")}>
               Back to Nurses
             </Btn>
@@ -490,7 +479,7 @@ export function AdminNursesAccommodationPage() {
           </div>
         </div>
 
-        <div style={{ padding: "20px 24px 28px", flex: 1 }}>
+        <div className="admin-page-content" style={{ paddingBottom: 28 }}>
           {flash ? (
             <div
               style={{
@@ -540,14 +529,8 @@ export function AdminNursesAccommodationPage() {
           </div>
 
           <Card style={{ marginBottom: 18 }}>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
-                gap: 12,
-              }}
-            >
-              <div style={{ gridColumn: "span 2", minWidth: 0 }}>
+            <div className="admin-form-grid" style={{ gap: 12 }}>
+              <div className="admin-form-grid-span-2">
                 <label className="f-label">Search</label>
                 <input
                   className="f-input"
@@ -630,7 +613,7 @@ export function AdminNursesAccommodationPage() {
                 />
               </div>
             </div>
-            <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+            <div className="admin-filter-actions" style={{ marginTop: 16 }}>
               <Btn variant="navy" size="sm" icon="filter" onClick={() => void loadList()}>
                 Apply Filters
               </Btn>
@@ -771,7 +754,7 @@ export function AdminNursesAccommodationPage() {
           <div className="drawer-overlay" onClick={() => setDetailOpen(false)} />
           <div className="drawer-panel">
             <div style={{ padding: 22, borderBottom: `1px solid ${T.borderLt}`, position: "sticky", top: 0, background: T.surface, zIndex: 1 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 800, color: T.navy }}>
                     {detailData?.nurse?.full_name || "Accommodation detail"}
@@ -809,7 +792,7 @@ export function AdminNursesAccommodationPage() {
                     <div style={{ fontSize: 14, fontWeight: 800, color: T.navy, marginBottom: 12 }}>
                       Nurse identity
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, fontSize: 13 }}>
+                    <div className="admin-detail-grid" style={{ fontSize: 13 }}>
                       <div><strong>Reference:</strong> {detailData.nurse.reference_id || "—"}</div>
                       <div><strong>Father:</strong> {detailData.nurse.father_name || "—"}</div>
                       <div><strong>Passport:</strong> {detailData.nurse.passport_masked || "—"}</div>
@@ -825,7 +808,7 @@ export function AdminNursesAccommodationPage() {
                     <div style={{ fontSize: 14, fontWeight: 800, color: T.navy, marginBottom: 12 }}>
                       Current accommodation
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, fontSize: 13 }}>
+                    <div className="admin-detail-grid" style={{ fontSize: 13 }}>
                       <div><strong>Type:</strong> {detailData.summary?.current_accommodation_type || "—"}</div>
                       <div><strong>Status:</strong> {detailData.summary?.status || "—"}</div>
                       <div><strong>Vendor:</strong> {detailData.summary?.vendor_name || "—"}</div>
@@ -844,7 +827,7 @@ export function AdminNursesAccommodationPage() {
                     <div style={{ fontSize: 14, fontWeight: 800, color: T.navy, marginBottom: 12 }}>
                       Update accommodation
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 12 }}>
+                    <div className="admin-detail-grid" style={{ gap: 12 }}>
                       <div>
                         <label className="f-label">Vendor</label>
                         <input className="f-input" value={form.vendor_name} onChange={(e) => setForm({ ...form, vendor_name: e.target.value })} />

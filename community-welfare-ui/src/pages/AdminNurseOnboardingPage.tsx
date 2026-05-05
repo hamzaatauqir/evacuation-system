@@ -299,7 +299,7 @@ export function AdminNurseOnboardingPage() {
 
   return (
     <AdminLayout>
-      <div style={{ flex: 1, overflow: "auto", padding: 24 }} className="fade-in">
+      <div className="fade-in admin-page-shell admin-page-content">
         <div
           style={{
             display: "flex",
@@ -316,7 +316,7 @@ export function AdminNurseOnboardingPage() {
               Monitor newly arrived nurses, current MOH settlement stage, and help-needed cases.
             </p>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div className="admin-page-actions">
             <Btn variant="light" onClick={() => navigate("/admin/nurses")}>Back to Nurses</Btn>
             <Btn variant="light" onClick={downloadCsv}>Export CSV</Btn>
             <Btn variant="navy" onClick={() => void loadList()}>Refresh</Btn>
@@ -342,7 +342,7 @@ export function AdminNurseOnboardingPage() {
         </div>
 
         <Card style={{ marginBottom: 16 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
+          <div className="admin-form-grid">
             <label style={{ color: T.muted, fontSize: 12 }}>
               Search
               <input
@@ -393,7 +393,7 @@ export function AdminNurseOnboardingPage() {
                 placeholder="e.g. 7 or 14"
               />
             </label>
-            <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+            <div className="admin-filter-actions" style={{ alignItems: "flex-end" }}>
               <Btn variant="navy" onClick={() => void loadList()}>Apply</Btn>
               <Btn
                 variant="light"
