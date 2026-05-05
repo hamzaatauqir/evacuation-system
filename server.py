@@ -849,8 +849,10 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         reference_id TEXT UNIQUE,
         full_name TEXT NOT NULL,
+        father_name TEXT DEFAULT '',
         passport_number TEXT DEFAULT '',
         civil_id TEXT DEFAULT '',
+        mton_number TEXT DEFAULT '',
         mobile TEXT DEFAULT '',
         emergency_contact TEXT DEFAULT '',
         email TEXT DEFAULT '',
@@ -1005,6 +1007,8 @@ def init_db():
         ('arrival_date', "TEXT DEFAULT ''"),
         ('batch_number', "TEXT DEFAULT ''"),
         ('cnic', "TEXT DEFAULT ''"),
+        ('father_name', "TEXT DEFAULT ''"),
+        ('mton_number', "TEXT DEFAULT ''"),
         ('professional_category', "TEXT DEFAULT 'Nurse'"),
         ('vendor_name', "TEXT DEFAULT ''"),
         ('facility_area', "TEXT DEFAULT ''"),
@@ -4851,6 +4855,30 @@ def _row_to_dict(row):
     return dict(row) if row else {}
 
 
+def _nurse_clean_text(value, max_len=160):
+    text = str(value or '').strip()
+    if max_len and len(text) > max_len:
+        text = text[:max_len].strip()
+    return text
+
+
+MTON_NUMBER_RE = re.compile(r'^MTON-E-\d{1,6}$')
+
+
+def _normalize_mton_number(value):
+    raw = str(value or '').strip().upper()
+    if not raw:
+        return ''
+    match = re.match(r'^MTON[\s-]*E[\s-]*(\d{1,6})$', raw)
+    if match:
+        return f"MTON-E-{match.group(1)}"
+    return re.sub(r'\s+', ' ', raw)
+
+
+def _valid_mton_number(value):
+    return bool(MTON_NUMBER_RE.match(str(value or '').strip().upper()))
+
+
 def _nurse_professional_category(value, designation=''):
     raw = (value or '').strip()
     key = re.sub(r'[^a-z]+', ' ', raw.lower()).strip()
@@ -7441,6 +7469,7 @@ def _build_nurse_public_profile_bundle(db, rec):
         'reference_id': rec.get('reference_id', ''),
         'professional_category': professional_category,
         'full_name': rec.get('full_name', ''),
+        'father_name': rec.get('father_name', ''),
         'passport_number': rec.get('passport_number', ''),
         'cnic': rec.get('cnic', ''),
         'civil_id': rec.get('civil_id', ''),
@@ -7456,6 +7485,7 @@ def _build_nurse_public_profile_bundle(db, rec):
         'emergency_contact_full': rec.get('emergency_contact_full', '') or rec.get('emergency_contact', ''),
         'email': rec.get('email', ''),
         'email_status': _email_status_label(rec),
+        'mton_number': rec.get('mton_number', ''),
         'email_verification_sent_at': rec.get('email_verification_sent_at', ''),
         'batch_number': rec.get('batch_number', ''),
         'arrival_date': rec.get('arrival_date', ''),
@@ -7538,9 +7568,11 @@ def _send_nurse_ack_email(record):
 
 def api_nurse_register(data):
     full_name = (data.get('full_name') or '').strip()
+    father_name = _nurse_clean_text(data.get('father_name'), 160)
     passport = _nurse_normalize_passport(data.get('passport_number') or '')
     cnic = (data.get('cnic') or '').strip()
     civil_id = (data.get('civil_id') or '').strip()  # optional — new arrivals may not have Civil ID yet
+    mton_number = _normalize_mton_number(data.get('mton_number') or '')
     mobile_country_code = _normalize_country_code(data.get('mobile_country_code') or '+965')
     mobile_number = _phone_digits(data.get('mobile_number') or data.get('mobile') or '')
     mobile_full = _compose_phone(mobile_country_code, mobile_number)
@@ -7621,6 +7653,8 @@ def api_nurse_register(data):
     email = _nurse_normalize_email(data.get('email') or '')
     password = data.get('password') or ''
     confirm_password = data.get('confirm_password') or ''
+    if not father_name:
+        return {'success': False, 'ok': False, 'error': 'Father Name is required.'}
     if not full_name or not passport or not mobile or not cnic or not arrival_date or not batch_number or not hospital or not designation:
         return {'success': False, 'ok': False, 'error': 'Please fill all required fields.'}
     if not mobile_number or len(mobile_number) < 7 or len(mobile_number) > 15:
@@ -7633,6 +7667,8 @@ def api_nurse_register(data):
         return {'success': False, 'ok': False, 'error': 'Qualification / Degree is required.'}
     if qualification_degree == 'Other' and not qualification_degree_other:
         return {'success': False, 'ok': False, 'error': 'Other Qualification / Degree is required.'}
+    if mton_number and not _valid_mton_number(mton_number):
+        return {'success': False, 'ok': False, 'error': 'Please enter a valid MTON number in this format: MTON-E-145'}
     if not email or not _is_valid_email_loose(email):
         return {'success': False, 'ok': False, 'error': 'A valid email address is required for your nurse account.'}
     ok_pw, pw_err = _nurse_validate_password_strength(password)
@@ -7666,13 +7702,14 @@ def api_nurse_register(data):
         step_values = [_nurse_step_value(data.get(col, 0)) for col, _ in NURSE_PROCESS_STEPS]
         ph, psalt = _nurse_hash_password_pbkdf2(password)
         insert_columns = [
-            'reference_id', 'full_name', 'passport_number', 'arrival_date', 'batch_number',
+            'reference_id', 'full_name', 'father_name', 'passport_number', 'arrival_date', 'batch_number',
             'cnic', 'civil_id', 'mobile', 'email', 'hospital', 'hospital_or_medical_center',
             'mobile_country_code', 'mobile_number', 'mobile_full',
             'whatsapp_country_code', 'whatsapp_number', 'whatsapp_full', 'whatsapp_same_as_mobile',
             'emergency_country_code', 'emergency_contact', 'emergency_contact_full',
             'designation', 'job_title_moh', 'professional_category', 'degree_type',
             'qualification_degree', 'qualification_degree_other',
+            'mton_number',
             'moh_offer_salary_kwd', 'grading_letter_issued', 'accommodation_status',
             'current_accommodation', 'current_arrangement', 'applying_for_accommodation', 'vendor_name',
             'current_hostel', 'facility_area', 'date_shifted_to_facility',
@@ -7688,7 +7725,7 @@ def api_nurse_register(data):
             'password_hash', 'password_salt', 'password_updated_at', 'email_verified'
         ]
         insert_values = [
-            ref, full_name, passport, arrival_date, batch_number, cnic, civil_id, mobile, email,
+            ref, full_name, father_name, passport, arrival_date, batch_number, cnic, civil_id, mobile, email,
             hospital, (data.get('hospital_or_medical_center') or hospital).strip(),
             mobile_country_code, mobile_number, mobile_full,
             whatsapp_country_code, whatsapp_number, whatsapp_full, whatsapp_same_as_mobile,
@@ -7696,6 +7733,7 @@ def api_nurse_register(data):
             designation, designation,
             professional_category, (data.get('degree_type') or '').strip(),
             qualification_degree, qualification_degree_other if qualification_degree == 'Other' else '',
+            mton_number,
             (data.get('moh_offer_salary_kwd') or '').strip(), (data.get('grading_letter_issued') or 'No').strip(),
             current_arrangement, current_arrangement, current_arrangement, apply_acc, vendor_name, facility_name,
             facility_area, date_shifted_to_facility, contract_start_date, contract_end_date,
@@ -7978,6 +8016,57 @@ def api_nurse_change_password(data):
             )
             _nurse_send_email_smtp_env(to_email, 'Nurse Portal — Password changed', body)
         return {'success': True, 'message': 'Password updated.'}
+    finally:
+        db.close()
+
+
+def api_nurse_mton_save(data):
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip().upper()
+    session_marker = (data.get('session_marker') or '').strip()
+    canonical = _normalize_mton_number(data.get('mton_number') or '')
+    if not ref or not session_marker:
+        return {'success': False, 'error': 'Session required. Please sign in again.', 'status_code': 403}
+    if not _valid_mton_number(canonical):
+        return {'success': False, 'error': 'Please enter a valid MTON number in this format: MTON-E-145'}
+    db = get_db()
+    try:
+        rec = _nurse_session_lookup(db, ref, session_marker)
+        if not rec:
+            return {'success': False, 'error': 'Session expired. Please sign in again.', 'status_code': 403}
+        warning = ''
+        dup = db.execute(
+            """SELECT reference_id, full_name FROM nurse_registrations
+               WHERE UPPER(TRIM(COALESCE(mton_number,''))) = UPPER(TRIM(?))
+                 AND id != ?
+               ORDER BY id DESC LIMIT 1""",
+            [canonical, rec.get('id')]
+        ).fetchone()
+        if dup:
+            warning = 'This MTON number is already present on another nurse record and may need Embassy review.'
+        db.execute(
+            "UPDATE nurse_registrations SET mton_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [canonical, rec.get('id')]
+        )
+        _nurse_log(
+            db, 'mton_number_saved', rec.get('reference_id', ''), rec.get('passport_number', ''), 'nurse_portal',
+            {'mton_number': canonical}
+        )
+        db.commit()
+        result = {
+            'success': True,
+            'mton_number': canonical,
+            'message': 'MTON number saved.'
+        }
+        if warning:
+            result['warning'] = warning
+        return result
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[NursePortal] mton save failed: {exc}", flush=True)
+        return {'success': False, 'error': 'MTON number could not be saved. Please try again.'}
     finally:
         db.close()
 
@@ -8379,9 +8468,15 @@ GL_QUALIFICATIONS = {
     'BSN_4Y': 'BSN Nursing 4 Years',
     'POST_RN_BSN': 'Post RN BSN',
     'GENERAL_NURSING_DIPLOMA': 'General Nursing Diploma',
-    'NURSING_DIPLOMA': 'Nursing Diploma',
-    'MIDWIFERY_ADDITIONAL': 'Midwifery / Additional Course',
-    'OTHER': 'Other',
+    'SPECIALIZATION_MIDWIFERY': 'Specialization / Midwifery',
+}
+GL_LEGACY_QUALIFICATION_ALIASES = {
+    'MIDWIFERY_ADDITIONAL': 'SPECIALIZATION_MIDWIFERY',
+}
+GL_LEGACY_QUALIFICATION_LABELS = {
+    'MIDWIFERY_ADDITIONAL': 'Specialization / Midwifery',
+    'NURSING_DIPLOMA': 'Nursing Diploma (Legacy)',
+    'OTHER': 'Other (Legacy)',
 }
 GL_STATUSES = {
     'SUBMITTED', 'UNDER_REVIEW', 'CORRECTION_REQUIRED', 'APPROVED',
@@ -8401,6 +8496,22 @@ def _gl_clean_text(value, max_len=300):
     if max_len and len(text) > max_len:
         text = text[:max_len].strip()
     return text
+
+
+def _gl_normalize_qualification_code(value):
+    code = _gl_clean_text(value, 60).upper()
+    return GL_LEGACY_QUALIFICATION_ALIASES.get(code, code)
+
+
+def _gl_qualification_label(code, qualification_other=''):
+    normalized = _gl_normalize_qualification_code(code)
+    if normalized == 'OTHER':
+        return qualification_other or GL_LEGACY_QUALIFICATION_LABELS.get('OTHER', 'Other')
+    if normalized in GL_QUALIFICATIONS:
+        return GL_QUALIFICATIONS[normalized]
+    if normalized in GL_LEGACY_QUALIFICATION_LABELS:
+        return GL_LEGACY_QUALIFICATION_LABELS[normalized]
+    return normalized or ''
 
 
 def _gl_to_float(value, field_label):
@@ -8583,6 +8694,7 @@ def _gl_nurse_identity(nurse):
         'reference_id': n.get('reference_id') or '',
         'full_name': n.get('full_name') or n.get('name') or '',
         'father_name': n.get('father_name') or n.get('father_or_husband_name') or '',
+        'mton_number': n.get('mton_number') or '',
         'passport_number': n.get('passport_number') or n.get('passport') or '',
         'cnic': n.get('cnic') or '',
         'civil_id': n.get('civil_id') or '',
@@ -8603,12 +8715,9 @@ def _gl_validate_year(value):
 
 
 def _gl_validate_application_payload(data, db):
-    qualification_code = _gl_clean_text(data.get('qualification_code') or data.get('qualification_type'), 60).upper()
+    qualification_code = _gl_normalize_qualification_code(data.get('qualification_code') or data.get('qualification_type'))
     if qualification_code not in GL_QUALIFICATIONS:
-        raise ValueError('Please select a qualification type.')
-    qualification_other = _gl_clean_text(data.get('qualification_other'), 160)
-    if qualification_code == 'OTHER' and not qualification_other:
-        raise ValueError('Please specify the other qualification type.')
+        raise ValueError('Please select BSN Nursing 4 Years, Post RN BSN, General Nursing Diploma, or Specialization / Midwifery.')
     degree_title = _gl_clean_text(data.get('degree_title'), 220)
     student_no = _gl_clean_text(data.get('student_no') or data.get('roll_no'), 120)
     institute = _gl_clean_text(data.get('institute') or data.get('college'), 220)
@@ -8641,7 +8750,7 @@ def _gl_validate_application_payload(data, db):
         raise ValueError('Invalid grading scale: highest grade must be Excellent.')
     return {
         'qualification_code': qualification_code,
-        'qualification_other': qualification_other if qualification_code == 'OTHER' else '',
+        'qualification_other': '',
         'degree_title': degree_title,
         'student_no': student_no,
         'institute': institute,
@@ -8662,11 +8771,19 @@ def _gl_validate_application_payload(data, db):
 def _gl_application_dict(row):
     d = dict(row or {})
     status = d.get('status') or 'SUBMITTED'
-    d['qualification_label'] = GL_QUALIFICATIONS.get(d.get('qualification_code') or '', d.get('qualification_code') or '')
+    d['qualification_label'] = _gl_qualification_label(d.get('qualification_code') or '', d.get('qualification_other') or '')
     d['letter_available'] = bool((d.get('letter_pdf_path') or '').strip())
     d['can_nurse_edit'] = status == 'CORRECTION_REQUIRED'
     d['can_nurse_cancel'] = status in {'SUBMITTED', 'CORRECTION_REQUIRED'}
     return d
+
+
+def _gl_invalid_mton_response():
+    return {
+        'success': False,
+        'error': 'Please enter your MOH / MTON number before submitting a grading letter request.',
+        'status_code': 403,
+    }
 
 
 def _gl_active_application(db, nurse_id):
@@ -8725,6 +8842,8 @@ def api_gl_nurse_submit(data):
         blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
         if blocked:
             return blocked
+        if not _valid_mton_number(_normalize_mton_number(nurse.get('mton_number') or '')):
+            return _gl_invalid_mton_response()
         payload = _gl_validate_application_payload(data, db)
         db.execute("BEGIN IMMEDIATE")
         allow_parallel = _gl_bool_setting(db, 'allow_parallel_applications', False)
@@ -8794,6 +8913,8 @@ def api_gl_nurse_resubmit(data):
         blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
         if blocked:
             return blocked
+        if not _valid_mton_number(_normalize_mton_number(nurse.get('mton_number') or '')):
+            return _gl_invalid_mton_response()
         app_id = int(data.get('id') or data.get('application_id') or 0)
         row = db.execute("SELECT * FROM gl_applications WHERE id = ? AND nurse_id = ?", [app_id, nurse.get('id')]).fetchone()
         if not row:
@@ -8857,11 +8978,13 @@ def _gl_fetch_application(db, app_id):
         """SELECT a.*,
                   n.reference_id AS nurse_reference_id,
                   n.full_name AS nurse_full_name,
+                  n.father_name AS nurse_father_name,
                   n.passport_number AS nurse_passport_number,
                   n.cnic AS nurse_cnic,
                   n.civil_id AS nurse_civil_id,
                   n.mobile AS nurse_mobile,
-                  n.email AS nurse_email
+                  n.email AS nurse_email,
+                  n.mton_number AS nurse_mton_number
            FROM gl_applications a
            LEFT JOIN nurse_registrations n ON n.id = a.nurse_id
            WHERE a.id = ? LIMIT 1""",
@@ -8874,12 +8997,13 @@ def _gl_admin_app_dict(row):
     d['nurse'] = {
         'reference_id': d.get('nurse_reference_id') or '',
         'full_name': d.get('nurse_full_name') or '',
-        'father_name': '',
+        'father_name': d.get('nurse_father_name') or '',
         'passport_number': d.get('nurse_passport_number') or '',
         'cnic': d.get('nurse_cnic') or '',
         'civil_id': d.get('nurse_civil_id') or '',
         'mobile': d.get('nurse_mobile') or '',
         'email': d.get('nurse_email') or '',
+        'mton_number': d.get('nurse_mton_number') or '',
     }
     return d
 
@@ -8921,11 +9045,13 @@ def _gl_list_rows(db, params, limit=50, offset=0):
         f"""SELECT a.*,
                   n.reference_id AS nurse_reference_id,
                   n.full_name AS nurse_full_name,
+                  n.father_name AS nurse_father_name,
                   n.passport_number AS nurse_passport_number,
                   n.cnic AS nurse_cnic,
                   n.civil_id AS nurse_civil_id,
                   n.mobile AS nurse_mobile,
-                  n.email AS nurse_email
+                  n.email AS nurse_email,
+                  n.mton_number AS nurse_mton_number
            FROM {from_sql}
            WHERE {where_sql}
            ORDER BY a.id DESC LIMIT ? OFFSET ?""",
@@ -9138,6 +9264,7 @@ def api_admin_gl_detail(app_id, user):
             'audit': [dict(a) for a in audit],
             'letter_preview': _gl_letter_text(row),
             'can_manage': gl_user_can_manage(user),
+            'qualification_options': [{'code': code, 'label': label} for code, label in GL_QUALIFICATIONS.items()],
         }
     finally:
         db.close()
@@ -9607,6 +9734,8 @@ def _nurse_registration_public_dict(row):
     d['notice_flag'] = _facility_notice_flag(d)
     d['status'] = d.get('registration_status') or 'Pending Review'
     d['email_status'] = _email_status_label(d)
+    d['father_name'] = d.get('father_name') or ''
+    d['mton_number'] = d.get('mton_number') or ''
     return d
 
 
@@ -30418,7 +30547,7 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             except json.JSONDecodeError:
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_gl_nurse_submit(data)
-            self.send_json(result, 200 if result.get('success') else 400)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
             return
         elif path == '/api/nurses/grading-letter/resubmit':
             try:
@@ -30426,7 +30555,7 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             except json.JSONDecodeError:
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_gl_nurse_resubmit(data)
-            self.send_json(result, 200 if result.get('success') else 400)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
             return
         elif path == '/api/nurses/grading-letter/cancel':
             try:
@@ -30435,6 +30564,14 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_gl_nurse_cancel(data)
             self.send_json(result, 200 if result.get('success') else 400)
+            return
+        elif path == '/api/nurses/mton/save':
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_mton_save(data)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
             return
         elif path == '/api/admin/gl/action':
             user = self.require_auth()
@@ -30655,10 +30792,16 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                     self.send_json({'success': False, 'error': 'Record not found'}, 404); return
                 updates = []
                 vals = []
-                for fld in ('registration_status', 'admin_remarks', 'documents_status', 'accommodation_status', 'grading_letter_issued'):
+                for fld in ('registration_status', 'admin_remarks', 'documents_status', 'accommodation_status', 'grading_letter_issued', 'father_name'):
                     if fld in data and data.get(fld) is not None:
                         updates.append(f"{fld} = ?")
-                        vals.append(data.get(fld))
+                        vals.append(_nurse_clean_text(data.get(fld), 200) if fld == 'father_name' else data.get(fld))
+                if 'mton_number' in data and data.get('mton_number') is not None:
+                    canonical_mton = _normalize_mton_number(data.get('mton_number') or '')
+                    if canonical_mton and not _valid_mton_number(canonical_mton):
+                        self.send_json({'success': False, 'error': 'Please enter a valid MTON number in this format: MTON-E-145'}, 400); return
+                    updates.append("mton_number = ?")
+                    vals.append(canonical_mton)
                 for col, _lbl in NURSE_PROCESS_STEPS:
                     if col in data:
                         updates.append(f"{col} = ?")
@@ -34282,7 +34425,7 @@ async function doTrack(e){
   const complaintForm='<h4>Submit Complaint / Welfare Issue</h4><form onsubmit="return submitComplaintFromDash(event)"><input type="hidden" id="dash_ref" value="'+esc(x.reference_id)+'"><input type="hidden" id="dash_pp" value="'+esc(x.passport_number)+'"><label>Category</label><select id="dash_category"><option>Accommodation</option><option>Maintenance</option><option>Cleanliness</option><option>Safety / Security</option><option>Roommate Issue</option><option>Hospital / Workplace Concern</option><option>Welfare Assistance</option><option>Grading Letter / OEC Issue</option><option>MOFA Attestation Issue</option><option>Civil ID / Iqama Issue</option><option>Salary / Locum Payment Issue</option><option>Medical License Issue</option><option>General Request</option><option>Other</option></select><label>Priority</label><select id="dash_priority"><option>Normal</option><option>Important</option><option>Urgent</option></select><label>Subject</label><input id="dash_subject" required><label>Detailed Description</label><textarea id="dash_desc" required></textarea><label>Preferred Contact Method</label><select id="dash_contact"><option>Phone Call</option><option>WhatsApp</option><option>Email</option></select><label><input type="checkbox" id="dash_consent" required> I understand that this request will be reviewed by the Community Welfare Wing and may be assigned to relevant staff for follow-up.</label><button>Submit Complaint</button><div id="dash_msg" class="note"></div></form>';
   out.innerHTML =
     '<h3>Nurse Profile Summary</h3>'
-    +'<p><strong>Reference ID:</strong> '+esc(x.reference_id)+'<br><strong>Full Name:</strong> '+esc(x.full_name)+'<br><strong>Passport Number:</strong> '+esc(x.passport_number)+'<br><strong>CNIC:</strong> '+esc(x.cnic)+'<br><strong>Civil ID:</strong> '+esc(x.civil_id)+'<br><strong>Mobile:</strong> '+esc(x.mobile)+'<br><strong>Email:</strong> '+esc(x.email)+'<br><strong>Batch Number:</strong> '+esc(x.batch_number)+'<br><strong>Date of Arrival:</strong> '+esc(x.arrival_date)+'<br><strong>Hospital / Medical Center:</strong> '+esc(x.hospital)+'<br><strong>Degree Type:</strong> '+esc(x.degree_type)+'<br><strong>Job Title in MOH Kuwait:</strong> '+esc(x.job_title_moh)+'<br><strong>Salary on MOH Offer Letter:</strong> '+esc(x.moh_offer_salary_kwd)+'<br><strong>Current Accommodation:</strong> '+esc(x.accommodation_status)+'<br><strong>Grading Letter Issued:</strong> '+esc(x.grading_letter_issued)+'<br><strong>Registration Status:</strong> '+esc(x.registration_status)+'<br><strong>Documents Status:</strong> '+esc(x.documents_status)+'<br><strong>Latest Admin Remarks:</strong> '+esc(x.latest_admin_remarks)+'</p>'
+    +'<p><strong>Reference ID:</strong> '+esc(x.reference_id)+'<br><strong>Full Name:</strong> '+esc(x.full_name)+'<br><strong>Father Name:</strong> '+esc(x.father_name||'')+'<br><strong>Passport Number:</strong> '+esc(x.passport_number)+'<br><strong>CNIC:</strong> '+esc(x.cnic)+'<br><strong>Civil ID:</strong> '+esc(x.civil_id)+'<br><strong>Mobile:</strong> '+esc(x.mobile)+'<br><strong>Email:</strong> '+esc(x.email)+'<br><strong>MOH / MTON Number:</strong> '+esc(x.mton_number||'')+'<br><strong>Batch Number:</strong> '+esc(x.batch_number)+'<br><strong>Date of Arrival:</strong> '+esc(x.arrival_date)+'<br><strong>Hospital / Medical Center:</strong> '+esc(x.hospital)+'<br><strong>Degree Type:</strong> '+esc(x.degree_type)+'<br><strong>Job Title in MOH Kuwait:</strong> '+esc(x.job_title_moh)+'<br><strong>Salary on MOH Offer Letter:</strong> '+esc(x.moh_offer_salary_kwd)+'<br><strong>Current Accommodation:</strong> '+esc(x.accommodation_status)+'<br><strong>Grading Letter Issued:</strong> '+esc(x.grading_letter_issued)+'<br><strong>Registration Status:</strong> '+esc(x.registration_status)+'<br><strong>Documents Status:</strong> '+esc(x.documents_status)+'<br><strong>Latest Admin Remarks:</strong> '+esc(x.latest_admin_remarks)+'</p>'
     +'<h3>Civil Services Process Tracker</h3><p class="note"><strong>Process status is subject to verification and update by the Community Welfare Wing.</strong></p><p><strong>Civil Services Progress: '+esc(x.steps_completed)+' of '+esc(x.steps_total)+' completed</strong> ('+esc(x.progress_percent)+'%)<br><strong>Last Updated:</strong> '+esc(x.process_last_updated_at||'N/A')+'</p><table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left;border-bottom:1px solid #ccc;padding:6px">Step</th><th style="text-align:left;border-bottom:1px solid #ccc;padding:6px">Status</th></tr></thead><tbody>'+steps+'</tbody></table>'
     +'<h3>Remarks / Issues</h3><p><strong>Remarks:</strong> '+esc(x.remarks)+'<br><strong>Issue Notice:</strong> '+esc(x.issue_notice)+'<br><strong>Admin Remarks:</strong> '+esc(x.latest_admin_remarks)+'</p>'
     +'<h3>My Complaints</h3><table style="width:100%;border-collapse:collapse"><thead><tr><th>Complaint ID</th><th>Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Submitted</th><th>Last Update</th><th>Public Response</th></tr></thead><tbody>'+compRows+'</tbody></table>'

@@ -42,6 +42,7 @@ const QUALIFICATION_OPTIONS_BY_CATEGORY: Record<string, string[]> = {
 
 interface FormState {
   fullName?: string;
+  fatherName?: string;
   gender?: string;
   passport?: string;
   civilId?: string;
@@ -63,6 +64,7 @@ interface FormState {
   dept?: string;
   empType?: string;
   workPermit?: string;
+  mtonNumber?: string;
   arrivalDate?: string;
   batchNumber?: string;
   currentArrangement?: string;
@@ -90,6 +92,17 @@ function passwordOk(pw: string): string | null {
   if (!/[A-Za-z]/.test(pw)) return "Password must contain at least one letter.";
   if (!/\d/.test(pw)) return "Password must contain at least one number.";
   return null;
+}
+
+function normalizeMtonNumber(value: string) {
+  const raw = (value || "").trim().toUpperCase();
+  if (!raw) return "";
+  const match = raw.match(/^MTON[\s-]*E[\s-]*(\d{1,6})$/);
+  return match ? `MTON-E-${match[1]}` : raw.replace(/\s+/g, " ");
+}
+
+function isValidMtonNumber(value: string) {
+  return /^MTON-E-\d{1,6}$/.test(value);
 }
 
 export function NursesRegisterPage() {
@@ -256,6 +269,14 @@ export function NursesRegisterPage() {
                         req
                         {...inp("fullName")}
                         placeholder="e.g. Fatima Malik"
+                      />
+                    </div>
+                    <div style={{ gridColumn: "1/-1" }}>
+                      <FInput
+                        label="Father Name"
+                        req
+                        {...inp("fatherName")}
+                        placeholder="e.g. Muhammad Ashraf"
                       />
                     </div>
                     <FSelect
@@ -433,6 +454,13 @@ export function NursesRegisterPage() {
                     label="Work Permit / IQAMA Number"
                     {...inp("workPermit")}
                     placeholder="If available"
+                  />
+                  <FInput
+                    label="MOH / MTON Number"
+                    value={form.mtonNumber || ""}
+                    onChange={(e) => set("mtonNumber", e.target.value)}
+                    placeholder="MTON-E-145"
+                    hint="Optional at registration. If entered, use the format MTON-E-145."
                   />
                   <Grid cols={2} gap={14} style={{ marginTop: 8 }}>
                     <FInput label="Date arrived in Kuwait" req {...inp("arrivalDate")} type="date" />
@@ -693,6 +721,7 @@ export function NursesRegisterPage() {
                           return;
                         }
                         const professionalCategory = form.professionalCategory || "";
+                        const fatherName = (form.fatherName || "").trim();
                         const mobileCountryCode = form.mobileCountryCode || "+965";
                         const whatsappSameAsMobile = form.whatsappSameAsMobile !== false;
                         const whatsappCountryCode = whatsappSameAsMobile ? mobileCountryCode : (form.whatsappCountryCode || mobileCountryCode);
@@ -719,8 +748,13 @@ export function NursesRegisterPage() {
                           setSubmitError("Emergency contact number must be 7 to 15 digits.");
                           return;
                         }
+                        if (!fatherName) {
+                          setSubmitError("Father Name is required.");
+                          return;
+                        }
                         const qualificationDegree = form.qualificationDegree || "";
                         const qualificationDegreeOther = (form.qualificationDegreeOther || "").trim();
+                        const normalizedMton = normalizeMtonNumber(form.mtonNumber || "");
                         const categoryVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory);
                         if (!qualificationDegree) {
                           setSubmitError("Qualification / Degree is required.");
@@ -732,6 +766,10 @@ export function NursesRegisterPage() {
                         }
                         if (categoryVendorEligible && !(form.currentArrangement || "").trim()) {
                           setSubmitError("Current Stay Arrangement is required for Nurse / Other Health Worker.");
+                          return;
+                        }
+                        if (normalizedMton && !isValidMtonNumber(normalizedMton)) {
+                          setSubmitError("Please enter a valid MTON number in this format: MTON-E-145");
                           return;
                         }
                         const arrangement = categoryVendorEligible ? form.currentArrangement || "" : "";
@@ -752,6 +790,7 @@ export function NursesRegisterPage() {
                             error?: string;
                           }>("/api/nurses/register", {
                             full_name: form.fullName,
+                            father_name: fatherName,
                             passport_number: form.passport,
                             civil_id: (form.civilId || "").trim(),
                             cnic: form.cnic,
@@ -771,6 +810,7 @@ export function NursesRegisterPage() {
                             professional_category: professionalCategory,
                             qualification_degree: qualificationDegree,
                             qualification_degree_other: qualificationDegree === "Other" ? qualificationDegreeOther : "",
+                            mton_number: normalizedMton,
                             current_arrangement: arrangement,
                             degree_type: form.dept || "",
                             remarks: form.remarks || "",

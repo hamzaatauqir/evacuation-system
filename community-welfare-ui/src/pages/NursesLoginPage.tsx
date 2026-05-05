@@ -47,7 +47,7 @@ export function NursesLoginPage() {
             : next === "leaving" || next === "leaving-notice"
               ? "/nurses/portal?tab=leaving"
               : "/nurses/portal";
-      navigate(nextRoute, { replace: true });
+      navigate(nextRoute, { replace: true, state: { portalContext: ctx } });
     } catch (err) {
       setError((err as Error).message || `Could not reach backend at ${API_BASE}.`);
     } finally {

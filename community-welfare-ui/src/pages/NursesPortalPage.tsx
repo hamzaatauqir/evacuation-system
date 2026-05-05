@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useEffectEvent, useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
@@ -7,9 +7,11 @@ import { StatusBadge } from "../components/StatusBadge";
 import { api, BACKEND_PORTAL } from "../lib/api";
 import {
   addLocalPortalRequest,
+  buildPortalContextFromApiData,
   clearNursePortal,
   getLocalPortalRequests,
   getNursePortal,
+  setNursePortal,
   type NursePortalContext,
 } from "../lib/nursePortal";
 
@@ -19,6 +21,7 @@ type GradingMode = "MARKS" | "PERCENT" | "GPA";
 type GradingIdentity = {
   full_name?: string;
   father_name?: string;
+  mton_number?: string;
   passport_number?: string;
   cnic?: string;
   mobile?: string;
@@ -63,7 +66,6 @@ type GradingSummaryResponse = {
 type GradingFormState = {
   application_id: number | null;
   qualification_code: string;
-  qualification_other: string;
   degree_title: string;
   student_no: string;
   institute: string;
@@ -81,14 +83,31 @@ const DASH_VALUE = "—";
 const GRADING_SUMMARY_FALLBACK = "Could not load grading letter status. Please try again.";
 const GRADING_SUBMIT_FALLBACK =
   "Request could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.";
+const GRADING_MTON_FALLBACK = "MTON number could not be saved. Please check your connection and try again.";
 const GRADING_QUALIFICATIONS = [
   { value: "BSN_4Y", label: "BSN Nursing 4 Years" },
   { value: "POST_RN_BSN", label: "Post RN BSN" },
   { value: "GENERAL_NURSING_DIPLOMA", label: "General Nursing Diploma" },
-  { value: "NURSING_DIPLOMA", label: "Nursing Diploma" },
-  { value: "MIDWIFERY_ADDITIONAL", label: "Midwifery / Additional Course" },
-  { value: "OTHER", label: "Other" },
+  { value: "SPECIALIZATION_MIDWIFERY", label: "Specialization / Midwifery" },
 ];
+const GRADING_ALLOWED_QUALIFICATION_CODES = new Set(GRADING_QUALIFICATIONS.map((item) => item.value));
+
+function normalizeMtonNumber(value: string) {
+  const raw = (value || "").trim().toUpperCase();
+  if (!raw) return "";
+  const match = raw.match(/^MTON[\s-]*E[\s-]*(\d{1,6})$/);
+  return match ? `MTON-E-${match[1]}` : raw.replace(/\s+/g, " ");
+}
+
+function isValidMtonNumber(value: unknown) {
+  return /^MTON-E-\d{1,6}$/.test(String(value || "").trim().toUpperCase());
+}
+
+function normalizeQualificationCode(code: string) {
+  const normalized = (code || "").trim().toUpperCase();
+  if (normalized === "MIDWIFERY_ADDITIONAL") return "SPECIALIZATION_MIDWIFERY";
+  return normalized;
+}
 
 function normalizeRequestError(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : "";
@@ -104,15 +123,17 @@ function displayValue(value: unknown) {
 }
 
 function qualificationLabelFromCode(code: string, other = "") {
-  if (code === "OTHER") return other || "Other";
-  return GRADING_QUALIFICATIONS.find((item) => item.value === code)?.label || code || DASH_VALUE;
+  const normalized = normalizeQualificationCode(code);
+  if (normalized === "OTHER") return other || "Other (Legacy)";
+  if (normalized === "NURSING_DIPLOMA") return "Nursing Diploma (Legacy)";
+  return GRADING_QUALIFICATIONS.find((item) => item.value === normalized)?.label || code || DASH_VALUE;
 }
 
 function createGradingForm(application?: GradingApplication | null): GradingFormState {
+  const qualificationCode = normalizeQualificationCode(application?.qualification_code || "");
   return {
     application_id: typeof application?.id === "number" ? application.id : null,
-    qualification_code: application?.qualification_code || "",
-    qualification_other: application?.qualification_other || "",
+    qualification_code: GRADING_ALLOWED_QUALIFICATION_CODES.has(qualificationCode) ? qualificationCode : "",
     degree_title: application?.degree_title || "",
     student_no: application?.student_no || "",
     institute: application?.institute || "",
@@ -173,8 +194,7 @@ function computeGradingPreview(form: GradingFormState) {
     !!form.student_no.trim() &&
     !!form.institute.trim() &&
     !!form.university.trim() &&
-    !!form.year_of_passing.trim() &&
-    (form.qualification_code !== "OTHER" || !!form.qualification_other.trim());
+    !!form.year_of_passing.trim();
 
   let percentage: number | null = null;
   let validationMessage = "";
@@ -241,8 +261,11 @@ function buildPendingArrivalFeatureMessage(baseMessage: string, featureName: str
 
 export function NursesPortalPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [params, setParams] = useSearchParams();
-  const [ctx] = useState(() => getNursePortal());
+  const locationPortalContext =
+    (location.state as { portalContext?: NursePortalContext } | null)?.portalContext || null;
+  const [ctx, setCtx] = useState<NursePortalContext | null>(() => locationPortalContext || getNursePortal());
   const [requests, setRequests] = useState(() => getLocalPortalRequests());
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -255,6 +278,10 @@ export function NursesPortalPage() {
   const [gradingError, setGradingError] = useState("");
   const [gradingFlash, setGradingFlash] = useState("");
   const [gradingSubmitBusy, setGradingSubmitBusy] = useState(false);
+  const [gradingMtonInput, setGradingMtonInput] = useState(() => normalizeMtonNumber(ctx?.mtonNumber || ""));
+  const [gradingMtonBusy, setGradingMtonBusy] = useState(false);
+  const [gradingMtonError, setGradingMtonError] = useState("");
+  const [gradingMtonFlash, setGradingMtonFlash] = useState("");
   const [gradingForm, setGradingForm] = useState<GradingFormState>(() => createGradingForm());
 
   const [facilityReq, setFacilityReq] = useState({
@@ -292,6 +319,15 @@ export function NursesPortalPage() {
   const [showEmailEditor, setShowEmailEditor] = useState(false);
   const [newEmail, setNewEmail] = useState("");
   const [confirmNewEmail, setConfirmNewEmail] = useState("");
+
+  function commitPortalContext(next: NursePortalContext | ((prev: NursePortalContext) => NursePortalContext)) {
+    setCtx((prev) => {
+      if (!prev) return prev;
+      const resolved = typeof next === "function" ? next(prev) : next;
+      setNursePortal(resolved);
+      return resolved;
+    });
+  }
 
   if (!ctx) {
     navigate("/nurses/login", { replace: true });
@@ -374,6 +410,8 @@ export function NursesPortalPage() {
   const gradingActiveRequest = gradingSummary?.active_application || null;
   const gradingHistory = gradingSummary?.applications || gradingSummary?.history || [];
   const gradingProfile = gradingSummary?.profile || {};
+  const savedMtonNumber = normalizeMtonNumber(gradingProfile.mton_number || ctx.mtonNumber || "");
+  const hasSavedMtonNumber = isValidMtonNumber(savedMtonNumber);
 
   const refreshGradingSummary = useEffectEvent(async (showLoading = true) => {
     if (!ctx) return;
@@ -399,6 +437,18 @@ export function NursesPortalPage() {
   });
 
   useEffect(() => {
+    if (!locationPortalContext) return;
+    setCtx(locationPortalContext);
+    setNursePortal(locationPortalContext);
+  }, [locationPortalContext]);
+
+  useEffect(() => {
+    setCurrentEmail(ctx.email || "");
+    setCurrentEmailStatus(ctx.emailStatus || "");
+    setGradingMtonInput(normalizeMtonNumber(ctx.mtonNumber || ""));
+  }, [ctx.email, ctx.emailStatus, ctx.mtonNumber]);
+
+  useEffect(() => {
     let live = true;
     (async () => {
       try {
@@ -410,6 +460,11 @@ export function NursesPortalPage() {
           }
         );
         if (!live || !res?.success) return;
+        const nextCtx = {
+          ...buildPortalContextFromApiData(res.data),
+          sessionMarker: ctx.sessionMarker,
+        };
+        commitPortalContext((prev) => ({ ...prev, ...nextCtx }));
         setQualificationInfo({
           degree: (res.data?.qualification_degree || "").toString(),
           other: (res.data?.qualification_degree_other || "").toString(),
@@ -421,7 +476,7 @@ export function NursesPortalPage() {
     return () => {
       live = false;
     };
-  }, [ctx.referenceId, ctx.passportNumber, ctx.mobile, ctx.civilId]);
+  }, [ctx.referenceId, ctx.passportNumber, ctx.mobile, ctx.civilId, ctx.sessionMarker]);
 
   useEffect(() => {
     if (activeTab !== "grading" || gradingAccessBlocked) return;
@@ -532,6 +587,12 @@ export function NursesPortalPage() {
     setGradingError("");
     setGradingFlash("");
 
+    if (!hasSavedMtonNumber) {
+      setGradingError("Please enter your MOH / MTON number before submitting a grading letter request.");
+      setGradingSubmitBusy(false);
+      return;
+    }
+
     if (!gradingPreview.canSubmit) {
       setGradingError(gradingPreview.validationMessage || "Please complete all required grading letter fields.");
       setGradingSubmitBusy(false);
@@ -545,7 +606,7 @@ export function NursesPortalPage() {
       session_marker: ctx.sessionMarker || "",
       id: gradingForm.application_id || undefined,
       qualification_code: gradingForm.qualification_code,
-      qualification_other: gradingForm.qualification_other.trim(),
+      qualification_other: "",
       degree_title: gradingForm.degree_title.trim(),
       student_no: gradingForm.student_no.trim(),
       institute: gradingForm.institute.trim(),
@@ -574,6 +635,39 @@ export function NursesPortalPage() {
       setGradingError(normalizeRequestError(error, GRADING_SUBMIT_FALLBACK));
     } finally {
       setGradingSubmitBusy(false);
+    }
+  }
+
+  async function saveGradingMton() {
+    const canonical = normalizeMtonNumber(gradingMtonInput);
+    setGradingMtonError("");
+    setGradingMtonFlash("");
+    if (!isValidMtonNumber(canonical)) {
+      setGradingMtonError("Please enter a valid MTON number in this format: MTON-E-145");
+      return;
+    }
+    setGradingMtonBusy(true);
+    try {
+      const res = await api.post<{
+        success?: boolean;
+        mton_number?: string;
+        message?: string;
+        warning?: string;
+        error?: string;
+      }>("/api/nurses/mton/save", {
+        nurse_reference_id: ctx.referenceId,
+        session_marker: ctx.sessionMarker || "",
+        mton_number: canonical,
+      });
+      const savedNumber = normalizeMtonNumber(res.mton_number || canonical);
+      commitPortalContext((prev) => ({ ...prev, mtonNumber: savedNumber }));
+      setGradingMtonInput(savedNumber);
+      setGradingMtonFlash([res.message || "MTON number saved.", res.warning || ""].filter(Boolean).join(" "));
+      await refreshGradingSummary(false);
+    } catch (error) {
+      setGradingMtonError(normalizeRequestError(error, GRADING_MTON_FALLBACK));
+    } finally {
+      setGradingMtonBusy(false);
     }
   }
 
@@ -614,6 +708,7 @@ export function NursesPortalPage() {
         session_marker: ctx.sessionMarker || "",
         email,
       });
+      commitPortalContext((prev) => ({ ...prev, email, emailStatus: "Verification Pending" }));
       setCurrentEmail(email);
       setCurrentEmailStatus("Verification Pending");
       setMsg(
@@ -706,12 +801,14 @@ export function NursesPortalPage() {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <Field label="Reference ID" value={ctx.referenceId || "-"} />
                   <Field label="Name" value={ctx.fullName || "-"} />
+                  <Field label="Father Name" value={ctx.fatherName || "—"} />
                   <Field label="Email" value={ctx.email || "-"} />
                   <Field label="Primary Mobile" value={ctx.mobileFull || ctx.mobile || "—"} />
                   <Field label="WhatsApp" value={ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "—"} />
                   <Field label="Emergency Contact" value={ctx.emergencyContactFull || "—"} />
                   <Field label="Passport" value={ctx.passportMasked || "-"} />
                   <Field label="Civil ID (if any)" value={ctx.civilIdMasked || "—"} />
+                  <Field label="MOH / MTON Number" value={ctx.mtonNumber || "—"} />
                   <Field label="Qualification / Degree" value={qualificationDisplay} />
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
@@ -940,15 +1037,18 @@ export function NursesPortalPage() {
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 }}>
                 <Field label="Name" value={displayValue(gradingProfile.full_name || ctx.fullName)} />
-                <Field label="Father Name" value={displayValue(gradingProfile.father_name)} />
+                <Field label="Father Name" value={displayValue(gradingProfile.father_name || ctx.fatherName)} />
                 <Field label="Passport No." value={displayValue(gradingProfile.passport_number || ctx.passportNumber)} />
                 <Field label="CNIC" value={displayValue(gradingProfile.cnic)} />
                 <Field label="Mobile" value={displayValue(gradingProfile.mobile || ctx.mobileFull || ctx.mobile)} />
                 <Field label="Email" value={displayValue(gradingProfile.email || currentEmail)} />
+                <Field label="MOH / MTON Number" value={displayValue(savedMtonNumber)} />
               </div>
 
               {gradingFlash ? <NoticeBox tone="success">{gradingFlash}</NoticeBox> : null}
               {gradingError ? <NoticeBox tone="error">{gradingError}</NoticeBox> : null}
+              {gradingMtonFlash ? <NoticeBox tone="success">{gradingMtonFlash}</NoticeBox> : null}
+              {gradingMtonError ? <NoticeBox tone="error">{gradingMtonError}</NoticeBox> : null}
 
               {gradingLoading ? (
                 <p style={{ color: "#5B6773", margin: 0 }}>Loading grading letter details...</p>
@@ -996,20 +1096,50 @@ export function NursesPortalPage() {
                 </div>
               ) : null}
 
-              {!gradingLoading && !gradingError && (!gradingActiveRequest || gradingActiveRequest.can_nurse_edit) ? (
+              {!hasSavedMtonNumber ? (
+                <div
+                  style={{
+                    border: "1px solid #E3EBF0",
+                    borderRadius: 10,
+                    padding: 14,
+                    background: "#F7FAFC",
+                    display: "grid",
+                    gap: 10,
+                  }}
+                >
+                  <div>
+                    <h4 style={{ margin: "0 0 6px", color: "#2D4A6B" }}>Enter MOH / MTON Number</h4>
+                    <p style={{ margin: 0, color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
+                      Please enter your MOH / MTON number issued for your Ministry of Health arrival process. This
+                      number is required before submitting a grading letter request.
+                    </p>
+                  </div>
+                  <label>
+                    MOH / MTON Number
+                    <input
+                      className="f-input"
+                      placeholder="MTON-E-145"
+                      value={gradingMtonInput}
+                      onChange={(e) => setGradingMtonInput(e.target.value)}
+                    />
+                  </label>
+                  <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                    Enter the number exactly in this format: MTON-E-145
+                  </p>
+                  <Btn variant="primary" disabled={gradingMtonBusy} onClick={saveGradingMton}>
+                    {gradingMtonBusy ? "Saving..." : "Continue to Grading Letter Form"}
+                  </Btn>
+                </div>
+              ) : null}
+
+              {hasSavedMtonNumber && !gradingLoading && !gradingError && (!gradingActiveRequest || gradingActiveRequest.can_nurse_edit) ? (
                 <>
                   <label>
                     Qualification Type
                     <select
                       className="f-input"
                       value={gradingForm.qualification_code}
-                      onChange={(e) =>
-                        setGradingForm({
-                          ...gradingForm,
-                          qualification_code: e.target.value,
-                          qualification_other: e.target.value === "OTHER" ? gradingForm.qualification_other : "",
-                        })
-                      }
+                      onChange={(e) => setGradingForm({ ...gradingForm, qualification_code: e.target.value })}
                     >
                       <option value="">Select</option>
                       {GRADING_QUALIFICATIONS.map((item) => (
@@ -1019,17 +1149,6 @@ export function NursesPortalPage() {
                       ))}
                     </select>
                   </label>
-
-                  {gradingForm.qualification_code === "OTHER" ? (
-                    <label>
-                      Other qualification text
-                      <input
-                        className="f-input"
-                        value={gradingForm.qualification_other}
-                        onChange={(e) => setGradingForm({ ...gradingForm, qualification_other: e.target.value })}
-                      />
-                    </label>
-                  ) : null}
 
                   <label>
                     Degree Title as printed on certificate

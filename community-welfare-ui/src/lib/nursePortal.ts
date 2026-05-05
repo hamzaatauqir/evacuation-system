@@ -13,9 +13,11 @@ export type NursePortalContext = {
   referenceId: string;
   nurseDbId?: number;
   fullName: string;
+  fatherName?: string;
   professionalCategory?: string;
   email: string;
   emailStatus?: string;
+  mtonNumber?: string;
   passportMasked: string;
   civilIdMasked: string;
   passportNumber: string;
@@ -117,6 +119,14 @@ export function setNursePortal(ctx: NursePortalContext) {
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(ctx));
 }
 
+export function updateNursePortal(patch: Partial<NursePortalContext>) {
+  const current = getNursePortal();
+  if (!current) return null;
+  const next = { ...current, ...patch };
+  setNursePortal(next);
+  return next;
+}
+
 export function clearNursePortal() {
   sessionStorage.removeItem(SESSION_KEY);
   sessionStorage.removeItem(REQUESTS_KEY);
@@ -142,9 +152,11 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     referenceId: ref,
     nurseDbId: typeof data?.nurse_db_id === "number" ? data.nurse_db_id : undefined,
     fullName: (data?.full_name || '').toString(),
+    fatherName: (data?.father_name || '').toString(),
     professionalCategory: (data?.professional_category || '').toString(),
     email: (data?.email || '').toString(),
     emailStatus: (data?.email_status || '').toString(),
+    mtonNumber: (data?.mton_number || '').toString(),
     passportMasked: maskPassport(passport),
     civilIdMasked: maskCivilId(civil),
     passportNumber: passport,
