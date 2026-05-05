@@ -49,6 +49,12 @@ PORT = int(os.environ.get('PORT', 8080))
 ROUTE_REVIEW_ENABLED = False
 FEATURE_GRADING_LETTER = True
 GRADING_LETTER_AVAILABLE = True
+FEATURE_NURSE_HOUSING = str(os.environ.get('FEATURE_NURSE_HOUSING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+
+NH_ACCOUNT_STATUS_PENDING_ARRIVAL = 'PENDING_ARRIVAL'
+NH_ACCOUNT_STATUS_ACTIVE = 'ACTIVE'
+NH_BATCH_STATUS_PLANNED = 'PLANNED'
+NH_BATCH_STATUS_ARRIVED = 'ARRIVED'
 
 # Use /data/ for persistent Render Disk, fallback to local directory for development
 RENDER_DISK = Path('/data')
@@ -106,6 +112,8 @@ ONEDRIVE_LOCK = threading.Lock()  # guards _onedrive_refresh_runtime under Threa
 _DB_WAL_APPLIED = False
 _DB_WAL_LOCK = threading.Lock()
 MONTHLY_WELFARE_CHECKIN_LOCK = threading.Lock()
+_NH_SCHEMA_READY = False
+_NH_SCHEMA_LOCK = threading.Lock()
 
 
 def _apply_wal_once():
@@ -299,6 +307,68 @@ def _init_grading_letter_db(db):
     CREATE INDEX IF NOT EXISTS idx_gl_app_submitted_at ON gl_applications(submitted_at);
     CREATE INDEX IF NOT EXISTS idx_gl_audit_application ON gl_audit(application_id);
     """)
+
+
+def _nh_ensure_schema(db):
+    global _NH_SCHEMA_READY
+    if _NH_SCHEMA_READY:
+        return
+    with _NH_SCHEMA_LOCK:
+        if _NH_SCHEMA_READY:
+            return
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS nh_arrival_batch (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_code TEXT UNIQUE NOT NULL,
+            arrival_date TEXT DEFAULT '',
+            status TEXT DEFAULT 'PLANNED',
+            remarks TEXT DEFAULT '',
+            arrived_at TIMESTAMP,
+            arrived_by TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_nh_arrival_batch_code ON nh_arrival_batch(batch_code);
+        CREATE INDEX IF NOT EXISTS idx_nh_arrival_batch_status ON nh_arrival_batch(status);
+        CREATE TABLE IF NOT EXISTS nh_nurse_account (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nurse_registration_id INTEGER NOT NULL UNIQUE REFERENCES nurse_registrations(id),
+            account_status TEXT DEFAULT 'PENDING_ARRIVAL',
+            arrival_batch_id INTEGER REFERENCES nh_arrival_batch(id),
+            batch_code TEXT DEFAULT '',
+            activated_at TIMESTAMP,
+            activated_by TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_nh_account_status ON nh_nurse_account(account_status);
+        CREATE INDEX IF NOT EXISTS idx_nh_account_batch ON nh_nurse_account(arrival_batch_id);
+        CREATE INDEX IF NOT EXISTS idx_nh_account_batch_code ON nh_nurse_account(batch_code);
+        CREATE TABLE IF NOT EXISTS nh_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT DEFAULT '',
+            entity_id INTEGER DEFAULT 0,
+            nurse_registration_id INTEGER DEFAULT 0,
+            event_type TEXT DEFAULT '',
+            old_value TEXT DEFAULT '',
+            new_value TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            actor TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_nh_audit_entity ON nh_audit(entity_type, entity_id);
+        CREATE INDEX IF NOT EXISTS idx_nh_audit_nurse ON nh_audit(nurse_registration_id);
+        CREATE TABLE IF NOT EXISTS nh_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT DEFAULT ''
+        );
+        """)
+        try:
+            db.commit()
+        except Exception:
+            pass
+        _NH_SCHEMA_READY = True
     for table_name, cols in {
         'gl_applications': [
             ('ref_no', 'TEXT UNIQUE'),
@@ -867,6 +937,52 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_nurse_leave_created_at ON nurse_leave_notices(created_at);
     CREATE INDEX IF NOT EXISTS idx_nurse_log_ref ON nurse_activity_log(nurse_reference_id);
     CREATE INDEX IF NOT EXISTS idx_nurse_log_created ON nurse_activity_log(created_at);
+    CREATE TABLE IF NOT EXISTS nh_arrival_batch (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_code TEXT UNIQUE NOT NULL,
+        arrival_date TEXT DEFAULT '',
+        status TEXT DEFAULT 'PLANNED',
+        remarks TEXT DEFAULT '',
+        arrived_at TIMESTAMP,
+        arrived_by TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_nh_arrival_batch_code ON nh_arrival_batch(batch_code);
+    CREATE INDEX IF NOT EXISTS idx_nh_arrival_batch_status ON nh_arrival_batch(status);
+    CREATE TABLE IF NOT EXISTS nh_nurse_account (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nurse_registration_id INTEGER NOT NULL UNIQUE REFERENCES nurse_registrations(id),
+        account_status TEXT DEFAULT 'PENDING_ARRIVAL',
+        arrival_batch_id INTEGER REFERENCES nh_arrival_batch(id),
+        batch_code TEXT DEFAULT '',
+        activated_at TIMESTAMP,
+        activated_by TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_nh_account_status ON nh_nurse_account(account_status);
+    CREATE INDEX IF NOT EXISTS idx_nh_account_batch ON nh_nurse_account(arrival_batch_id);
+    CREATE INDEX IF NOT EXISTS idx_nh_account_batch_code ON nh_nurse_account(batch_code);
+    CREATE TABLE IF NOT EXISTS nh_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT DEFAULT '',
+        entity_id INTEGER DEFAULT 0,
+        nurse_registration_id INTEGER DEFAULT 0,
+        event_type TEXT DEFAULT '',
+        old_value TEXT DEFAULT '',
+        new_value TEXT DEFAULT '',
+        note TEXT DEFAULT '',
+        actor TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_nh_audit_entity ON nh_audit(entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_nh_audit_nurse ON nh_audit(nurse_registration_id);
+    CREATE TABLE IF NOT EXISTS nh_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT DEFAULT ''
+    );
     CREATE TABLE IF NOT EXISTS nurse_complaint_actions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         complaint_id TEXT NOT NULL,
@@ -5660,6 +5776,293 @@ def _nurse_session_lookup(db, nurse_reference_id, session_marker):
     return rec
 
 
+def _nh_clean_text(value, max_len=160):
+    text = str(value or '').strip()
+    if max_len and len(text) > max_len:
+        text = text[:max_len].strip()
+    return text
+
+
+def _nh_actor_text(actor):
+    if isinstance(actor, dict):
+        return _nh_clean_text(actor.get('user') or actor.get('username') or actor.get('name') or actor.get('role') or 'system', 120)
+    return _nh_clean_text(actor or 'system', 120)
+
+
+def _nh_write_audit(db, entity_type, entity_id, event_type, nurse_registration_id=0, old_value='', new_value='', note='', actor=''):
+    db.execute(
+        """INSERT INTO nh_audit
+           (entity_type, entity_id, nurse_registration_id, event_type, old_value, new_value, note, actor)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            _nh_clean_text(entity_type, 40),
+            int(entity_id or 0),
+            int(nurse_registration_id or 0),
+            _nh_clean_text(event_type, 80),
+            '' if old_value is None else str(old_value),
+            '' if new_value is None else str(new_value),
+            _nh_clean_text(note, 400),
+            _nh_actor_text(actor),
+        ]
+    )
+
+
+def _nh_normalize_account_payload(account_row, nurse_row=None):
+    nurse_d = dict(nurse_row or {})
+    acc = dict(account_row or {})
+    status = (acc.get('account_status') or acc.get('status') or NH_ACCOUNT_STATUS_ACTIVE).strip().upper()
+    if status not in {NH_ACCOUNT_STATUS_PENDING_ARRIVAL, NH_ACCOUNT_STATUS_ACTIVE}:
+        status = NH_ACCOUNT_STATUS_ACTIVE
+    batch_code = (acc.get('batch_code') or acc.get('arrival_batch_code') or nurse_d.get('batch_number') or '').strip()
+    batch_status = (acc.get('arrival_batch_status') or acc.get('batch_status') or '').strip().upper()
+    pending = status == NH_ACCOUNT_STATUS_PENDING_ARRIVAL
+    if pending:
+        banner = "Your nurse portal account is pending arrival activation."
+        if batch_code:
+            banner += f" Batch {batch_code} is still waiting to be marked ARRIVED by the Embassy."
+        else:
+            banner += " Your arrival batch is still waiting to be marked ARRIVED by the Embassy."
+        banner += " Complaints, stay-arrangement services, and grading letter requests will open after arrival is confirmed."
+    else:
+        banner = ''
+    return {
+        'feature_enabled': bool(FEATURE_NURSE_HOUSING),
+        'has_sidecar_row': bool(account_row),
+        'account_id': int(acc.get('id') or 0) if account_row else 0,
+        'nurse_registration_id': int(acc.get('nurse_registration_id') or nurse_d.get('id') or 0),
+        'account_status': status,
+        'status_label': 'Pending Arrival' if pending else 'Active',
+        'pending_arrival': pending,
+        'arrival_batch_id': int(acc.get('arrival_batch_id') or 0) if acc.get('arrival_batch_id') else None,
+        'batch_code': batch_code,
+        'arrival_date': (acc.get('arrival_date') or nurse_d.get('arrival_date') or '').strip(),
+        'arrival_batch_status': batch_status,
+        'portal_banner': banner,
+    }
+
+
+def nh_feature_enabled():
+    return bool(FEATURE_NURSE_HOUSING)
+
+
+def nh_get_or_create_arrival_batch(db, batch_code, arrival_date='', actor='system'):
+    if not nh_feature_enabled():
+        return None
+    _nh_ensure_schema(db)
+    normalized_batch_code = _nh_clean_text(batch_code, 80)
+    if not normalized_batch_code:
+        return None
+    row = db.execute(
+        "SELECT * FROM nh_arrival_batch WHERE UPPER(TRIM(batch_code)) = UPPER(TRIM(?)) ORDER BY id DESC LIMIT 1",
+        [normalized_batch_code]
+    ).fetchone()
+    if row:
+        row_d = dict(row)
+        if arrival_date and not (row_d.get('arrival_date') or '').strip():
+            db.execute(
+                "UPDATE nh_arrival_batch SET arrival_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [_nh_clean_text(arrival_date, 40), row_d['id']]
+            )
+            row_d['arrival_date'] = _nh_clean_text(arrival_date, 40)
+        return row_d
+    cur = db.execute(
+        """INSERT INTO nh_arrival_batch
+           (batch_code, arrival_date, status, remarks)
+           VALUES (?, ?, ?, '')""",
+        [normalized_batch_code, _nh_clean_text(arrival_date, 40), NH_BATCH_STATUS_PLANNED]
+    )
+    batch_id = int(cur.lastrowid or 0)
+    _nh_write_audit(
+        db,
+        'arrival_batch',
+        batch_id,
+        'created',
+        note=f'Arrival batch {normalized_batch_code} created from nurse registration flow.',
+        new_value=NH_BATCH_STATUS_PLANNED,
+        actor=actor,
+    )
+    return {
+        'id': batch_id,
+        'batch_code': normalized_batch_code,
+        'arrival_date': _nh_clean_text(arrival_date, 40),
+        'status': NH_BATCH_STATUS_PLANNED,
+        'remarks': '',
+    }
+
+
+def nh_get_account(db, nurse_row_or_dict):
+    nurse = dict(nurse_row_or_dict or {})
+    nurse_id = int(nurse.get('id') or 0)
+    if not nurse_id:
+        return _nh_normalize_account_payload(None, nurse)
+    if not nh_feature_enabled():
+        return _nh_normalize_account_payload(None, {**nurse, 'id': nurse_id})
+    _nh_ensure_schema(db)
+    row = db.execute(
+        """SELECT a.*,
+                  b.batch_code AS arrival_batch_code,
+                  b.arrival_date,
+                  b.status AS arrival_batch_status
+           FROM nh_nurse_account a
+           LEFT JOIN nh_arrival_batch b ON b.id = a.arrival_batch_id
+           WHERE a.nurse_registration_id = ?
+           ORDER BY a.id DESC LIMIT 1""",
+        [nurse_id]
+    ).fetchone()
+    if not row:
+        return _nh_normalize_account_payload(None, nurse)
+    return _nh_normalize_account_payload(row, nurse)
+
+
+def nh_create_registration_account(db, nurse_row_or_dict, actor='public_registration'):
+    if not nh_feature_enabled():
+        return None
+    _nh_ensure_schema(db)
+    nurse = dict(nurse_row_or_dict or {})
+    nurse_id = int(nurse.get('id') or 0)
+    if not nurse_id:
+        return None
+    batch = nh_get_or_create_arrival_batch(db, nurse.get('batch_number') or '', nurse.get('arrival_date') or '', actor=actor)
+    batch_code = _nh_clean_text((batch or {}).get('batch_code') or nurse.get('batch_number') or '', 80)
+    arrival_batch_id = int((batch or {}).get('id') or 0) if batch else None
+    row = db.execute("SELECT * FROM nh_nurse_account WHERE nurse_registration_id = ? LIMIT 1", [nurse_id]).fetchone()
+    if row:
+        old = dict(row)
+        db.execute(
+            """UPDATE nh_nurse_account
+               SET account_status = ?,
+                   arrival_batch_id = COALESCE(?, arrival_batch_id),
+                   batch_code = CASE WHEN ? != '' THEN ? ELSE batch_code END,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE nurse_registration_id = ?""",
+            [
+                NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+                arrival_batch_id,
+                batch_code,
+                batch_code,
+                nurse_id,
+            ]
+        )
+        if (old.get('account_status') or '') != NH_ACCOUNT_STATUS_PENDING_ARRIVAL or (old.get('batch_code') or '') != batch_code:
+            _nh_write_audit(
+                db,
+                'nurse_account',
+                old.get('id'),
+                'registration_synced',
+                nurse_registration_id=nurse_id,
+                old_value=old.get('account_status') or '',
+                new_value=NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+                note=f'Batch {batch_code or "unassigned"} linked from registration flow.',
+                actor=actor,
+            )
+        return None
+    cur = db.execute(
+        """INSERT INTO nh_nurse_account
+           (nurse_registration_id, account_status, arrival_batch_id, batch_code, notes)
+           VALUES (?, ?, ?, ?, '')""",
+        [nurse_id, NH_ACCOUNT_STATUS_PENDING_ARRIVAL, arrival_batch_id, batch_code]
+    )
+    account_id = int(cur.lastrowid or 0)
+    _nh_write_audit(
+        db,
+        'nurse_account',
+        account_id,
+        'created',
+        nurse_registration_id=nurse_id,
+        new_value=NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+        note=f'Created pending-arrival housing account for nurse registration {nurse.get("reference_id") or nurse_id}.',
+        actor=actor,
+    )
+    return account_id
+
+
+def nh_pending_arrival_block_message(account, feature_label):
+    feature = _nh_clean_text(feature_label, 120) or 'This service'
+    banner = (account or {}).get('portal_banner') or 'Your nurse portal account is pending arrival activation.'
+    return f"{feature} is not available yet. {banner}"
+
+
+def nh_block_if_pending_arrival(db, nurse_row_or_dict, feature_label):
+    account = nh_get_account(db, nurse_row_or_dict)
+    if account.get('pending_arrival'):
+        return {
+            'success': False,
+            'error': nh_pending_arrival_block_message(account, feature_label),
+            'housing_account': account,
+        }
+    return None
+
+
+def nh_mark_batch_arrived(db, batch_id, actor='system'):
+    _nh_ensure_schema(db)
+    batch = db.execute("SELECT * FROM nh_arrival_batch WHERE id = ? LIMIT 1", [int(batch_id or 0)]).fetchone()
+    if not batch:
+        raise ValueError('Arrival batch not found.')
+    batch_d = dict(batch)
+    batch_code = (batch_d.get('batch_code') or '').strip()
+    prior_status = (batch_d.get('status') or '').strip().upper() or NH_BATCH_STATUS_PLANNED
+    db.execute(
+        """UPDATE nh_arrival_batch
+           SET status = ?, arrived_at = COALESCE(arrived_at, CURRENT_TIMESTAMP),
+               arrived_by = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        [NH_BATCH_STATUS_ARRIVED, _nh_actor_text(actor), batch_d['id']]
+    )
+    pending_rows = db.execute(
+        """SELECT id, nurse_registration_id, batch_code
+           FROM nh_nurse_account
+           WHERE account_status = ?
+             AND (
+                 arrival_batch_id = ?
+                 OR (arrival_batch_id IS NULL AND UPPER(TRIM(COALESCE(batch_code, ''))) = UPPER(TRIM(?)))
+             )""",
+        [NH_ACCOUNT_STATUS_PENDING_ARRIVAL, batch_d['id'], batch_code]
+    ).fetchall()
+    db.execute(
+        """UPDATE nh_nurse_account
+           SET account_status = ?, arrival_batch_id = COALESCE(arrival_batch_id, ?),
+               activated_at = CURRENT_TIMESTAMP, activated_by = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE account_status = ?
+             AND (
+                 arrival_batch_id = ?
+                 OR (arrival_batch_id IS NULL AND UPPER(TRIM(COALESCE(batch_code, ''))) = UPPER(TRIM(?)))
+             )""",
+        [
+            NH_ACCOUNT_STATUS_ACTIVE,
+            batch_d['id'],
+            _nh_actor_text(actor),
+            NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+            batch_d['id'],
+            batch_code,
+        ]
+    )
+    _nh_write_audit(
+        db,
+        'arrival_batch',
+        batch_d['id'],
+        'marked_arrived',
+        old_value=prior_status,
+        new_value=NH_BATCH_STATUS_ARRIVED,
+        note=f'Activated {len(pending_rows)} linked pending-arrival nurse account(s).',
+        actor=actor,
+    )
+    for row in pending_rows:
+        r = dict(row)
+        _nh_write_audit(
+            db,
+            'nurse_account',
+            r.get('id'),
+            'activated_by_batch_arrival',
+            nurse_registration_id=r.get('nurse_registration_id') or 0,
+            old_value=NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+            new_value=NH_ACCOUNT_STATUS_ACTIVE,
+            note=f'Activated when batch {(batch_d.get("batch_code") or "").strip()} was marked ARRIVED.',
+            actor=actor,
+        )
+    refreshed = db.execute("SELECT * FROM nh_arrival_batch WHERE id = ? LIMIT 1", [batch_d['id']]).fetchone()
+    return dict(refreshed or batch_d), len(pending_rows)
+
+
 def _should_notify_applicant_status(status, public_note='', visible_to_applicant=False, safe_statuses=None):
     safe = set(safe_statuses or [])
     status_text = (status or '').strip()
@@ -6871,6 +7274,9 @@ def api_nurse_stay_confirmation(data):
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
         nurse_d = dict(nurse)
+        blocked = nh_block_if_pending_arrival(db, nurse_d, 'Stay-arrangement services')
+        if blocked:
+            return blocked
         roster = _facility_find_linked_roster(db, nurse_d)
         if not roster:
             return {'success': False, 'error': 'No linked facility occupancy record was found. Please contact the Community Welfare Wing.'}
@@ -6962,6 +7368,7 @@ def api_nurse_stay_confirmation(data):
 def _build_nurse_public_profile_bundle(db, rec):
     """Build portal-safe JSON for a nurse row (no password fields)."""
     professional_category = _nurse_professional_category(rec.get('professional_category'), rec.get('designation') or rec.get('job_title_moh') or '')
+    housing_account = nh_get_account(db, rec)
     acc = db.execute("""SELECT request_status, admin_remarks
                         FROM nurse_accommodation_requests
                         WHERE nurse_reference_id = ? OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
@@ -7073,6 +7480,9 @@ def _build_nurse_public_profile_bundle(db, rec):
         'process_last_updated_at': rec.get('updated_at', '') or rec.get('created_at', ''),
         'complaints': complaints,
         'facility_roster': facility_record,
+        'housing_account': housing_account,
+        'pending_arrival': bool(housing_account.get('pending_arrival')),
+        'pending_arrival_banner': housing_account.get('portal_banner', ''),
         'login_at': rec.get('last_login_at', ''),
     }
 
@@ -7343,6 +7753,12 @@ def api_nurse_register(data):
             }, actor='public_registration')
             if not match.get('matched'):
                 _nurse_log(db, 'facility_roster_link_skipped', ref, passport, 'system', {'error': match.get('error') or match.get('reason')})
+        nh_create_registration_account(db, {
+            'id': nurse_id,
+            'reference_id': ref,
+            'batch_number': batch_number,
+            'arrival_date': arrival_date,
+        }, actor='public_registration')
         db.commit()
         verification = _send_email_verification_for_record(
             'nurse_registrations', nurse_id, ref, full_name, email, 'nurse_registration'
@@ -7681,6 +8097,11 @@ def api_nurse_accommodation_submit(data):
         return {'success': False, 'error': 'Nurse Reference ID or Passport Number is required.'}
     db = get_db()
     try:
+        nurse = _nurse_verify_for_portal_request(db, ref, passport, data.get('verifier') or '')
+        if nurse:
+            blocked = nh_block_if_pending_arrival(db, nurse, 'Stay-arrangement services')
+            if blocked:
+                return blocked
         db.execute("""INSERT INTO nurse_accommodation_requests
             (nurse_reference_id, passport_number, current_accommodation_status, requested_facility, reason_remarks)
             VALUES (?, ?, ?, ?, ?)""",
@@ -7737,6 +8158,9 @@ def api_nurse_facility_assistance(data):
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
         n = dict(nurse)
+        blocked = nh_block_if_pending_arrival(db, n, 'Stay-arrangement services')
+        if blocked:
+            return blocked
         roster = _facility_find_linked_roster(db, n)
         roster_d = _facility_roster_to_dict(roster) if roster else {}
         complaint_id = _next_nurse_complaint_id(db)
@@ -7838,6 +8262,9 @@ def api_nurse_complaint_submit(data):
         if not nurse:
             return {'success': False, 'error': 'No matching registration found. Please check your details.'}
         n = dict(nurse)
+        blocked = nh_block_if_pending_arrival(db, n, 'Complaints')
+        if blocked:
+            return blocked
         complaint_id = _next_nurse_complaint_id(db)
         db.execute("""INSERT INTO nurse_complaints
             (complaint_id, nurse_reference_id, nurse_full_name, passport_number, complaint_category, category, priority, subject, description,
@@ -7883,6 +8310,9 @@ def api_nurse_leave_notice_submit(data):
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
         nurse_d = dict(nurse)
+        blocked = nh_block_if_pending_arrival(db, nurse_d, 'Stay-arrangement services')
+        if blocked:
+            return blocked
         current_facility = (data.get('current_facility') or data.get('facility_name') or '').strip()
         intended_leaving = (data.get('intended_leaving_date') or '').strip()
         reason = (data.get('reason') or data.get('remarks') or '').strip()
@@ -8256,6 +8686,9 @@ def api_gl_nurse_summary(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
+        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        if blocked:
+            return blocked
         active = _gl_active_application(db, nurse.get('id'))
         apps = db.execute(
             "SELECT * FROM gl_applications WHERE nurse_id = ? ORDER BY id DESC LIMIT 20",
@@ -8289,6 +8722,9 @@ def api_gl_nurse_submit(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
+        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        if blocked:
+            return blocked
         payload = _gl_validate_application_payload(data, db)
         db.execute("BEGIN IMMEDIATE")
         allow_parallel = _gl_bool_setting(db, 'allow_parallel_applications', False)
@@ -8355,6 +8791,9 @@ def api_gl_nurse_resubmit(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
+        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        if blocked:
+            return blocked
         app_id = int(data.get('id') or data.get('application_id') or 0)
         row = db.execute("SELECT * FROM gl_applications WHERE id = ? AND nurse_id = ?", [app_id, nurse.get('id')]).fetchone()
         if not row:
@@ -8392,6 +8831,9 @@ def api_gl_nurse_cancel(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
+        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        if blocked:
+            return blocked
         app_id = int(data.get('id') or data.get('application_id') or 0)
         row = db.execute("SELECT * FROM gl_applications WHERE id = ? AND nurse_id = ?", [app_id, nurse.get('id')]).fetchone()
         if not row:
@@ -8886,6 +9328,8 @@ def api_admin_nurses_summary(user=None):
         totals = {
             'registrations': _count("SELECT COUNT(*) c FROM nurse_registrations"),
             'pending_registrations': _count("SELECT COUNT(*) c FROM nurse_registrations WHERE registration_status IN ('Pending', 'Pending Review')"),
+            'housing_pending_arrival': _count("SELECT COUNT(*) c FROM nh_nurse_account WHERE account_status = ?", [NH_ACCOUNT_STATUS_PENDING_ARRIVAL]) if nh_feature_enabled() else 0,
+            'arrival_batches': _count("SELECT COUNT(*) c FROM nh_arrival_batch") if nh_feature_enabled() else 0,
             'accommodation_requests': _count("SELECT COUNT(*) c FROM nurse_accommodation_requests"),
             'open_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE complaint_status IN ('Seen', 'In Progress')"),
             'resolved_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE COALESCE(status, complaint_status) IN ('Resolved','Closed')"),
@@ -8926,6 +9370,178 @@ def api_admin_nurses_summary(user=None):
             'vendor_name': vendor,
         }
         return {'success': True, 'totals': totals}
+    finally:
+        db.close()
+
+
+def api_admin_nurse_pending_accounts(params, user=None):
+    if not nh_feature_enabled():
+        return {'success': True, 'feature_enabled': False, 'total': 0, 'items': []}
+    page = _nurse_int(params.get('page', 1), 1, 1, 100000)
+    page_size = _nurse_int(params.get('page_size', 50), 50, 1, 200)
+    offset = (page - 1) * page_size
+    search = _nh_clean_text(params.get('search') or params.get('q'), 120)
+    db = get_db()
+    try:
+        _nh_ensure_schema(db)
+        where = ["a.account_status = ?"]
+        vals = [NH_ACCOUNT_STATUS_PENDING_ARRIVAL]
+        if search:
+            where.append("""(
+                UPPER(COALESCE(n.reference_id,'')) LIKE UPPER(?)
+                OR UPPER(COALESCE(n.full_name,'')) LIKE UPPER(?)
+                OR UPPER(COALESCE(n.passport_number,'')) LIKE UPPER(?)
+                OR UPPER(COALESCE(n.cnic,'')) LIKE UPPER(?)
+                OR UPPER(COALESCE(n.civil_id,'')) LIKE UPPER(?)
+                OR UPPER(COALESCE(n.email,'')) LIKE UPPER(?)
+                OR UPPER(COALESCE(a.batch_code,'')) LIKE UPPER(?)
+                OR UPPER(COALESCE(b.batch_code,'')) LIKE UPPER(?)
+            )""")
+            term = f"%{search}%"
+            vals.extend([term] * 8)
+        where_sql = " AND ".join(where)
+        from_sql = """nh_nurse_account a
+                      JOIN nurse_registrations n ON n.id = a.nurse_registration_id
+                      LEFT JOIN nh_arrival_batch b ON b.id = a.arrival_batch_id"""
+        total = int(db.execute(f"SELECT COUNT(*) c FROM {from_sql} WHERE {where_sql}", vals).fetchone()['c'] or 0)
+        rows = db.execute(
+            f"""SELECT a.id AS account_id,
+                       a.nurse_registration_id,
+                       a.account_status,
+                       a.batch_code AS account_batch_code,
+                       a.created_at AS account_created_at,
+                       b.id AS arrival_batch_id,
+                       b.batch_code AS arrival_batch_code,
+                       b.arrival_date AS batch_arrival_date,
+                       b.status AS arrival_batch_status,
+                       n.reference_id,
+                       n.full_name,
+                       n.passport_number,
+                       n.cnic,
+                       n.civil_id,
+                       COALESCE(n.mobile_full, n.mobile, '') AS mobile_full,
+                       n.email,
+                       n.registration_status,
+                       n.batch_number,
+                       n.arrival_date AS nurse_arrival_date,
+                       n.created_at AS registration_created_at
+                FROM {from_sql}
+                WHERE {where_sql}
+                ORDER BY COALESCE(NULLIF(b.arrival_date,''), NULLIF(n.arrival_date,''), '') DESC, a.id DESC
+                LIMIT ? OFFSET ?""",
+            vals + [page_size, offset]
+        ).fetchall()
+        items = []
+        for row in rows:
+            d = dict(row)
+            items.append({
+                'account_id': d.get('account_id'),
+                'nurse_registration_id': d.get('nurse_registration_id'),
+                'reference_id': d.get('reference_id') or '',
+                'full_name': d.get('full_name') or '',
+                'passport_number': d.get('passport_number') or '',
+                'cnic': d.get('cnic') or '',
+                'civil_id': d.get('civil_id') or '',
+                'mobile_full': d.get('mobile_full') or '',
+                'email': d.get('email') or '',
+                'registration_status': d.get('registration_status') or '',
+                'account_status': d.get('account_status') or NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+                'arrival_batch_id': d.get('arrival_batch_id'),
+                'batch_code': d.get('arrival_batch_code') or d.get('account_batch_code') or d.get('batch_number') or '',
+                'arrival_date': d.get('batch_arrival_date') or d.get('nurse_arrival_date') or '',
+                'arrival_batch_status': d.get('arrival_batch_status') or '',
+                'account_created_at': d.get('account_created_at') or '',
+                'registration_created_at': d.get('registration_created_at') or '',
+            })
+        return {
+            'success': True,
+            'feature_enabled': True,
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+            'items': items,
+        }
+    finally:
+        db.close()
+
+
+def api_admin_nurse_arrival_batches(params, user=None):
+    if not nh_feature_enabled():
+        return {'success': True, 'feature_enabled': False, 'total': 0, 'items': []}
+    search = _nh_clean_text(params.get('search') or params.get('q'), 120)
+    db = get_db()
+    try:
+        _nh_ensure_schema(db)
+        where = ["1=1"]
+        vals = []
+        if search:
+            where.append("UPPER(COALESCE(b.batch_code,'')) LIKE UPPER(?)")
+            vals.append(f"%{search}%")
+        rows = db.execute(
+            f"""SELECT b.*,
+                       COUNT(a.id) AS linked_accounts,
+                       SUM(CASE WHEN a.account_status = ? THEN 1 ELSE 0 END) AS pending_accounts,
+                       SUM(CASE WHEN a.account_status = ? THEN 1 ELSE 0 END) AS active_accounts
+                FROM nh_arrival_batch b
+                LEFT JOIN nh_nurse_account a ON a.arrival_batch_id = b.id
+                WHERE {' AND '.join(where)}
+                GROUP BY b.id
+                ORDER BY CASE WHEN b.status = ? THEN 1 ELSE 0 END,
+                         COALESCE(NULLIF(b.arrival_date,''), '') DESC,
+                         b.id DESC""",
+            [NH_ACCOUNT_STATUS_PENDING_ARRIVAL, NH_ACCOUNT_STATUS_ACTIVE, *vals, NH_BATCH_STATUS_ARRIVED]
+        ).fetchall()
+        items = []
+        for row in rows:
+            d = dict(row)
+            items.append({
+                'id': d.get('id'),
+                'batch_code': d.get('batch_code') or '',
+                'arrival_date': d.get('arrival_date') or '',
+                'status': d.get('status') or NH_BATCH_STATUS_PLANNED,
+                'remarks': d.get('remarks') or '',
+                'arrived_at': d.get('arrived_at') or '',
+                'arrived_by': d.get('arrived_by') or '',
+                'linked_accounts': int(d.get('linked_accounts') or 0),
+                'pending_accounts': int(d.get('pending_accounts') or 0),
+                'active_accounts': int(d.get('active_accounts') or 0),
+                'created_at': d.get('created_at') or '',
+            })
+        return {'success': True, 'feature_enabled': True, 'total': len(items), 'items': items}
+    finally:
+        db.close()
+
+
+def api_admin_nurse_arrival_batch_mark_arrived(data, user):
+    if not nh_feature_enabled():
+        return {'success': False, 'error': 'Nurse housing feature is disabled.'}
+    batch_id = int(data.get('id') or data.get('batch_id') or 0)
+    if batch_id <= 0:
+        return {'success': False, 'error': 'Arrival batch id is required.'}
+    db = get_db()
+    try:
+        _nh_ensure_schema(db)
+        db.execute("BEGIN IMMEDIATE")
+        batch, activated_count = nh_mark_batch_arrived(db, batch_id, actor=user)
+        db.commit()
+        return {
+            'success': True,
+            'batch': batch,
+            'activated_count': activated_count,
+            'message': f'Arrival batch marked ARRIVED. {activated_count} linked pending-arrival nurse account(s) activated.',
+        }
+    except ValueError as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {'success': False, 'error': str(exc)}
     finally:
         db.close()
 
@@ -26921,6 +27537,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_nurses_summary(user))
+        elif path == '/api/admin/nurses/pending-accounts':
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_admin_nurse_pending_accounts(params, user))
+        elif path == '/api/admin/nurses/arrival-batches':
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            self.send_json(api_admin_nurse_arrival_batches(params, user))
         elif path == '/api/admin/nurses/registrations':
             user = self.require_auth()
             if not user: return
@@ -30364,6 +30992,18 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': True})
             finally:
                 db.close()
+            return
+        elif path == '/api/admin/nurses/arrival-batches/mark-arrived':
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_nurse_arrival_batch_mark_arrived(data, user)
+            self.send_json(result, 200 if result.get('success') else 400)
             return
         elif path == '/api/admin/nurses/leave-notice/update':
             user = self.require_auth()

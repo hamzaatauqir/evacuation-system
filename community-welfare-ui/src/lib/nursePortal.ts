@@ -60,6 +60,22 @@ export type NursePortalContext = {
     approved_service_provider?: boolean;
     remarks?: string;
   } | null;
+  housingAccount?: {
+    featureEnabled?: boolean;
+    hasSidecarRow?: boolean;
+    accountId?: number;
+    nurseRegistrationId?: number;
+    accountStatus?: string;
+    statusLabel?: string;
+    pendingArrival?: boolean;
+    arrivalBatchId?: number | null;
+    batchCode?: string;
+    arrivalDate?: string;
+    arrivalBatchStatus?: string;
+    portalBanner?: string;
+  } | null;
+  pendingArrival?: boolean;
+  pendingArrivalBanner?: string;
   /** Opaque marker from server after password login (not a secret session token). */
   sessionMarker?: string;
 };
@@ -143,6 +159,30 @@ export function buildPortalContextFromApiData(data: any): NursePortalContext {
     remarks: (data?.latest_admin_remarks || data?.remarks || '').toString(),
     complaints: Array.isArray(data?.complaints) ? data.complaints : [],
     facilityRoster: data?.facility_roster || null,
+    housingAccount: data?.housing_account
+      ? {
+          featureEnabled: Boolean(data.housing_account.feature_enabled),
+          hasSidecarRow: Boolean(data.housing_account.has_sidecar_row),
+          accountId: typeof data.housing_account.account_id === "number" ? data.housing_account.account_id : undefined,
+          nurseRegistrationId:
+            typeof data.housing_account.nurse_registration_id === "number"
+              ? data.housing_account.nurse_registration_id
+              : undefined,
+          accountStatus: (data.housing_account.account_status || "").toString(),
+          statusLabel: (data.housing_account.status_label || "").toString(),
+          pendingArrival: Boolean(data.housing_account.pending_arrival),
+          arrivalBatchId:
+            typeof data.housing_account.arrival_batch_id === "number"
+              ? data.housing_account.arrival_batch_id
+              : null,
+          batchCode: (data.housing_account.batch_code || "").toString(),
+          arrivalDate: (data.housing_account.arrival_date || "").toString(),
+          arrivalBatchStatus: (data.housing_account.arrival_batch_status || "").toString(),
+          portalBanner: (data.housing_account.portal_banner || "").toString(),
+        }
+      : null,
+    pendingArrival: Boolean(data?.pending_arrival),
+    pendingArrivalBanner: (data?.pending_arrival_banner || "").toString(),
     sessionMarker: (data?.session_marker || "").toString() || undefined,
   };
 }

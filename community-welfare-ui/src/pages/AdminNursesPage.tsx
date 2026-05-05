@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { AdminLayout } from "../components/AdminLayout";
 import { AdminKpiCard } from "../components/AdminKpiCard";
 import { Card } from "../components/Layout";
@@ -31,6 +32,8 @@ type NurseComplaint = {
 type SummaryTotals = {
   registrations?: number;
   pending_registrations?: number;
+  housing_pending_arrival?: number;
+  arrival_batches?: number;
   accommodation_requests?: number;
   open_complaints?: number;
   leave_notices?: number;
@@ -56,6 +59,7 @@ function toPriority(v?: string) {
 }
 
 export function AdminNursesPage() {
+  const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("All");
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
@@ -147,6 +151,20 @@ export function AdminNursesPage() {
             <p style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{rows.length} total complaint records</p>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
+            <Btn
+              variant="light"
+              size="sm"
+              onClick={() => navigate("/admin/nurses/pending-accounts")}
+            >
+              Pending Accounts {totals.housing_pending_arrival ? `(${totals.housing_pending_arrival})` : ""}
+            </Btn>
+            <Btn
+              variant="light"
+              size="sm"
+              onClick={() => navigate("/admin/nurses/arrival-batches")}
+            >
+              Arrival Batches {totals.arrival_batches ? `(${totals.arrival_batches})` : ""}
+            </Btn>
             <Btn variant="light" size="sm" icon="download">
               Export
             </Btn>
@@ -170,6 +188,13 @@ export function AdminNursesPage() {
               accent="#92400e"
               icon="clock"
               iconBg="#fffbeb"
+            />
+            <AdminKpiCard
+              label="Pending Arrival"
+              value={totals.housing_pending_arrival || 0}
+              accent="#8A5C00"
+              icon="home"
+              iconBg="#FFF7E6"
             />
             <AdminKpiCard
               label="Accommodation"

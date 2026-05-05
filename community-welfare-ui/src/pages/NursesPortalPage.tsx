@@ -234,6 +234,11 @@ function computeGradingPreview(form: GradingFormState) {
   };
 }
 
+function buildPendingArrivalFeatureMessage(baseMessage: string, featureName: string) {
+  const headline = baseMessage.trim() || "Your nurse portal account is pending arrival activation.";
+  return `${headline} ${featureName} will open after the Embassy marks your arrival batch as ARRIVED.`;
+}
+
 export function NursesPortalPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -340,6 +345,31 @@ export function NursesPortalPage() {
     : emailStatus.toLowerCase().includes("failed")
       ? "Delivery Failed"
       : "Email verification pending. Please verify your email address to activate your portal account and receive official updates.";
+  const housingAccount = ctx.housingAccount || null;
+  const pendingArrival = Boolean(ctx.pendingArrival || housingAccount?.pendingArrival);
+  const pendingArrivalBanner =
+    (ctx.pendingArrivalBanner || housingAccount?.portalBanner || "").trim() ||
+    "Your nurse portal account is pending arrival activation.";
+  const stayAccessBlocked = pendingArrival;
+  const complaintAccessBlocked = pendingArrival;
+  const gradingAccessBlocked = pendingArrival;
+  const leavingAccessBlocked = pendingArrival;
+  const stayBlockedMessage = buildPendingArrivalFeatureMessage(
+    pendingArrivalBanner,
+    "Stay-arrangement services"
+  );
+  const complaintBlockedMessage = buildPendingArrivalFeatureMessage(
+    pendingArrivalBanner,
+    "Complaints"
+  );
+  const gradingBlockedMessage = buildPendingArrivalFeatureMessage(
+    pendingArrivalBanner,
+    "Grading letter requests"
+  );
+  const leavingBlockedMessage = buildPendingArrivalFeatureMessage(
+    pendingArrivalBanner,
+    "Leaving notices and stay-arrangement changes"
+  );
   const gradingPreview = useMemo(() => computeGradingPreview(gradingForm), [gradingForm]);
   const gradingActiveRequest = gradingSummary?.active_application || null;
   const gradingHistory = gradingSummary?.applications || gradingSummary?.history || [];
@@ -394,9 +424,9 @@ export function NursesPortalPage() {
   }, [ctx.referenceId, ctx.passportNumber, ctx.mobile, ctx.civilId]);
 
   useEffect(() => {
-    if (activeTab !== "grading") return;
+    if (activeTab !== "grading" || gradingAccessBlocked) return;
     void refreshGradingSummary();
-  }, [activeTab]);
+  }, [activeTab, gradingAccessBlocked]);
 
   async function submitFacilityRequest() {
     setBusy(true); setErr(""); setMsg("");
@@ -662,6 +692,12 @@ export function NursesPortalPage() {
           </div>
         ) : null}
 
+        {pendingArrival ? (
+          <div style={{ marginBottom: 14 }}>
+            <NoticeBox tone="warning">{pendingArrivalBanner}</NoticeBox>
+          </div>
+        ) : null}
+
         {activeTab === "overview" ? (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 14, marginBottom: 14 }}>
@@ -679,6 +715,9 @@ export function NursesPortalPage() {
                   <Field label="Qualification / Degree" value={qualificationDisplay} />
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
+                  <Field label="Housing Account" value={housingAccount?.statusLabel || "Active"} />
+                  {housingAccount?.batchCode ? <Field label="Arrival Batch" value={housingAccount.batchCode} /> : null}
+                  {housingAccount?.arrivalDate ? <Field label="Arrival Date" value={housingAccount.arrivalDate} /> : null}
                   {showStaySummary ? <Field label="Current Stay Arrangement" value={currentArrangement} /> : null}
                   {showStaySummary ? <Field label="Latest Monthly Check-in" value={monthlyCheckinStatus || "—"} /> : null}
                   {monthlyCheckinReceivedAt ? <Field label="Check-in Received" value={monthlyCheckinReceivedAt} /> : null}
@@ -759,6 +798,9 @@ export function NursesPortalPage() {
         ) : null}
 
         {activeTab === "stay" ? (
+          stayAccessBlocked ? (
+            <PendingArrivalPanel title="Stay Arrangement" message={stayBlockedMessage} />
+          ) : (
           <div style={{ display: "grid", gap: 14 }}>
             {ctx.facilityRoster && !isDoctor ? (
               <FormCard title="Stay Arrangement Confirmation">
@@ -860,19 +902,27 @@ export function NursesPortalPage() {
               <Btn variant="primary" disabled={busy || !facilityReq.category || !facilityReq.details} onClick={submitFacilityRequest}>{busy ? "Submitting..." : "Submit Facility Assistance Request"}</Btn>
             </FormCard>
           </div>
+          )
         ) : null}
 
         {activeTab === "complaint" ? (
-          <FormCard title="Complaint / Welfare Issue">
-            <label>Category<input className="f-input" value={complaint.complaint_category} onChange={(e) => setComplaint({ ...complaint, complaint_category: e.target.value })} /></label>
-            <label>Priority<select className="f-input" value={complaint.priority} onChange={(e) => setComplaint({ ...complaint, priority: e.target.value })}><option>Normal</option><option>Important</option><option>Urgent</option></select></label>
-            <label>Subject<input className="f-input" value={complaint.subject} onChange={(e) => setComplaint({ ...complaint, subject: e.target.value })} /></label>
-            <label>Details<textarea className="f-input" value={complaint.description} onChange={(e) => setComplaint({ ...complaint, description: e.target.value })} /></label>
-            <Btn variant="primary" disabled={busy} onClick={submitComplaint}>{busy ? "Submitting..." : "Submit Complaint"}</Btn>
-          </FormCard>
+          complaintAccessBlocked ? (
+            <PendingArrivalPanel title="Complaint / Welfare Issue" message={complaintBlockedMessage} />
+          ) : (
+            <FormCard title="Complaint / Welfare Issue">
+              <label>Category<input className="f-input" value={complaint.complaint_category} onChange={(e) => setComplaint({ ...complaint, complaint_category: e.target.value })} /></label>
+              <label>Priority<select className="f-input" value={complaint.priority} onChange={(e) => setComplaint({ ...complaint, priority: e.target.value })}><option>Normal</option><option>Important</option><option>Urgent</option></select></label>
+              <label>Subject<input className="f-input" value={complaint.subject} onChange={(e) => setComplaint({ ...complaint, subject: e.target.value })} /></label>
+              <label>Details<textarea className="f-input" value={complaint.description} onChange={(e) => setComplaint({ ...complaint, description: e.target.value })} /></label>
+              <Btn variant="primary" disabled={busy} onClick={submitComplaint}>{busy ? "Submitting..." : "Submit Complaint"}</Btn>
+            </FormCard>
+          )
         ) : null}
 
         {activeTab === "grading" ? (
+          gradingAccessBlocked ? (
+            <PendingArrivalPanel title="Grading Letter Request" message={gradingBlockedMessage} />
+          ) : (
           <div style={{ display: "grid", gap: 14 }}>
             <FormCard title="Grading Letter Request">
               <NoticeBox>
@@ -1188,45 +1238,50 @@ export function NursesPortalPage() {
               )}
             </FormCard>
           </div>
+          )
         ) : null}
 
         {activeTab === "leaving" ? (
-          <FormCard title="Leaving Notice / Change of Stay Arrangement">
-            <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
-              If you intend to leave or change your current stay arrangement, please submit a Leaving Notice through this portal so that your record can be reviewed and updated in time.
-            </p>
-            {ctx.facilityRoster?.notice_period_start_date ? (
-              <p style={{ color: "#2D4A6B", fontSize: 13, lineHeight: 1.6, background: "#F7FAFC", border: "1px solid #E3EBF0", borderRadius: 10, padding: 10 }}>
-                Based on the dates recorded, your notice period start date is {ctx.facilityRoster.notice_period_start_date}. If you intend to leave or change your stay arrangement, please submit your notice before the applicable deadline where possible.
+          leavingAccessBlocked ? (
+            <PendingArrivalPanel title="Leaving Notice / Change of Stay Arrangement" message={leavingBlockedMessage} />
+          ) : (
+            <FormCard title="Leaving Notice / Change of Stay Arrangement">
+              <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
+                If you intend to leave or change your current stay arrangement, please submit a Leaving Notice through this portal so that your record can be reviewed and updated in time.
               </p>
-            ) : null}
-            <label>Current Facility / Building<input className="f-input" value={leaving.current_facility} onChange={(e) => setLeaving({ ...leaving, current_facility: e.target.value })} /></label>
-            <label>Date shifted to facility<input className="f-input" type="date" value={leaving.date_shifted_to_facility} onChange={(e) => setLeaving({ ...leaving, date_shifted_to_facility: e.target.value })} /></label>
-            <label>Intended leaving date<input className="f-input" type="date" value={leaving.intended_leaving_date} onChange={(e) => setLeaving({ ...leaving, intended_leaving_date: e.target.value })} /></label>
-            <label>
-              Reason / category
-              <select className="f-input" value={leaving.reason_category} onChange={(e) => setLeaving({ ...leaving, reason_category: e.target.value })}>
-                <option value="">Select</option>
-                <option>Change of stay arrangement</option>
-                <option>Shifted to private option</option>
-                <option>Shifted to family / relative</option>
-                <option>Workplace-arranged option</option>
-                <option>Facility details require correction</option>
-                <option>Other</option>
-              </select>
-            </label>
-            <label>New stay arrangement if known<input className="f-input" value={leaving.new_stay_arrangement} onChange={(e) => setLeaving({ ...leaving, new_stay_arrangement: e.target.value })} /></label>
-            <label>New area if known<input className="f-input" value={leaving.new_area} onChange={(e) => setLeaving({ ...leaving, new_area: e.target.value })} /></label>
-            <label>
-              Do you require assistance in identifying alternative options?
-              <select className="f-input" value={leaving.assistance_required} onChange={(e) => setLeaving({ ...leaving, assistance_required: e.target.value })}>
-                <option>No</option>
-                <option>Yes</option>
-              </select>
-            </label>
-            <label>Remarks<textarea className="f-input" value={leaving.remarks} onChange={(e) => setLeaving({ ...leaving, remarks: e.target.value })} /></label>
-            <Btn variant="primary" disabled={busy} onClick={submitLeavingNotice}>{busy ? "Submitting..." : "Submit Leaving Notice"}</Btn>
-          </FormCard>
+              {ctx.facilityRoster?.notice_period_start_date ? (
+                <p style={{ color: "#2D4A6B", fontSize: 13, lineHeight: 1.6, background: "#F7FAFC", border: "1px solid #E3EBF0", borderRadius: 10, padding: 10 }}>
+                  Based on the dates recorded, your notice period start date is {ctx.facilityRoster.notice_period_start_date}. If you intend to leave or change your stay arrangement, please submit your notice before the applicable deadline where possible.
+                </p>
+              ) : null}
+              <label>Current Facility / Building<input className="f-input" value={leaving.current_facility} onChange={(e) => setLeaving({ ...leaving, current_facility: e.target.value })} /></label>
+              <label>Date shifted to facility<input className="f-input" type="date" value={leaving.date_shifted_to_facility} onChange={(e) => setLeaving({ ...leaving, date_shifted_to_facility: e.target.value })} /></label>
+              <label>Intended leaving date<input className="f-input" type="date" value={leaving.intended_leaving_date} onChange={(e) => setLeaving({ ...leaving, intended_leaving_date: e.target.value })} /></label>
+              <label>
+                Reason / category
+                <select className="f-input" value={leaving.reason_category} onChange={(e) => setLeaving({ ...leaving, reason_category: e.target.value })}>
+                  <option value="">Select</option>
+                  <option>Change of stay arrangement</option>
+                  <option>Shifted to private option</option>
+                  <option>Shifted to family / relative</option>
+                  <option>Workplace-arranged option</option>
+                  <option>Facility details require correction</option>
+                  <option>Other</option>
+                </select>
+              </label>
+              <label>New stay arrangement if known<input className="f-input" value={leaving.new_stay_arrangement} onChange={(e) => setLeaving({ ...leaving, new_stay_arrangement: e.target.value })} /></label>
+              <label>New area if known<input className="f-input" value={leaving.new_area} onChange={(e) => setLeaving({ ...leaving, new_area: e.target.value })} /></label>
+              <label>
+                Do you require assistance in identifying alternative options?
+                <select className="f-input" value={leaving.assistance_required} onChange={(e) => setLeaving({ ...leaving, assistance_required: e.target.value })}>
+                  <option>No</option>
+                  <option>Yes</option>
+                </select>
+              </label>
+              <label>Remarks<textarea className="f-input" value={leaving.remarks} onChange={(e) => setLeaving({ ...leaving, remarks: e.target.value })} /></label>
+              <Btn variant="primary" disabled={busy} onClick={submitLeavingNotice}>{busy ? "Submitting..." : "Submit Leaving Notice"}</Btn>
+            </FormCard>
+          )
         ) : null}
 
         {activeTab === "password" ? (
@@ -1361,6 +1416,17 @@ function NoticeBox({
     >
       {children}
     </div>
+  );
+}
+
+function PendingArrivalPanel({ title, message }: { title: string; message: string }) {
+  return (
+    <FormCard title={title}>
+      <NoticeBox tone="warning">{message}</NoticeBox>
+      <p style={{ margin: 0, color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
+        You can still use Overview, My Requests, and Change password while your arrival activation is pending.
+      </p>
+    </FormCard>
   );
 }
 
