@@ -58,19 +58,21 @@ export function NursesLoginPage() {
   return (
     <div className="fade-in" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <PublicHeader />
-      <main style={{ flex: 1, padding: 24, display: "grid", placeItems: "center" }}>
+      <main style={{ flex: 1, padding: "clamp(16px, 4vw, 24px)", display: "grid", placeItems: "center", width: "100%" }}>
         <div
           style={{
-            maxWidth: 440,
+            maxWidth: 460,
             width: "100%",
             background: "#fff",
             border: "1px solid #E3EBF0",
             borderRadius: 14,
-            padding: 28,
+            padding: "clamp(18px, 5vw, 28px)",
             boxShadow: "0 8px 32px rgba(45,74,107,.08)",
           }}
         >
-          <h1 style={{ color: "#2D4A6B", marginBottom: 6, fontSize: 22 }}>Nurse Portal Login</h1>
+          <h1 style={{ color: "#2D4A6B", marginBottom: 6, fontSize: "clamp(20px, 4.5vw, 22px)", lineHeight: 1.25 }}>
+            Nurse Portal Login
+          </h1>
           <p style={{ color: "#5B6773", marginBottom: 20, fontSize: 14, lineHeight: 1.6 }}>
             Sign in with the email or passport number you used at registration (or your Civil ID if you have one on
             file), and your password.
@@ -87,10 +89,10 @@ export function NursesLoginPage() {
           </label>
           <label style={{ display: "block", marginBottom: 8, fontSize: 13, color: "#334155" }}>
             Password
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "stretch", flexWrap: "wrap" }}>
               <input
                 className="f-input"
-                style={{ flex: 1 }}
+                style={{ flex: "1 1 240px", minWidth: 0 }}
                 type={showPw ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -100,7 +102,13 @@ export function NursesLoginPage() {
               <button
                 type="button"
                 className="f-input"
-                style={{ width: "auto", cursor: "pointer", whiteSpace: "nowrap", padding: "8px 12px" }}
+                style={{
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  padding: "10px 14px",
+                  flex: "1 0 120px",
+                  width: "100%",
+                }}
                 onClick={() => setShowPw((s) => !s)}
               >
                 {showPw ? "Hide" : "Show"}
@@ -108,7 +116,7 @@ export function NursesLoginPage() {
             </div>
           </label>
           <div style={{ marginTop: 18, display: "flex", flexDirection: "column", gap: 12 }}>
-            <Btn variant="primary" onClick={login} disabled={loading}>
+            <Btn variant="primary" onClick={login} disabled={loading} fullWidth>
               {loading ? "Signing in…" : "Login"}
             </Btn>
             <Link to="/nurses/forgot-password" style={{ fontSize: 13, color: "#2563eb", textAlign: "center" }}>

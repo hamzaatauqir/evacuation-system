@@ -421,6 +421,10 @@ export function NursesPortalPage() {
     ? (["overview", "complaint", "grading", "onboarding", "requests", "password"] as PortalTab[])
     : (["overview", "stay", "complaint", "grading", "onboarding", "leaving", "requests", "password"] as PortalTab[]);
   const activeTab = tabs.includes(tab) ? tab : "overview";
+  const pagePadding = "clamp(16px, 4vw, 24px)";
+  const overviewGridColumns = "repeat(auto-fit,minmax(320px,1fr))";
+  const detailGridColumns = "repeat(auto-fit,minmax(180px,1fr))";
+  const compactGridColumns = "repeat(auto-fit,minmax(160px,1fr))";
 
   const statusType = (ctx.registrationStatus || "").toLowerCase().includes("resolved")
     ? "resolved"
@@ -898,11 +902,13 @@ export function NursesPortalPage() {
   }
 
   return (
-    <div className="fade-in" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+    <div className="fade-in nurse-portal-page" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       <PublicHeader />
-      <main style={{ flex: 1, maxWidth: 1120, margin: "0 auto", width: "100%", padding: 24 }}>
+      <main style={{ flex: 1, maxWidth: 1120, margin: "0 auto", width: "100%", padding: pagePadding, minWidth: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 10, flexWrap: "wrap" }}>
-          <h1 style={{ fontSize: 28, color: "#2D4A6B" }}>Welcome, {ctx.fullName || "Nurse"}</h1>
+          <h1 style={{ fontSize: "clamp(24px, 5vw, 28px)", color: "#2D4A6B", lineHeight: 1.2 }}>
+            Welcome, {ctx.fullName || "Nurse"}
+          </h1>
           <Btn
             variant="light"
             onClick={() => {
@@ -913,9 +919,24 @@ export function NursesPortalPage() {
             Logout / Clear Portal Session
           </Btn>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            flexWrap: "nowrap",
+            overflowX: "auto",
+            WebkitOverflowScrolling: "touch",
+            paddingBottom: 4,
+            marginBottom: 14,
+          }}
+        >
           {tabs.map((t) => (
-            <Btn key={t} variant={activeTab === t ? "navy" : "light"} onClick={() => setParams({ tab: t })}>
+            <Btn
+              key={t}
+              variant={activeTab === t ? "navy" : "light"}
+              onClick={() => setParams({ tab: t })}
+              style={{ flex: "0 0 auto" }}
+            >
               {t === "overview"
                 ? "Overview"
                 : t === "stay"
@@ -949,10 +970,10 @@ export function NursesPortalPage() {
 
         {activeTab === "overview" ? (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 14, marginBottom: 14 }}>
-              <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: overviewGridColumns, gap: 14, marginBottom: 14 }}>
+              <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: "clamp(14px, 3vw, 16px)", minWidth: 0 }}>
                 <h3 style={{ marginBottom: 10, color: "#2D4A6B" }}>Nurse Profile Summary</h3>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div style={{ display: "grid", gridTemplateColumns: detailGridColumns, gap: 10 }}>
                   <Field label="Reference ID" value={ctx.referenceId || "-"} />
                   <Field label="Name" value={ctx.fullName || "-"} />
                   <Field label="Father Name" value={ctx.fatherName || "—"} />
@@ -998,7 +1019,7 @@ export function NursesPortalPage() {
                   ) : null}
                 </div>
               </div>
-              <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16 }}>
+              <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: "clamp(14px, 3vw, 16px)", minWidth: 0 }}>
                 <h3 style={{ marginBottom: 10, color: "#2D4A6B" }}>Tracking / Status</h3>
                 <div style={{ marginBottom: 8 }}><StatusBadge type={statusType as any} label={ctx.registrationStatus || "Pending"} /></div>
                 <p style={{ color: "#5B6773", fontSize: 13, marginTop: 8 }}><strong>Embassy remarks:</strong> {ctx.remarks || "No remarks yet."}</p>
@@ -1021,11 +1042,11 @@ export function NursesPortalPage() {
                 ) : null}
               </div>
             </div>
-            <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: "clamp(14px, 3vw, 16px)", minWidth: 0 }}>
               <h3 style={{ marginBottom: 8, color: "#2D4A6B" }}>Embassy Messages</h3>
               <p style={{ color: "#5B6773" }}>{ctx.remarks || "Embassy messages and remarks will appear here after review."}</p>
             </div>
-            <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16, marginTop: 14 }}>
+            <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: "clamp(14px, 3vw, 16px)", marginTop: 14, minWidth: 0 }}>
               <h3 style={{ marginBottom: 8, color: "#2D4A6B" }}>Contact Details</h3>
               <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Current Email Address:</strong> {currentEmail || "—"}</p>
               <p style={{ fontSize: 13, color: "#5B6773" }}><strong>Email Status:</strong> {emailStatusText}</p>
@@ -1086,7 +1107,7 @@ export function NursesPortalPage() {
                 </label>
                 <label>Current facility name<input className="f-input" value={stay.current_facility_name} onChange={(e) => setStay({ ...stay, current_facility_name: e.target.value })} /></label>
                 <label>Area<input className="f-input" value={stay.area} onChange={(e) => setStay({ ...stay, area: e.target.value })} /></label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
                   <label>Room<input className="f-input" value={stay.room_number} onChange={(e) => setStay({ ...stay, room_number: e.target.value })} /></label>
                   <label>Bed<input className="f-input" value={stay.bed_number} onChange={(e) => setStay({ ...stay, bed_number: e.target.value })} /></label>
                 </div>
@@ -1371,7 +1392,7 @@ export function NursesPortalPage() {
                   </label>
 
                   {gradingForm.mode === "MARKS" ? (
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
                       <label>
                         Total Marks
                         <input
@@ -1707,7 +1728,7 @@ export function NursesPortalPage() {
         ) : null}
 
         {activeTab === "password" ? (
-          <FormCard title="Change password">
+            <FormCard title="Change password">
             <label>
               Current password
               <input
@@ -1741,7 +1762,7 @@ export function NursesPortalPage() {
             <button
               type="button"
               className="f-input"
-              style={{ width: "auto", cursor: "pointer", maxWidth: 120 }}
+              style={{ width: "100%", cursor: "pointer", maxWidth: 220 }}
               onClick={() => setShowPw((s) => !s)}
             >
               {showPw ? "Hide passwords" : "Show passwords"}
@@ -1853,12 +1874,27 @@ function PendingArrivalPanel({ title, message }: { title: string; message: strin
 }
 
 function Field({ label, value }: { label: string; value: string | number }) {
-  return <div><div style={{ fontSize: 11, color: '#7A8A96', marginBottom: 2 }}>{label}</div><div style={{ fontSize: 13, fontWeight: 600 }}>{value}</div></div>;
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 11, color: "#7A8A96", marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.5, overflowWrap: "anywhere" }}>{value}</div>
+    </div>
+  );
 }
 
 function FormCard({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #E3EBF0", padding: 16, display: "grid", gap: 10 }}>
+    <div
+      style={{
+        background: "#fff",
+        borderRadius: 12,
+        border: "1px solid #E3EBF0",
+        padding: "clamp(14px, 3vw, 16px)",
+        display: "grid",
+        gap: 10,
+        minWidth: 0,
+      }}
+    >
       <h3 style={{ color: "#2D4A6B" }}>{title}</h3>
       {children}
     </div>

@@ -31,7 +31,7 @@ export function CwaHomePage() {
       cta: "Open Service",
       accent: T.navy,
       ctaVariant: "navy",
-      onClick: () => window.location.assign(`${BACKEND_PORTAL}/register`),
+      onClick: () => window.location.assign("/register"),
     },
     {
       icon: "user-add",
