@@ -38,6 +38,7 @@ else:
     print(f"WARNING: PyMuPDF unavailable; controlled NV rendering disabled ({PYMUPDF_IMPORT_ERROR or 'unknown import error'})", flush=True)
 
 PORT = int(os.environ.get('PORT', 8080))
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 # ═══════════════════════════════════════════════════════════════
 # FEATURE FLAG: Route Review
@@ -64,9 +65,13 @@ if RENDER_DISK.exists() and RENDER_DISK.is_dir():
     DB_PATH = RENDER_DISK / 'evacuation.db'
     BACKUP_DIR = RENDER_DISK / 'backups'
 else:
-    DB_PATH = Path(__file__).parent / 'evacuation.db'
-    BACKUP_DIR = Path(__file__).parent / 'backups'
-COMMUNITY_WELFARE_UI_DIST = (Path(__file__).parent / 'community-welfare-ui' / 'dist').resolve()
+    DB_PATH = PROJECT_ROOT / 'evacuation.db'
+    BACKUP_DIR = PROJECT_ROOT / 'backups'
+COMMUNITY_WELFARE_UI_DIST_CANDIDATES = tuple(path.resolve() for path in (
+    PROJECT_ROOT / 'community-welfare-ui' / 'dist',
+    PROJECT_ROOT / 'dist',
+    PROJECT_ROOT / 'static' / 'community-welfare-ui',
+))
 COMMUNITY_WELFARE_UI_REACT_ROUTES = {
     '/admin/nurses/pending-accounts',
     '/admin/nurses/arrival-batches',
@@ -82,8 +87,8 @@ if RENDER_DISK.exists() and RENDER_DISK.is_dir():
     APPROVAL_UPLOADS_DIR = RENDER_DISK / 'approval_uploads'
     NOTE_VERBAL_UPLOADS_DIR = RENDER_DISK / 'note_verbal_uploads'
 else:
-    APPROVAL_UPLOADS_DIR = Path(__file__).parent / 'approval_uploads'
-    NOTE_VERBAL_UPLOADS_DIR = Path(__file__).parent / 'note_verbal_uploads'
+    APPROVAL_UPLOADS_DIR = PROJECT_ROOT / 'approval_uploads'
+    NOTE_VERBAL_UPLOADS_DIR = PROJECT_ROOT / 'note_verbal_uploads'
 
 # OneDrive secondary backup (Microsoft Graph). Set on Render: ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_REFRESH_TOKEN
 
@@ -96,6 +101,16 @@ def _onedrive_env_clean(value):
     if len(s) >= 2 and s[0] == s[-1] and s[0] in '"\'':
         s = s[1:-1].strip()
     return s
+
+
+def community_welfare_ui_dist_dir():
+    for candidate in COMMUNITY_WELFARE_UI_DIST_CANDIDATES:
+        try:
+            if (candidate / 'index.html').is_file():
+                return candidate
+        except Exception:
+            continue
+    return COMMUNITY_WELFARE_UI_DIST_CANDIDATES[0]
 
 
 # OneDrive secondary backup (Microsoft Graph). Set on Render: ONEDRIVE_CLIENT_ID, ONEDRIVE_CLIENT_SECRET, ONEDRIVE_REFRESH_TOKEN
@@ -28768,8 +28783,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
 
     def community_welfare_ui_target(self, rel_path: str):
-        target = (COMMUNITY_WELFARE_UI_DIST / rel_path.lstrip('/')).resolve()
-        if COMMUNITY_WELFARE_UI_DIST not in target.parents and target != COMMUNITY_WELFARE_UI_DIST:
+        dist_dir = community_welfare_ui_dist_dir()
+        target = (dist_dir / rel_path.lstrip('/')).resolve()
+        if dist_dir not in target.parents and target != dist_dir:
             return None
         return target
 
@@ -28788,7 +28804,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def send_community_welfare_ui_index(self):
         index_path = self.community_welfare_ui_target('index.html')
-        if not index_path.is_file():
+        if not index_path or not index_path.is_file():
+            checked_paths = ', '.join(str(path) for path in COMMUNITY_WELFARE_UI_DIST_CANDIDATES)
+            print(f"[CommunityWelfareUI] build missing. Checked: {checked_paths}", flush=True)
             self.send_html(
                 '<html><body style="font-family:Arial,sans-serif;padding:40px">'
                 '<h1>Community Welfare UI build missing</h1>'
