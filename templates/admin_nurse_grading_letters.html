@@ -216,6 +216,16 @@ function qOptions(selected){
   const opts=[['BSN_4Y','BSN Nursing 4 Years'],['POST_RN_BSN','Post RN BSN'],['GENERAL_NURSING_DIPLOMA','General Nursing Diploma'],['NURSING_DIPLOMA','Nursing Diploma'],['MIDWIFERY_ADDITIONAL','Midwifery / Additional Course'],['OTHER','Other']];
   return opts.map(o=>'<option value="'+o[0]+'" '+(selected===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
 }
+function identifierType(value){
+  const opts=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number'];
+  const current=String(value||'').trim().toLowerCase();
+  return opts.find(o=>o.toLowerCase()===current)||'Student Number';
+}
+function identifierOptions(selected){
+  return ['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number']
+    .map(label=>'<option value="'+esc(label)+'" '+(identifierType(selected)===label?'selected':'')+'>'+esc(label)+'</option>')
+    .join('');
+}
 function modeRadios(mode){
   return ['MARKS','PERCENT','GPA'].map(m=>'<label style="display:inline-block;margin-right:12px"><input type="radio" name="e_mode" value="'+m+'" '+(mode===m?'checked':'')+'> '+m+'</label>').join('');
 }
@@ -245,17 +255,19 @@ function actionButtons(a, canManage){
 }
 function renderDetail(d){
   const a=d.application||d.item||{}, n=a.nurse||{}, canManage=!!d.can_manage;
+  const identifierLabel=identifierType(a.student_identifier_type||a.student_no_label||'');
   state.selected=a;
   detail.innerHTML='<div class="cwa-card__head"><div><div class="cwa-card__title">'+esc(a.ref_no||'Grading Letter')+' <span class="gl-status">'+esc(statusText(a.status))+'</span></div><div style="font-size:12px;color:var(--cwa-muted)">Final data: '+esc(moneylessPct(a.final_percentage))+' '+esc(a.final_grade_label||'')+'</div></div><div class="gl-actions">'+actionButtons(a,canManage)+'</div></div>'
     +'<div class="gl-detail-grid">'
     +'<div class="gl-info"><b>Nurse Identity</b>'+esc(n.full_name||'—')+'<br>Passport: '+esc(n.passport_number||'—')+'<br>CNIC: '+esc(n.cnic||'—')+'<br>Civil ID: '+esc(n.civil_id||'—')+'<br>Mobile: '+esc(n.mobile||'—')+'<br>Email: '+esc(n.email||'—')+'</div>'
-    +'<div class="gl-info"><b>Qualification</b>'+esc(a.qualification_label||a.qualification_code||'—')+'<br>'+esc(a.degree_title||'—')+'<br>Student No. '+esc(a.student_no||'—')+'<br>'+esc(a.institute||'—')+'<br>Affiliated with '+esc(a.university||'—')+'<br>'+esc(a.year_of_passing||'—')+'</div>'
+    +'<div class="gl-info"><b>Qualification</b>'+esc(a.qualification_label||a.qualification_code||'—')+'<br>'+esc(a.degree_title||'—')+'<br>'+esc(identifierLabel)+': '+esc(a.student_no||'—')+'<br>'+esc(a.institute||'—')+'<br>Affiliated with '+esc(a.university||'—')+'<br>'+esc(a.year_of_passing||'—')+'</div>'
     +'<div class="gl-info"><b>Grading</b>Mode: '+esc(a.mode||'—')+'<br>Computed: '+esc(moneylessPct(a.computed_percentage))+'<br>Final: '+esc(moneylessPct(a.final_percentage))+'<br>Grade: '+esc(a.final_grade_label||'—')+'</div>'
     +'</div>'
     +'<h3>Edit / Correct Data</h3>'
     +'<div class="cwa-form-row">'
     +'<select id="e_qualification_code" class="cwa-select">'+qOptions(a.qualification_code)+'</select><input id="e_qualification_other" class="cwa-input" placeholder="Other qualification" value="'+esc(a.qualification_other)+'">'
-    +'<input id="e_degree_title" class="cwa-input" placeholder="Degree title" value="'+esc(a.degree_title)+'"><input id="e_student_no" class="cwa-input" placeholder="Student / Roll No." value="'+esc(a.student_no)+'">'
+    +'<input id="e_degree_title" class="cwa-input" placeholder="Degree title" value="'+esc(a.degree_title)+'"><select id="e_student_identifier_type" class="cwa-select">'+identifierOptions(identifierLabel)+'</select>'
+    +'<input id="e_student_no" class="cwa-input" placeholder="Enter the number exactly as printed on your certificate/transcript." value="'+esc(a.student_no)+'">'
     +'<input id="e_institute" class="cwa-input" placeholder="College / Institute" value="'+esc(a.institute)+'"><input id="e_university" class="cwa-input" placeholder="University / Body" value="'+esc(a.university)+'">'
     +'<input id="e_year_of_passing" class="cwa-input" type="number" placeholder="Year" value="'+esc(a.year_of_passing)+'"><input id="e_relation_override" class="cwa-input" placeholder="Relation text for letter" value="'+esc(a.relation_override)+'"></div>'
     +'<div class="cwa-form-row"><div>'+modeRadios(a.mode)+'</div><input id="e_total_marks" class="cwa-input" placeholder="Total marks" value="'+esc(a.total_marks)+'"><input id="e_obtained_marks" class="cwa-input" placeholder="Obtained marks" value="'+esc(a.obtained_marks)+'"><input id="e_entered_percentage" class="cwa-input" placeholder="Percentage" value="'+esc(a.entered_percentage)+'"><input id="e_entered_gpa" class="cwa-input" placeholder="GPA obtained (max 4.00)" value="'+esc(a.entered_gpa)+'"></div>'
@@ -269,7 +281,7 @@ function renderDetail(d){
 }
 function editPayload(){
   const mode=(document.querySelector('input[name="e_mode"]:checked')||{}).value||'MARKS';
-  return {id:state.selected.id,action:'edit',qualification_code:e_qualification_code.value,qualification_other:e_qualification_other.value,degree_title:e_degree_title.value,student_no:e_student_no.value,institute:e_institute.value,university:e_university.value,year_of_passing:e_year_of_passing.value,relation_override:e_relation_override.value,mode,total_marks:e_total_marks.value,obtained_marks:e_obtained_marks.value,entered_percentage:e_entered_percentage.value,entered_gpa:e_entered_gpa.value,internal_notes:e_internal_notes.value};
+  return {id:state.selected.id,action:'edit',qualification_code:e_qualification_code.value,qualification_other:e_qualification_other.value,degree_title:e_degree_title.value,student_identifier_type:e_student_identifier_type.value,student_no:e_student_no.value,institute:e_institute.value,university:e_university.value,year_of_passing:e_year_of_passing.value,relation_override:e_relation_override.value,mode,total_marks:e_total_marks.value,obtained_marks:e_obtained_marks.value,entered_percentage:e_entered_percentage.value,entered_gpa:e_entered_gpa.value,internal_notes:e_internal_notes.value};
 }
 async function doAction(action, extra){
   if(!state.selected) return;

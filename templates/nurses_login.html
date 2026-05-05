@@ -122,6 +122,16 @@
     ];
     return opts.map(o=>'<option value="'+o[0]+'" '+(selected===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
   }
+  function identifierType(value){
+    const opts=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number'];
+    const current=String(value||'').trim().toLowerCase();
+    return opts.find(o=>o.toLowerCase()===current)||'Student Number';
+  }
+  function identifierOptions(selected){
+    return ['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number']
+      .map(label=>'<option value="'+esc(label)+'" '+(identifierType(selected)===label?'selected':'')+'>'+esc(label)+'</option>')
+      .join('');
+  }
   function appRows(apps){
     if(!apps||!apps.length) return '<p class="muted">No previous grading letter requests found.</p>';
     return '<h4>Previous Grading Letter Requests</h4><div class="portal-table-wrap"><table><thead><tr><th>Reference</th><th>Qualification</th><th>Final %</th><th>Grade</th><th>Status</th></tr></thead><tbody>'
@@ -135,7 +145,8 @@
       +'<div><label>Qualification Type</label><select id="gl_qualification_code">'+qualificationOptions(app.qualification_code||'')+'</select></div>'
       +'<div id="glOtherWrap" style="display:none"><label>Other qualification text</label><input id="gl_qualification_other" value="'+esc(app.qualification_other)+'"></div>'
       +'<div><label>Degree Title as printed on certificate</label><input id="gl_degree_title" value="'+esc(app.degree_title)+'"></div>'
-      +'<div><label>Student / Roll No.</label><input id="gl_student_no" value="'+esc(app.student_no)+'"></div>'
+      +'<div><label>Identifier Type</label><select id="gl_student_identifier_type">'+identifierOptions(app.student_identifier_type||app.student_no_label||'')+'</select></div>'
+      +'<div><label>Identifier Value</label><input id="gl_student_no" placeholder="Enter the number exactly as printed on your certificate/transcript." value="'+esc(app.student_no)+'"></div>'
       +'<div><label>College / Institute</label><input id="gl_institute" value="'+esc(app.institute)+'"></div>'
       +'<div><label>University / Affiliating Body</label><input id="gl_university" value="'+esc(app.university)+'"></div>'
       +'<div><label>Year of Passing</label><input id="gl_year_of_passing" type="number" min="1950" max="2030" value="'+esc(app.year_of_passing)+'"></div>'
@@ -162,6 +173,7 @@
       qualification_code:gl_qualification_code.value,
       qualification_other:gl_qualification_other.value,
       degree_title:gl_degree_title.value,
+      student_identifier_type:gl_student_identifier_type.value,
       student_no:gl_student_no.value,
       institute:gl_institute.value,
       university:gl_university.value,
@@ -195,7 +207,8 @@
         if(g>=0 && g<=4) pct=g/4*100;
         else if(gl_entered_gpa.value) validation='GPA cannot exceed 4.00.';
       }
-      const required=[gl_degree_title.value,gl_student_no.value,gl_institute.value,gl_university.value,gl_year_of_passing.value,gl_qualification_code.value];
+      if(!gl_student_identifier_type.value) validation='Please select an identifier type.';
+      const required=[gl_degree_title.value,gl_student_identifier_type.value,gl_student_no.value,gl_institute.value,gl_university.value,gl_year_of_passing.value,gl_qualification_code.value];
       if(gl_qualification_code.value==='OTHER') required.push(gl_qualification_other.value);
       const complete=required.every(v=>String(v||'').trim()) && isFinite(pct) && gl_declaration.checked;
       glPreviewPct.textContent=isFinite(pct)?pct.toFixed(2)+'%':'—';

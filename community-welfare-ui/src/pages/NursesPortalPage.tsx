@@ -84,6 +84,8 @@ type GradingApplication = {
   qualification_label?: string;
   degree_title?: string;
   student_no?: string;
+  student_identifier_type?: string;
+  student_no_label?: string;
   institute?: string;
   university?: string;
   year_of_passing?: number | string;
@@ -113,6 +115,7 @@ type GradingFormState = {
   application_id: number | null;
   qualification_code: string;
   degree_title: string;
+  student_identifier_type: string;
   student_no: string;
   institute: string;
   university: string;
@@ -137,6 +140,14 @@ const GRADING_QUALIFICATIONS = [
   { value: "SPECIALIZATION_MIDWIFERY", label: "Specialization / Midwifery" },
 ];
 const GRADING_ALLOWED_QUALIFICATION_CODES = new Set(GRADING_QUALIFICATIONS.map((item) => item.value));
+const GRADING_IDENTIFIER_TYPES = [
+  "Student Number",
+  "Seat Number",
+  "Registration Number",
+  "Enrollment Number",
+  "Roll Number",
+] as const;
+const GRADING_IDENTIFIER_TYPE_SET = new Set<string>(GRADING_IDENTIFIER_TYPES);
 
 function normalizeMtonNumber(value: string) {
   const raw = (value || "").trim().toUpperCase();
@@ -153,6 +164,12 @@ function normalizeQualificationCode(code: string) {
   const normalized = (code || "").trim().toUpperCase();
   if (normalized === "MIDWIFERY_ADDITIONAL") return "SPECIALIZATION_MIDWIFERY";
   return normalized;
+}
+
+function normalizeGradingIdentifierType(value: string) {
+  const raw = (value || "").trim().toLowerCase();
+  const match = GRADING_IDENTIFIER_TYPES.find((label) => label.toLowerCase() === raw);
+  return match || "Student Number";
 }
 
 function normalizeRequestError(error: unknown, fallback: string) {
@@ -181,6 +198,9 @@ function createGradingForm(application?: GradingApplication | null): GradingForm
     application_id: typeof application?.id === "number" ? application.id : null,
     qualification_code: GRADING_ALLOWED_QUALIFICATION_CODES.has(qualificationCode) ? qualificationCode : "",
     degree_title: application?.degree_title || "",
+    student_identifier_type: normalizeGradingIdentifierType(
+      application?.student_identifier_type || application?.student_no_label || ""
+    ),
     student_no: application?.student_no || "",
     institute: application?.institute || "",
     university: application?.university || "",
@@ -264,10 +284,20 @@ function computeGradingPreview(form: GradingFormState) {
   const commonComplete =
     !!form.qualification_code.trim() &&
     !!form.degree_title.trim() &&
+    !!form.student_identifier_type.trim() &&
     !!form.student_no.trim() &&
     !!form.institute.trim() &&
     !!form.university.trim() &&
     !!form.year_of_passing.trim();
+
+  if (!GRADING_IDENTIFIER_TYPE_SET.has(form.student_identifier_type.trim())) {
+    return {
+      percentage: null,
+      gradeLabel: DASH_VALUE,
+      validationMessage: "Please select a valid identifier type.",
+      canSubmit: false,
+    };
+  }
 
   let percentage: number | null = null;
   let validationMessage = "";
@@ -764,6 +794,7 @@ export function NursesPortalPage() {
       qualification_code: gradingForm.qualification_code,
       qualification_other: "",
       degree_title: gradingForm.degree_title.trim(),
+      student_identifier_type: gradingForm.student_identifier_type.trim(),
       student_no: gradingForm.student_no.trim(),
       institute: gradingForm.institute.trim(),
       university: gradingForm.university.trim(),
@@ -1255,6 +1286,12 @@ export function NursesPortalPage() {
                     )}
                   </p>
                   <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                    {normalizeGradingIdentifierType(
+                      gradingActiveRequest.student_identifier_type || gradingActiveRequest.student_no_label || ""
+                    )}
+                    : {gradingActiveRequest.student_no || DASH_VALUE}
+                  </p>
+                  <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
                     Submitted date: {gradingActiveRequest.submitted_at || gradingActiveRequest.created_at || DASH_VALUE}
                   </p>
                   {gradingActiveRequest.correction_notes ? (
@@ -1334,9 +1371,29 @@ export function NursesPortalPage() {
                     />
                   </label>
                   <label>
-                    Student / Roll No.
+                    Identifier Type
+                    <select
+                      className="f-input"
+                      value={gradingForm.student_identifier_type}
+                      onChange={(e) =>
+                        setGradingForm({
+                          ...gradingForm,
+                          student_identifier_type: normalizeGradingIdentifierType(e.target.value),
+                        })
+                      }
+                    >
+                      {GRADING_IDENTIFIER_TYPES.map((label) => (
+                        <option key={label} value={label}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Identifier Value
                     <input
                       className="f-input"
+                      placeholder="Enter the number exactly as printed on your certificate/transcript."
                       value={gradingForm.student_no}
                       onChange={(e) => setGradingForm({ ...gradingForm, student_no: e.target.value })}
                     />
@@ -1517,6 +1574,10 @@ export function NursesPortalPage() {
                       </div>
                       <p style={{ fontSize: 12, color: "#5B6773", margin: "8px 0 4px" }}>
                         Qualification: {qualificationLabelFromCode(item.qualification_code || "", item.qualification_other || "")}
+                      </p>
+                      <p style={{ fontSize: 12, color: "#5B6773", margin: 0 }}>
+                        {normalizeGradingIdentifierType(item.student_identifier_type || item.student_no_label || "")}:{" "}
+                        {item.student_no || DASH_VALUE}
                       </p>
                       <p style={{ fontSize: 12, color: "#5B6773", margin: 0 }}>
                         Final %: {formatGradingPercent(item.final_percentage)} | Grade: {item.final_grade_label || DASH_VALUE}

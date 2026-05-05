@@ -237,6 +237,7 @@ def _init_grading_letter_db(db):
         qualification_other TEXT DEFAULT '',
         degree_title TEXT DEFAULT '',
         student_no TEXT DEFAULT '',
+        student_identifier_type TEXT DEFAULT 'Student Number',
         institute TEXT DEFAULT '',
         university TEXT DEFAULT '',
         year_of_passing INTEGER,
@@ -381,6 +382,7 @@ def _nh_ensure_schema(db):
             ('qualification_other', "TEXT DEFAULT ''"),
             ('degree_title', "TEXT DEFAULT ''"),
             ('student_no', "TEXT DEFAULT ''"),
+            ('student_identifier_type', "TEXT DEFAULT 'Student Number'"),
             ('institute', "TEXT DEFAULT ''"),
             ('university', "TEXT DEFAULT ''"),
             ('year_of_passing', 'INTEGER'),
@@ -8645,6 +8647,14 @@ GL_STATUSES = {
 GL_ACTIVE_STATUSES = {'SUBMITTED', 'UNDER_REVIEW', 'CORRECTION_REQUIRED', 'APPROVED', 'LETTER_GENERATED'}
 GL_TERMINAL_STATUSES = {'ISSUED', 'REJECTED', 'CANCELLED'}
 GL_GRADE_LABELS = {'Excellent', 'Very Good', 'Good', 'Pass', 'Fail'}
+GL_STUDENT_IDENTIFIER_TYPES = (
+    'Student Number',
+    'Seat Number',
+    'Registration Number',
+    'Enrollment Number',
+    'Roll Number',
+)
+GL_DEFAULT_STUDENT_IDENTIFIER_TYPE = 'Student Number'
 
 
 def _gl_feature_enabled():
@@ -8672,6 +8682,25 @@ def _gl_qualification_label(code, qualification_other=''):
     if normalized in GL_LEGACY_QUALIFICATION_LABELS:
         return GL_LEGACY_QUALIFICATION_LABELS[normalized]
     return normalized or ''
+
+
+def _gl_normalize_student_identifier_type(value, required=True):
+    raw = _gl_clean_text(value, 80)
+    if not raw:
+        if required:
+            raise ValueError('Identifier type is required.')
+        return ''
+    for label in GL_STUDENT_IDENTIFIER_TYPES:
+        if raw.lower() == label.lower():
+            return label
+    raise ValueError('Please select a valid identifier type.')
+
+
+def _gl_student_identifier_type(value, legacy_label=GL_DEFAULT_STUDENT_IDENTIFIER_TYPE):
+    try:
+        return _gl_normalize_student_identifier_type(value, required=False) or legacy_label
+    except ValueError:
+        return legacy_label
 
 
 def _gl_to_float(value, field_label):
@@ -8879,13 +8908,18 @@ def _gl_validate_application_payload(data, db):
     if qualification_code not in GL_QUALIFICATIONS:
         raise ValueError('Please select BSN Nursing 4 Years, Post RN BSN, General Nursing Diploma, or Specialization / Midwifery.')
     degree_title = _gl_clean_text(data.get('degree_title'), 220)
+    student_identifier_type = _gl_normalize_student_identifier_type(
+        data.get('student_identifier_type') or data.get('student_no_label')
+    )
     student_no = _gl_clean_text(data.get('student_no') or data.get('roll_no'), 120)
     institute = _gl_clean_text(data.get('institute') or data.get('college'), 220)
     university = _gl_clean_text(data.get('university') or data.get('affiliating_body'), 220)
     if not degree_title:
         raise ValueError('Degree title is required.')
+    if not student_identifier_type:
+        raise ValueError('Identifier type is required.')
     if not student_no:
-        raise ValueError('Student / Roll No. is required.')
+        raise ValueError('Identifier value is required.')
     if not institute:
         raise ValueError('College / Institute is required.')
     if not university:
@@ -8913,6 +8947,7 @@ def _gl_validate_application_payload(data, db):
         'qualification_other': '',
         'degree_title': degree_title,
         'student_no': student_no,
+        'student_identifier_type': student_identifier_type,
         'institute': institute,
         'university': university,
         'year_of_passing': year_of_passing,
@@ -8931,6 +8966,10 @@ def _gl_validate_application_payload(data, db):
 def _gl_application_dict(row):
     d = dict(row or {})
     status = d.get('status') or 'SUBMITTED'
+    d['student_identifier_type'] = _gl_student_identifier_type(
+        d.get('student_identifier_type') or d.get('student_no_label')
+    )
+    d['student_no_label'] = d['student_identifier_type']
     d['qualification_label'] = _gl_qualification_label(d.get('qualification_code') or '', d.get('qualification_other') or '')
     d['letter_available'] = bool((d.get('letter_pdf_path') or '').strip())
     d['can_nurse_edit'] = status == 'CORRECTION_REQUIRED'
@@ -9025,13 +9064,13 @@ def api_gl_nurse_submit(data):
         ref_no = _gl_next_ref_no(db)
         cols = [
             'ref_no', 'nurse_id', 'qualification_code', 'qualification_other', 'degree_title',
-            'student_no', 'institute', 'university', 'year_of_passing', 'mode', 'total_marks',
+            'student_no', 'student_identifier_type', 'institute', 'university', 'year_of_passing', 'mode', 'total_marks',
             'obtained_marks', 'entered_percentage', 'entered_gpa', 'computed_percentage',
             'final_percentage', 'final_grade_label', 'scale_version_id', 'status', 'submitted_at'
         ]
         vals = [
             ref_no, nurse.get('id'), payload['qualification_code'], payload['qualification_other'],
-            payload['degree_title'], payload['student_no'], payload['institute'], payload['university'],
+            payload['degree_title'], payload['student_no'], payload['student_identifier_type'], payload['institute'], payload['university'],
             payload['year_of_passing'], payload['mode'], payload['total_marks'], payload['obtained_marks'],
             payload['entered_percentage'], payload['entered_gpa'], payload['computed_percentage'],
             payload['final_percentage'], payload['final_grade_label'], payload['scale_version_id'],
@@ -10922,6 +10961,7 @@ def _gl_letter_text(app):
     nurse = d.get('nurse') or {}
     pct = '' if d.get('final_percentage') is None else f"{float(d.get('final_percentage')):.2f}"
     relation = _gl_clean_text(d.get('relation_override'), 160)
+    identifier_label = _gl_student_identifier_type(d.get('student_identifier_type'))
     if not relation:
         father = _gl_clean_text(nurse.get('father_name'), 140)
         relation = f"D/o/S/o {father}".strip()
@@ -10934,7 +10974,7 @@ def _gl_letter_text(app):
         f"{nurse.get('full_name') or ''} {relation} "
         f"and holding Pakistani Passport No. {nurse.get('passport_number') or ''}, passed the examination of:\n\n"
         f"{d.get('degree_title') or ''}\n"
-        f"Student No. {d.get('student_no') or ''}\n\n"
+        f"{identifier_label}: {d.get('student_no') or ''}\n\n"
         f"{d.get('institute') or ''}\n"
         f"Affiliated with {d.get('university') or ''}\n"
         f"{d.get('year_of_passing') or ''}\n"
@@ -11060,6 +11100,7 @@ def api_admin_gl_detail(app_id, user):
             'letter_preview': _gl_letter_text(row),
             'can_manage': gl_user_can_manage(user),
             'qualification_options': [{'code': code, 'label': label} for code, label in GL_QUALIFICATIONS.items()],
+            'student_identifier_options': list(GL_STUDENT_IDENTIFIER_TYPES),
         }
     finally:
         db.close()
