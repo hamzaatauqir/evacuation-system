@@ -419,14 +419,11 @@ function relationLabelForGender(gender?: string) {
   return normalized === "male" || normalized === "m" ? "S/o" : "D/o";
 }
 
-function qualificationSubtitleFromForm(form: GradingFormState) {
-  const title = form.degree_title.trim().toLowerCase();
-  if (form.qualification_code === "SPECIALIZATION_MIDWIFERY" && !title.includes("midwifery")) {
-    return "Specialization / Midwifery";
-  }
-  if (form.qualification_code === "POST_RN_BSN" && !title.includes("post rn")) {
-    return "Post RN BSN";
-  }
+function qualificationSubtitleFromForm(_form: GradingFormState) {
+  // Per accepted Embassy sample: never auto-add a parenthetical that duplicates
+  // the qualification (e.g., "BSN Nursing" + "(Post RN BSN)"). The degree
+  // title is the canonical label; an explicit subtype like "(Generic)" must be
+  // entered into degree_title itself by the applicant or admin.
   return "";
 }
 
@@ -523,17 +520,44 @@ function OfficialLetterPreview(props: {
       </div>
 
       <div
-        className="grading-preview-shell"
+        role="note"
+        style={{
+          background: "#FEF3C7",
+          border: "1px solid #FDE68A",
+          color: "#7c2d12",
+          borderRadius: 10,
+          padding: "10px 12px",
+          fontSize: 13,
+          lineHeight: 1.55,
+          maxWidth: 794,
+          margin: "0 auto",
+        }}
+      >
+        This preview is not an official Embassy letter and cannot be used for MOH or any other official purpose.
+        It is only for checking spelling and data before submission.
+        <br />
+        <span dir="rtl">هذه نسخة معاينة فقط وليست كتاباً رسمياً ولا تصلح للاستخدام لدى وزارة الصحة أو أي جهة رسمية.</span>
+      </div>
+
+      <div
+        className="grading-letter-page grading-preview-shell"
         style={{
           position: "relative",
           background: "#fff",
           border: "1px solid #D9E2EC",
-          borderRadius: 12,
-          padding: "32px 22px 20px",
+          borderRadius: 6,
+          padding: "54px 56px 36px",
           color: "#000",
           overflow: "hidden",
           boxShadow: "0 18px 44px rgba(15, 23, 42, 0.08)",
           fontFamily: '"Times New Roman", Georgia, serif',
+          width: "100%",
+          maxWidth: 794,
+          minHeight: 1123,
+          margin: "0 auto",
+          boxSizing: "border-box",
+          display: "flex",
+          flexDirection: "column",
         }}
       >
         <div
@@ -545,38 +569,46 @@ function OfficialLetterPreview(props: {
             alignItems: "center",
             justifyContent: "center",
             pointerEvents: "none",
-            opacity: 0.12,
+            zIndex: 0,
           }}
         >
           <div
             style={{
               transform: "rotate(-28deg)",
               textAlign: "center",
-              fontSize: "clamp(24px, 5vw, 42px)",
-              fontWeight: 700,
-              letterSpacing: "0.08em",
-              color: "#163d63",
-              lineHeight: 1.35,
+              fontSize: "clamp(28px, 5.4vw, 52px)",
+              fontWeight: 800,
+              letterSpacing: "0.06em",
+              color: "rgba(185, 28, 28, 0.16)",
+              lineHeight: 1.25,
             }}
           >
-            NOT OFFICIAL USE ONLY
+            NOT OFFICIAL FOR MOH USE
             <br />
-            للاطلاع فقط - غير رسمي
+            PREVIEW ONLY
+            <br />
+            <span dir="rtl" style={{ fontSize: "0.7em" }}>غير رسمي ولا يستخدم لدى وزارة الصحة</span>
+            <br />
+            <span dir="rtl" style={{ fontSize: "0.7em" }}>للمراجعة فقط</span>
           </div>
         </div>
 
-        <div style={{ position: "relative", zIndex: 1 }}>
+        <div style={{ position: "relative", zIndex: 1, flex: "1 1 auto" }}>
           <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 12, alignItems: "start" }}>
             <div style={{ display: "flex", justifyContent: "flex-start" }}>
-              <img src="/images/pakistan-emblem.png" alt="Embassy crest" style={{ width: 82, height: "auto" }} />
+              <img
+                src="/images/gop-emblem.png"
+                alt="Government of Pakistan emblem"
+                style={{ width: 84, height: "auto", objectFit: "contain", display: "block" }}
+              />
             </div>
             <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.2 }}>
+              <div style={{ fontSize: 19, fontWeight: 700, lineHeight: 1.2 }}>
                 Embassy of Islamic Republic of Pakistan
                 <br />
                 Kuwait
               </div>
-              <div dir="rtl" style={{ marginTop: 8, fontSize: 17, fontWeight: 700, lineHeight: 1.35 }}>
+              <div dir="rtl" style={{ marginTop: 6, fontSize: 17, fontWeight: 700, lineHeight: 1.35 }}>
                 سفارة جمهورية باكستان الإسلامية
                 <br />
                 الكويت
@@ -584,18 +616,18 @@ function OfficialLetterPreview(props: {
             </div>
           </div>
 
-          <div style={{ marginTop: 26, fontSize: 18 }}>No. Pol-II/18/2021 (Attestation)</div>
+          <div style={{ marginTop: 24, fontSize: 16 }}>No. Pol-II/18/2021 (Attestation)</div>
 
-          <div style={{ margin: "22px 0 18px", textAlign: "center", fontSize: 22, fontWeight: 700, textDecoration: "underline" }}>
+          <div style={{ margin: "22px 0 16px", textAlign: "center", fontSize: 20, fontWeight: 700, textDecoration: "underline" }}>
             TO WHOM IT MAY CONCERN
           </div>
 
-          <div style={{ fontSize: 18, lineHeight: 1.95, maxWidth: 760, margin: "0 auto 18px" }}>
+          <div style={{ fontSize: 16, lineHeight: 1.85, maxWidth: 680, margin: "0 auto 16px" }}>
             This is to certify that according to the documents produced in this Embassy, {letter.applicantName}
             <br />
             {letter.relationText} and holding Pakistani Passport No. {letter.passportNumber}, passed
             <br />
-            the examination of.
+            the examination of:
           </div>
 
           <div
@@ -603,9 +635,9 @@ function OfficialLetterPreview(props: {
               display: "grid",
               gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))",
               gap: 18,
-              margin: "22px 0 28px",
+              margin: "18px 0 22px",
               textAlign: "center",
-              fontSize: 17,
+              fontSize: 16,
               lineHeight: 1.45,
             }}
           >
@@ -622,28 +654,29 @@ function OfficialLetterPreview(props: {
             </div>
           </div>
 
-          <div style={{ fontSize: 18, lineHeight: 1.95, maxWidth: 760, margin: "0 auto" }}>
+          <div style={{ fontSize: 16, lineHeight: 1.85, maxWidth: 680, margin: "0 auto" }}>
             This certificate is issued on the request of the applicant without any liability on the part
             <br />
             of this Embassy whatsoever.
           </div>
+        </div>
 
-          <div style={{ height: 180 }} />
-
-          <div
-            style={{
-              borderTop: "1px solid #111",
-              paddingTop: 8,
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
-              gap: 8,
-              fontSize: 15,
-            }}
-          >
-            <div>Telephone: 00965-25354073/25327651</div>
-            <div style={{ textAlign: "center" }}>Fax: 00965-25327648</div>
-            <div style={{ textAlign: "right" }}>Email: parepkuwait@mofa.gov.pk</div>
-          </div>
+        <div
+          style={{
+            position: "relative",
+            zIndex: 1,
+            marginTop: "auto",
+            borderTop: "1px solid #111",
+            paddingTop: 10,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+            gap: 8,
+            fontSize: 14,
+          }}
+        >
+          <div>Telephone: 00965-25354073/25327651</div>
+          <div style={{ textAlign: "center" }}>Fax: 00965-25327648</div>
+          <div style={{ textAlign: "right" }}>Email: parepkuwait@mofa.gov.pk</div>
         </div>
       </div>
     </div>

@@ -9039,12 +9039,13 @@ def _gl_relation_label(gender=''):
 
 
 def _gl_qualification_subtitle(app):
-    code = _gl_normalize_qualification_code((app or {}).get('qualification_code') or '')
-    title = _gl_clean_text((app or {}).get('degree_title'), 220).lower()
-    if code == 'SPECIALIZATION_MIDWIFERY' and 'midwifery' not in title:
-        return 'Specialization / Midwifery'
-    if code == 'POST_RN_BSN' and 'post rn' not in title:
-        return 'Post RN BSN'
+    """Return a parenthetical subtitle ONLY when the qualification adds clarifying
+    information that the degree title does not already convey, e.g., a 'Generic'
+    subtype. The accepted Embassy sample never duplicates the qualification under
+    the degree title (e.g., never prints 'BSN Nursing' above '(Post RN BSN)').
+    For all current qualification codes, return ''. Kept as a hook for future
+    approved subtypes such as '(Generic)'.
+    """
     return ''
 
 
@@ -11488,7 +11489,7 @@ def _gl_letter_context(app):
         'relation_text': relation_text,
         'certificate_line_1': 'This is to certify that according to the documents produced in this Embassy,',
         'certificate_line_2': certificate_line_2,
-        'certificate_line_3': 'the examination of.',
+        'certificate_line_3': 'the examination of:',
         'footer_telephone': GL_OFFICIAL_TELEPHONE,
         'footer_fax': GL_OFFICIAL_FAX,
         'footer_email': GL_OFFICIAL_EMAIL,
@@ -11510,8 +11511,7 @@ def _gl_letter_text(app):
         "الكويت\n\n"
         f"{letter['reference_line']}\n\n"
         "TO WHOM IT MAY CONCERN\n\n"
-        f"{letter['certificate_line_1']}\n"
-        f"{letter['applicant_name']}\n"
+        f"{letter['certificate_line_1']} {letter['applicant_name']}\n"
         f"{letter['relation_text']} and holding {passport_line}, passed\n"
         f"{letter['certificate_line_3']}\n\n"
         f"{letter['degree_title']}\n"
@@ -11522,17 +11522,35 @@ def _gl_letter_text(app):
         f"{letter['year_of_passing']}\n"
         f"{letter['final_result_text']}\n\n"
         "This certificate is issued on the request of the applicant without any liability on the part\n"
-        "of this Embassy whatsoever."
+        "of this Embassy whatsoever.\n\n"
+        f"Telephone: {letter['footer_telephone']}    Fax: {letter['footer_fax']}    Email: {letter['footer_email']}"
     )
 
 
 def _gl_preview_html(letter, include_watermark=False, preview_title=''):
-    emblem = _embassy_letterhead_data_url()
+    """Render the grading letter HTML.
+
+    The HTML is reused for: nurse-side preview (include_watermark=True),
+    admin-side preview before generation (include_watermark=True), and the
+    PyMuPDF-rendered official PDF (include_watermark=False) — see _gl_build_pdf_bytes.
+    Page is sized to A4 portrait (~794px x ~1123px at 96dpi) with the footer
+    anchored near the bottom via flex layout.
+    """
+    emblem = _gop_emblem_data_url()
     watermark_html = ''
+    notice_html = ''
     if include_watermark:
         watermark_html = (
-            '<div class="gl-official-letter__watermark">'
-            '<div>NOT OFFICIAL USE ONLY<br>للاطلاع فقط - غير رسمي</div>'
+            '<div class="gl-official-letter__watermark" aria-hidden="true">'
+            '<div class="gl-official-letter__watermark-text">NOT OFFICIAL FOR MOH USE<br>PREVIEW ONLY<br>'
+            '<span dir="rtl">غير رسمي ولا يستخدم لدى وزارة الصحة<br>للمراجعة فقط</span></div>'
+            '</div>'
+        )
+        notice_html = (
+            '<div class="gl-official-letter__notice" role="note">'
+            'This preview is not an official Embassy letter and cannot be used for MOH or any other official purpose. '
+            'It is only for checking spelling and data before submission.'
+            '<br><span dir="rtl">هذه نسخة معاينة فقط وليست كتاباً رسمياً ولا تصلح للاستخدام لدى وزارة الصحة أو أي جهة رسمية.</span>'
             '</div>'
         )
     preview_banner = (
@@ -11545,80 +11563,83 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
     return f"""
 <style>
 .gl-official-letter__preview-title{{font-family:Georgia,"Times New Roman",serif;font-size:18px;font-weight:700;color:#102a43;margin:0 0 10px;text-align:left}}
-.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:8px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:36px 34px 24px;font-family:"Times New Roman",Georgia,serif;line-height:1.42;max-width:920px;margin:0 auto;box-sizing:border-box;overflow:hidden}}
+.gl-official-letter__notice{{font-family:Georgia,"Times New Roman",serif;font-size:13px;line-height:1.55;color:#7c2d12;background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:10px 12px;margin:0 auto 12px;max-width:794px}}
+.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:6px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:54px 56px 36px;font-family:"Times New Roman",Georgia,serif;line-height:1.42;width:100%;max-width:794px;min-height:1123px;margin:0 auto;box-sizing:border-box;overflow:hidden;display:flex;flex-direction:column}}
 .gl-official-letter__watermark{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0}}
-.gl-official-letter__watermark div{{transform:rotate(-28deg);font-size:40px;line-height:1.3;text-align:center;font-weight:700;letter-spacing:.08em;color:rgba(11,54,97,.12)}}
+.gl-official-letter__watermark-text{{transform:rotate(-28deg);font-size:48px;line-height:1.25;text-align:center;font-weight:800;letter-spacing:.06em;color:rgba(185,28,28,.16);text-shadow:0 1px 2px rgba(0,0,0,0.04)}}
 .gl-official-letter > *{{position:relative;z-index:1}}
 .gl-official-letter table{{width:100%;border-collapse:collapse}}
 .gl-official-letter__header td{{vertical-align:top}}
-.gl-official-letter__crest{{width:150px;text-align:left}}
-.gl-official-letter__crest img{{width:86px;height:auto;display:block}}
+.gl-official-letter__crest{{width:120px;text-align:left}}
+.gl-official-letter__crest img{{width:84px;height:auto;display:block;object-fit:contain}}
 .gl-official-letter__heading{{text-align:center}}
-.gl-official-letter__heading-en{{font-size:20px;font-weight:700;line-height:1.2}}
-.gl-official-letter__heading-ar{{margin-top:8px;font-size:18px;font-weight:700;line-height:1.35;direction:rtl}}
-.gl-official-letter__ref{{margin-top:28px;font-size:18px}}
-.gl-official-letter__title{{margin:22px 0 20px;text-align:center;font-size:22px;font-weight:700;text-decoration:underline}}
-.gl-official-letter__para{{font-size:18px;line-height:1.95;text-align:left;margin:0 auto 20px;max-width:760px}}
-.gl-official-letter__grid{{margin:22px 0 30px}}
-.gl-official-letter__grid td{{width:50%;padding:0 14px;text-align:center;vertical-align:top;font-size:17px;line-height:1.4}}
+.gl-official-letter__heading-en{{font-size:19px;font-weight:700;line-height:1.2}}
+.gl-official-letter__heading-ar{{margin-top:6px;font-size:17px;font-weight:700;line-height:1.35;direction:rtl}}
+.gl-official-letter__ref{{margin-top:24px;font-size:16px}}
+.gl-official-letter__title{{margin:22px 0 16px;text-align:center;font-size:20px;font-weight:700;text-decoration:underline}}
+.gl-official-letter__para{{font-size:16px;line-height:1.85;text-align:left;margin:0 auto 16px;max-width:680px}}
+.gl-official-letter__grid{{margin:18px 0 22px}}
+.gl-official-letter__grid td{{width:50%;padding:0 14px;text-align:center;vertical-align:top;font-size:16px;line-height:1.45}}
 .gl-official-letter__cell-line{{display:block}}
-.gl-official-letter__liability{{margin-top:18px;max-width:760px}}
-.gl-official-letter__spacer{{height:280px}}
-.gl-official-letter__footer td{{font-size:15px;padding-top:8px;border-top:1px solid #111}}
+.gl-official-letter__liability{{margin-top:14px;max-width:680px}}
+.gl-official-letter__body{{flex:1 1 auto}}
+.gl-official-letter__footer{{margin-top:auto;padding-top:10px;border-top:1px solid #111}}
+.gl-official-letter__footer td{{font-size:14px;padding-top:6px;vertical-align:top}}
 .gl-official-letter__footer-mid{{text-align:center}}
 .gl-official-letter__footer-right{{text-align:right}}
-@media (max-width: 760px) {{
-  .gl-official-letter{{padding:24px 18px 18px}}
-  .gl-official-letter__heading-en{{font-size:18px}}
-  .gl-official-letter__heading-ar{{font-size:16px}}
-  .gl-official-letter__ref{{font-size:16px}}
-  .gl-official-letter__title{{font-size:20px}}
-  .gl-official-letter__para{{font-size:16px;line-height:1.8}}
-  .gl-official-letter__grid td{{display:block;width:100%;padding:0 0 18px}}
-  .gl-official-letter__spacer{{height:140px}}
-  .gl-official-letter__footer td{{display:block;text-align:left!important;padding-top:4px;border-top:none}}
+@media (max-width: 820px) {{
+  .gl-official-letter{{padding:32px 22px 24px;min-height:auto}}
+  .gl-official-letter__heading-en{{font-size:17px}}
+  .gl-official-letter__heading-ar{{font-size:15px}}
+  .gl-official-letter__ref{{font-size:15px}}
+  .gl-official-letter__title{{font-size:18px}}
+  .gl-official-letter__para{{font-size:15px;line-height:1.7}}
+  .gl-official-letter__grid td{{display:block;width:100%;padding:0 0 14px}}
+  .gl-official-letter__footer td{{display:block;text-align:left!important;padding-top:4px}}
   .gl-official-letter__footer-mid,.gl-official-letter__footer-right{{text-align:left}}
 }}
 </style>
 {preview_banner}
-<div class="gl-official-letter">
+{notice_html}
+<div class="gl-official-letter grading-letter-page">
   {watermark_html}
-  <table class="gl-official-letter__header">
-    <tr>
-      <td class="gl-official-letter__crest">{f'<img src="{emblem}" alt="Embassy crest">' if emblem else ''}</td>
-      <td class="gl-official-letter__heading">
-        <div class="gl-official-letter__heading-en">Embassy of Islamic Republic of Pakistan<br>Kuwait</div>
-        <div class="gl-official-letter__heading-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
-      </td>
-    </tr>
-  </table>
-  <div class="gl-official-letter__ref">{esc(letter['reference_line'])}</div>
-  <div class="gl-official-letter__title">TO WHOM IT MAY CONCERN</div>
-  <div class="gl-official-letter__para">
-    {esc(letter['certificate_line_1'])} {esc(letter['applicant_name'])}<br>
-    {esc(letter['certificate_line_2'])}<br>
-    {esc(letter['certificate_line_3'])}
+  <div class="gl-official-letter__body">
+    <table class="gl-official-letter__header">
+      <tr>
+        <td class="gl-official-letter__crest">{f'<img src="{emblem}" alt="Government of Pakistan emblem">' if emblem else ''}</td>
+        <td class="gl-official-letter__heading">
+          <div class="gl-official-letter__heading-en">Embassy of Islamic Republic of Pakistan<br>Kuwait</div>
+          <div class="gl-official-letter__heading-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
+        </td>
+      </tr>
+    </table>
+    <div class="gl-official-letter__ref">{esc(letter['reference_line'])}</div>
+    <div class="gl-official-letter__title">TO WHOM IT MAY CONCERN</div>
+    <div class="gl-official-letter__para">
+      {esc(letter['certificate_line_1'])} {esc(letter['applicant_name'])}<br>
+      {esc(letter['certificate_line_2'])}<br>
+      {esc(letter['certificate_line_3'])}
+    </div>
+    <table class="gl-official-letter__grid">
+      <tr>
+        <td>
+          <span class="gl-official-letter__cell-line">{esc(letter['degree_title'])}</span>
+          {subtitle_html}
+          <span class="gl-official-letter__cell-line">{esc(letter['identifier_label'])} {esc(letter['identifier_value'])}</span>
+        </td>
+        <td>
+          <span class="gl-official-letter__cell-line">{esc(letter['institute'])}</span>
+          <span class="gl-official-letter__cell-line">Affiliated with {esc(letter['university'])}</span>
+          <span class="gl-official-letter__cell-line">{esc(letter['year_of_passing'])}</span>
+          <span class="gl-official-letter__cell-line">{esc(letter['final_result_text'])}</span>
+        </td>
+      </tr>
+    </table>
+    <div class="gl-official-letter__para gl-official-letter__liability">
+      This certificate is issued on the request of the applicant without any liability on the part<br>
+      of this Embassy whatsoever.
+    </div>
   </div>
-  <table class="gl-official-letter__grid">
-    <tr>
-      <td>
-        <span class="gl-official-letter__cell-line">{esc(letter['degree_title'])}</span>
-        {subtitle_html}
-        <span class="gl-official-letter__cell-line">{esc(letter['identifier_label'])} {esc(letter['identifier_value'])}</span>
-      </td>
-      <td>
-        <span class="gl-official-letter__cell-line">{esc(letter['institute'])}</span>
-        <span class="gl-official-letter__cell-line">Affiliated with {esc(letter['university'])}</span>
-        <span class="gl-official-letter__cell-line">{esc(letter['year_of_passing'])}</span>
-        <span class="gl-official-letter__cell-line">{esc(letter['final_result_text'])}</span>
-      </td>
-    </tr>
-  </table>
-  <div class="gl-official-letter__para gl-official-letter__liability">
-    This certificate is issued on the request of the applicant without any liability on the part<br>
-    of this Embassy whatsoever.
-  </div>
-  <div class="gl-official-letter__spacer"></div>
   <table class="gl-official-letter__footer">
     <tr>
       <td>Telephone: {esc(letter['footer_telephone'])}</td>
@@ -11765,7 +11786,7 @@ def api_admin_gl_detail(app_id, user):
             'application': application,
             'audit': [dict(a) for a in audit],
             'letter_preview': _gl_letter_text(row),
-            'letter_preview_html': _gl_preview_html(letter, include_watermark=False),
+            'letter_preview_html': _gl_preview_html(letter, include_watermark=True, preview_title='Preview — Pending Official Generation'),
             'preview_warnings': list(letter.get('warnings') or []),
             'generation_blockers': list(letter.get('generation_blockers') or []),
             'can_generate_official': bool(letter.get('can_generate_official')),
@@ -28369,6 +28390,8 @@ def api_approval_batches_list():
 # ---------- Embassy Letter helpers ----------
 
 EMBASSY_LETTERHEAD_FILENAME = 'embassy_letterhead.png'  # Embassy seal/logo PNG (place next to server.py)
+GOP_EMBLEM_RELATIVE_PATH = 'static/images/gop-emblem.png'  # canonical Government of Pakistan State Emblem
+_GOP_EMBLEM_DATA_URL_CACHE = {'mtime': 0, 'value': ''}
 
 def _embassy_letterhead_data_url():
     """Load uploaded letterhead PNG as data URL for print page (no extra HTTP round-trip)."""
@@ -28380,6 +28403,30 @@ def _embassy_letterhead_data_url():
     except OSError:
         return ''
     return 'data:image/png;base64,' + base64.b64encode(raw).decode('ascii')
+
+
+def _gop_emblem_data_url():
+    """Load the canonical Government of Pakistan State Emblem as a data URL.
+    Used by the grading letter HTML preview and PDF generation. Falls back to
+    the older letterhead asset only if the canonical file is missing.
+    """
+    p = Path(__file__).resolve().parent / GOP_EMBLEM_RELATIVE_PATH
+    if not p.is_file():
+        return _embassy_letterhead_data_url()
+    try:
+        stat = p.stat()
+    except OSError:
+        return _embassy_letterhead_data_url()
+    if _GOP_EMBLEM_DATA_URL_CACHE.get('value') and _GOP_EMBLEM_DATA_URL_CACHE.get('mtime') == int(stat.st_mtime):
+        return _GOP_EMBLEM_DATA_URL_CACHE['value']
+    try:
+        raw = p.read_bytes()
+    except OSError:
+        return _embassy_letterhead_data_url()
+    encoded = 'data:image/png;base64,' + base64.b64encode(raw).decode('ascii')
+    _GOP_EMBLEM_DATA_URL_CACHE['mtime'] = int(stat.st_mtime)
+    _GOP_EMBLEM_DATA_URL_CACHE['value'] = encoded
+    return encoded
 
 def is_letter_print_ready(record):
     """Check if a record has all required fields for embassy letter printing."""
