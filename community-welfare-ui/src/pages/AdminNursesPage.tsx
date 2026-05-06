@@ -107,13 +107,13 @@ export function AdminNursesPage() {
     () => ({
       All: rows.length,
       Pending: rows.filter((n) => toStatus(n.status || n.complaint_status) === "pending").length,
-      Accommodation: 0,
+      Accommodation: totals.accommodation_requests || 0,
       Complaints: rows.length,
       "Leaving Notice": 0,
       "Assigned to Me": rows.filter((n) => (n.assigned_to_name || n.assigned_to_username || "").trim()).length,
       Resolved: rows.filter((n) => toStatus(n.status || n.complaint_status) === "resolved").length,
     }),
-    [rows]
+    [rows, totals.accommodation_requests]
   );
 
   const filtered = useMemo(() => {
@@ -240,7 +240,13 @@ export function AdminNursesPage() {
               <button
                 key={t}
                 className={`tab-item${tab === t ? " active" : ""}`}
-                onClick={() => setTab(t)}
+                onClick={() => {
+                  if (t === "Accommodation") {
+                    navigate("/admin/nurses/accommodation");
+                    return;
+                  }
+                  setTab(t);
+                }}
               >
                 {t}
                 <span className="tab-badge">{tabCounts[t] || 0}</span>

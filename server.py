@@ -9287,8 +9287,26 @@ def gl_user_can_view(user):
     return role in {'senior_review', 'ambassador_review'}
 
 
+def _gl_row_to_dict(row):
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return dict(row)
+    try:
+        return dict(row)
+    except Exception:
+        pass
+    keys = getattr(row, 'keys', None)
+    if callable(keys):
+        try:
+            return {k: row[k] for k in keys()}
+        except Exception:
+            return {}
+    return {}
+
+
 def _can_print_clean_grading_letter(user, row):
-    row_data = dict(row or {})
+    row_data = _gl_row_to_dict(row)
     status = (row_data.get("status") or "").strip().upper()
     letter_pdf_path = (row_data.get("letter_pdf_path") or "").strip()
     if not gl_user_can_manage(user):
@@ -9435,7 +9453,7 @@ def _gl_validate_application_payload(data, db):
 
 
 def _gl_application_dict(row):
-    d = dict(row or {})
+    d = _gl_row_to_dict(row)
     status = d.get('status') or 'SUBMITTED'
     d['student_identifier_type'] = _gl_student_identifier_type(
         d.get('student_identifier_type') or d.get('student_no_label')
@@ -11311,8 +11329,9 @@ def api_admin_nurses_accommodation_request_update_message(data, user):
 
 
 def _gl_fetch_application(db, app_id):
+    gender_expr = "COALESCE(n.gender, '') AS nurse_gender" if 'gender' in _table_columns(db, 'nurse_registrations') else "'' AS nurse_gender"
     return db.execute(
-        """SELECT a.*,
+        f"""SELECT a.*,
                   n.reference_id AS nurse_reference_id,
                   n.full_name AS nurse_full_name,
                   n.father_name AS nurse_father_name,
@@ -11324,7 +11343,7 @@ def _gl_fetch_application(db, app_id):
                   n.whatsapp_full AS nurse_whatsapp,
                   n.email AS nurse_email,
                   n.mton_number AS nurse_mton_number,
-                  n.gender AS nurse_gender,
+                  {gender_expr},
                   COALESCE(n.hospital, n.hospital_workplace, n.hospital_or_medical_center, '') AS nurse_workplace
            FROM gl_applications a
            LEFT JOIN nurse_registrations n ON n.id = a.nurse_id
@@ -11353,11 +11372,12 @@ def _gl_admin_app_dict(row, user=None):
     # eligible users on rows whose letter PDF actually exists. When called
     # without a user (e.g. from _gl_letter_context for PDF rendering) leave
     # this False so it never accidentally enables UI affordances.
-    d['can_print_clean'] = _can_print_clean_grading_letter(user, row) if user else False
+    d['can_print_clean'] = _can_print_clean_grading_letter(user, d)
     return d
 
 
 def _gl_list_rows(db, params, limit=50, offset=0):
+    gender_expr = "COALESCE(n.gender, '') AS nurse_gender" if 'gender' in _table_columns(db, 'nurse_registrations') else "'' AS nurse_gender"
     where = ['1=1']
     vals = []
     status = _gl_clean_text(params.get('status'), 40).upper()
@@ -11403,7 +11423,7 @@ def _gl_list_rows(db, params, limit=50, offset=0):
                   n.whatsapp_full AS nurse_whatsapp,
                   n.email AS nurse_email,
                   n.mton_number AS nurse_mton_number,
-                  n.gender AS nurse_gender,
+                  {gender_expr},
                   COALESCE(n.hospital, n.hospital_workplace, n.hospital_or_medical_center, '') AS nurse_workplace
            FROM {from_sql}
            WHERE {where_sql}
@@ -11420,8 +11440,9 @@ def api_admin_gl_list(params, user):
         return {'success': False, 'error': 'Unauthorized'}
     page = max(1, _nurse_int(params.get('page', 1), 1, 1, 100000))
     page_size = _nurse_int(params.get('page_size', 25), 25, 1, 200)
-    db = get_db()
+    db = None
     try:
+        db = get_db()
         total, rows = _gl_list_rows(db, params, page_size, (page - 1) * page_size)
         status_rows = db.execute("SELECT status, COUNT(*) c FROM gl_applications GROUP BY status").fetchall()
         status_counts = {str(r['status'] or '').lower(): int(r['c'] or 0) for r in status_rows}
@@ -11441,8 +11462,12 @@ def api_admin_gl_list(params, user):
             'items': [_gl_admin_app_dict(r, user) for r in rows],
             'kpis': kpis,
         }
+    except Exception as exc:
+        print(f"[GradingLetter] admin list failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Grading letter list could not be loaded.', 'status': 500}
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def api_admin_gl_export_csv(params, user):
@@ -11827,8 +11852,9 @@ def api_admin_gl_detail(app_id, user):
         return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
     if not gl_user_can_view(user):
         return {'success': False, 'error': 'Unauthorized'}
-    db = get_db()
+    db = None
     try:
+        db = get_db()
         row = _gl_fetch_application(db, app_id)
         if not row:
             return {'success': False, 'error': 'Application not found.'}
@@ -11854,8 +11880,12 @@ def api_admin_gl_detail(app_id, user):
             'qualification_options': [{'code': code, 'label': label} for code, label in GL_QUALIFICATIONS.items()],
             'student_identifier_options': list(GL_STUDENT_IDENTIFIER_TYPES),
         }
+    except Exception as exc:
+        print(f"[GradingLetter] admin detail failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Grading letter detail could not be loaded.', 'status': 500}
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def _gl_transition(db, app, user, new_status, event_type, note=''):
@@ -30189,7 +30219,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.require_auth()
             if not user: return
             res = api_admin_gl_list(params, user)
-            self.send_json(res, 200 if res.get('success') else (403 if res.get('error') == 'Unauthorized' else 400))
+            status_hint = res.get('status') if isinstance(res, dict) else None
+            if res.get('success'):
+                status = 200
+            elif isinstance(status_hint, int):
+                status = status_hint
+            elif res.get('error') == 'Unauthorized':
+                status = 403
+            else:
+                status = 400
+            self.send_json(res, status)
         elif path in ('/admin/gl/list.csv', '/api/admin/gl/list.csv'):
             user = self.require_auth()
             if not user: return
@@ -30208,7 +30247,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             app_id = params.get('id') or (path.rsplit('/', 1)[-1] if path.startswith('/admin/gl/') else '')
             res = api_admin_gl_detail(app_id, user)
-            self.send_json(res, 200 if res.get('success') else (403 if res.get('error') == 'Unauthorized' else 404))
+            status_hint = res.get('status') if isinstance(res, dict) else None
+            if res.get('success'):
+                status = 200
+            elif isinstance(status_hint, int):
+                status = status_hint
+            elif res.get('error') == 'Unauthorized':
+                status = 403
+            else:
+                status = 404
+            self.send_json(res, status)
         elif path == '/api/admin/gl/letter' or re.match(r'^/admin/gl/\d+/letter\.pdf$', path):
             user = self.require_auth()
             if not user: return
