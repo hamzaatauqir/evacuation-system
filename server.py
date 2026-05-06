@@ -9261,11 +9261,21 @@ def gl_user_can_manage(user):
         return False
     role = (user.get('role') or '').strip().lower()
     ident = _gl_user_identity_text(user)
+    # Explicit deny: operator_special is a restricted variant and must NOT manage
+    # grading letters even though its name shares the "operator" prefix.
+    if role == 'operator_special':
+        return False
     if role == 'admin':
         return True
     if 'awais' in ident:
         return True
-    if role in {'nurses_desk', 'nurse_desk', 'nurses_welfare_desk', 'nurse_welfare_desk'}:
+    if role in {
+        'nurses_desk', 'nurse_desk', 'nurses_welfare_desk', 'nurse_welfare_desk',
+        # Embassy operator handles grading-letter day-to-day work:
+        # editing details, verifying marks from original certificates,
+        # approving/generating letters, and printing the final A4 letter.
+        'operator',
+    }:
         return True
     return False
 
@@ -9275,6 +9285,19 @@ def gl_user_can_view(user):
         return True
     role = (user or {}).get('role', '')
     return role in {'senior_review', 'ambassador_review'}
+
+
+def _can_print_clean_grading_letter(user, row):
+    row_data = dict(row or {})
+    status = (row_data.get("status") or "").strip().upper()
+    letter_pdf_path = (row_data.get("letter_pdf_path") or "").strip()
+    if not gl_user_can_manage(user):
+        return False
+    if status not in {"LETTER_GENERATED", "ISSUED"}:
+        return False
+    if not letter_pdf_path:
+        return False
+    return True
 
 
 def _gl_write_audit(db, application_id, actor_role, actor_id, event_type, field_name='', old_value='', new_value='', note=''):
@@ -11310,7 +11333,7 @@ def _gl_fetch_application(db, app_id):
     ).fetchone()
 
 
-def _gl_admin_app_dict(row):
+def _gl_admin_app_dict(row, user=None):
     d = _gl_application_dict(row)
     d['nurse'] = {
         'reference_id': d.get('nurse_reference_id') or '',
@@ -11326,6 +11349,11 @@ def _gl_admin_app_dict(row):
         'gender': d.get('nurse_gender') or '',
         'workplace': d.get('nurse_workplace') or '',
     }
+    # UI gate: clean (no-watermark) final-print button should only render for
+    # eligible users on rows whose letter PDF actually exists. When called
+    # without a user (e.g. from _gl_letter_context for PDF rendering) leave
+    # this False so it never accidentally enables UI affordances.
+    d['can_print_clean'] = _can_print_clean_grading_letter(user, row) if user else False
     return d
 
 
@@ -11410,7 +11438,7 @@ def api_admin_gl_list(params, user):
             'total': total,
             'page': page,
             'page_size': page_size,
-            'items': [_gl_admin_app_dict(r) for r in rows],
+            'items': [_gl_admin_app_dict(r, user) for r in rows],
             'kpis': kpis,
         }
     finally:
@@ -11429,7 +11457,7 @@ def api_admin_gl_export_csv(params, user):
         writer = csv.writer(out)
         writer.writerow(['Ref No', 'Nurse Name', 'Passport', 'Qualification', 'Mode', 'Computed %', 'Final %', 'Grade', 'Status', 'Submitted'])
         for r in rows:
-            d = _gl_admin_app_dict(r)
+            d = _gl_admin_app_dict(r, user)
             writer.writerow([
                 d.get('ref_no') or '',
                 d.get('nurse', {}).get('full_name') or '',
@@ -11805,7 +11833,7 @@ def api_admin_gl_detail(app_id, user):
         if not row:
             return {'success': False, 'error': 'Application not found.'}
         letter = _gl_letter_context(row)
-        application = _gl_admin_app_dict(row)
+        application = _gl_admin_app_dict(row, user)
         application['preview_warnings'] = list(letter.get('warnings') or [])
         application['generation_blockers'] = list(letter.get('generation_blockers') or [])
         application['can_generate_official'] = bool(letter.get('can_generate_official'))
@@ -11967,7 +11995,7 @@ def api_admin_gl_action(data, user):
             return {'success': False, 'error': 'Unknown grading letter action.'}
         db.commit()
         fresh = _gl_fetch_application(db, app_id)
-        return {'success': True, 'application': _gl_admin_app_dict(fresh)}
+        return {'success': True, 'application': _gl_admin_app_dict(fresh, user)}
     except ValueError as exc:
         try: db.rollback()
         except Exception: pass
@@ -11992,6 +12020,16 @@ def api_admin_gl_letter(app_id, user):
         if not row:
             return None, None, {'success': False, 'error': 'Application not found.'}
         app = dict(row)
+        # Strict gate for the clean (no-watermark) final PDF: must pass the
+        # role + status + file-exists check. Pending/under-review/approved
+        # rows and viewer-only roles are blocked here even though they may
+        # be allowed to read the row's metadata via gl_user_can_view.
+        if not _can_print_clean_grading_letter(user, app):
+            return None, None, {
+                'success': False,
+                'error': 'Not authorized to print the clean letter for this application.',
+                'status': 403,
+            }
         rel = (app.get('letter_pdf_path') or '').strip()
         if not rel:
             return None, None, {'success': False, 'error': 'PDF letter has not been generated yet.'}
@@ -30180,7 +30218,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 app_id = params.get('id')
             body_pdf, fname, err = api_admin_gl_letter(app_id, user)
             if err:
-                self.send_json(err, 403 if err.get('error') == 'Unauthorized' else 404); return
+                # Helper may return an explicit HTTP status hint (e.g. 403 for
+                # the clean-print authorization gate); fall back to the legacy
+                # Unauthorized→403, otherwise→404 mapping.
+                status_hint = err.get('status') if isinstance(err, dict) else None
+                if isinstance(status_hint, int):
+                    status = status_hint
+                elif err.get('error') == 'Unauthorized':
+                    status = 403
+                else:
+                    status = 404
+                self.send_json(err, status); return
             self.send_response(200)
             self.send_header('Content-Type', 'application/pdf')
             self.send_header('Content-Disposition', f'attachment; filename="{fname}"')

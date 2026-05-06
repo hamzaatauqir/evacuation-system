@@ -255,7 +255,11 @@ function actionButtons(a, canManage){
     : '<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'generate\')">Generate PDF</button>')
     +'<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reopen()">Reopen</button>';
   if(a.status==='LETTER_GENERATED') b+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'mark-issued\')">Mark Issued</button>';
-  if(a.letter_available) b+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/api/admin/gl/letter?id='+Number(a.id)+'">Download PDF</a>';
+  // Clean (no-watermark) final A4 PDF button: only render when the row has
+  // a generated/issued letter on disk AND the user is permitted to print it.
+  // Pending/under-review/approved rows never show this button — they only
+  // get the watermarked HTML preview embedded below.
+  if(a.can_print_clean) b+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/api/admin/gl/letter?id='+Number(a.id)+'" target="_blank" rel="noopener">Print Clean A4 PDF</a>';
   if(!['ISSUED','REJECTED','CANCELLED'].includes(a.status)) b+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reject()">Reject</button>';
   if(['SUBMITTED','CORRECTION_REQUIRED'].includes(a.status)) b+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="cancelReq()">Cancel</button>';
   return b;
