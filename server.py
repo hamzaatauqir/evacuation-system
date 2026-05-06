@@ -6442,25 +6442,63 @@ def nh_create_registration_account(db, nurse_row_or_dict, actor='public_registra
     batch = nh_get_or_create_arrival_batch(db, nurse.get('batch_number') or '', nurse.get('arrival_date') or '', actor=actor)
     batch_code = _normalize_arrival_batch_number((batch or {}).get('batch_code') or nurse.get('batch_number') or '')
     arrival_batch_id = int((batch or {}).get('id') or 0) if batch else None
+    batch_status = ((batch or {}).get('status') or '').strip().upper()
+    is_arrived_batch = batch_status == NH_BATCH_STATUS_ARRIVED
+    target_status = NH_ACCOUNT_STATUS_ACTIVE if is_arrived_batch else NH_ACCOUNT_STATUS_PENDING_ARRIVAL
     row = db.execute("SELECT * FROM nh_nurse_account WHERE nurse_registration_id = ? LIMIT 1", [nurse_id]).fetchone()
     if row:
         old = dict(row)
-        db.execute(
-            """UPDATE nh_nurse_account
-               SET account_status = ?,
-                   arrival_batch_id = COALESCE(?, arrival_batch_id),
-                   batch_code = CASE WHEN ? != '' THEN ? ELSE batch_code END,
-                   updated_at = CURRENT_TIMESTAMP
-               WHERE nurse_registration_id = ?""",
-            [
-                NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
-                arrival_batch_id,
-                batch_code,
-                batch_code,
-                nurse_id,
-            ]
-        )
-        if (old.get('account_status') or '') != NH_ACCOUNT_STATUS_PENDING_ARRIVAL or (old.get('batch_code') or '') != batch_code:
+        old_status = (old.get('account_status') or '').strip().upper()
+        if is_arrived_batch:
+            db.execute(
+                """UPDATE nh_nurse_account
+                   SET account_status = ?,
+                       arrival_batch_id = COALESCE(?, arrival_batch_id),
+                       batch_code = CASE WHEN ? != '' THEN ? ELSE batch_code END,
+                       activated_at = COALESCE(activated_at, CURRENT_TIMESTAMP),
+                       activated_by = CASE WHEN COALESCE(activated_by, '') = '' THEN ? ELSE activated_by END,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE nurse_registration_id = ?""",
+                [
+                    NH_ACCOUNT_STATUS_ACTIVE,
+                    arrival_batch_id,
+                    batch_code,
+                    batch_code,
+                    _nh_actor_text(actor),
+                    nurse_id,
+                ]
+            )
+        else:
+            db.execute(
+                """UPDATE nh_nurse_account
+                   SET account_status = ?,
+                       arrival_batch_id = COALESCE(?, arrival_batch_id),
+                       batch_code = CASE WHEN ? != '' THEN ? ELSE batch_code END,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE nurse_registration_id = ?""",
+                [
+                    NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+                    arrival_batch_id,
+                    batch_code,
+                    batch_code,
+                    nurse_id,
+                ]
+            )
+        status_changed = old_status != target_status
+        batch_changed = (old.get('batch_code') or '') != batch_code
+        if is_arrived_batch and status_changed:
+            _nh_write_audit(
+                db,
+                'nurse_account',
+                old.get('id'),
+                'auto_activated_on_relink',
+                nurse_registration_id=nurse_id,
+                old_value=old.get('account_status') or '',
+                new_value=NH_ACCOUNT_STATUS_ACTIVE,
+                note=f'Auto-activated when linked to already-arrived batch {batch_code or "unassigned"}.',
+                actor=actor,
+            )
+        elif status_changed or batch_changed:
             _nh_write_audit(
                 db,
                 'nurse_account',
@@ -6468,28 +6506,55 @@ def nh_create_registration_account(db, nurse_row_or_dict, actor='public_registra
                 'registration_synced',
                 nurse_registration_id=nurse_id,
                 old_value=old.get('account_status') or '',
-                new_value=NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+                new_value=target_status,
                 note=f'Batch {batch_code or "unassigned"} linked from registration flow.',
                 actor=actor,
             )
         return None
-    cur = db.execute(
-        """INSERT INTO nh_nurse_account
-           (nurse_registration_id, account_status, arrival_batch_id, batch_code, notes)
-           VALUES (?, ?, ?, ?, '')""",
-        [nurse_id, NH_ACCOUNT_STATUS_PENDING_ARRIVAL, arrival_batch_id, batch_code]
-    )
+    if is_arrived_batch:
+        cur = db.execute(
+            """INSERT INTO nh_nurse_account
+               (nurse_registration_id, account_status, arrival_batch_id, batch_code,
+                activated_at, activated_by, notes)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, '')""",
+            [
+                nurse_id,
+                NH_ACCOUNT_STATUS_ACTIVE,
+                arrival_batch_id,
+                batch_code,
+                _nh_actor_text(actor),
+            ]
+        )
+    else:
+        cur = db.execute(
+            """INSERT INTO nh_nurse_account
+               (nurse_registration_id, account_status, arrival_batch_id, batch_code, notes)
+               VALUES (?, ?, ?, ?, '')""",
+            [nurse_id, NH_ACCOUNT_STATUS_PENDING_ARRIVAL, arrival_batch_id, batch_code]
+        )
     account_id = int(cur.lastrowid or 0)
-    _nh_write_audit(
-        db,
-        'nurse_account',
-        account_id,
-        'created',
-        nurse_registration_id=nurse_id,
-        new_value=NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
-        note=f'Created pending-arrival housing account for nurse registration {nurse.get("reference_id") or nurse_id}.',
-        actor=actor,
-    )
+    if is_arrived_batch:
+        _nh_write_audit(
+            db,
+            'nurse_account',
+            account_id,
+            'auto_activated_on_create',
+            nurse_registration_id=nurse_id,
+            new_value=NH_ACCOUNT_STATUS_ACTIVE,
+            note=f'Auto-activated because batch {batch_code or "unassigned"} was already marked ARRIVED.',
+            actor=actor,
+        )
+    else:
+        _nh_write_audit(
+            db,
+            'nurse_account',
+            account_id,
+            'created',
+            nurse_registration_id=nurse_id,
+            new_value=NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+            note=f'Created pending-arrival housing account for nurse registration {nurse.get("reference_id") or nurse_id}.',
+            actor=actor,
+        )
     return account_id
 
 
