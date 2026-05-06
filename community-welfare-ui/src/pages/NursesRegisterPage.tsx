@@ -111,6 +111,12 @@ function isValidArrivalBatchNumber(value: string) {
   return /^[0-9]+$/.test((value || "").trim());
 }
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isFilled(value: unknown): boolean {
+  return typeof value === "string" ? value.trim().length > 0 : !!value;
+}
+
 function addMonthsToIsoDate(value: string, months: number) {
   const match = (value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return "";
@@ -130,6 +136,7 @@ export function NursesRegisterPage() {
   const [done, setDone] = useState(false);
   const [submittedRef, setSubmittedRef] = useState("");
   const [submitError, setSubmitError] = useState("");
+  const [stepError, setStepError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [showPw, setShowPw] = useState(false);
   const normalizeDigits = (v: string) => (v || "").replace(/[^\d]/g, "");
@@ -158,6 +165,119 @@ export function NursesRegisterPage() {
   const computedMohHotelExpectedEndDate = isMohHotel ? addMonthsToIsoDate(form.mohHotelStartDate || "", 3) : "";
   const qualificationOptions = QUALIFICATION_OPTIONS_BY_CATEGORY[form.professionalCategory || ""] || [];
   const showQualificationOther = form.qualificationDegree === "Other";
+
+  function validateStep(s: number): string {
+    if (s === 0) {
+      if (!isFilled(form.fullName)) return "Full Name as per Passport is required.";
+      if (!isFilled(form.fatherName)) return "Father Name is required.";
+      if (!isFilled(form.gender)) return "Gender is required.";
+      if (!isFilled(form.passport)) return "Passport Number is required.";
+      if (!isFilled(form.cnic)) return "CNIC (Pakistan National ID) is required.";
+      if (!isFilled(form.nationality)) return "Nationality is required.";
+      return "";
+    }
+    if (s === 1) {
+      const mobileDigits = normalizeDigits(form.mobileNumber || "");
+      if (!mobileDigits) return "Please enter a valid mobile number.";
+      const mobileCC = form.mobileCountryCode || "+965";
+      if (!mobileCC.startsWith("+")) return "Mobile country code must start with +.";
+      if (mobileDigits.length < 7 || mobileDigits.length > 15) {
+        return "Please enter a valid mobile number.";
+      }
+      if (form.whatsappSameAsMobile === false) {
+        const waCC = form.whatsappCountryCode || "";
+        if (!waCC || !waCC.startsWith("+")) return "WhatsApp country code is required.";
+        const waDigits = normalizeDigits(form.whatsappNumber || "");
+        if (!waDigits) return "WhatsApp number is required.";
+        if (waDigits.length < 7 || waDigits.length > 15) {
+          return "Please enter a valid WhatsApp number.";
+        }
+      }
+      if (!isFilled(form.email)) return "Email address is required.";
+      if (!EMAIL_RE.test((form.email || "").trim())) {
+        return "Please enter a valid email address.";
+      }
+      if (!isFilled(form.address)) return "Current address in Kuwait is required.";
+      return "";
+    }
+    if (s === 2) {
+      if (!isFilled(form.hospital)) return "Hospital / Workplace Name is required.";
+      if (!isFilled(form.jobTitle)) return "Job Title / Designation is required.";
+      if (!isFilled(form.professionalCategory)) return "Professional Category is required.";
+      if (!isFilled(form.qualificationDegree)) return "Qualification / Degree is required.";
+      if (form.qualificationDegree === "Other" && !isFilled(form.qualificationDegreeOther)) {
+        return "Please specify your qualification / degree.";
+      }
+      if (!isFilled(form.arrivalDate)) return "Date arrived in Kuwait is required.";
+      const batchNumber = (form.batchNumber || "").trim();
+      if (!batchNumber) return "Batch / cohort reference is required.";
+      if (!isValidArrivalBatchNumber(batchNumber)) {
+        return "Batch number must contain digits only.";
+      }
+      return "";
+    }
+    if (s === 3) {
+      if (showStayArrangementWorkflow && !isFilled(form.currentArrangement)) {
+        return "Current Stay Arrangement is required.";
+      }
+      if (showMohHotelDetails) {
+        const mohName = (form.mohHotelName || "").trim();
+        const mohArea = (form.mohHotelArea || "").trim();
+        const mohStart = (form.mohHotelStartDate || "").trim();
+        if (!mohName || !mohArea || !mohStart) {
+          return "Please provide hotel/facility name, area, and date shifted to hotel.";
+        }
+      }
+      const emergencyDigits = normalizeDigits(form.emergency || "");
+      if (!emergencyDigits) return "Emergency Contact Number is required.";
+      const emergencyCC = form.emergencyCountryCode || "+965";
+      if (!emergencyCC.startsWith("+")) return "Emergency country code must start with +.";
+      if (emergencyDigits.length < 7 || emergencyDigits.length > 15) {
+        return "Please enter a valid emergency contact number.";
+      }
+      if (!form.declared) {
+        return "Please tick the declaration to confirm the information is accurate.";
+      }
+      return "";
+    }
+    if (s === 4) {
+      const pwErr = passwordOk(form.password || "");
+      if (pwErr) return pwErr;
+      if ((form.password || "") !== (form.confirmPassword || "")) {
+        return "Passwords do not match.";
+      }
+      return "";
+    }
+    return "";
+  }
+
+  function scrollToFormTop() {
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
+  function handleNext() {
+    const err = validateStep(step);
+    if (err) {
+      setStepError(err);
+      scrollToFormTop();
+      return;
+    }
+    setStepError("");
+    setSubmitError("");
+    setStep((s) => Math.min(s + 1, STEPS.length - 1));
+  }
+
+  function handleBack() {
+    setStepError("");
+    setSubmitError("");
+    if (step === 0) {
+      navigate("/nurses");
+      return;
+    }
+    setStep((s) => Math.max(0, s - 1));
+  }
 
   if (done) {
     return (
@@ -737,6 +857,11 @@ export function NursesRegisterPage() {
               )}
 
               {/* Navigation buttons */}
+              {stepError ? (
+                <div style={{ marginTop: 16 }}>
+                  <NoticeCard type="warning">{stepError}</NoticeCard>
+                </div>
+              ) : null}
               {submitError ? (
                 <div style={{ marginTop: 16 }}>
                   <NoticeCard type="warning">{submitError}</NoticeCard>
@@ -752,15 +877,12 @@ export function NursesRegisterPage() {
                   borderTop: `1px solid ${T.borderLt}`,
                 }}
               >
-                <Btn
-                  variant="light"
-                  onClick={() => (step === 0 ? navigate("/nurses") : setStep((s) => s - 1))}
-                >
+                <Btn variant="light" onClick={handleBack}>
                   {step === 0 ? "Cancel" : "← Back"}
                 </Btn>
                 <div style={{ display: "flex", gap: 10 }}>
                   {step < 4 ? (
-                    <Btn variant="navy" onClick={() => setStep((s) => s + 1)}>
+                    <Btn variant="navy" onClick={handleNext}>
                       Continue →
                     </Btn>
                   ) : (

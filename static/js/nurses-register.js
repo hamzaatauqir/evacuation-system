@@ -123,13 +123,24 @@
 
   function validateStep(n) {
     const pane = document.querySelector('.nurses-pane[data-pane="' + n + '"]');
+    if (!pane) return true;
     if (n === 2 && !validateMohHotelFields(true)) return false;
     const required = Array.from(pane.querySelectorAll('input[required],select[required],textarea[required]'));
     for (const field of required) {
-      if (!field.value) {
+      // Skip hidden conditional fields (e.g. WhatsApp / MOH hotel inputs that are not currently shown).
+      if (field.offsetParent === null && field.type !== 'hidden') continue;
+      if (!field.value || (typeof field.value === 'string' && !field.value.trim())) {
         stepError.textContent = 'Please fill all required fields in this step.';
         stepError.style.display = 'block';
-        field.focus();
+        try {
+          field.focus({ preventScroll: false });
+          if (typeof field.scrollIntoView === 'function') {
+            field.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+          if (typeof field.reportValidity === 'function') field.reportValidity();
+        } catch (_e) {
+          // ignore focus/scroll errors in older browsers
+        }
         return false;
       }
     }
