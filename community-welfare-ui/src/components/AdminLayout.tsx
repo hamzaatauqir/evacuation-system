@@ -3,7 +3,15 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { T } from "../lib/tokens";
 import { Icon, type IconName } from "./Icon";
 
-const NAV: { to: string; label: string; icon: IconName }[] = [
+export interface AdminNavItem {
+  to: string;
+  label: string;
+  icon: IconName;
+  match?: "exact" | "section";
+  reloadDocument?: boolean;
+}
+
+const DEFAULT_NAV: AdminNavItem[] = [
   { to: "/admin/community-welfare", label: "Overview", icon: "grid" },
   { to: "/admin/nurses", label: "Nurses", icon: "users" },
   { to: "/admin/legal-cases", label: "Legal Cases", icon: "scale" },
@@ -54,7 +62,7 @@ function AdminHeader({
           <div className="cwa-admin-topbar__logo-fallback" aria-hidden="true" />
         ) : (
           <img
-            src="/images/embassy-of-pakistan-logo.png"
+            src="/static/images/pakistan-emblem.png"
             alt="Embassy of Pakistan logo"
             className="cwa-admin-topbar__logo"
             onError={() => setLogoError(true)}
@@ -137,13 +145,21 @@ function AdminHeader({
 function AdminSidebar({
   mobileNavOpen,
   onNavigate,
+  navItems,
+  navSectionTitle,
+  showQuickAccess,
 }: {
   mobileNavOpen: boolean;
   onNavigate: () => void;
+  navItems: AdminNavItem[];
+  navSectionTitle: string;
+  showQuickAccess: boolean;
 }) {
   const location = useLocation();
-  const isActive = (to: string) =>
-    location.pathname === to || location.pathname.startsWith(to + "/");
+  const isActive = (item: AdminNavItem) =>
+    item.match === "exact"
+      ? location.pathname === item.to
+      : location.pathname === item.to || location.pathname.startsWith(item.to + "/");
   const handleNavigate = () => {
     const activeEl = document.activeElement;
     if (activeEl instanceof HTMLElement) {
@@ -177,14 +193,15 @@ function AdminSidebar({
             padding: "0 8px 10px",
           }}
         >
-          Management
+          {navSectionTitle}
         </div>
-        {NAV.map((it) => {
-          const active = isActive(it.to);
+        {navItems.map((it) => {
+          const active = isActive(it);
           return (
             <Link
               key={it.to}
               to={it.to}
+              reloadDocument={it.reloadDocument}
               onClick={handleNavigate}
               style={{
                 display: "flex",
@@ -215,49 +232,63 @@ function AdminSidebar({
           );
         })}
       </div>
-      <div style={{ margin: "10px 20px", borderTop: "1px solid rgba(255,255,255,.07)" }} />
-      <div style={{ padding: "0 10px" }}>
-        <div
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            color: "rgba(255,255,255,.3)",
-            letterSpacing: ".1em",
-            textTransform: "uppercase",
-            padding: "0 8px 10px",
-          }}
-        >
-          Quick Access
-        </div>
-        <Link
-          to="/"
-          onClick={handleNavigate}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            width: "100%",
-            textAlign: "left",
-            background: "transparent",
-            border: "1px solid transparent",
-            borderRadius: 8,
-            padding: "9px 12px",
-            fontSize: 13,
-            fontWeight: 600,
-            color: "rgba(255,255,255,.5)",
-            cursor: "pointer",
-            textDecoration: "none",
-          }}
-        >
-          <Icon name="exit" size={16} color="rgba(255,255,255,.4)" />
-          Public Portal
-        </Link>
-      </div>
+      {showQuickAccess ? (
+        <>
+          <div style={{ margin: "10px 20px", borderTop: "1px solid rgba(255,255,255,.07)" }} />
+          <div style={{ padding: "0 10px" }}>
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: "rgba(255,255,255,.3)",
+                letterSpacing: ".1em",
+                textTransform: "uppercase",
+                padding: "0 8px 10px",
+              }}
+            >
+              Quick Access
+            </div>
+            <Link
+              to="/"
+              onClick={handleNavigate}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                width: "100%",
+                textAlign: "left",
+                background: "transparent",
+                border: "1px solid transparent",
+                borderRadius: 8,
+                padding: "9px 12px",
+                fontSize: 13,
+                fontWeight: 600,
+                color: "rgba(255,255,255,.5)",
+                cursor: "pointer",
+                textDecoration: "none",
+              }}
+            >
+              <Icon name="exit" size={16} color="rgba(255,255,255,.4)" />
+              Public Portal
+            </Link>
+          </div>
+        </>
+      ) : null}
     </aside>
   );
 }
 
-export function AdminLayout({ children }: { children: ReactNode }) {
+export function AdminLayout({
+  children,
+  navItems = DEFAULT_NAV,
+  navSectionTitle = "Management",
+  showQuickAccess = true,
+}: {
+  children: ReactNode;
+  navItems?: AdminNavItem[];
+  navSectionTitle?: string;
+  showQuickAccess?: boolean;
+}) {
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -310,6 +341,9 @@ export function AdminLayout({ children }: { children: ReactNode }) {
         <AdminSidebar
           mobileNavOpen={mobileNavOpen}
           onNavigate={() => setMobileNavOpen(false)}
+          navItems={navItems}
+          navSectionTitle={navSectionTitle}
+          showQuickAccess={showQuickAccess}
         />
         <div
           className="cwa-admin-react-main"

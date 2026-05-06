@@ -36,6 +36,11 @@ type MarkArrivedResponse = {
   error?: string;
 };
 
+function normalizeBatchNumber(value?: string) {
+  const match = String(value || "").trim().match(/\d+/);
+  return match ? match[0] : "";
+}
+
 export function AdminNurseArrivalBatchesPage() {
   const navigate = useNavigate();
   const [rows, setRows] = useState<ArrivalBatchRow[]>([]);
@@ -162,11 +167,12 @@ export function AdminNurseArrivalBatchesPage() {
                   {rows.map((row) => {
                     const arrived = (row.status || "").toUpperCase() === "ARRIVED";
                     const showAction = !arrived || (row.pending_accounts || 0) > 0;
+                    const batchNumber = normalizeBatchNumber(row.batch_code) || row.batch_code || "Batch";
                     return (
                       <tr key={row.id || row.batch_code}>
                         <td>
                           <div style={{ display: "grid", gap: 4 }}>
-                            <strong style={{ color: T.navy }}>{row.batch_code || "Batch"}</strong>
+                            <strong style={{ color: T.navy }}>{batchNumber}</strong>
                             <span style={{ fontSize: 12, color: T.muted }}>{row.created_at || "—"}</span>
                           </div>
                         </td>

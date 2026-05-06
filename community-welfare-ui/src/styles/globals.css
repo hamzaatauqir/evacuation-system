@@ -331,14 +331,20 @@ textarea.f-input { resize: vertical; min-height: 90px; }
   box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06), 0 6px 20px rgba(15, 23, 42, 0.05);
 }
 .cwa-admin-topbar__logo {
-  height: 44px;
-  width: auto;
+  height: 48px;
+  width: 48px;
+  padding: 4px;
+  background: #ffffff;
+  border: 1px solid var(--border-lt);
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
   object-fit: contain;
   flex-shrink: 0;
 }
 @media (min-width: 769px) {
   .cwa-admin-topbar__logo {
-    height: clamp(48px, 3vw, 56px);
+    height: clamp(50px, 3vw, 56px);
+    width: clamp(50px, 3vw, 56px);
   }
 }
 .cwa-admin-topbar__logo-fallback {

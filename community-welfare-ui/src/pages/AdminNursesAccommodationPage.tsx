@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AdminLayout } from "../components/AdminLayout";
+import { AdminLayout, type AdminNavItem } from "../components/AdminLayout";
 import { AdminKpiCard } from "../components/AdminKpiCard";
 import { Btn } from "../components/Btn";
 import { Card } from "../components/Layout";
@@ -195,6 +195,14 @@ const EMPTY_FORM: FormState = {
   notes: "",
 };
 
+const ACCOMMODATION_NAV: AdminNavItem[] = [
+  { to: "/admin/nurses", label: "Back to Nurses Management", icon: "chevron-l", match: "exact" },
+  { to: "/admin/nurses/accommodation", label: "Accommodation / Hostel Roster", icon: "home", match: "exact" },
+  { to: "/admin/facility-roster", label: "Facility Roster", icon: "building", match: "exact", reloadDocument: true },
+  { to: "/admin/facility-occupancy", label: "Facility Occupancy", icon: "grid", match: "exact", reloadDocument: true },
+  { to: "/admin/alternative-facilities", label: "Alternative Facilities", icon: "tag", match: "exact", reloadDocument: true },
+];
+
 function buildQueryString(params: Record<string, string>) {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -218,6 +226,11 @@ function formatRoomBed(row: AccommodationRow) {
 function formatUpdated(value?: string) {
   if (!value) return "—";
   return value.replace("T", " ").slice(0, 16);
+}
+
+function normalizeBatchNumber(value?: string) {
+  const match = String(value || "").trim().match(/\d+/);
+  return match ? match[0] : "";
 }
 
 function asArray<T>(value: T[] | null | undefined): T[] {
@@ -484,27 +497,20 @@ export function AdminNursesAccommodationPage() {
   }
 
   return (
-    <AdminLayout>
+    <AdminLayout
+      navItems={ACCOMMODATION_NAV}
+      navSectionTitle="Nurses Accommodation"
+      showQuickAccess={false}
+    >
       <div className="fade-in admin-page-shell">
         <div className="admin-page-header">
           <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-              <button
-                type="button"
-                onClick={() => navigate("/admin/nurses")}
-                style={{
-                  border: `1px solid ${T.borderLt}`,
-                  background: T.surfaceLow,
-                  borderRadius: 8,
-                  width: 34,
-                  height: 34,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <Icon name="chevron-l" size={16} color={T.navy} />
-              </button>
+            <div style={{ display: "grid", gap: 10 }}>
+              <div>
+                <Btn variant="light" size="sm" icon="chevron-l" onClick={() => navigate("/admin/nurses")}>
+                  Back to Nurses Management
+                </Btn>
+              </div>
               <div>
                 <h1 style={{ fontSize: 20, fontWeight: 800, color: T.navy }}>
                   Accommodation / Hostel Roster
@@ -516,9 +522,6 @@ export function AdminNursesAccommodationPage() {
             </div>
           </div>
           <div className="admin-page-actions">
-            <Btn variant="light" size="sm" onClick={() => navigate("/admin/nurses")}>
-              Back to Nurses
-            </Btn>
             <Btn variant="light" size="sm" icon="download" onClick={exportCsv}>
               Export CSV
             </Btn>
@@ -763,7 +766,7 @@ export function AdminNursesAccommodationPage() {
                         </td>
                         <td>{row.mton_number || "—"}</td>
                         <td>{row.mobile || "—"}</td>
-                        <td>{row.batch || "—"}</td>
+                        <td>{normalizeBatchNumber(row.batch) || row.batch || "—"}</td>
                         <td>{row.current_accommodation_type || "—"}</td>
                         <td>{row.vendor_name || "—"}</td>
                         <td>{row.facility_name || "—"}</td>
@@ -863,7 +866,7 @@ export function AdminNursesAccommodationPage() {
                       <div><strong>Mobile:</strong> {detailData.nurse.mobile || "—"}</div>
                       <div><strong>WhatsApp:</strong> {detailData.nurse.whatsapp || "—"}</div>
                       <div><strong>Email:</strong> {detailData.nurse.email || "—"}</div>
-                      <div><strong>Batch:</strong> {detailData.nurse.batch_number || "—"}</div>
+                      <div><strong>Batch:</strong> {normalizeBatchNumber(detailData.nurse.batch_number) || detailData.nurse.batch_number || "—"}</div>
                     </div>
                   </Card>
 

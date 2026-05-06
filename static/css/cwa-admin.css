@@ -68,11 +68,22 @@ body.cwa-admin-body, .cwa-admin-body * { box-sizing: border-box; }
 }
 .cwa-admin-header__brand { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
 .cwa-admin-header__logo {
-  width: 38px; height: 38px; border-radius: 50%;
-  background: rgba(255,255,255,.08);
-  border: 1px solid rgba(255,255,255,.18);
+  width: 42px; height: 42px; border-radius: 10px;
+  background: #fff url('/static/images/pakistan-emblem.png') center/contain no-repeat;
+  border: 1px solid rgba(255,255,255,.24);
+  box-shadow: 0 6px 16px rgba(0,0,0,.12);
   display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
+  overflow: hidden;
+}
+.cwa-admin-header__logo svg { display: none; }
+.cwa-admin-header__logo img,
+.cwa-admin-header__logo-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #fff;
 }
 .cwa-admin-header__titles { min-width: 0; }
 .cwa-admin-header__gov {

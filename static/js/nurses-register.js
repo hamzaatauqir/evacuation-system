@@ -47,6 +47,10 @@
     return el ? el.value : '';
   }
 
+  function isValidBatchNumber(value) {
+    return /^[0-9]+$/.test(String(value || '').trim());
+  }
+
   function showStep(n) {
     currentStep = n;
     panes.forEach((p) => p.classList.toggle('active', Number(p.dataset.pane) === n));
@@ -81,6 +85,11 @@
   form.addEventListener('submit', async function (e) {
     e.preventDefault();
     if (!validateStep(4)) return false;
+    const batchNumber = valueOf('batch_number');
+    if (!isValidBatchNumber(batchNumber)) {
+      msg.textContent = 'Batch number must contain digits only.';
+      return false;
+    }
     const p = {
       full_name: valueOf('full_name'),
       passport_number: valueOf('passport_number'),
@@ -91,7 +100,7 @@
       password: valueOf('password'),
       confirm_password: valueOf('confirm_password'),
       arrival_date: valueOf('arrival_date'),
-      batch_number: valueOf('batch_number'),
+      batch_number: batchNumber,
       hospital: valueOf('hospital'),
       designation: valueOf('designation'),
       qualification_degree: valueOf('qualification_degree'),

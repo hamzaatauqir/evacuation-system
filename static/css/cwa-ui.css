@@ -28,6 +28,7 @@ body.cwa-ui.cwa-menu-open{
 .cwa-topbar .cwa-shell{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:72px;flex-wrap:wrap}
 .cwa-topbar-shell{position:relative}
 .cwa-logo-strip{background:#fff;color:var(--cwa-navy);border:1px solid var(--cwa-border);border-radius:4px;font-size:11px;padding:6px 10px;font-weight:600}
+.logo,.header-logo,.brand-logo,.embassy-logo{background:#fff;border-radius:6px;object-fit:contain}
 .cwa-nav{display:flex;gap:16px;flex-wrap:wrap}
 .cwa-nav a,.cwa-nav-link{color:#dbeafe;text-decoration:none;font-size:14px}
 .cwa-nav a:hover,.cwa-nav-link:hover{color:#fff}

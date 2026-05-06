@@ -213,6 +213,11 @@ function displayValue(value: unknown) {
   return text || DASH_VALUE;
 }
 
+function normalizeArrivalBatchNumber(value: unknown) {
+  const match = String(value ?? "").trim().match(/\d+/);
+  return match ? match[0] : "";
+}
+
 function qualificationLabelFromCode(code: string, other = "") {
   const normalized = normalizeQualificationCode(code);
   if (normalized === "OTHER") return other || "Other (Legacy)";
@@ -1413,7 +1418,12 @@ export function NursesPortalPage() {
                   <Field label="Status" value={ctx.registrationStatus || "-"} />
                   <Field label="Last Updated" value={ctx.lastUpdated || "-"} />
                   <Field label="Housing Account" value={housingAccount?.statusLabel || "Active"} />
-                  {housingAccount?.batchCode ? <Field label="Arrival Batch" value={housingAccount.batchCode} /> : null}
+                  {housingAccount?.batchCode ? (
+                    <Field
+                      label="Arrival Batch"
+                      value={normalizeArrivalBatchNumber(housingAccount.batchCode) || housingAccount.batchCode}
+                    />
+                  ) : null}
                   {housingAccount?.arrivalDate ? <Field label="Arrival Date" value={housingAccount.arrivalDate} /> : null}
                   {showStaySummary ? <Field label="Current Stay Arrangement" value={currentArrangement} /> : null}
                   {showStaySummary ? <Field label="Latest Monthly Check-in" value={monthlyCheckinStatus || "—"} /> : null}

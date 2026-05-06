@@ -105,6 +105,14 @@ function isValidMtonNumber(value: string) {
   return /^MTON-E-\d{1,6}$/.test(value);
 }
 
+function normalizeArrivalBatchNumber(value: string) {
+  return (value || "").replace(/[^0-9]/g, "");
+}
+
+function isValidArrivalBatchNumber(value: string) {
+  return /^[0-9]+$/.test((value || "").trim());
+}
+
 export function NursesRegisterPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
@@ -464,7 +472,17 @@ export function NursesRegisterPage() {
                   />
                   <Grid cols={2} gap={14} style={{ marginTop: 8 }}>
                     <FInput label="Date arrived in Kuwait" req {...inp("arrivalDate")} type="date" />
-                    <FInput label="Batch / cohort reference" req {...inp("batchNumber")} placeholder="As issued by authorities" />
+                    <FInput
+                      label="Batch / cohort reference"
+                      req
+                      type="number"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={form.batchNumber || ""}
+                      onChange={(e) => set("batchNumber", normalizeArrivalBatchNumber(e.target.value))}
+                      placeholder="e.g. 39"
+                      hint="Batch number must contain digits only."
+                    />
                   </Grid>
                 </div>
               )}
@@ -772,6 +790,12 @@ export function NursesRegisterPage() {
                           setSubmitError("Please enter a valid MTON number in this format: MTON-E-145");
                           return;
                         }
+                        const batchNumber = (form.batchNumber || "").trim();
+                        if (!isValidArrivalBatchNumber(batchNumber)) {
+                          setSubmitError("Batch number must contain digits only.");
+                          return;
+                        }
+                        const normalizedBatchNumber = normalizeArrivalBatchNumber(batchNumber);
                         const arrangement = categoryVendorEligible ? form.currentArrangement || "" : "";
                         const arrangementFlag = categoryVendorEligible && /embassy/i.test(arrangement) ? "Yes" : "No";
                         const includeFacilityWorkflow = categoryVendorEligible && arrangement === "Embassy Contracted / Arranged";
@@ -804,7 +828,7 @@ export function NursesRegisterPage() {
                             whatsapp_full: whatsappFull,
                             email: form.email,
                             arrival_date: form.arrivalDate,
-                            batch_number: form.batchNumber,
+                            batch_number: normalizedBatchNumber,
                             hospital: form.hospital,
                             designation: form.jobTitle,
                             professional_category: professionalCategory,

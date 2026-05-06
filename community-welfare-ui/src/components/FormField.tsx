@@ -1,4 +1,4 @@
-import type { ChangeEvent, ReactNode } from "react";
+import type { ChangeEvent, ReactNode, InputHTMLAttributes } from "react";
 
 interface FGroupProps {
   label?: string;
@@ -31,9 +31,28 @@ interface FInputProps {
   value?: string;
   onChange?: (e: ChangeEvent<HTMLInputElement>) => void;
   name?: string;
+  inputMode?: InputHTMLAttributes<HTMLInputElement>["inputMode"];
+  pattern?: string;
+  min?: number | string;
+  max?: number | string;
+  step?: number | string;
 }
 
-export function FInput({ label, req, type = "text", placeholder, hint, value, onChange, name }: FInputProps) {
+export function FInput({
+  label,
+  req,
+  type = "text",
+  placeholder,
+  hint,
+  value,
+  onChange,
+  name,
+  inputMode,
+  pattern,
+  min,
+  max,
+  step,
+}: FInputProps) {
   return (
     <FGroup label={label} req={req} hint={hint}>
       <input
@@ -43,6 +62,11 @@ export function FInput({ label, req, type = "text", placeholder, hint, value, on
         value={value || ""}
         onChange={onChange}
         name={name}
+        inputMode={inputMode}
+        pattern={pattern}
+        min={min}
+        max={max}
+        step={step}
       />
     </FGroup>
   );

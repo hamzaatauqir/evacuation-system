@@ -6146,13 +6146,190 @@ def _nh_write_audit(db, entity_type, entity_id, event_type, nurse_registration_i
     )
 
 
+def _normalize_arrival_batch_number(value):
+    text = str(value or "").strip()
+    m = re.search(r"\d+", text)
+    return m.group(0) if m else ""
+
+
+def _arrival_batch_rank_key(row):
+    d = dict(row or {})
+    status = str(d.get('status') or '').strip().upper()
+    return (
+        0 if status == NH_BATCH_STATUS_ARRIVED else 1,
+        0 if str(d.get('arrival_date') or '').strip() else 1,
+        int(d.get('id') or 0),
+    )
+
+
+def _normalize_existing_arrival_batch_data(db):
+    changed = False
+    nurse_rows = [dict(r) for r in db.execute(
+        "SELECT id, batch_number, arrival_date FROM nurse_registrations WHERE COALESCE(batch_number, '') != ''"
+    ).fetchall()]
+    nurse_batch_by_id = {}
+    nurse_arrival_by_batch = {}
+    for row in nurse_rows:
+        raw_batch = str(row.get('batch_number') or '').strip()
+        normalized = _normalize_arrival_batch_number(raw_batch)
+        if normalized:
+            nurse_batch_by_id[int(row.get('id') or 0)] = normalized
+            arrival_date = str(row.get('arrival_date') or '').strip()
+            if arrival_date and normalized not in nurse_arrival_by_batch:
+                nurse_arrival_by_batch[normalized] = arrival_date
+            if normalized != raw_batch:
+                db.execute(
+                    "UPDATE nurse_registrations SET batch_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    [normalized, int(row.get('id') or 0)]
+                )
+                changed = True
+
+    batch_rows = [dict(r) for r in db.execute("SELECT * FROM nh_arrival_batch ORDER BY id ASC").fetchall()]
+    groups = {}
+    for row in batch_rows:
+        normalized = _normalize_arrival_batch_number(row.get('batch_code'))
+        if normalized:
+            groups.setdefault(normalized, []).append(row)
+
+    canonical_by_batch = {}
+    batch_id_to_number = {}
+    for batch_number, rows in groups.items():
+        rows_sorted = sorted(rows, key=_arrival_batch_rank_key)
+        canonical = next(
+            (dict(r) for r in rows_sorted if str(r.get('batch_code') or '').strip() == batch_number),
+            dict(rows_sorted[0])
+        )
+        preferred_arrival_date = next(
+            (str(r.get('arrival_date') or '').strip() for r in rows_sorted if str(r.get('arrival_date') or '').strip()),
+            nurse_arrival_by_batch.get(batch_number, '')
+        )
+        preferred_arrived_at = next(
+            (str(r.get('arrived_at') or '').strip() for r in rows_sorted if str(r.get('arrived_at') or '').strip()),
+            str(canonical.get('arrived_at') or '').strip()
+        )
+        preferred_arrived_by = next(
+            (str(r.get('arrived_by') or '').strip() for r in rows_sorted if str(r.get('arrived_by') or '').strip()),
+            str(canonical.get('arrived_by') or '').strip()
+        )
+        desired_status = (
+            NH_BATCH_STATUS_ARRIVED
+            if any(str(r.get('status') or '').strip().upper() == NH_BATCH_STATUS_ARRIVED for r in rows_sorted)
+            else NH_BATCH_STATUS_PLANNED
+        )
+        if (
+            str(canonical.get('batch_code') or '').strip() != batch_number
+            or str(canonical.get('arrival_date') or '').strip() != preferred_arrival_date
+            or str(canonical.get('status') or '').strip().upper() != desired_status
+            or str(canonical.get('arrived_at') or '').strip() != preferred_arrived_at
+            or str(canonical.get('arrived_by') or '').strip() != preferred_arrived_by
+        ):
+            db.execute(
+                """UPDATE nh_arrival_batch
+                   SET batch_code = ?, arrival_date = ?, status = ?,
+                       arrived_at = NULLIF(?, ''), arrived_by = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [
+                    batch_number,
+                    preferred_arrival_date,
+                    desired_status,
+                    preferred_arrived_at,
+                    preferred_arrived_by,
+                    int(canonical.get('id') or 0),
+                ]
+            )
+            changed = True
+            canonical.update({
+                'batch_code': batch_number,
+                'arrival_date': preferred_arrival_date,
+                'status': desired_status,
+                'arrived_at': preferred_arrived_at,
+                'arrived_by': preferred_arrived_by,
+            })
+        canonical_by_batch[batch_number] = canonical
+        for row in rows_sorted:
+            batch_id_to_number[int(row.get('id') or 0)] = batch_number
+
+    for batch_number in sorted(set(nurse_batch_by_id.values()), key=lambda item: (int(item), item)):
+        if batch_number in canonical_by_batch:
+            continue
+        arrival_date = nurse_arrival_by_batch.get(batch_number, '')
+        cur = db.execute(
+            """INSERT INTO nh_arrival_batch
+               (batch_code, arrival_date, status, remarks)
+               VALUES (?, ?, ?, '')""",
+            [batch_number, arrival_date, NH_BATCH_STATUS_PLANNED]
+        )
+        canonical_by_batch[batch_number] = {
+            'id': int(cur.lastrowid or 0),
+            'batch_code': batch_number,
+            'arrival_date': arrival_date,
+            'status': NH_BATCH_STATUS_PLANNED,
+            'remarks': '',
+            'arrived_at': '',
+            'arrived_by': '',
+        }
+        changed = True
+
+    account_rows = [dict(r) for r in db.execute(
+        "SELECT id, arrival_batch_id, nurse_registration_id, batch_code FROM nh_nurse_account ORDER BY id ASC"
+    ).fetchall()]
+    for row in account_rows:
+        nurse_id = int(row.get('nurse_registration_id') or 0)
+        linked_batch_id = int(row.get('arrival_batch_id') or 0)
+        raw_batch = (
+            str(row.get('batch_code') or '').strip()
+            or str((next((b.get('batch_code') for b in batch_rows if int(b.get('id') or 0) == linked_batch_id), '')) or '').strip()
+            or nurse_batch_by_id.get(nurse_id, '')
+        )
+        normalized = _normalize_arrival_batch_number(raw_batch)
+        if not normalized:
+            continue
+        canonical = canonical_by_batch.get(normalized)
+        if not canonical:
+            arrival_date = nurse_arrival_by_batch.get(normalized, '')
+            cur = db.execute(
+                """INSERT INTO nh_arrival_batch
+                   (batch_code, arrival_date, status, remarks)
+                   VALUES (?, ?, ?, '')""",
+                [normalized, arrival_date, NH_BATCH_STATUS_PLANNED]
+            )
+            canonical = {
+                'id': int(cur.lastrowid or 0),
+                'batch_code': normalized,
+                'arrival_date': arrival_date,
+                'status': NH_BATCH_STATUS_PLANNED,
+                'remarks': '',
+                'arrived_at': '',
+                'arrived_by': '',
+            }
+            canonical_by_batch[normalized] = canonical
+            changed = True
+        desired_batch_id = int(canonical.get('id') or 0) or None
+        if str(row.get('batch_code') or '').strip() != normalized or (row.get('arrival_batch_id') or None) != desired_batch_id:
+            db.execute(
+                """UPDATE nh_nurse_account
+                   SET arrival_batch_id = ?, batch_code = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [desired_batch_id, normalized, int(row.get('id') or 0)]
+            )
+            changed = True
+
+    refreshed = {
+        batch_number: dict(db.execute("SELECT * FROM nh_arrival_batch WHERE id = ? LIMIT 1", [int(row.get('id') or 0)]).fetchone() or row)
+        for batch_number, row in canonical_by_batch.items()
+    }
+    return changed, refreshed
+
+
 def _nh_normalize_account_payload(account_row, nurse_row=None):
     nurse_d = dict(nurse_row or {})
     acc = dict(account_row or {})
     status = (acc.get('account_status') or acc.get('status') or NH_ACCOUNT_STATUS_ACTIVE).strip().upper()
     if status not in {NH_ACCOUNT_STATUS_PENDING_ARRIVAL, NH_ACCOUNT_STATUS_ACTIVE}:
         status = NH_ACCOUNT_STATUS_ACTIVE
-    batch_code = (acc.get('batch_code') or acc.get('arrival_batch_code') or nurse_d.get('batch_number') or '').strip()
+    batch_code = _normalize_arrival_batch_number(
+        acc.get('batch_code') or acc.get('arrival_batch_code') or nurse_d.get('batch_number') or ''
+    )
     batch_status = (acc.get('arrival_batch_status') or acc.get('batch_status') or '').strip().upper()
     pending = status == NH_ACCOUNT_STATUS_PENDING_ARRIVAL
     if pending:
@@ -6188,11 +6365,12 @@ def nh_get_or_create_arrival_batch(db, batch_code, arrival_date='', actor='syste
     if not nh_feature_enabled():
         return None
     _nh_ensure_schema(db)
-    normalized_batch_code = _nh_clean_text(batch_code, 80)
+    _normalize_existing_arrival_batch_data(db)
+    normalized_batch_code = _normalize_arrival_batch_number(batch_code)
     if not normalized_batch_code:
         return None
     row = db.execute(
-        "SELECT * FROM nh_arrival_batch WHERE UPPER(TRIM(batch_code)) = UPPER(TRIM(?)) ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM nh_arrival_batch WHERE TRIM(COALESCE(batch_code, '')) = ? ORDER BY id ASC LIMIT 1",
         [normalized_batch_code]
     ).fetchone()
     if row:
@@ -6262,7 +6440,7 @@ def nh_create_registration_account(db, nurse_row_or_dict, actor='public_registra
     if not nurse_id:
         return None
     batch = nh_get_or_create_arrival_batch(db, nurse.get('batch_number') or '', nurse.get('arrival_date') or '', actor=actor)
-    batch_code = _nh_clean_text((batch or {}).get('batch_code') or nurse.get('batch_number') or '', 80)
+    batch_code = _normalize_arrival_batch_number((batch or {}).get('batch_code') or nurse.get('batch_number') or '')
     arrival_batch_id = int((batch or {}).get('id') or 0) if batch else None
     row = db.execute("SELECT * FROM nh_nurse_account WHERE nurse_registration_id = ? LIMIT 1", [nurse_id]).fetchone()
     if row:
@@ -6334,11 +6512,14 @@ def nh_block_if_pending_arrival(db, nurse_row_or_dict, feature_label):
 
 def nh_mark_batch_arrived(db, batch_id, actor='system'):
     _nh_ensure_schema(db)
+    _, canonical_by_batch = _normalize_existing_arrival_batch_data(db)
     batch = db.execute("SELECT * FROM nh_arrival_batch WHERE id = ? LIMIT 1", [int(batch_id or 0)]).fetchone()
     if not batch:
         raise ValueError('Arrival batch not found.')
     batch_d = dict(batch)
-    batch_code = (batch_d.get('batch_code') or '').strip()
+    batch_code = _normalize_arrival_batch_number(batch_d.get('batch_code') or '')
+    if batch_code and batch_code in canonical_by_batch:
+        batch_d = dict(canonical_by_batch[batch_code])
     prior_status = (batch_d.get('status') or '').strip().upper() or NH_BATCH_STATUS_PLANNED
     db.execute(
         """UPDATE nh_arrival_batch
@@ -7798,7 +7979,7 @@ def _build_nurse_public_profile_bundle(db, rec):
         'email_status': _email_status_label(rec),
         'mton_number': rec.get('mton_number', ''),
         'email_verification_sent_at': rec.get('email_verification_sent_at', ''),
-        'batch_number': rec.get('batch_number', ''),
+        'batch_number': _normalize_arrival_batch_number(rec.get('batch_number', '')) or rec.get('batch_number', ''),
         'arrival_date': rec.get('arrival_date', ''),
         'hospital': rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
         'qualification_degree': rec.get('qualification_degree', ''),
@@ -7899,7 +8080,8 @@ def api_nurse_register(data):
     emergency_contact_full = _compose_phone(emergency_country_code, emergency_contact_number)
     mobile = mobile_full or (data.get('mobile') or '').strip()
     arrival_date = (data.get('arrival_date') or '').strip()
-    batch_number = (data.get('batch_number') or '').strip()
+    batch_number_raw = (data.get('batch_number') or '').strip()
+    batch_number = _normalize_arrival_batch_number(batch_number_raw)
     hospital = (data.get('hospital') or '').strip()
     designation = (data.get('designation') or '').strip()
     professional_category = _nurse_professional_category(data.get('professional_category'), designation)
@@ -7966,8 +8148,10 @@ def api_nurse_register(data):
     confirm_password = data.get('confirm_password') or ''
     if not father_name:
         return {'success': False, 'ok': False, 'error': 'Father Name is required.'}
-    if not full_name or not passport or not mobile or not cnic or not arrival_date or not batch_number or not hospital or not designation:
+    if not full_name or not passport or not mobile or not cnic or not arrival_date or not batch_number_raw or not hospital or not designation:
         return {'success': False, 'ok': False, 'error': 'Please fill all required fields.'}
+    if not batch_number:
+        return {'success': False, 'ok': False, 'error': 'Batch number must contain digits only.'}
     if not mobile_number or len(mobile_number) < 7 or len(mobile_number) > 15:
         return {'success': False, 'ok': False, 'error': 'Primary mobile number must be 7 to 15 digits.'}
     if not emergency_contact_number or len(emergency_contact_number) < 7 or len(emergency_contact_number) > 15:
@@ -10117,7 +10301,9 @@ def _nurse_onboarding_admin_row(db, nurse_row, steps_by_code, total_steps):
         'whatsapp': nd.get('whatsapp_full') or nd.get('mobile_full') or nd.get('mobile') or '',
         'email': nd.get('email') or '',
         'mton_number': nd.get('mton_number') or '',
-        'arrival_batch': nd.get('arrival_batch_code') or nd.get('batch_code') or nd.get('batch_number') or '',
+        'arrival_batch': _normalize_arrival_batch_number(
+            nd.get('arrival_batch_code') or nd.get('batch_code') or nd.get('batch_number') or ''
+        ) or nd.get('arrival_batch_code') or nd.get('batch_code') or nd.get('batch_number') or '',
         'current_stage_code': current_stage_code,
         'current_stage_name': (current_step or {}).get('step_name') or '',
         'issue_status': issue_status,
@@ -10154,7 +10340,7 @@ def _nurse_onboarding_admin_query_rows(db, params):
     issue_status = _nurse_onboarding_clean_text((params or {}).get('issue_status'), 32)
     help_needed = (params or {}).get('help_needed')
     no_update_days_s = _nurse_onboarding_clean_text((params or {}).get('no_update_days'), 8)
-    batch = _nurse_onboarding_clean_text((params or {}).get('batch'), 80)
+    batch = _normalize_arrival_batch_number(_nurse_onboarding_clean_text((params or {}).get('batch'), 80))
     mton = _nurse_onboarding_clean_text((params or {}).get('mton'), 60)
     if search:
         where.append(
@@ -10326,7 +10512,7 @@ def api_admin_nurse_onboarding_detail(params, user):
                 'whatsapp': nurse.get('whatsapp_full') or nurse.get('mobile_full') or nurse.get('mobile') or '',
                 'email': nurse.get('email') or '',
                 'mton_number': nurse.get('mton_number') or '',
-                'batch_number': nurse.get('batch_number') or '',
+                'batch_number': _normalize_arrival_batch_number(nurse.get('batch_number') or '') or nurse.get('batch_number') or '',
             },
             'progress': progress_row or {},
             'steps': derived_steps,
@@ -10737,7 +10923,7 @@ def _nurse_accommodation_row_from_related(nurse_row, roster_row=None, request_ro
         'mobile': nurse.get('mobile_full') or nurse.get('mobile') or roster_raw.get('mobile_full') or roster.get('phone') or '',
         'whatsapp': nurse.get('whatsapp_full') or nurse.get('mobile_full') or nurse.get('mobile') or roster_raw.get('whatsapp_full') or roster.get('phone') or '',
         'gender': nurse.get('gender') or '',
-        'batch': nurse.get('batch_number') or '',
+        'batch': _normalize_arrival_batch_number(nurse.get('batch_number') or '') or nurse.get('batch_number') or '',
         'current_accommodation_type': current_type,
         'vendor_name': vendor_name,
         'facility_name': facility_name,
@@ -10945,7 +11131,7 @@ def _nurse_accommodation_detail_payload(db, nurse_id):
             'email': nurse.get('email') or '',
             'mton_number': nurse.get('mton_number') or '',
             'gender': nurse.get('gender') or '',
-            'batch_number': nurse.get('batch_number') or '',
+            'batch_number': _normalize_arrival_batch_number(nurse.get('batch_number') or '') or nurse.get('batch_number') or '',
             'hospital': nurse.get('hospital') or '',
         },
         'summary': summary_row,
@@ -12077,6 +12263,12 @@ def api_admin_gl_letter(app_id, user):
 def api_admin_nurses_summary(user=None):
     db = get_db()
     try:
+        normalized_changed = False
+        normalized_batches = {}
+        if nh_feature_enabled():
+            normalized_changed, normalized_batches = _normalize_existing_arrival_batch_data(db)
+            if normalized_changed:
+                db.commit()
         def _count(sql, vals=()):
             try:
                 return int((db.execute(sql, vals).fetchone()['c']) or 0)
@@ -12089,7 +12281,7 @@ def api_admin_nurses_summary(user=None):
             'registrations': _count("SELECT COUNT(*) c FROM nurse_registrations"),
             'pending_registrations': _count("SELECT COUNT(*) c FROM nurse_registrations WHERE registration_status IN ('Pending', 'Pending Review')"),
             'housing_pending_arrival': _count("SELECT COUNT(*) c FROM nh_nurse_account WHERE account_status = ?", [NH_ACCOUNT_STATUS_PENDING_ARRIVAL]) if nh_feature_enabled() else 0,
-            'arrival_batches': _count("SELECT COUNT(*) c FROM nh_arrival_batch") if nh_feature_enabled() else 0,
+            'arrival_batches': len(normalized_batches) if nh_feature_enabled() else 0,
             'accommodation_requests': _count("SELECT COUNT(*) c FROM nurse_accommodation_requests"),
             'open_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE complaint_status IN ('Seen', 'In Progress')"),
             'resolved_complaints': _count("SELECT COUNT(*) c FROM nurse_complaints WHERE COALESCE(status, complaint_status) IN ('Resolved','Closed')"),
@@ -12149,6 +12341,9 @@ def api_admin_nurse_pending_accounts(params, user=None):
     db = get_db()
     try:
         _nh_ensure_schema(db)
+        normalized_changed, _ = _normalize_existing_arrival_batch_data(db)
+        if normalized_changed:
+            db.commit()
         where = ["a.account_status = ?"]
         vals = [NH_ACCOUNT_STATUS_PENDING_ARRIVAL]
         if search:
@@ -12212,7 +12407,9 @@ def api_admin_nurse_pending_accounts(params, user=None):
                 'registration_status': d.get('registration_status') or '',
                 'account_status': d.get('account_status') or NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
                 'arrival_batch_id': d.get('arrival_batch_id'),
-                'batch_code': d.get('arrival_batch_code') or d.get('account_batch_code') or d.get('batch_number') or '',
+                'batch_code': _normalize_arrival_batch_number(
+                    d.get('arrival_batch_code') or d.get('account_batch_code') or d.get('batch_number') or ''
+                ),
                 'arrival_date': d.get('batch_arrival_date') or d.get('nurse_arrival_date') or '',
                 'arrival_batch_status': d.get('arrival_batch_status') or '',
                 'account_created_at': d.get('account_created_at') or '',
@@ -12230,6 +12427,94 @@ def api_admin_nurse_pending_accounts(params, user=None):
         db.close()
 
 
+def _arrival_batch_matches_search(search_text, batch_number, row):
+    if not search_text:
+        return True
+    haystack = " ".join([
+        batch_number,
+        f"Batch {batch_number}" if batch_number else "",
+        str((row or {}).get('remarks') or ''),
+        str((row or {}).get('arrival_date') or ''),
+        str((row or {}).get('status') or ''),
+    ]).lower()
+    return search_text.lower() in haystack
+
+
+def _arrival_batch_group_items(db, search_text=""):
+    normalized_changed, canonical_by_batch = _normalize_existing_arrival_batch_data(db)
+    batch_rows = [dict(r) for r in db.execute("SELECT * FROM nh_arrival_batch ORDER BY id ASC").fetchall()]
+    batch_code_by_id = {
+        int(row.get('id') or 0): _normalize_arrival_batch_number(row.get('batch_code') or '')
+        for row in batch_rows
+        if int(row.get('id') or 0) > 0
+    }
+    nurse_batch_by_id = {
+        int(r['id']): _normalize_arrival_batch_number(r['batch_number'] or '')
+        for r in db.execute("SELECT id, batch_number FROM nurse_registrations WHERE COALESCE(batch_number, '') != ''").fetchall()
+    }
+    groups = {}
+    for batch_number, row in canonical_by_batch.items():
+        row_d = dict(row or {})
+        if not _arrival_batch_matches_search(search_text, batch_number, row_d):
+            continue
+        groups[batch_number] = {
+            'id': row_d.get('id'),
+            'batch_code': batch_number,
+            'arrival_date': row_d.get('arrival_date') or '',
+            'status': row_d.get('status') or NH_BATCH_STATUS_PLANNED,
+            'remarks': row_d.get('remarks') or '',
+            'arrived_at': row_d.get('arrived_at') or '',
+            'arrived_by': row_d.get('arrived_by') or '',
+            'linked_accounts': 0,
+            'pending_accounts': 0,
+            'active_accounts': 0,
+            'created_at': row_d.get('created_at') or '',
+        }
+    for row in db.execute(
+        "SELECT id, arrival_batch_id, nurse_registration_id, batch_code, account_status FROM nh_nurse_account ORDER BY id ASC"
+    ).fetchall():
+        acc = dict(row)
+        batch_number = (
+            _normalize_arrival_batch_number(acc.get('batch_code') or '')
+            or batch_code_by_id.get(int(acc.get('arrival_batch_id') or 0), '')
+            or nurse_batch_by_id.get(int(acc.get('nurse_registration_id') or 0), '')
+        )
+        if not batch_number:
+            continue
+        canonical = canonical_by_batch.get(batch_number)
+        group = groups.get(batch_number)
+        if not group:
+            if not canonical:
+                continue
+            if not _arrival_batch_matches_search(search_text, batch_number, canonical):
+                continue
+            group = {
+                'id': canonical.get('id'),
+                'batch_code': batch_number,
+                'arrival_date': canonical.get('arrival_date') or '',
+                'status': canonical.get('status') or NH_BATCH_STATUS_PLANNED,
+                'remarks': canonical.get('remarks') or '',
+                'arrived_at': canonical.get('arrived_at') or '',
+                'arrived_by': canonical.get('arrived_by') or '',
+                'linked_accounts': 0,
+                'pending_accounts': 0,
+                'active_accounts': 0,
+                'created_at': canonical.get('created_at') or '',
+            }
+            groups[batch_number] = group
+        group['linked_accounts'] += 1
+        status = str(acc.get('account_status') or '').strip().upper()
+        if status == NH_ACCOUNT_STATUS_PENDING_ARRIVAL:
+            group['pending_accounts'] += 1
+        elif status == NH_ACCOUNT_STATUS_ACTIVE:
+            group['active_accounts'] += 1
+    items = list(groups.values())
+    items.sort(key=lambda item: int(item.get('id') or 0), reverse=True)
+    items.sort(key=lambda item: str(item.get('arrival_date') or ''), reverse=True)
+    items.sort(key=lambda item: 1 if str(item.get('status') or '').strip().upper() == NH_BATCH_STATUS_ARRIVED else 0)
+    return normalized_changed, items
+
+
 def api_admin_nurse_arrival_batches(params, user=None):
     if not nh_feature_enabled():
         return {'success': True, 'feature_enabled': False, 'total': 0, 'items': []}
@@ -12237,41 +12522,9 @@ def api_admin_nurse_arrival_batches(params, user=None):
     db = get_db()
     try:
         _nh_ensure_schema(db)
-        where = ["1=1"]
-        vals = []
-        if search:
-            where.append("UPPER(COALESCE(b.batch_code,'')) LIKE UPPER(?)")
-            vals.append(f"%{search}%")
-        rows = db.execute(
-            f"""SELECT b.*,
-                       COUNT(a.id) AS linked_accounts,
-                       SUM(CASE WHEN a.account_status = ? THEN 1 ELSE 0 END) AS pending_accounts,
-                       SUM(CASE WHEN a.account_status = ? THEN 1 ELSE 0 END) AS active_accounts
-                FROM nh_arrival_batch b
-                LEFT JOIN nh_nurse_account a ON a.arrival_batch_id = b.id
-                WHERE {' AND '.join(where)}
-                GROUP BY b.id
-                ORDER BY CASE WHEN b.status = ? THEN 1 ELSE 0 END,
-                         COALESCE(NULLIF(b.arrival_date,''), '') DESC,
-                         b.id DESC""",
-            [NH_ACCOUNT_STATUS_PENDING_ARRIVAL, NH_ACCOUNT_STATUS_ACTIVE, *vals, NH_BATCH_STATUS_ARRIVED]
-        ).fetchall()
-        items = []
-        for row in rows:
-            d = dict(row)
-            items.append({
-                'id': d.get('id'),
-                'batch_code': d.get('batch_code') or '',
-                'arrival_date': d.get('arrival_date') or '',
-                'status': d.get('status') or NH_BATCH_STATUS_PLANNED,
-                'remarks': d.get('remarks') or '',
-                'arrived_at': d.get('arrived_at') or '',
-                'arrived_by': d.get('arrived_by') or '',
-                'linked_accounts': int(d.get('linked_accounts') or 0),
-                'pending_accounts': int(d.get('pending_accounts') or 0),
-                'active_accounts': int(d.get('active_accounts') or 0),
-                'created_at': d.get('created_at') or '',
-            })
+        normalized_changed, items = _arrival_batch_group_items(db, search)
+        if normalized_changed:
+            db.commit()
         return {'success': True, 'feature_enabled': True, 'total': len(items), 'items': items}
     finally:
         db.close()
@@ -30289,31 +30542,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if not _facility_user_can_access(user):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(
+            self.send_html(_apply_nurse_accommodation_admin_shell(
                 FACILITY_ROSTER_ADMIN_PAGE
                 .replace('__USER_NAME__', user['user'])
                 .replace('__USER_ROLE__', user['role'])
-            )
+            , '/admin/facility-roster'))
         elif path in ('/admin/facility-occupancy', '/admin/facility-occupancy/detail', '/admin/facility-reconciliation'):
             user = self.require_auth()
             if not user: return
             if not _facility_user_can_access(user):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(
+            self.send_html(_apply_nurse_accommodation_admin_shell(
                 FACILITY_OCCUPANCY_ADMIN_PAGE
                 .replace('__USER_NAME__', user['user'])
                 .replace('__USER_ROLE__', user['role'])
-            )
+            , '/admin/facility-occupancy'))
         elif path == '/admin/alternative-facilities':
             user = self.require_auth()
             if not user: return
             if not _facility_user_can_access(user):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(
+            self.send_html(_apply_nurse_accommodation_admin_shell(
                 ALTERNATIVE_FACILITIES_ADMIN_PAGE
                 .replace('__USER_NAME__', user['user'])
                 .replace('__USER_ROLE__', user['role'])
-            )
+            , '/admin/alternative-facilities'))
         elif path in ('/admin/legal-opf', '/admin/legal-cases'):
             user = self.require_auth()
             if not user: return
@@ -30595,7 +30848,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             reg_status = (params.get('registration_status') or params.get('status') or '').strip()
             docs_status = (params.get('documents_status') or '').strip()
             grading_letter = (params.get('grading_letter_issued') or '').strip()
-            batch_number = (params.get('batch_number') or '').strip()
+            batch_number = _normalize_arrival_batch_number((params.get('batch_number') or '').strip())
             hospital = (params.get('hospital') or '').strip()
             current_arrangement = (params.get('current_arrangement') or '').strip()
             confirmation_status = (params.get('confirmation_status') or '').strip()
@@ -33838,7 +34091,10 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid id'}, 400); return
             db = get_db()
             try:
-                row = db.execute("SELECT reference_id, passport_number FROM nurse_registrations WHERE id = ?", [rec_id]).fetchone()
+                row = db.execute(
+                    "SELECT reference_id, passport_number, arrival_date, batch_number FROM nurse_registrations WHERE id = ?",
+                    [rec_id]
+                ).fetchone()
                 if not row:
                     self.send_json({'success': False, 'error': 'Record not found'}, 404); return
                 updates = []
@@ -33853,6 +34109,13 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                         self.send_json({'success': False, 'error': 'Please enter a valid MTON number in this format: MTON-E-145'}, 400); return
                     updates.append("mton_number = ?")
                     vals.append(canonical_mton)
+                normalized_batch_number = None
+                if 'batch_number' in data and data.get('batch_number') is not None:
+                    normalized_batch_number = _normalize_arrival_batch_number(data.get('batch_number') or '')
+                    if not normalized_batch_number:
+                        self.send_json({'success': False, 'error': 'Batch number must contain digits only.'}, 400); return
+                    updates.append("batch_number = ?")
+                    vals.append(normalized_batch_number)
                 for col, _lbl in NURSE_PROCESS_STEPS:
                     if col in data:
                         updates.append(f"{col} = ?")
@@ -33865,6 +34128,13 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 vals.append(rec_id)
                 db.execute("""UPDATE nurse_registrations SET
                     """ + ", ".join(updates) + " WHERE id = ?", vals)
+                if normalized_batch_number and nh_feature_enabled():
+                    nh_create_registration_account(db, {
+                        'id': rec_id,
+                        'reference_id': row['reference_id'],
+                        'batch_number': normalized_batch_number,
+                        'arrival_date': row['arrival_date'] or '',
+                    }, actor=user['user'])
                 _nurse_log(db, 'admin_registration_update', row['reference_id'], row['passport_number'], user['user'], data)
                 db.commit()
                 self.send_json({'success': True})
@@ -36855,6 +37125,32 @@ WELFARE_CASES_OFFLINE_EXPORT_CARD = """
 <div class="panel" id="pulseOfflineExportCard" style="margin-bottom:14px;display:none"><div class="filters"><strong style="color:#10253f;align-self:center">Ambassador Pulse Offline Export</strong><span style="font-size:12px;color:#64748b">Read-only CSV export for local offline pulse report generation.</span></div><div style="padding:12px 14px"><div class="filters" style="padding:0;border:0"><button type="button" class="btn2" onclick="setPulseOfflineExportDays(3)">Last 3 days</button><button type="button" class="btn2" onclick="setPulseOfflineExportDays(7)">Last 7 days</button><input id="pulseOfflineStartDate" type="date"><input id="pulseOfflineEndDate" type="date"><button type="button" onclick="downloadPulseOfflineExportSelected()">Download CSV for Offline Pulse Report</button></div><div class="hint" style="margin-top:10px">Download this CSV and place it in: Desktop/Ambassador Pulse Offline. Rename it to cases_last_7_days.csv or run the offline script with --input.</div><div class="hint" style="margin-top:6px"><a id="pulseOfflineQuick3" href="/api/admin/ambassador-pulse-export.csv?days=3">Download last 3 days</a> <span style="color:#cbd5e1">|</span> <a id="pulseOfflineQuick7" href="/api/admin/ambassador-pulse-export.csv?days=7">Download last 7 days</a></div></div></div>
 """
 
+def _nurse_accommodation_admin_sidebar(active_path=''):
+    def link(href, icon, label):
+        active = ' class="is-active"' if href == active_path else ''
+        return f'<a href="{href}"{active}><span class="cwa-admin-sidebar__icon">{icon}</span><span>{label}</span></a>'
+    return (
+        '<aside class="cwa-admin-sidebar"><div class="cwa-admin-sidebar__group">'
+        '<div class="cwa-admin-sidebar__section-title">Nurses Accommodation</div>'
+        + link('/admin/nurses', '←', 'Back to Nurses Management')
+        + link('/admin/nurses/accommodation', 'AH', 'Accommodation / Hostel Roster')
+        + link('/admin/facility-roster', 'FR', 'Facility Roster')
+        + link('/admin/facility-occupancy', 'FO', 'Facility Occupancy')
+        + link('/admin/alternative-facilities', 'AF', 'Alternative Facilities')
+        + '</div></aside>'
+    )
+
+
+def _apply_nurse_accommodation_admin_shell(html, active_path=''):
+    return re.sub(
+        r'<aside class="cwa-admin-sidebar">.*?</aside>',
+        _nurse_accommodation_admin_sidebar(active_path),
+        html,
+        count=1,
+        flags=re.S,
+    )
+
+
 WELFARE_CASES_PRINT_SCRIPT = """
 <script>
 function cwaPrintTodayIso(){
@@ -37318,7 +37614,7 @@ NURSES_REGISTER_PAGE = nurse_simple_page("New Nurses Registration", """
             <h3>Personal Information</h3>
             <div class="grid"><div><label>Full Name *</label><input id="full_name" required></div><div><label>Passport Number *</label><input id="passport_number" required></div></div>
             <div class="grid"><div><label>CNIC *</label><input id="cnic" required></div><div><label>Civil ID Number</label><input id="civil_id"></div></div>
-            <div class="grid"><div><label>Date of Arrival in Kuwait *</label><input id="arrival_date" type="date" required></div><div><label>Batch Number *</label><input id="batch_number" required></div></div>
+            <div class="grid"><div><label>Date of Arrival in Kuwait *</label><input id="arrival_date" type="date" required></div><div><label>Batch Number *</label><input id="batch_number" type="number" inputmode="numeric" pattern="[0-9]*" required></div></div>
           </div>
         </div>
         <div class="nurses-pane" data-pane="2">
@@ -37440,7 +37736,9 @@ async function submitForm(e){
   if(!validateStep(4)) return false;
   const networkErrorMessage='Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.';
   const val=id=>{const el=document.getElementById(id);return el?el.value:''};
-  const p={full_name:val('full_name'),passport_number:val('passport_number'),cnic:val('cnic'),civil_id:val('civil_id'),mobile:val('mobile'),email:val('email'),password:val('password'),confirm_password:val('confirm_password'),arrival_date:val('arrival_date'),batch_number:val('batch_number'),hospital:val('hospital'),designation:val('designation'),qualification_degree:val('qualification_degree'),qualification_degree_other:val('qualification_degree_other'),degree_type:val('degree_type'),moh_offer_salary_kwd:val('moh_offer_salary_kwd'),grading_letter_issued:val('grading_letter_issued'),current_arrangement:val('current_arrangement'),current_accommodation:val('current_arrangement'),current_accommodation_status:val('current_accommodation_status_v3'),emergency_contact:val('emergency_contact_v3'),applying_for_accommodation:val('applying_for_accommodation'),remarks:val('remarks'),issue_notice:val('issue_notice')};
+  const batchNumber=val('batch_number');
+  if(!/^[0-9]+$/.test(String(batchNumber||'').trim())){msg.textContent='Batch number must contain digits only.';return false;}
+  const p={full_name:val('full_name'),passport_number:val('passport_number'),cnic:val('cnic'),civil_id:val('civil_id'),mobile:val('mobile'),email:val('email'),password:val('password'),confirm_password:val('confirm_password'),arrival_date:val('arrival_date'),batch_number:batchNumber,hospital:val('hospital'),designation:val('designation'),qualification_degree:val('qualification_degree'),qualification_degree_other:val('qualification_degree_other'),degree_type:val('degree_type'),moh_offer_salary_kwd:val('moh_offer_salary_kwd'),grading_letter_issued:val('grading_letter_issued'),current_arrangement:val('current_arrangement'),current_accommodation:val('current_arrangement'),current_accommodation_status:val('current_accommodation_status_v3'),emergency_contact:val('emergency_contact_v3'),applying_for_accommodation:val('applying_for_accommodation'),remarks:val('remarks'),issue_notice:val('issue_notice')};
   for(const [k,_] of STEPS){p[k]=stepVal(k);}
   msg.textContent='Submitting registration...';
   try{
