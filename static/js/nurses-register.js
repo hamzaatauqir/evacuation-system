@@ -41,10 +41,71 @@
   const stepError = document.getElementById('step_error');
   const msg = document.getElementById('msg');
   const networkErrorMessage = 'Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.';
+  const mohHotelDetailsMessage = 'Please provide hotel/facility name, area, and date shifted to hotel.';
+  const currentArrangementField = document.getElementById('current_arrangement');
+  const mohHotelSection = document.getElementById('moh_hotel_details');
+  const mohHotelNameField = document.getElementById('moh_hotel_name');
+  const mohHotelAreaField = document.getElementById('moh_hotel_area');
+  const mohHotelStartDateField = document.getElementById('moh_hotel_start_date');
+  const mohHotelDurationField = document.getElementById('moh_hotel_duration_months');
+  const mohHotelExpectedEndField = document.getElementById('moh_hotel_expected_end_date');
+  const mohHotelExpectedEndDisplayField = document.getElementById('moh_hotel_expected_end_date_display');
 
   function valueOf(id) {
     const el = document.getElementById(id);
     return el ? el.value : '';
+  }
+
+  function isMohHotelArrangement() {
+    return valueOf('current_arrangement') === 'MOH Provided Hotel - Arrival Stay';
+  }
+
+  function addMonthsToIsoDate(value, months) {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return '';
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const target = new Date(Date.UTC(year, month - 1 + months, 1));
+    const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+    target.setUTCDate(Math.min(day, lastDay));
+    return target.toISOString().slice(0, 10);
+  }
+
+  function syncMohHotelFields() {
+    const active = isMohHotelArrangement();
+    const detailFields = [mohHotelNameField, mohHotelAreaField, mohHotelStartDateField];
+    if (mohHotelSection) mohHotelSection.style.display = active ? 'block' : 'none';
+    detailFields.forEach((field) => {
+      if (!field) return;
+      if (active) {
+        field.setAttribute('required', 'required');
+      } else {
+        field.removeAttribute('required');
+        field.value = '';
+      }
+    });
+    const expectedEndDate = active ? addMonthsToIsoDate(mohHotelStartDateField ? mohHotelStartDateField.value : '', 3) : '';
+    if (mohHotelDurationField) mohHotelDurationField.value = active ? '3' : '';
+    if (mohHotelExpectedEndField) mohHotelExpectedEndField.value = expectedEndDate;
+    if (mohHotelExpectedEndDisplayField) mohHotelExpectedEndDisplayField.value = expectedEndDate;
+  }
+
+  function validateMohHotelFields(useStepError) {
+    if (!isMohHotelArrangement()) return true;
+    const missingField = [mohHotelNameField, mohHotelAreaField, mohHotelStartDateField].find((field) => field && !field.value.trim());
+    if (!missingField) {
+      if (useStepError) stepError.style.display = 'none';
+      return true;
+    }
+    if (useStepError) {
+      stepError.textContent = mohHotelDetailsMessage;
+      stepError.style.display = 'block';
+    } else {
+      msg.textContent = mohHotelDetailsMessage;
+    }
+    missingField.focus();
+    return false;
   }
 
   function isValidBatchNumber(value) {
@@ -62,6 +123,7 @@
 
   function validateStep(n) {
     const pane = document.querySelector('.nurses-pane[data-pane="' + n + '"]');
+    if (n === 2 && !validateMohHotelFields(true)) return false;
     const required = Array.from(pane.querySelectorAll('input[required],select[required],textarea[required]'));
     for (const field of required) {
       if (!field.value) {
@@ -74,6 +136,14 @@
     stepError.style.display = 'none';
     return true;
   }
+
+  if (currentArrangementField) {
+    currentArrangementField.addEventListener('change', syncMohHotelFields);
+  }
+  if (mohHotelStartDateField) {
+    mohHotelStartDateField.addEventListener('change', syncMohHotelFields);
+  }
+  syncMohHotelFields();
 
   nextBtn.addEventListener('click', function () {
     if (validateStep(currentStep)) showStep(Math.min(4, currentStep + 1));
@@ -90,6 +160,8 @@
       msg.textContent = 'Batch number must contain digits only.';
       return false;
     }
+    syncMohHotelFields();
+    if (!validateMohHotelFields(false)) return false;
     const p = {
       full_name: valueOf('full_name'),
       passport_number: valueOf('passport_number'),
@@ -113,6 +185,11 @@
       current_accommodation_status: valueOf('current_accommodation_status_v3'),
       emergency_contact: valueOf('emergency_contact_v3'),
       applying_for_accommodation: valueOf('applying_for_accommodation'),
+      moh_hotel_name: isMohHotelArrangement() ? valueOf('moh_hotel_name') : '',
+      moh_hotel_area: isMohHotelArrangement() ? valueOf('moh_hotel_area') : '',
+      moh_hotel_start_date: isMohHotelArrangement() ? valueOf('moh_hotel_start_date') : '',
+      moh_hotel_duration_months: isMohHotelArrangement() ? valueOf('moh_hotel_duration_months') : '',
+      moh_hotel_expected_end_date: isMohHotelArrangement() ? valueOf('moh_hotel_expected_end_date') : '',
       remarks: valueOf('remarks'),
       issue_notice: valueOf('issue_notice')
     };

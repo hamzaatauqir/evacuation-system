@@ -68,8 +68,22 @@
                   <div><label>Confirm Password *</label><input id="confirm_password" type="password" autocomplete="new-password" required></div>
                 </div>
                 <div class="nurses-grid">
-                  <div><label>Current Stay Arrangement *</label><select id="current_arrangement" required><option value="">Select</option><option>Private (Self Arranged)</option><option>MOH Arranged</option><option>MOH Provided Hotel - Arrival Stay</option><option>Embassy Contracted / Arranged</option></select></div>
+                  <div><label>Current Stay Arrangement *</label><select id="current_arrangement" required><option value="">Select</option><option>Private (Self Arranged)</option><option>MOH Provided Hotel - Arrival Stay</option><option value="Embassy Contracted / Arranged">AJA Care Vendor Embassy Contracted</option><option>Other</option></select></div>
                   <div><label>Applying for Accommodation?</label><select id="applying_for_accommodation"><option>No</option><option>Yes</option></select></div>
+                </div>
+                <div id="moh_hotel_details" style="display:none;margin-top:16px;padding:16px;border:1px solid #dbe4ef;border-radius:12px;background:#f8fbff">
+                  <h4 style="margin:0 0 10px;color:#002147">MOH Provided Hotel - Arrival Stay Details</h4>
+                  <div class="nurses-grid">
+                    <div><label>Hotel / Facility Name *</label><input id="moh_hotel_name"></div>
+                    <div><label>Area *</label><input id="moh_hotel_area"></div>
+                  </div>
+                  <div class="nurses-grid">
+                    <div><label>Date Shifted to Hotel / Arrival Stay *</label><input id="moh_hotel_start_date" type="date"></div>
+                    <div><label>Expected End Date</label><input id="moh_hotel_expected_end_date_display" type="date" readonly></div>
+                  </div>
+                  <p class="muted" style="margin:10px 0 0">Expected stay duration: 3 months fixed for MOH arrival hotel stay</p>
+                  <input id="moh_hotel_duration_months" type="hidden" value="3">
+                  <input id="moh_hotel_expected_end_date" type="hidden">
                 </div>
               </div>
             </div>

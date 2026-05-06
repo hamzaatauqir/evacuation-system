@@ -4969,6 +4969,17 @@ MONTHLY_WELFARE_CHECKIN_EXCLUDED_STATUSES = {'Left Facility', 'Closed / Archived
 MONTHLY_WELFARE_CHECKIN_WELFARE_RESPONSES = {'needs_assistance', 'callback_requested', 'service_difficulty'}
 NURSE_VENDOR_ELIGIBLE_CATEGORIES = {'Nurse', 'Other Health Worker'}
 NURSE_APPROVED_VENDOR_VALUES = {FACILITY_VENDOR_DEFAULT, 'Other / Not Sure'}
+NURSE_EMBASSY_ARRANGEMENT = 'Embassy Contracted / Arranged'
+NURSE_PRIVATE_ARRANGEMENT = 'Private (Self Arranged)'
+NURSE_LEGACY_MOH_ARRANGEMENT = 'MOH Arranged'
+NURSE_MOH_ARRIVAL_STAY = 'MOH Provided Hotel - Arrival Stay'
+NURSE_OTHER_ARRANGEMENT = 'Other'
+NURSE_PUBLIC_STAY_ARRANGEMENTS = {
+    NURSE_PRIVATE_ARRANGEMENT,
+    NURSE_MOH_ARRIVAL_STAY,
+    NURSE_EMBASSY_ARRANGEMENT,
+    NURSE_OTHER_ARRANGEMENT,
+}
 FACILITY_ROSTER_STATUSES = {
     'Assigned', 'Assigned to Facility', 'Pending Nurse Confirmation',
     'Pending Stay Confirmation', 'Registered - Vendor Facility',
@@ -5022,6 +5033,43 @@ STAFF_LIMITED_STATUSES = {
     'Seen by Staff', 'In Progress', 'Information Requested',
     'Follow-up Completed', 'Unable to Contact', 'Resolved by Staff'
 }
+
+
+def _nurse_stay_arrangement_key(value):
+    text = str(value or '').strip().lower()
+    if not text:
+        return ''
+    text = text.replace('–', '-').replace('—', '-').replace('_', ' ')
+    return ' '.join(text.split())
+
+
+NURSE_STAY_ARRANGEMENT_ALIASES = {
+    _nurse_stay_arrangement_key(NURSE_PRIVATE_ARRANGEMENT): NURSE_PRIVATE_ARRANGEMENT,
+    _nurse_stay_arrangement_key('Private Self Arranged'): NURSE_PRIVATE_ARRANGEMENT,
+    _nurse_stay_arrangement_key('Private Self-Arranged'): NURSE_PRIVATE_ARRANGEMENT,
+    _nurse_stay_arrangement_key(NURSE_LEGACY_MOH_ARRANGEMENT): NURSE_LEGACY_MOH_ARRANGEMENT,
+    _nurse_stay_arrangement_key(NURSE_MOH_ARRIVAL_STAY): NURSE_MOH_ARRIVAL_STAY,
+    _nurse_stay_arrangement_key('MOH Provided Hotel Arrival Stay'): NURSE_MOH_ARRIVAL_STAY,
+    _nurse_stay_arrangement_key('MOH Hotel Arrival Stay'): NURSE_MOH_ARRIVAL_STAY,
+    _nurse_stay_arrangement_key('MOH Hotel - Arrival Stay'): NURSE_MOH_ARRIVAL_STAY,
+    _nurse_stay_arrangement_key('MOH_HOTEL_ARRIVAL_STAY'): NURSE_MOH_ARRIVAL_STAY,
+    _nurse_stay_arrangement_key('MOH_PROVIDED_HOTEL_ARRIVAL_STAY'): NURSE_MOH_ARRIVAL_STAY,
+    _nurse_stay_arrangement_key(NURSE_EMBASSY_ARRANGEMENT): NURSE_EMBASSY_ARRANGEMENT,
+    _nurse_stay_arrangement_key('AJA Care Vendor Embassy Contracted'): NURSE_EMBASSY_ARRANGEMENT,
+    _nurse_stay_arrangement_key('Embassy Contracted'): NURSE_EMBASSY_ARRANGEMENT,
+    _nurse_stay_arrangement_key(NURSE_OTHER_ARRANGEMENT): NURSE_OTHER_ARRANGEMENT,
+}
+
+
+def _normalize_nurse_stay_arrangement(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    return NURSE_STAY_ARRANGEMENT_ALIASES.get(_nurse_stay_arrangement_key(raw), raw)
+
+
+def _is_moh_arrival_hotel_stay(value):
+    return _normalize_nurse_stay_arrangement(value) == NURSE_MOH_ARRIVAL_STAY
 
 
 def _role_name(role):
@@ -5425,7 +5473,9 @@ def _facility_portal_dict(row):
 
 def _nurse_registration_facility_portal_dict(rec):
     rec = rec or {}
-    current_arrangement = (rec.get('current_accommodation') or rec.get('current_accommodation_status') or '').strip()
+    current_arrangement = _normalize_nurse_stay_arrangement(
+        rec.get('current_arrangement') or rec.get('current_accommodation') or rec.get('current_accommodation_status') or ''
+    )
     professional_category = _nurse_professional_category(rec.get('professional_category'), rec.get('designation') or rec.get('job_title_moh') or '')
     if professional_category == 'Doctor' or professional_category not in NURSE_VENDOR_ELIGIBLE_CATEGORIES:
         return None
@@ -5434,7 +5484,7 @@ def _nurse_registration_facility_portal_dict(rec):
     vendor_name = (rec.get('vendor_name') or '').strip()
     approved_vendor_label = f'Approved Vendor: {vendor_name}' if vendor_name else 'Approved Vendor: To be confirmed'
     stay_reminders_opt_in = (rec.get('stay_reminders_opt_in') or rec.get('receive_notice_reminders') or '').strip()
-    is_moh_hotel = current_arrangement == 'MOH Provided Hotel - Arrival Stay'
+    is_moh_hotel = _is_moh_arrival_hotel_stay(current_arrangement)
     return {
         'id': None,
         'roster_reference': '',
@@ -8152,14 +8202,24 @@ def api_nurse_register(data):
     professional_category = _nurse_professional_category(data.get('professional_category'), designation)
     qualification_degree = (data.get('qualification_degree') or '').strip()
     qualification_degree_other = (data.get('qualification_degree_other') or '').strip()
-    current_arrangement = (data.get('current_arrangement') or data.get('current_accommodation') or '').strip()
+    current_arrangement = _normalize_nurse_stay_arrangement(
+        data.get('current_arrangement') or data.get('current_accommodation') or ''
+    )
     if professional_category == 'Doctor':
         current_arrangement = ''
     eligible_vendor_category = professional_category in NURSE_VENDOR_ELIGIBLE_CATEGORIES
     if eligible_vendor_category and not current_arrangement:
         return {'success': False, 'ok': False, 'error': 'Current Stay Arrangement is required for Nurse / Other Health Worker.'}
-    embassy_arranged = eligible_vendor_category and current_arrangement == 'Embassy Contracted / Arranged'
-    moh_hotel_arranged = eligible_vendor_category and current_arrangement == 'MOH Provided Hotel - Arrival Stay'
+    if eligible_vendor_category and current_arrangement == NURSE_LEGACY_MOH_ARRANGEMENT:
+        return {
+            'success': False,
+            'ok': False,
+            'error': 'MOH Arranged is no longer available for new registrations. Please select MOH Provided Hotel - Arrival Stay.'
+        }
+    if eligible_vendor_category and current_arrangement and current_arrangement not in NURSE_PUBLIC_STAY_ARRANGEMENTS:
+        return {'success': False, 'ok': False, 'error': 'Invalid current stay arrangement selection.'}
+    embassy_arranged = eligible_vendor_category and current_arrangement == NURSE_EMBASSY_ARRANGEMENT
+    moh_hotel_arranged = eligible_vendor_category and _is_moh_arrival_hotel_stay(current_arrangement)
     vendor_name = ''
     facility_name = ''
     facility_area = ''
@@ -8193,15 +8253,30 @@ def api_nurse_register(data):
         moh_hotel_name = (data.get('moh_hotel_name') or data.get('facility_name') or '').strip()
         moh_hotel_area = (data.get('moh_hotel_area') or data.get('facility_area') or data.get('area') or '').strip()
         moh_hotel_start_date = (data.get('moh_hotel_start_date') or data.get('date_shifted_to_facility') or '').strip()
-        try:
-            moh_hotel_duration_months = int(data.get('moh_hotel_duration_months') or 3)
-        except Exception:
-            moh_hotel_duration_months = 3
-        moh_hotel_duration_months = max(1, min(12, moh_hotel_duration_months))
-        moh_hotel_expected_end_date = (data.get('moh_hotel_expected_end_date') or '').strip()
-        if moh_hotel_start_date and not moh_hotel_expected_end_date:
-            moh_hotel_expected_end_date = _date_add_months(moh_hotel_start_date, moh_hotel_duration_months)
+        if not moh_hotel_name or not moh_hotel_area or not moh_hotel_start_date:
+            return {
+                'success': False,
+                'ok': False,
+                'error': 'Please provide hotel/facility name, area, and date shifted to hotel.'
+            }
+        moh_hotel_duration_months = 3
+        computed_hotel_end_date = _date_add_months(moh_hotel_start_date, moh_hotel_duration_months)
+        submitted_hotel_end_date = (data.get('moh_hotel_expected_end_date') or '').strip()
+        if submitted_hotel_end_date and computed_hotel_end_date and submitted_hotel_end_date != computed_hotel_end_date:
+            return {
+                'success': False,
+                'ok': False,
+                'error': 'Expected end date for MOH arrival hotel stay is fixed at 3 months from the hotel start date.'
+            }
+        moh_hotel_expected_end_date = computed_hotel_end_date or submitted_hotel_end_date
+        facility_name = moh_hotel_name
         facility_area = moh_hotel_area
+        date_shifted_to_facility = moh_hotel_start_date
+        contract_start_date = moh_hotel_start_date
+        contract_end_date = moh_hotel_expected_end_date
+        contract_months = 3
+        notice_period_months = 3
+        notice_period_start_date = ''
     vendor_flags = _registration_vendor_flags(professional_category, current_arrangement, vendor_name)
     if professional_category == 'Doctor' or not embassy_arranged:
         vendor_name = ''
@@ -10957,8 +11032,15 @@ def _nurse_accommodation_row_from_related(nurse_row, roster_row=None, request_ro
     nurse_reference = str(nurse.get('reference_id') or '').strip()
     passport_number = nurse.get('passport_number') or roster_raw.get('passport_number') or ''
     vendor_name = str(roster_raw.get('vendor_name') or nurse.get('vendor_name') or '').strip()
-    facility_name = str(roster.get('facility_name') or nurse.get('current_hostel') or leave_row.get('current_facility') or '').strip()
     current_type = _nurse_accommodation_current_type(nurse, roster_raw, roster, request_row)
+    is_moh_hotel = _is_moh_arrival_hotel_stay(current_type)
+    facility_name = str(
+        roster.get('facility_name')
+        or nurse.get('current_hostel')
+        or (nurse.get('moh_hotel_name') if is_moh_hotel else '')
+        or leave_row.get('current_facility')
+        or ''
+    ).strip()
     preference = _nurse_accommodation_preference(request_row)
     leaving_notice_status = str(leave_row.get('notice_status') or '').strip()
     current_status = str(roster.get('current_status') or '').strip()
@@ -11007,8 +11089,8 @@ def _nurse_accommodation_row_from_related(nurse_row, roster_row=None, request_ro
         'facility_name': facility_name,
         'room_no': roster.get('room_number') or nurse.get('room_number') or '',
         'bed_no': roster.get('bed_number') or '',
-        'contract_start_date': roster.get('contract_start_date') or nurse.get('contract_start_date') or '',
-        'contract_end_date': roster.get('contract_end_date') or nurse.get('contract_end_date') or '',
+        'contract_start_date': roster.get('contract_start_date') or nurse.get('contract_start_date') or (nurse.get('moh_hotel_start_date') if is_moh_hotel else '') or '',
+        'contract_end_date': roster.get('contract_end_date') or nurse.get('contract_end_date') or (nurse.get('moh_hotel_expected_end_date') if is_moh_hotel else '') or '',
         'monthly_rate': roster_raw.get('monthly_amount_kwd'),
         'status': status,
         'request_status': request_row.get('request_status') or '',
@@ -12661,7 +12743,9 @@ def _nurse_registration_public_dict(row):
     d['emergency_contact_full'] = d.get('emergency_contact_full') or d.get('emergency_contact') or ''
     d['phone'] = d.get('mobile_full') or d.get('mobile') or ''
     d['workplace'] = d.get('hospital') or d.get('hospital_workplace') or d.get('hospital_or_medical_center') or ''
-    d['current_arrangement'] = d.get('current_arrangement') or d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
+    d['current_arrangement'] = _normalize_nurse_stay_arrangement(
+        d.get('current_arrangement') or d.get('current_accommodation') or d.get('current_accommodation_status') or d.get('accommodation_status') or ''
+    )
     d['professional_category'] = _nurse_professional_category(d.get('professional_category'), d.get('designation') or d.get('job_title_moh') or '')
     d['facility_name'] = d.get('linked_facility_name') or d.get('facility_name') or d.get('current_hostel') or ''
     d['vendor_name'] = d.get('linked_vendor_name') or d.get('vendor_name') or ''
@@ -12689,6 +12773,14 @@ def _nurse_registration_public_dict(row):
     for hotel_key in ('moh_hotel_name', 'moh_hotel_area', 'moh_hotel_start_date', 'moh_hotel_expected_end_date'):
         d[hotel_key] = d.get(hotel_key) or ''
     d['moh_hotel_duration_months'] = _facility_int_value(d.get('moh_hotel_duration_months'), 3)
+    if _is_moh_arrival_hotel_stay(d.get('current_arrangement')):
+        d['facility_name'] = d.get('facility_name') or d['moh_hotel_name']
+        d['facility_area'] = d.get('facility_area') or d['moh_hotel_area']
+        d['date_shifted_to_facility'] = d.get('date_shifted_to_facility') or d['moh_hotel_start_date']
+        d['contract_start_date'] = d.get('contract_start_date') or d['moh_hotel_start_date']
+        d['contract_end_date'] = d.get('contract_end_date') or d['moh_hotel_expected_end_date']
+        d['stay_period_start_date'] = d['contract_start_date'] or d['moh_hotel_start_date']
+        d['contract_months'] = 3
     d['monthly_checkin_status'] = d.get('monthly_checkin_status') or ''
     d['last_monthly_checkin_sent_at'] = d.get('last_monthly_checkin_sent_at') or ''
     d['last_monthly_checkin_response_at'] = d.get('last_monthly_checkin_response_at') or ''
@@ -37700,7 +37792,15 @@ NURSES_REGISTER_PAGE = nurse_simple_page("New Nurses Registration", """
             <h3>Contact Details</h3>
             <div class="grid"><div><label>Phone / WhatsApp Number *</label><input id="mobile" required></div><div><label>Email Address *</label><input id="email" type="email" required></div></div>
             <div class="grid"><div><label>Password *</label><input id="password" type="password" autocomplete="new-password" required></div><div><label>Confirm Password *</label><input id="confirm_password" type="password" autocomplete="new-password" required></div></div>
-            <div class="grid"><div><label>Current Stay Arrangement *</label><select id="current_arrangement" required><option value="">Select</option><option>Private (Self Arranged)</option><option>MOH Arranged</option><option>MOH Provided Hotel - Arrival Stay</option><option>Embassy Contracted / Arranged</option></select></div><div><label>Applying for Accommodation?</label><select id="applying_for_accommodation"><option>No</option><option>Yes</option></select></div></div>
+            <div class="grid"><div><label>Current Stay Arrangement *</label><select id="current_arrangement" required><option value="">Select</option><option>Private (Self Arranged)</option><option>MOH Provided Hotel - Arrival Stay</option><option value="Embassy Contracted / Arranged">AJA Care Vendor Embassy Contracted</option><option>Other</option></select></div><div><label>Applying for Accommodation?</label><select id="applying_for_accommodation"><option>No</option><option>Yes</option></select></div></div>
+            <div id="moh_hotel_details" style="display:none;margin-top:16px;padding:16px;border:1px solid #dbe4ef;border-radius:12px;background:#f8fbff">
+              <h4 style="margin:0 0 10px;color:#002147">MOH Provided Hotel - Arrival Stay Details</h4>
+              <div class="grid"><div><label>Hotel / Facility Name *</label><input id="moh_hotel_name"></div><div><label>Area *</label><input id="moh_hotel_area"></div></div>
+              <div class="grid"><div><label>Date Shifted to Hotel / Arrival Stay *</label><input id="moh_hotel_start_date" type="date"></div><div><label>Expected End Date</label><input id="moh_hotel_expected_end_date_display" type="date" readonly></div></div>
+              <p class="note" style="margin:10px 0 0"><strong>Expected stay duration:</strong> 3 months fixed for MOH arrival hotel stay</p>
+              <input id="moh_hotel_duration_months" type="hidden" value="3">
+              <input id="moh_hotel_expected_end_date" type="hidden">
+            </div>
           </div>
         </div>
         <div class="nurses-pane" data-pane="3">
@@ -37790,6 +37890,48 @@ function stepVal(k){const el=document.querySelector('input[name="'+k+'"]:checked
 let currentStep=1;
 const panes=[...document.querySelectorAll('.nurses-pane')];
 const stepNodes=[...document.querySelectorAll('.nurses-step')];
+const mohHotelDetailsMessage='Please provide hotel/facility name, area, and date shifted to hotel.';
+const currentArrangementField=document.getElementById('current_arrangement');
+const mohHotelSection=document.getElementById('moh_hotel_details');
+const mohHotelNameField=document.getElementById('moh_hotel_name');
+const mohHotelAreaField=document.getElementById('moh_hotel_area');
+const mohHotelStartDateField=document.getElementById('moh_hotel_start_date');
+const mohHotelDurationField=document.getElementById('moh_hotel_duration_months');
+const mohHotelExpectedEndField=document.getElementById('moh_hotel_expected_end_date');
+const mohHotelExpectedEndDisplayField=document.getElementById('moh_hotel_expected_end_date_display');
+function isMohHotelArrangement(){return (currentArrangementField&&currentArrangementField.value)==='MOH Provided Hotel - Arrival Stay';}
+function addMonthsToIsoDate(value, months){
+  const match=String(value||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(!match)return '';
+  const year=Number(match[1]); const month=Number(match[2]); const day=Number(match[3]);
+  const target=new Date(Date.UTC(year, month-1+months, 1));
+  const lastDay=new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth()+1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day,lastDay));
+  return target.toISOString().slice(0,10);
+}
+function syncMohHotelFields(){
+  const active=isMohHotelArrangement();
+  const detailFields=[mohHotelNameField,mohHotelAreaField,mohHotelStartDateField];
+  if(mohHotelSection)mohHotelSection.style.display=active?'block':'none';
+  detailFields.forEach(field=>{
+    if(!field)return;
+    if(active){field.setAttribute('required','required');}
+    else{field.removeAttribute('required');field.value='';}
+  });
+  const expectedEndDate=active?addMonthsToIsoDate(mohHotelStartDateField?mohHotelStartDateField.value:'',3):'';
+  if(mohHotelDurationField)mohHotelDurationField.value=active?'3':'';
+  if(mohHotelExpectedEndField)mohHotelExpectedEndField.value=expectedEndDate;
+  if(mohHotelExpectedEndDisplayField)mohHotelExpectedEndDisplayField.value=expectedEndDate;
+}
+function validateMohHotelFields(useStepError){
+  if(!isMohHotelArrangement())return true;
+  const missingField=[mohHotelNameField,mohHotelAreaField,mohHotelStartDateField].find(field=>field&&!field.value.trim());
+  if(!missingField){if(useStepError)step_error.style.display='none';return true;}
+  if(useStepError){step_error.textContent=mohHotelDetailsMessage;step_error.style.display='block';}
+  else{msg.textContent=mohHotelDetailsMessage;}
+  missingField.focus();
+  return false;
+}
 function showStep(n){
   currentStep=n;
   panes.forEach(p=>p.classList.toggle('active', Number(p.dataset.pane)===n));
@@ -37800,6 +37942,7 @@ function showStep(n){
 }
 function validateStep(n){
   const pane=document.querySelector('.nurses-pane[data-pane="'+n+'"]');
+  if(n===2 && !validateMohHotelFields(true)) return false;
   const required=[...pane.querySelectorAll('input[required],select[required],textarea[required]')];
   for(const field of required){
     if(!field.value){step_error.textContent='Please fill all required fields in this step.';step_error.style.display='block';field.focus();return false;}
@@ -37807,6 +37950,9 @@ function validateStep(n){
   step_error.style.display='none';
   return true;
 }
+if(currentArrangementField) currentArrangementField.addEventListener('change', syncMohHotelFields);
+if(mohHotelStartDateField) mohHotelStartDateField.addEventListener('change', syncMohHotelFields);
+syncMohHotelFields();
 btn_next.onclick=()=>{if(validateStep(currentStep))showStep(Math.min(4,currentStep+1));};
 btn_back.onclick=()=>showStep(Math.max(1,currentStep-1));
 async function submitForm(e){
@@ -37816,7 +37962,9 @@ async function submitForm(e){
   const val=id=>{const el=document.getElementById(id);return el?el.value:''};
   const batchNumber=val('batch_number');
   if(!/^[0-9]+$/.test(String(batchNumber||'').trim())){msg.textContent='Batch number must contain digits only.';return false;}
-  const p={full_name:val('full_name'),passport_number:val('passport_number'),cnic:val('cnic'),civil_id:val('civil_id'),mobile:val('mobile'),email:val('email'),password:val('password'),confirm_password:val('confirm_password'),arrival_date:val('arrival_date'),batch_number:batchNumber,hospital:val('hospital'),designation:val('designation'),qualification_degree:val('qualification_degree'),qualification_degree_other:val('qualification_degree_other'),degree_type:val('degree_type'),moh_offer_salary_kwd:val('moh_offer_salary_kwd'),grading_letter_issued:val('grading_letter_issued'),current_arrangement:val('current_arrangement'),current_accommodation:val('current_arrangement'),current_accommodation_status:val('current_accommodation_status_v3'),emergency_contact:val('emergency_contact_v3'),applying_for_accommodation:val('applying_for_accommodation'),remarks:val('remarks'),issue_notice:val('issue_notice')};
+  syncMohHotelFields();
+  if(!validateMohHotelFields(false)) return false;
+  const p={full_name:val('full_name'),passport_number:val('passport_number'),cnic:val('cnic'),civil_id:val('civil_id'),mobile:val('mobile'),email:val('email'),password:val('password'),confirm_password:val('confirm_password'),arrival_date:val('arrival_date'),batch_number:batchNumber,hospital:val('hospital'),designation:val('designation'),qualification_degree:val('qualification_degree'),qualification_degree_other:val('qualification_degree_other'),degree_type:val('degree_type'),moh_offer_salary_kwd:val('moh_offer_salary_kwd'),grading_letter_issued:val('grading_letter_issued'),current_arrangement:val('current_arrangement'),current_accommodation:val('current_arrangement'),current_accommodation_status:val('current_accommodation_status_v3'),emergency_contact:val('emergency_contact_v3'),applying_for_accommodation:val('applying_for_accommodation'),moh_hotel_name:isMohHotelArrangement()?val('moh_hotel_name'):'',moh_hotel_area:isMohHotelArrangement()?val('moh_hotel_area'):'',moh_hotel_start_date:isMohHotelArrangement()?val('moh_hotel_start_date'):'',moh_hotel_duration_months:isMohHotelArrangement()?val('moh_hotel_duration_months'):'',moh_hotel_expected_end_date:isMohHotelArrangement()?val('moh_hotel_expected_end_date'):'',remarks:val('remarks'),issue_notice:val('issue_notice')};
   for(const [k,_] of STEPS){p[k]=stepVal(k);}
   msg.textContent='Submitting registration...';
   try{

@@ -820,14 +820,14 @@ export function NursesPortalPage() {
   const currentArrangement = (ctx.facilityRoster?.current_arrangement || "").trim();
   const hasEmbassyArrangement = !isDoctor && currentArrangement === "Embassy Contracted / Arranged";
   const isMohHotel = !isDoctor && currentArrangement === "MOH Provided Hotel - Arrival Stay";
-  const mohHotelName = (ctx.facilityRoster as any)?.moh_hotel_name || "";
-  const mohHotelArea = (ctx.facilityRoster as any)?.moh_hotel_area || "";
-  const mohHotelStartDate = (ctx.facilityRoster as any)?.moh_hotel_start_date || "";
-  const mohHotelExpectedEndDate = (ctx.facilityRoster as any)?.moh_hotel_expected_end_date || "";
-  const mohHotelDurationMonths = (ctx.facilityRoster as any)?.moh_hotel_duration_months || 3;
+  const mohHotelName = ctx.facilityRoster?.moh_hotel_name || "";
+  const mohHotelArea = ctx.facilityRoster?.moh_hotel_area || "";
+  const mohHotelStartDate = ctx.facilityRoster?.moh_hotel_start_date || "";
+  const mohHotelExpectedEndDate = ctx.facilityRoster?.moh_hotel_expected_end_date || "";
+  const mohHotelDurationMonths = Number(ctx.facilityRoster?.moh_hotel_duration_months) || 3;
   const showStaySummary = !isDoctor && !!currentArrangement;
   const stayArea = ctx.facilityRoster?.facility_area || ctx.facilityRoster?.area || "";
-  const stayReminderPref = (ctx.facilityRoster as any)?.receive_notice_reminders || (ctx.facilityRoster as any)?.stay_reminders_opt_in || "";
+  const stayReminderPref = ctx.facilityRoster?.receive_notice_reminders || ctx.facilityRoster?.stay_reminders_opt_in || "";
   const monthlyCheckinStatus =
     ctx.facilityRoster?.monthly_checkin_status ||
     ctx.facilityRoster?.latest_monthly_checkin_status ||
@@ -1454,7 +1454,10 @@ export function NursesPortalPage() {
                     <Field label="Expected End Date" value={mohHotelExpectedEndDate} />
                   ) : null}
                   {isMohHotel ? (
-                    <Field label="Expected Duration" value={`${mohHotelDurationMonths} month(s)`} />
+                    <Field
+                      label="Expected Duration"
+                      value={mohHotelDurationMonths === 3 ? "3 months fixed for MOH arrival hotel stay" : `${mohHotelDurationMonths} month(s)`}
+                    />
                   ) : null}
                 </div>
               </div>

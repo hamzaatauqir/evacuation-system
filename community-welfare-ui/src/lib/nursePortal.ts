@@ -65,6 +65,13 @@ export type NursePortalContext = {
     latest_monthly_checkin_url?: string;
     notice_flag?: string;
     approved_service_provider?: boolean;
+    moh_hotel_name?: string;
+    moh_hotel_area?: string;
+    moh_hotel_start_date?: string;
+    moh_hotel_expected_end_date?: string;
+    moh_hotel_duration_months?: number;
+    stay_reminders_opt_in?: string;
+    receive_notice_reminders?: string;
     remarks?: string;
   } | null;
   housingAccount?: {

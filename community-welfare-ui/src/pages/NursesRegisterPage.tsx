@@ -4,7 +4,7 @@ import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
 import { Card, Grid } from "../components/Layout";
 import { Stepper } from "../components/Stepper";
-import { FInput, FSelect, FTextarea } from "../components/FormField";
+import { FGroup, FInput, FSelect, FTextarea } from "../components/FormField";
 import { Btn } from "../components/Btn";
 import { Icon } from "../components/Icon";
 import { NoticeCard } from "../components/NoticeCard";
@@ -15,13 +15,11 @@ const STEPS = ["Personal", "Contact", "Employment", "Welfare", "Account"];
 const PROFESSIONAL_CATEGORIES = ["Nurse", "Other Health Worker", "Doctor"];
 const VENDOR_ELIGIBLE_CATEGORIES = ["Nurse", "Other Health Worker"];
 const CURRENT_ARRANGEMENTS = [
-  "MOH Arranged",
   "MOH Provided Hotel - Arrival Stay",
   { value: "Embassy Contracted / Arranged", label: "AJA Care Vendor Embassy Contracted" },
   "Private (Self Arranged)",
   "Other",
 ];
-const MOH_HOTEL_DURATION_OPTIONS = ["1", "2", "3", "4", "5", "6"];
 const APPROVED_VENDOR_OPTIONS = ["AJA Care", "Other / Not Sure"];
 const COUNTRY_CODE_OPTIONS = [
   { value: "+965", label: "+965 Kuwait" },
@@ -113,6 +111,18 @@ function isValidArrivalBatchNumber(value: string) {
   return /^[0-9]+$/.test((value || "").trim());
 }
 
+function addMonthsToIsoDate(value: string, months: number) {
+  const match = (value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const target = new Date(Date.UTC(year, month - 1 + months, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target.toISOString().slice(0, 10);
+}
+
 export function NursesRegisterPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
@@ -141,10 +151,11 @@ export function NursesRegisterPage() {
   const isMohHotel = form.currentArrangement === "MOH Provided Hotel - Arrival Stay";
   const showAreaField =
     isVendorEligible &&
-    ["Embassy Contracted / Arranged", "Private (Self Arranged)", "MOH Arranged"].includes(form.currentArrangement || "");
+    ["Embassy Contracted / Arranged", "Private (Self Arranged)"].includes(form.currentArrangement || "");
   const showStayArrangementWorkflow = isVendorEligible;
   const showVendorSelection = isVendorEligible && isEmbassyArranged;
   const showMohHotelDetails = isVendorEligible && isMohHotel;
+  const computedMohHotelExpectedEndDate = isMohHotel ? addMonthsToIsoDate(form.mohHotelStartDate || "", 3) : "";
   const qualificationOptions = QUALIFICATION_OPTIONS_BY_CATEGORY[form.professionalCategory || ""] || [];
   const showQualificationOther = form.qualificationDegree === "Other";
 
@@ -420,6 +431,11 @@ export function NursesRegisterPage() {
                               dateShiftedToFacility: "",
                               contractStartDate: "",
                               stayRemindersOptIn: "Yes",
+                              mohHotelName: "",
+                              mohHotelArea: "",
+                              mohHotelStartDate: "",
+                              mohHotelExpectedEndDate: "",
+                              mohHotelDurationMonths: "",
                             }),
                       }));
                     }}
@@ -518,7 +534,8 @@ export function NursesRegisterPage() {
                                 dateShiftedToFacility: "",
                                 contractStartDate: "",
                                 stayRemindersOptIn: "",
-                                mohHotelDurationMonths: prev.mohHotelDurationMonths || "3",
+                                mohHotelDurationMonths: "3",
+                                mohHotelExpectedEndDate: addMonthsToIsoDate(prev.mohHotelStartDate || "", 3),
                               }
                             : {
                                 vendorName: "",
@@ -584,21 +601,44 @@ export function NursesRegisterPage() {
                         MOH Provided Hotel — Arrival Stay Details
                       </h4>
                       <Grid cols={2} gap={14}>
-                        <FInput label="Hotel / Facility Name" {...inp("mohHotelName")} placeholder="Hotel or facility name" />
-                        <FInput label="Area" {...inp("mohHotelArea")} placeholder="Area in Kuwait" />
-                        <FInput label="Date shifted to hotel / arrival stay" {...inp("mohHotelStartDate")} type="date" />
-                        <FSelect
-                          label="Expected stay duration (months)"
-                          value={form.mohHotelDurationMonths || "3"}
-                          onChange={(e) => set("mohHotelDurationMonths", e.target.value)}
-                          options={MOH_HOTEL_DURATION_OPTIONS}
-                        />
+                        <FInput label="Hotel / Facility Name" req {...inp("mohHotelName")} placeholder="Hotel or facility name" />
+                        <FInput label="Area" req {...inp("mohHotelArea")} placeholder="Area in Kuwait" />
                         <FInput
-                          label="Expected end date (optional)"
-                          {...inp("mohHotelExpectedEndDate")}
+                          label="Date shifted to hotel / arrival stay"
+                          req
+                          value={form.mohHotelStartDate || ""}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              mohHotelStartDate: e.target.value,
+                              mohHotelDurationMonths: "3",
+                              mohHotelExpectedEndDate: addMonthsToIsoDate(e.target.value, 3),
+                            }))
+                          }
                           type="date"
-                          hint="If left blank, the Embassy will compute it from your start date and duration."
                         />
+                        <FGroup label="Expected end date" hint="Auto-calculated from the hotel start date.">
+                          <input
+                            className="f-input"
+                            value={computedMohHotelExpectedEndDate}
+                            readOnly
+                            placeholder="Auto-calculated after the hotel start date is selected"
+                          />
+                        </FGroup>
+                        <div
+                          style={{
+                            gridColumn: "1/-1",
+                            padding: "12px 14px",
+                            background: "#fff",
+                            border: `1px solid ${T.borderLt}`,
+                            borderRadius: 10,
+                            fontSize: 13,
+                            color: T.navy,
+                            fontWeight: 700,
+                          }}
+                        >
+                          Expected stay duration: 3 months fixed for MOH arrival hotel stay
+                        </div>
                       </Grid>
                     </div>
                   ) : null}
@@ -800,10 +840,17 @@ export function NursesRegisterPage() {
                         const arrangementFlag = categoryVendorEligible && /embassy/i.test(arrangement) ? "Yes" : "No";
                         const includeFacilityWorkflow = categoryVendorEligible && arrangement === "Embassy Contracted / Arranged";
                         const includeMohHotelWorkflow = categoryVendorEligible && arrangement === "MOH Provided Hotel - Arrival Stay";
-                        const mohHotelDuration = (() => {
-                          const n = parseInt(form.mohHotelDurationMonths || "3", 10);
-                          return Number.isFinite(n) && n > 0 ? Math.min(12, n) : 3;
-                        })();
+                        const mohHotelName = (form.mohHotelName || "").trim();
+                        const mohHotelArea = (form.mohHotelArea || "").trim();
+                        const mohHotelStartDate = (form.mohHotelStartDate || "").trim();
+                        if (includeMohHotelWorkflow && (!mohHotelName || !mohHotelArea || !mohHotelStartDate)) {
+                          setSubmitError("Please provide hotel/facility name, area, and date shifted to hotel.");
+                          return;
+                        }
+                        const mohHotelDuration = 3;
+                        const mohHotelExpectedEndDate = includeMohHotelWorkflow
+                          ? addMonthsToIsoDate(mohHotelStartDate, mohHotelDuration)
+                          : "";
                         setSubmitting(true);
                         try {
                           const res = await api.post<{
@@ -841,17 +888,17 @@ export function NursesRegisterPage() {
                             ["current_" + "accom" + "modation"]: arrangement,
                             ["applying_for_" + "accom" + "modation"]: arrangementFlag,
                             vendor_name: includeFacilityWorkflow ? (form.vendorName || "AJA Care") : "",
-                            facility_name: includeFacilityWorkflow ? (form.facilityName || "") : "",
-                            facility_area: categoryVendorEligible ? (form.facilityArea || "") : "",
-                            date_shifted_to_facility: includeFacilityWorkflow ? (form.dateShiftedToFacility || "") : "",
+                            facility_name: includeFacilityWorkflow ? (form.facilityName || "") : includeMohHotelWorkflow ? mohHotelName : "",
+                            facility_area: includeMohHotelWorkflow ? mohHotelArea : categoryVendorEligible ? (form.facilityArea || "") : "",
+                            date_shifted_to_facility: includeFacilityWorkflow ? (form.dateShiftedToFacility || "") : includeMohHotelWorkflow ? mohHotelStartDate : "",
                             contract_start_date: includeFacilityWorkflow ? (form.contractStartDate || "") : "",
                             stay_period_start_date: includeFacilityWorkflow ? (form.contractStartDate || "") : "",
                             stay_reminders_opt_in: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
                             receive_notice_reminders: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
-                            moh_hotel_name: includeMohHotelWorkflow ? (form.mohHotelName || "") : "",
-                            moh_hotel_area: includeMohHotelWorkflow ? (form.mohHotelArea || "") : "",
-                            moh_hotel_start_date: includeMohHotelWorkflow ? (form.mohHotelStartDate || "") : "",
-                            moh_hotel_expected_end_date: includeMohHotelWorkflow ? (form.mohHotelExpectedEndDate || "") : "",
+                            moh_hotel_name: includeMohHotelWorkflow ? mohHotelName : "",
+                            moh_hotel_area: includeMohHotelWorkflow ? mohHotelArea : "",
+                            moh_hotel_start_date: includeMohHotelWorkflow ? mohHotelStartDate : "",
+                            moh_hotel_expected_end_date: includeMohHotelWorkflow ? mohHotelExpectedEndDate : "",
                             moh_hotel_duration_months: includeMohHotelWorkflow ? mohHotelDuration : 0,
                             issue_notice: "",
                             emergency_country_code: emergencyCountryCode,
