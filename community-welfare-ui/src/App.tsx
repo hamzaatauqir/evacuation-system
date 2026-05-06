@@ -23,11 +23,18 @@ import { AdminNursesAccommodationPage } from "./pages/AdminNursesAccommodationPa
 import { AdminLegalCasesPage } from "./pages/AdminLegalCasesPage";
 import { AdminDeathCasesPage } from "./pages/AdminDeathCasesPage";
 import { AdminWelfareCasesPage } from "./pages/AdminWelfareCasesPage";
+import { PublicRouteForwarder } from "./components/PublicRouteForwarder";
 
 export default function App() {
   return (
     <Routes>
       <Route path="/" element={<CwaHomePage />} />
+      <Route path="/register" element={<PublicRouteForwarder />} />
+      <Route path="/embassy-registration" element={<PublicRouteForwarder />} />
+      <Route path="/ksa-transit" element={<PublicRouteForwarder />} />
+      <Route path="/transit-visa" element={<PublicRouteForwarder />} />
+      <Route path="/apply" element={<PublicRouteForwarder />} />
+      <Route path="/transit" element={<PublicRouteForwarder />} />
       <Route path="/nurses" element={<NursesHomePage />} />
       <Route path="/nurses/register" element={<NursesRegisterPage />} />
       <Route path="/nurses/login" element={<NursesLoginPage />} />

@@ -3,15 +3,19 @@ import { Link, useLocation } from "react-router-dom";
 import { T } from "../lib/tokens";
 import { BACKEND_PORTAL } from "../lib/api";
 import { hasNursePortal } from "../lib/nursePortal";
+import { PUBLIC_PORTAL_PATHS, publicPortalUrl } from "../lib/publicRoutes";
 import { Btn } from "./Btn";
 import { Icon } from "./Icon";
 
 interface NavLink {
-  to: string;
+  to?: string;
+  href?: string;
+  external?: boolean;
   label: string;
 }
 
 const MAIN_LINKS: NavLink[] = [
+  { href: publicPortalUrl(PUBLIC_PORTAL_PATHS.ksaRegister), external: true, label: "KSA Transit" },
   { to: "/", label: "Home" },
   { to: "/nurses", label: "Nurses" },
   { to: "/legal-opf", label: "Legal & OPF" },
@@ -60,13 +64,24 @@ export function PublicHeader() {
 
         <nav className="cwa-public-header__nav hide-mobile">
           {links.map((l) => (
-            <Link
-              key={l.to}
-              to={l.to}
-              className={`cwa-public-header__nav-link${isActive(l.to) ? " is-active" : ""}`}
-            >
-              {l.label}
-            </Link>
+            l.external ? (
+              <a
+                key={l.label}
+                href={l.href}
+                className={`cwa-public-header__nav-link${l.label === "KSA Transit" ? " cwa-public-header__nav-link--accent" : ""}`}
+                data-service={l.label === "KSA Transit" ? "ksa-transit" : undefined}
+              >
+                {l.label}
+              </a>
+            ) : (
+              <Link
+                key={l.to}
+                to={l.to || "/"}
+                className={`cwa-public-header__nav-link${isActive(l.to || "/") ? " is-active" : ""}`}
+              >
+                {l.label}
+              </Link>
+            )
           ))}
         </nav>
 
@@ -91,14 +106,26 @@ export function PublicHeader() {
       {mob ? (
         <div className="cwa-public-header__drawer">
           {links.map((l) => (
-            <Link
-              key={l.to}
-              to={l.to}
-              className={`cwa-public-header__drawer-link${isActive(l.to) ? " is-active" : ""}`}
-              onClick={() => setMob(false)}
-            >
-              {l.label}
-            </Link>
+            l.external ? (
+              <a
+                key={l.label}
+                href={l.href}
+                className={`cwa-public-header__drawer-link${l.label === "KSA Transit" ? " cwa-public-header__drawer-link--accent" : ""}`}
+                data-service={l.label === "KSA Transit" ? "ksa-transit" : undefined}
+                onClick={() => setMob(false)}
+              >
+                {l.label}
+              </a>
+            ) : (
+              <Link
+                key={l.to}
+                to={l.to || "/"}
+                className={`cwa-public-header__drawer-link${isActive(l.to || "/") ? " is-active" : ""}`}
+                onClick={() => setMob(false)}
+              >
+                {l.label}
+              </Link>
+            )
           ))}
           <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${T.borderLt}` }}>
             <Btn variant="primary" size="sm" fullWidth onClick={() => window.location.assign(`${BACKEND_PORTAL}/login`)}>

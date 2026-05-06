@@ -4,6 +4,45 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        const aliasMap = new Map([
+          ["/register", "/embassy-registration"],
+          ["/embassy-registration", "/embassy-registration"],
+          ["/ksa-transit", "/embassy-registration"],
+          ["/transit-visa", "/embassy-registration"],
+          ["/apply", "/embassy-registration"],
+          ["/transit", "/embassy-registration"],
+        ]);
+        const rawPath = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
+        const segments = rawPath.split("/").filter(Boolean);
+        const segmentPath = segments.length ? `/${segments[segments.length - 1]}` : rawPath;
+        const targetPath = aliasMap.get(rawPath) || aliasMap.get(segmentPath);
+        if (!targetPath) return;
+
+        const envCandidates = ["%VITE_BACKEND_PORTAL_URL%", "%VITE_API_BASE_URL%"].map((value) =>
+          value === "%VITE_BACKEND_PORTAL_URL%" || value === "%VITE_API_BASE_URL%" ? "" : value
+        );
+        let backend = envCandidates.find(Boolean) || "";
+        const host = (window.location.hostname || "").toLowerCase();
+
+        if (!backend) {
+          if (/^(localhost|127\.0\.0\.1)$/i.test(host)) {
+            backend = `${window.location.protocol}//${host}:8080`;
+          } else if (
+            host === "cwakuwait.com" ||
+            host === "www.cwakuwait.com" ||
+            host === "community-welfare-ui.onrender.com"
+          ) {
+            backend = "https://portal.cwakuwait.com";
+          } else {
+            backend = window.location.origin;
+          }
+        }
+
+        window.location.replace(backend.replace(/\/+$/, "") + targetPath);
+      })();
+    </script>
     <title>Embassy of Pakistan Kuwait — Community Welfare Wing</title>
   </head>
   <body>

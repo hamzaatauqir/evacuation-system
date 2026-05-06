@@ -8,6 +8,7 @@ import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { Icon, type IconName } from "../components/Icon";
 import { T } from "../lib/tokens";
+import { PUBLIC_PORTAL_PATHS, navigateToPublicPortal } from "../lib/publicRoutes";
 
 type Variant = "primary" | "navy" | "secondary" | "ghost" | "danger" | "light";
 
@@ -31,7 +32,7 @@ export function CwaHomePage() {
       cta: "Open Service",
       accent: T.navy,
       ctaVariant: "navy",
-      onClick: () => window.location.assign("/register"),
+      onClick: () => navigateToPublicPortal(PUBLIC_PORTAL_PATHS.ksaRegister),
     },
     {
       icon: "user-add",
@@ -146,9 +147,15 @@ export function CwaHomePage() {
               <Btn
                 variant="primary"
                 size="lg"
-                onClick={() =>
-                  document.getElementById("cw-services")?.scrollIntoView({ behavior: "smooth" })
-                }
+                onClick={() => navigateToPublicPortal(PUBLIC_PORTAL_PATHS.ksaRegister)}
+              >
+                Apply for KSA Transit Visa
+              </Btn>
+              <Btn
+                variant="secondary"
+                size="lg"
+                style={{ background: "#ffffff", color: T.navy, borderColor: "#ffffff" }}
+                onClick={() => document.getElementById("cw-services")?.scrollIntoView({ behavior: "smooth" })}
               >
                 Browse Services
               </Btn>

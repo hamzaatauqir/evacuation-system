@@ -241,6 +241,15 @@ textarea.f-input { resize: vertical; min-height: 90px; }
   background: rgba(45, 74, 107, 0.07);
   color: var(--navy-dark);
 }
+.cwa-public-header__nav-link--accent {
+  background: rgba(47, 125, 78, 0.10);
+  border-color: rgba(47, 125, 78, 0.18);
+  color: var(--green);
+}
+.cwa-public-header__nav-link--accent:hover {
+  background: rgba(47, 125, 78, 0.18);
+  color: #1f633d;
+}
 .cwa-public-header__nav-link.is-active {
   background: #e8edf4;
   color: var(--navy-dark);
@@ -290,6 +299,10 @@ textarea.f-input { resize: vertical; min-height: 90px; }
 }
 .cwa-public-header__drawer-link:hover {
   background: rgba(45, 74, 107, 0.08);
+}
+.cwa-public-header__drawer-link--accent {
+  background: rgba(47, 125, 78, 0.10);
+  color: var(--green);
 }
 .cwa-public-header__drawer-link.is-active {
   background: #e8edf4;
