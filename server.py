@@ -9057,11 +9057,17 @@ def _gl_identifier_print_label(value):
     }.get(label, label)
 
 
-def _gl_relation_label(gender=''):
+def _gl_parent_relation_for_gender(gender=''):
     raw = _gl_clean_text(gender, 40).lower()
-    if raw in ('male', 'm'):
+    if raw in {'male', 'm', 'man', 'boy'}:
         return 'S/o'
-    return 'D/o'
+    if raw in {'female', 'f', 'woman', 'girl'}:
+        return 'D/o'
+    return 'S/o/D/o'
+
+
+def _gl_relation_label(gender=''):
+    return _gl_parent_relation_for_gender(gender)
 
 
 def _gl_qualification_subtitle(app):
@@ -11295,7 +11301,7 @@ def _gl_fetch_application(db, app_id):
                   n.whatsapp_full AS nurse_whatsapp,
                   n.email AS nurse_email,
                   n.mton_number AS nurse_mton_number,
-                  '' AS nurse_gender,
+                  n.gender AS nurse_gender,
                   COALESCE(n.hospital, n.hospital_workplace, n.hospital_or_medical_center, '') AS nurse_workplace
            FROM gl_applications a
            LEFT JOIN nurse_registrations n ON n.id = a.nurse_id
@@ -11369,7 +11375,7 @@ def _gl_list_rows(db, params, limit=50, offset=0):
                   n.whatsapp_full AS nurse_whatsapp,
                   n.email AS nurse_email,
                   n.mton_number AS nurse_mton_number,
-                  '' AS nurse_gender,
+                  n.gender AS nurse_gender,
                   COALESCE(n.hospital, n.hospital_workplace, n.hospital_or_medical_center, '') AS nurse_workplace
            FROM {from_sql}
            WHERE {where_sql}
@@ -11450,7 +11456,7 @@ def _gl_letter_context(app):
     passport_issue_date = _gl_format_official_date(identity.get('passport_issue_date'))
     relation_text = _gl_clean_text(d.get('relation_override'), 180)
     if not relation_text:
-        relation_text = f"{_gl_relation_label(identity.get('gender'))} {father_name or '—'}".strip()
+        relation_text = f"{_gl_parent_relation_for_gender(identity.get('gender'))} {father_name or '—'}".strip()
     degree_title = _gl_clean_text(d.get('degree_title'), 220)
     identifier_type = _gl_student_identifier_type(d.get('student_identifier_type'))
     identifier_value = _gl_clean_text(d.get('student_no'), 120)

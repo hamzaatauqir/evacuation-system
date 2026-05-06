@@ -414,9 +414,15 @@ function computeGradingPreview(form: GradingFormState) {
   };
 }
 
-function relationLabelForGender(gender?: string) {
+function parentRelationForGender(gender?: string) {
   const normalized = (gender || "").trim().toLowerCase();
-  return normalized === "male" || normalized === "m" ? "S/o" : "D/o";
+  if (normalized === "male" || normalized === "m" || normalized === "man" || normalized === "boy") {
+    return "S/o";
+  }
+  if (normalized === "female" || normalized === "f" || normalized === "woman" || normalized === "girl") {
+    return "D/o";
+  }
+  return "S/o/D/o";
 }
 
 function qualificationSubtitleFromForm(_form: GradingFormState) {
@@ -454,7 +460,7 @@ function buildGradingPreviewLetterModel(
   return {
     applicantName,
     fatherName,
-    relationText: `${relationLabelForGender(profile.gender || ctx.gender)} ${fatherName}`,
+    relationText: `${parentRelationForGender(profile.gender || ctx.gender)} ${fatherName}`,
     passportNumber,
     degreeTitle,
     qualificationSubtitle: qualificationSubtitleFromForm(form),
