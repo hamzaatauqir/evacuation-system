@@ -9143,9 +9143,11 @@ GL_QUALIFICATIONS = {
     'POST_RN_BSN': 'Post RN BSN',
     'GENERAL_NURSING_DIPLOMA': 'General Nursing Diploma',
     'SPECIALIZATION_MIDWIFERY': 'Specialization / Midwifery',
+    'MASTERS_NURSING_MSN': 'Masters in Nursing (MSN)',
 }
 GL_LEGACY_QUALIFICATION_ALIASES = {
     'MIDWIFERY_ADDITIONAL': 'SPECIALIZATION_MIDWIFERY',
+    'MASTERS_IN_NURSING_MSN': 'MASTERS_NURSING_MSN',
 }
 GL_LEGACY_QUALIFICATION_LABELS = {
     'MIDWIFERY_ADDITIONAL': 'Specialization / Midwifery',
@@ -9165,6 +9167,7 @@ GL_STUDENT_IDENTIFIER_TYPES = (
     'Registration Number',
     'Enrollment Number',
     'Roll Number',
+    'Serial Number',
 )
 GL_DEFAULT_STUDENT_IDENTIFIER_TYPE = 'Student Number'
 GL_OFFICIAL_REFERENCE_LINE = 'No. Pol-II/18/2021 (Attestation)'
@@ -9174,6 +9177,7 @@ GL_OFFICIAL_EMAIL = 'parepkuwait@mofa.gov.pk'
 GL_PROFILE_QUALIFICATION_OPTIONS = (
     'Diploma Nurse',
     'BSN Nursing',
+    'Masters in Nursing (MSN)',
     'Doctor MBBS',
     'Doctor BDS',
     'Other',
@@ -9189,6 +9193,11 @@ def _gl_clean_text(value, max_len=300):
     if max_len and len(text) > max_len:
         text = text[:max_len].strip()
     return text
+
+
+def _gl_identifier_type_key(value):
+    raw = _gl_clean_text(value, 80).lower()
+    return re.sub(r'[\s_-]+', ' ', raw).strip()
 
 
 def _gl_normalize_qualification_code(value):
@@ -9213,8 +9222,9 @@ def _gl_normalize_student_identifier_type(value, required=True):
         if required:
             raise ValueError('Identifier type is required.')
         return ''
+    normalized_key = _gl_identifier_type_key(raw)
     for label in GL_STUDENT_IDENTIFIER_TYPES:
-        if raw.lower() == label.lower():
+        if normalized_key == _gl_identifier_type_key(label):
             return label
     raise ValueError('Please select a valid identifier type.')
 
@@ -9238,6 +9248,7 @@ def _gl_identifier_print_label(value):
         'Registration Number': 'Registration No.',
         'Enrollment Number': 'Enrollment No.',
         'Roll Number': 'Roll No.',
+        'Serial Number': 'Serial No.',
     }.get(label, label)
 
 
@@ -9579,7 +9590,9 @@ def _gl_validate_year(value):
 def _gl_validate_application_payload(data, db):
     qualification_code = _gl_normalize_qualification_code(data.get('qualification_code') or data.get('qualification_type'))
     if qualification_code not in GL_QUALIFICATIONS:
-        raise ValueError('Please select BSN Nursing 4 Years, Post RN BSN, General Nursing Diploma, or Specialization / Midwifery.')
+        raise ValueError(
+            'Please select BSN Nursing 4 Years, Post RN BSN, General Nursing Diploma, Specialization / Midwifery, or Masters in Nursing (MSN).'
+        )
     degree_title = _gl_clean_text(data.get('degree_title'), 220)
     student_identifier_type = _gl_normalize_student_identifier_type(
         data.get('student_identifier_type') or data.get('student_no_label')

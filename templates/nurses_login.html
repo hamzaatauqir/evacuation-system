@@ -116,6 +116,7 @@
       ['BSN_4Y','BSN Nursing 4 Years'],
       ['POST_RN_BSN','Post RN BSN'],
       ['GENERAL_NURSING_DIPLOMA','General Nursing Diploma'],
+      ['MASTERS_NURSING_MSN','Masters in Nursing (MSN)'],
       ['NURSING_DIPLOMA','Nursing Diploma'],
       ['MIDWIFERY_ADDITIONAL','Midwifery / Additional Course'],
       ['OTHER','Other']
@@ -123,12 +124,12 @@
     return opts.map(o=>'<option value="'+o[0]+'" '+(selected===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
   }
   function identifierType(value){
-    const opts=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number'];
-    const current=String(value||'').trim().toLowerCase();
+    const opts=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number','Serial Number'];
+    const current=String(value||'').trim().toLowerCase().replace(/[_-]+/g,' ');
     return opts.find(o=>o.toLowerCase()===current)||'Student Number';
   }
   function identifierOptions(selected){
-    return ['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number']
+    return ['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number','Serial Number']
       .map(label=>'<option value="'+esc(label)+'" '+(identifierType(selected)===label?'selected':'')+'>'+esc(label)+'</option>')
       .join('');
   }
@@ -183,7 +184,8 @@
       obtained_marks:gl_obtained_marks.value,
       entered_percentage:gl_entered_percentage.value,
       entered_gpa:gl_entered_gpa.value,
-      declaration_accepted:true
+      declaration_accepted:true,
+      preview_confirmed:true
     });
   }
   function wireGlForm(){

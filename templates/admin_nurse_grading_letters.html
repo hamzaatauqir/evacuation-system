@@ -109,6 +109,7 @@
               <option value="POST_RN_BSN">Post RN BSN</option>
               <option value="GENERAL_NURSING_DIPLOMA">General Nursing Diploma</option>
               <option value="SPECIALIZATION_MIDWIFERY">Specialization / Midwifery</option>
+              <option value="MASTERS_NURSING_MSN">Masters in Nursing (MSN)</option>
             </select>
             <input id="date_from" class="cwa-input" type="date" style="width:160px" aria-label="Date from">
             <input id="date_to" class="cwa-input" type="date" style="width:160px" aria-label="Date to">
@@ -217,16 +218,16 @@ function gradeOptions(selected){
   return ['Excellent','Very Good','Good','Pass','Fail'].map(g=>'<option '+(selected===g?'selected':'')+'>'+g+'</option>').join('');
 }
 function qOptions(selected){
-  const opts=[['BSN_4Y','BSN Nursing 4 Years'],['POST_RN_BSN','Post RN BSN'],['GENERAL_NURSING_DIPLOMA','General Nursing Diploma'],['SPECIALIZATION_MIDWIFERY','Specialization / Midwifery']];
+  const opts=[['BSN_4Y','BSN Nursing 4 Years'],['POST_RN_BSN','Post RN BSN'],['GENERAL_NURSING_DIPLOMA','General Nursing Diploma'],['SPECIALIZATION_MIDWIFERY','Specialization / Midwifery'],['MASTERS_NURSING_MSN','Masters in Nursing (MSN)']];
   return opts.map(o=>'<option value="'+o[0]+'" '+(selected===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
 }
 function identifierType(value){
-  const opts=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number'];
-  const current=String(value||'').trim().toLowerCase();
+  const opts=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number','Serial Number'];
+  const current=String(value||'').trim().toLowerCase().replace(/[_-]+/g,' ');
   return opts.find(o=>o.toLowerCase()===current)||'Student Number';
 }
 function identifierOptions(selected){
-  return ['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number']
+  return ['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number','Serial Number']
     .map(label=>'<option value="'+esc(label)+'" '+(identifierType(selected)===label?'selected':'')+'>'+esc(label)+'</option>')
     .join('');
 }

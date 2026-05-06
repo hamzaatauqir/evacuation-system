@@ -35,9 +35,9 @@ const COUNTRY_CODE_OPTIONS = [
   { value: "+999", label: "Other" },
 ];
 const QUALIFICATION_OPTIONS_BY_CATEGORY: Record<string, string[]> = {
-  Nurse: ["Diploma Nurse", "BSN Nursing", "Other"],
+  Nurse: ["Diploma Nurse", "BSN Nursing", "Masters in Nursing (MSN)", "Other"],
   Doctor: ["Doctor MBBS", "Doctor BDS", "Other"],
-  "Other Health Worker": ["Diploma Nurse", "BSN Nursing", "Doctor MBBS", "Doctor BDS", "Other"],
+  "Other Health Worker": ["Diploma Nurse", "BSN Nursing", "Masters in Nursing (MSN)", "Doctor MBBS", "Doctor BDS", "Other"],
 };
 
 interface FormState {

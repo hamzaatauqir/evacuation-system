@@ -159,6 +159,7 @@ const GRADING_QUALIFICATIONS = [
   { value: "POST_RN_BSN", label: "Post RN BSN" },
   { value: "GENERAL_NURSING_DIPLOMA", label: "General Nursing Diploma" },
   { value: "SPECIALIZATION_MIDWIFERY", label: "Specialization / Midwifery" },
+  { value: "MASTERS_NURSING_MSN", label: "Masters in Nursing (MSN)" },
 ];
 const GRADING_ALLOWED_QUALIFICATION_CODES = new Set(GRADING_QUALIFICATIONS.map((item) => item.value));
 const GRADING_IDENTIFIER_TYPES = [
@@ -167,11 +168,13 @@ const GRADING_IDENTIFIER_TYPES = [
   "Registration Number",
   "Enrollment Number",
   "Roll Number",
+  "Serial Number",
 ] as const;
 const GRADING_IDENTIFIER_TYPE_SET = new Set<string>(GRADING_IDENTIFIER_TYPES);
 const PROFILE_QUALIFICATION_OPTIONS = [
   "Diploma Nurse",
   "BSN Nursing",
+  "Masters in Nursing (MSN)",
   "Doctor MBBS",
   "Doctor BDS",
   "Other",
@@ -191,11 +194,12 @@ function isValidMtonNumber(value: unknown) {
 function normalizeQualificationCode(code: string) {
   const normalized = (code || "").trim().toUpperCase();
   if (normalized === "MIDWIFERY_ADDITIONAL") return "SPECIALIZATION_MIDWIFERY";
+  if (normalized === "MASTERS_IN_NURSING_MSN") return "MASTERS_NURSING_MSN";
   return normalized;
 }
 
 function normalizeGradingIdentifierType(value: string) {
-  const raw = (value || "").trim().toLowerCase();
+  const raw = (value || "").trim().toLowerCase().replace(/[_-]+/g, " ");
   const match = GRADING_IDENTIFIER_TYPES.find((label) => label.toLowerCase() === raw);
   return match || "Student Number";
 }
