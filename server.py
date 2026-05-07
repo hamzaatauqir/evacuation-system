@@ -1497,6 +1497,8 @@ def init_db():
     db.execute("CREATE INDEX IF NOT EXISTS idx_nurse_hospital ON nurse_registrations(hospital)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_nurse_arrival_date ON nurse_registrations(arrival_date)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_nurse_grading_letter ON nurse_registrations(grading_letter_issued)")
+    # Applicant Detail Correction Workflow (additive / idempotent).
+    _ncr_ensure_schema(db)
     for col, coltype in [
         ('password_hash', "TEXT"),
         ('password_salt', "TEXT"),
@@ -8151,6 +8153,7 @@ def api_nurse_stay_confirmation(data):
 
 def _build_nurse_public_profile_bundle(db, rec):
     """Build portal-safe JSON for a nurse row (no password fields)."""
+    _ncr_ensure_schema(db)
     professional_category = _nurse_professional_category(rec.get('professional_category'), rec.get('designation') or rec.get('job_title_moh') or '')
     housing_account = nh_get_account(db, rec)
     acc = db.execute("""SELECT request_status, admin_remarks
@@ -8220,6 +8223,9 @@ def _build_nurse_public_profile_bundle(db, rec):
             facility_record['latest_monthly_checkin_received_at'] = td.get('used_at') or ''
             facility_record['latest_monthly_checkin_pending'] = bool(pending)
             facility_record['latest_monthly_checkin_url'] = f"/stay-confirm?token={quote(td.get('token') or '', safe='')}" if pending else ''
+    pending_by_field = _ncr_pending_for_nurse(db, rec.get('id'))
+    correction_requests = _ncr_requests_for_nurse(db, rec.get('id'), rec, limit=50)
+    pending_corrections = [r for r in correction_requests if str(r.get('status') or '').upper() == NCR_STATUS_PENDING]
     return {
         'nurse_db_id': int(rec.get('id') or 0),
         'reference_id': rec.get('reference_id', ''),
@@ -8244,8 +8250,10 @@ def _build_nurse_public_profile_bundle(db, rec):
         'mton_number': rec.get('mton_number', ''),
         'email_verification_sent_at': rec.get('email_verification_sent_at', ''),
         'batch_number': _normalize_arrival_batch_number(rec.get('batch_number', '')) or rec.get('batch_number', ''),
+        'visa_number': rec.get('visa_number', ''),
         'arrival_date': rec.get('arrival_date', ''),
         'hospital': rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
+        'hospital_workplace': rec.get('hospital_workplace', '') or rec.get('hospital', '') or rec.get('hospital_or_medical_center', ''),
         'qualification_degree': rec.get('qualification_degree', ''),
         'qualification_degree_other': rec.get('qualification_degree_other', ''),
         'degree_type': rec.get('degree_type', ''),
@@ -8265,6 +8273,19 @@ def _build_nurse_public_profile_bundle(db, rec):
         'progress_percent': int(round((completed * 100.0) / total)) if total else 0,
         'process_last_updated_at': rec.get('updated_at', '') or rec.get('created_at', ''),
         'complaints': complaints,
+        'correction_requests': correction_requests,
+        'locked_correction_fields': [
+            {
+                'name': fn,
+                'label': _ncr_field_label(fn),
+                'help': NURSE_LOCKED_FIELD_HELP.get(fn, ''),
+                'current_value': _ncr_current_value_for_field(rec, fn),
+                'pending_request_id': (pending_by_field.get(fn) or {}).get('id'),
+                'pending_requested_value': (pending_by_field.get(fn) or {}).get('requested_value') or '',
+            }
+            for fn in NURSE_LOCKED_FIELDS
+        ],
+        'pending_correction_count': len(pending_corrections),
         'facility_roster': facility_record,
         'housing_account': housing_account,
         'pending_arrival': bool(housing_account.get('pending_arrival')),
@@ -8440,7 +8461,7 @@ def api_nurse_register(data):
     if not full_name or not passport or not mobile or not cnic or not arrival_date or not batch_number_raw or not hospital or not designation:
         return {'success': False, 'ok': False, 'error': 'Please fill all required fields.'}
     if not batch_number:
-        return {'success': False, 'ok': False, 'error': 'Batch number must contain digits only.'}
+        return {'success': False, 'ok': False, 'error': 'Batch / Flight No. must contain digits only.'}
     if not mobile_number or len(mobile_number) < 7 or len(mobile_number) > 15:
         return {'success': False, 'ok': False, 'error': 'Primary mobile number must be 7 to 15 digits.'}
     if not emergency_contact_number or len(emergency_contact_number) < 7 or len(emergency_contact_number) > 15:
@@ -8866,7 +8887,6 @@ def api_nurse_profile_update(data):
             old.get('whatsapp_country_code') or old.get('mobile_country_code') or '+965',
             'WhatsApp number'
         )
-        civil_id = _nurse_clean_text(data.get('civil_id') or old.get('civil_id'), 80)
         cnic = _nurse_clean_text(data.get('cnic') or old.get('cnic'), 40)
         qualification_degree = _nurse_clean_text(data.get('qualification_degree') or old.get('qualification_degree'), 80)
         if qualification_degree and qualification_degree not in GL_PROFILE_QUALIFICATION_OPTIONS:
@@ -8895,15 +8915,34 @@ def api_nurse_profile_update(data):
             'whatsapp_country_code': whatsapp_value['country_code'],
             'whatsapp_number': whatsapp_value['number'],
             'whatsapp_same_as_mobile': whatsapp_same_as_mobile,
-            'civil_id': civil_id,
             'cnic': cnic,
             'mton_number': mton_number,
             'qualification_degree': qualification_degree,
             'qualification_degree_other': qualification_degree_other,
-            'hospital': workplace,
-            'hospital_or_medical_center': workplace,
-            'hospital_workplace': workplace,
         }
+        locked_update_attempts = []
+        def _track_locked_attempt(label, attempted_value, current_value):
+            attempted_text = str(attempted_value or '').strip()
+            current_text = str(current_value or '').strip()
+            if attempted_text and attempted_text != current_text and label not in locked_update_attempts:
+                locked_update_attempts.append(label)
+        attempted_passport = _nurse_normalize_passport(data.get('passport_number') or '') or str(data.get('passport_number') or '').strip()
+        current_passport = _nurse_normalize_passport(old.get('passport_number') or '') or str(old.get('passport_number') or '').strip()
+        _track_locked_attempt('Passport Number', attempted_passport, current_passport)
+        attempted_batch_raw = str(data.get('batch_number') or '').strip()
+        attempted_batch = _normalize_arrival_batch_number(attempted_batch_raw) or attempted_batch_raw
+        current_batch = _normalize_arrival_batch_number(old.get('batch_number') or '') or str(old.get('batch_number') or '').strip()
+        _track_locked_attempt('Batch / Flight No.', attempted_batch, current_batch)
+        _track_locked_attempt('Arrival Date', str(data.get('arrival_date') or '').strip(), str(old.get('arrival_date') or '').strip())
+        _track_locked_attempt('Visa Number', _nurse_clean_text(data.get('visa_number') or '', 120), _nurse_clean_text(old.get('visa_number') or '', 120))
+        attempted_civil_raw = str(data.get('civil_id') or '').strip()
+        attempted_civil = re.sub(r'\D+', '', attempted_civil_raw) or attempted_civil_raw
+        current_civil_raw = str(old.get('civil_id') or '').strip()
+        current_civil = re.sub(r'\D+', '', current_civil_raw) or current_civil_raw
+        _track_locked_attempt('Civil ID', attempted_civil, current_civil)
+        attempted_workplace = next((str(data.get(k) or '').strip() for k in ('workplace', 'hospital', 'hospital_or_medical_center', 'hospital_workplace') if str(data.get(k) or '').strip()), '')
+        if attempted_workplace and attempted_workplace != str(old.get('hospital_workplace') or old.get('hospital') or old.get('hospital_or_medical_center') or '').strip():
+            locked_update_attempts.append('Employer / Hospital')
         if email_changed:
             updates.update({
                 'email_verified': 0,
@@ -8919,7 +8958,14 @@ def api_nurse_profile_update(data):
         if not changed:
             bundle = _build_nurse_public_profile_bundle(db, old)
             bundle['session_marker'] = session_marker
-            return {'success': True, 'message': 'No profile changes were detected.', 'profile': bundle}
+            result = {'success': True, 'message': 'No profile changes were detected.', 'profile': bundle}
+            if locked_update_attempts:
+                result['warning'] = (
+                    'Locked fields must be corrected through the Request Correction workflow: '
+                    + ', '.join(locked_update_attempts)
+                    + '.'
+                )
+            return result
         sets = [f"{field} = ?" for field in updates]
         db.execute(
             f"UPDATE nurse_registrations SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -8966,6 +9012,10 @@ def api_nurse_profile_update(data):
             'message': message,
             'profile': bundle,
         }
+        if locked_update_attempts:
+            warning = (
+                (warning + ' ') if warning else ''
+            ) + 'Locked fields must be corrected through the Request Correction workflow: ' + ', '.join(locked_update_attempts) + '.'
         final_warning = ' '.join(part for part in (warning, email_warning) if part).strip()
         if final_warning:
             result['warning'] = final_warning
@@ -13633,9 +13683,864 @@ def api_admin_gl_letter(app_id, user):
         db.close()
 
 
+# ============================================================================
+# Applicant Detail Correction Workflow (additive)
+# ----------------------------------------------------------------------------
+# Nurses cannot directly edit a small set of identity / arrival fields after
+# the initial registration is submitted. Instead they raise a correction
+# request that is reviewed by Embassy admin staff. Approval is the only way
+# the underlying field is updated; the existing audit + nh_audit + activity
+# log helpers are reused so this slots into the existing admin trail.
+#
+# All schema changes live in init_db / nh_ensure_schema and use IF NOT EXISTS,
+# so this is safe to re-run on existing databases.
+# ============================================================================
+
+NURSE_CORRECTION_FIELD_ALIASES = {
+    'flight_number': 'batch_number',
+    'hospital': 'hospital_workplace',
+    'employer': 'hospital_workplace',
+    'employer_hospital': 'hospital_workplace',
+}
+
+NURSE_LOCKED_FIELDS = (
+    'batch_number',
+    'passport_number',
+    'civil_id',
+    'hospital_workplace',
+    'arrival_date',
+    'visa_number',
+)
+
+NURSE_LOCKED_FIELD_LABELS = {
+    'batch_number': 'Batch / Flight No.',
+    'passport_number': 'Passport Number',
+    'civil_id': 'Civil ID',
+    'hospital_workplace': 'Employer / Hospital',
+    'arrival_date': 'Arrival Date',
+    'visa_number': 'Visa Number',
+}
+
+NURSE_LOCKED_FIELD_HELP = {
+    'batch_number': (
+        'Enter the Kuwait arrival batch or flight number associated with your '
+        'nursing group (e.g. 37, 38, 39).'
+    ),
+    'passport_number': 'Enter the passport number exactly as printed on your passport.',
+    'civil_id': 'Enter your 12-digit Kuwait Civil ID, if it has been issued.',
+    'hospital_workplace': 'Enter the employer / hospital where you are currently posted.',
+    'arrival_date': 'Enter your Kuwait arrival date in YYYY-MM-DD format.',
+    'visa_number': 'Enter your Kuwait visa number as printed on the visa stamp.',
+}
+
+NCR_STATUS_PENDING = 'PENDING'
+NCR_STATUS_APPROVED = 'APPROVED'
+NCR_STATUS_REJECTED = 'REJECTED'
+NCR_STATUS_CANCELLED = 'CANCELLED'
+NCR_TERMINAL_STATUSES = {NCR_STATUS_APPROVED, NCR_STATUS_REJECTED, NCR_STATUS_CANCELLED}
+
+
+def _ncr_ensure_schema(db):
+    if not db:
+        return
+    try:
+        db.execute("ALTER TABLE nurse_registrations ADD COLUMN visa_number TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS nurse_correction_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nurse_id INTEGER NOT NULL,
+        ref_id TEXT DEFAULT '',
+        nurse_reference_id TEXT DEFAULT '',
+        passport_number TEXT DEFAULT '',
+        field_name TEXT NOT NULL,
+        field_label TEXT DEFAULT '',
+        old_value TEXT DEFAULT '',
+        requested_value TEXT DEFAULT '',
+        reason TEXT DEFAULT '',
+        status TEXT DEFAULT 'PENDING',
+        requested_by TEXT DEFAULT '',
+        reviewed_by TEXT DEFAULT '',
+        reviewed_at TEXT DEFAULT '',
+        review_remarks TEXT DEFAULT '',
+        auto_activated INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_ncr_nurse ON nurse_correction_requests(nurse_id);
+    CREATE INDEX IF NOT EXISTS idx_ncr_ref ON nurse_correction_requests(ref_id);
+    CREATE INDEX IF NOT EXISTS idx_ncr_status ON nurse_correction_requests(status);
+    CREATE INDEX IF NOT EXISTS idx_ncr_field ON nurse_correction_requests(field_name);
+    CREATE INDEX IF NOT EXISTS idx_ncr_created ON nurse_correction_requests(created_at);
+    CREATE INDEX IF NOT EXISTS idx_ncr_nurse_field_status ON nurse_correction_requests(nurse_id, field_name, status);
+    CREATE INDEX IF NOT EXISTS idx_ncr_status_created ON nurse_correction_requests(status, created_at);
+    """)
+    for col, coltype in [
+        ('ref_id', "TEXT DEFAULT ''"),
+        ('nurse_reference_id', "TEXT DEFAULT ''"),
+        ('passport_number', "TEXT DEFAULT ''"),
+        ('field_label', "TEXT DEFAULT ''"),
+        ('reviewed_by', "TEXT DEFAULT ''"),
+        ('reviewed_at', "TEXT DEFAULT ''"),
+        ('review_remarks', "TEXT DEFAULT ''"),
+        ('auto_activated', 'INTEGER DEFAULT 0'),
+        ('updated_at', "TEXT DEFAULT ''"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE nurse_correction_requests ADD COLUMN {col} {coltype}")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        db.execute(
+            "UPDATE nurse_correction_requests SET ref_id = COALESCE(NULLIF(ref_id, ''), nurse_reference_id, '') "
+            "WHERE COALESCE(ref_id, '') = ''"
+        )
+    except Exception:
+        pass
+    try:
+        db.execute(
+            "UPDATE nurse_correction_requests "
+            "SET nurse_reference_id = COALESCE(NULLIF(nurse_reference_id, ''), ref_id, '') "
+            "WHERE COALESCE(nurse_reference_id, '') = ''"
+        )
+    except Exception:
+        pass
+
+
+def _ncr_canonical_field_name(field_name):
+    normalized = str(field_name or '').strip().lower().replace('-', '_').replace(' ', '_')
+    return NURSE_CORRECTION_FIELD_ALIASES.get(normalized, normalized)
+
+
+def _ncr_field_label(field_name):
+    canonical = _ncr_canonical_field_name(field_name)
+    return NURSE_LOCKED_FIELD_LABELS.get(canonical, str(canonical or '').replace('_', ' ').title())
+
+
+def _ncr_clean(value, max_len=400):
+    text = '' if value is None else str(value)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if max_len and len(text) > max_len:
+        text = text[:max_len].strip()
+    return text
+
+
+def _ncr_current_value_for_field(nurse_row, field_name):
+    """Read the canonical current value for a locked field from a nurse_registrations row dict."""
+    if not nurse_row:
+        return ''
+    field_name = _ncr_canonical_field_name(field_name)
+    if field_name == 'hospital_workplace':
+        for key in ('hospital_workplace', 'hospital', 'hospital_or_medical_center'):
+            v = (nurse_row.get(key) or '').strip()
+            if v:
+                return v
+        return ''
+    if field_name == 'batch_number':
+        return _ncr_clean(nurse_row.get('batch_number') or '', 80)
+    return _ncr_clean(nurse_row.get(field_name) or '', 240)
+
+
+def _ncr_locked_field_snapshot(nurse_row):
+    """Return {field_name: current_value} for every locked field — used by UI to render Request Correction buttons."""
+    return {fn: _ncr_current_value_for_field(nurse_row, fn) for fn in NURSE_LOCKED_FIELDS}
+
+
+def _ncr_normalize_requested_value(field_name, value):
+    field_name = _ncr_canonical_field_name(field_name)
+    text = _ncr_clean(value, 240)
+    if field_name == 'batch_number':
+        normalized = _normalize_arrival_batch_number(text)
+        if not normalized:
+            raise ValueError('Batch / Flight No. must contain digits only.')
+        return normalized
+    if field_name == 'passport_number':
+        normalized = _nurse_normalize_passport(text)
+        if not normalized:
+            raise ValueError('Passport Number is required.')
+        return normalized
+    if field_name == 'civil_id':
+        digits = re.sub(r'\D+', '', text)
+        if len(digits) != 12:
+            raise ValueError('Civil ID must be 12 digits.')
+        return digits
+    if field_name == 'arrival_date':
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', text):
+            raise ValueError('Arrival Date must be in YYYY-MM-DD format.')
+        return text
+    if field_name == 'hospital_workplace':
+        if not text:
+            raise ValueError('Employer / Hospital is required.')
+        return _ncr_clean(text, 180)
+    if field_name == 'visa_number':
+        if not text:
+            raise ValueError('Visa Number is required.')
+        return _ncr_clean(text, 120)
+    return text
+
+
+def _ncr_comparable_value(field_name, value):
+    try:
+        return _ncr_normalize_requested_value(field_name, value)
+    except ValueError:
+        return _ncr_clean(value, 240)
+
+
+def _ncr_pending_for_nurse(db, nurse_id):
+    if not nurse_id:
+        return {}
+    rows = db.execute(
+        "SELECT field_name, id, requested_value, created_at FROM nurse_correction_requests "
+        "WHERE nurse_id = ? AND status = ? ORDER BY id DESC",
+        [int(nurse_id), NCR_STATUS_PENDING]
+    ).fetchall()
+    out = {}
+    for r in rows:
+        # Keep only the most recent pending entry per field (rows already DESC).
+        out.setdefault(_ncr_canonical_field_name(r['field_name']), dict(r))
+    return out
+
+
+def _ncr_requests_for_nurse(db, nurse_id, nurse=None, limit=50):
+    if not nurse_id:
+        return []
+    rows = db.execute(
+        "SELECT * FROM nurse_correction_requests WHERE nurse_id = ? ORDER BY id DESC LIMIT ?",
+        [int(nurse_id), int(limit or 50)]
+    ).fetchall()
+    return [_ncr_serialize(r, nurse) for r in rows]
+
+
+def _ncr_serialize(row, nurse=None):
+    if row is None:
+        return None
+    d = dict(row) if not isinstance(row, dict) else dict(row)
+    canonical_field = _ncr_canonical_field_name(d.get('field_name'))
+    ref_id = d.get('ref_id') or d.get('nurse_reference_id') or ''
+    return {
+        'id': int(d.get('id') or 0),
+        'nurse_id': int(d.get('nurse_id') or 0),
+        'ref_id': ref_id,
+        'nurse_reference_id': ref_id,
+        'passport_number': d.get('passport_number') or '',
+        'nurse_name': (nurse or {}).get('full_name') or d.get('nurse_full_name') or '',
+        'field_name': canonical_field,
+        'field_label': d.get('field_label') or _ncr_field_label(canonical_field),
+        'old_value': d.get('old_value') or '',
+        'requested_value': d.get('requested_value') or '',
+        'reason': d.get('reason') or '',
+        'status': d.get('status') or NCR_STATUS_PENDING,
+        'status_label': str(d.get('status') or NCR_STATUS_PENDING).replace('_', ' ').title(),
+        'requested_by': d.get('requested_by') or '',
+        'reviewed_by': d.get('reviewed_by') or '',
+        'reviewed_at': d.get('reviewed_at') or '',
+        'review_remarks': d.get('review_remarks') or '',
+        'auto_activated': bool(d.get('auto_activated') or 0),
+        'created_at': d.get('created_at') or '',
+        'updated_at': d.get('updated_at') or '',
+    }
+
+
+def _ncr_missing_activation_fields(nurse_row):
+    checks = [
+        ('Batch / Flight No.', _ncr_current_value_for_field(nurse_row, 'batch_number')),
+        ('Passport Number', _ncr_current_value_for_field(nurse_row, 'passport_number')),
+        ('Civil ID', _ncr_current_value_for_field(nurse_row, 'civil_id')),
+        ('Employer / Hospital', _ncr_current_value_for_field(nurse_row, 'hospital_workplace')),
+        ('Arrival Date', _ncr_current_value_for_field(nurse_row, 'arrival_date')),
+        ('Visa Number', _ncr_current_value_for_field(nurse_row, 'visa_number')),
+    ]
+    return [label for label, value in checks if not str(value or '').strip()]
+
+
+def _ncr_upsert_account_batch_link(db, nurse_row, actor, preserve_active=False):
+    if not nh_feature_enabled():
+        return None
+    nurse_d = dict(nurse_row or {})
+    nurse_id = int(nurse_d.get('id') or 0)
+    if not nurse_id:
+        return None
+    _nh_ensure_schema(db)
+    batch = nh_get_or_create_arrival_batch(
+        db,
+        nurse_d.get('batch_number') or '',
+        nurse_d.get('arrival_date') or '',
+        actor=actor
+    )
+    batch_code = _normalize_arrival_batch_number((batch or {}).get('batch_code') or nurse_d.get('batch_number') or '')
+    arrival_batch_id = int((batch or {}).get('id') or 0) if batch else None
+    row = db.execute("SELECT * FROM nh_nurse_account WHERE nurse_registration_id = ? LIMIT 1", [nurse_id]).fetchone()
+    target_status = NH_ACCOUNT_STATUS_ACTIVE if preserve_active else NH_ACCOUNT_STATUS_PENDING_ARRIVAL
+    if row:
+        old = dict(row)
+        db.execute(
+            """UPDATE nh_nurse_account
+               SET account_status = ?,
+                   arrival_batch_id = COALESCE(?, arrival_batch_id),
+                   batch_code = CASE WHEN ? != '' THEN ? ELSE batch_code END,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE nurse_registration_id = ?""",
+            [target_status, arrival_batch_id, batch_code, batch_code, nurse_id]
+        )
+        if (old.get('account_status') or '').strip().upper() != target_status or (old.get('batch_code') or '') != batch_code:
+            _nh_write_audit(
+                db,
+                'nurse_account',
+                old.get('id'),
+                'correction_batch_link_updated',
+                nurse_registration_id=nurse_id,
+                old_value=old.get('account_status') or '',
+                new_value=target_status,
+                note=f'Batch link refreshed from correction workflow ({batch_code or "unassigned"}).',
+                actor=actor,
+            )
+        return dict(old)
+    cur = db.execute(
+        """INSERT INTO nh_nurse_account
+           (nurse_registration_id, account_status, arrival_batch_id, batch_code, notes)
+           VALUES (?, ?, ?, ?, '')""",
+        [nurse_id, target_status, arrival_batch_id, batch_code]
+    )
+    account_id = int(cur.lastrowid or 0)
+    _nh_write_audit(
+        db,
+        'nurse_account',
+        account_id,
+        'created_from_correction',
+        nurse_registration_id=nurse_id,
+        new_value=target_status,
+        note=f'Created from correction workflow for batch {batch_code or "unassigned"}.',
+        actor=actor,
+    )
+    return {'id': account_id, 'account_status': target_status, 'batch_code': batch_code}
+
+
+def _ncr_authenticated_nurse_lookup(db, data):
+    ref = (data.get('nurse_reference_id') or data.get('reference_id') or '').strip().upper()
+    session_marker = (data.get('session_marker') or '').strip()
+    if ref and session_marker:
+        rec = _nurse_session_lookup(db, ref, session_marker)
+        if rec:
+            return rec
+    identity = (data.get('identity') or ref or data.get('passport_number') or '').strip()
+    verifier = (data.get('verifier') or '').strip()
+    if not identity or not verifier:
+        return None
+    return db.execute(
+        """SELECT * FROM nurse_registrations
+           WHERE (
+               UPPER(TRIM(reference_id)) = UPPER(TRIM(?))
+               OR UPPER(TRIM(passport_number)) = UPPER(TRIM(?))
+           )
+             AND (
+                 TRIM(mobile) = TRIM(?)
+                 OR TRIM(civil_id) = TRIM(?)
+                 OR TRIM(cnic) = TRIM(?)
+             )
+           ORDER BY id DESC LIMIT 1""",
+        [identity, identity, verifier, verifier, verifier]
+    ).fetchone()
+
+
+def _ncr_apply_field_update(db, nurse_row, field_name, new_value, actor):
+    """Write the approved correction into the canonical nurse_registrations column.
+
+    For hospital_workplace the value is mirrored across the legacy aliases so
+    every existing reader (admin list, JOINs, exports) sees the same value.
+    For batch_number the housing-account batch link is refreshed and automatic
+    activation only happens after approval when the linked batch is ARRIVED and
+    the required identity fields are complete.
+    Returns a dict with {auto_activated: bool, account_status: str|None}.
+    """
+    nurse_id = int((nurse_row or {}).get('id') or 0)
+    if not nurse_id:
+        return {'auto_activated': False, 'account_status': None}
+    field_name = _ncr_canonical_field_name(field_name)
+    new_value = _ncr_normalize_requested_value(field_name, new_value)
+    if field_name == 'hospital_workplace':
+        db.execute(
+            "UPDATE nurse_registrations SET hospital_workplace = ?, hospital = ?, "
+            "hospital_or_medical_center = ?, updated_at = CURRENT_TIMESTAMP, updated_by = ? WHERE id = ?",
+            [new_value, new_value, new_value, _ncr_clean(actor, 80), nurse_id]
+        )
+    else:
+        # Whitelist the column name to a known locked field to avoid SQL injection
+        # via `field_name`.
+        if field_name not in NURSE_LOCKED_FIELDS:
+            raise ValueError(f'Unsupported field for correction: {field_name}')
+        db.execute(
+            f"UPDATE nurse_registrations SET {field_name} = ?, updated_at = CURRENT_TIMESTAMP, "
+            "updated_by = ? WHERE id = ?",
+            [new_value, _ncr_clean(actor, 80), nurse_id]
+        )
+    auto_activated = False
+    account_status = None
+    activation_deferred_reason = ''
+    missing_activation_fields = []
+    if field_name == 'batch_number' and nh_feature_enabled():
+        try:
+            fresh = db.execute("SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [nurse_id]).fetchone()
+            if fresh:
+                fresh_d = dict(fresh)
+                account_before = nh_get_account(db, fresh_d)
+                prior_status = (account_before.get('account_status') or '').strip().upper()
+                batch = nh_get_or_create_arrival_batch(
+                    db,
+                    fresh_d.get('batch_number') or '',
+                    fresh_d.get('arrival_date') or '',
+                    actor=actor
+                )
+                batch_status = ((batch or {}).get('status') or '').strip().upper()
+                missing_activation_fields = _ncr_missing_activation_fields(fresh_d)
+                if batch_status == NH_BATCH_STATUS_ARRIVED and not missing_activation_fields:
+                    nh_create_registration_account(db, fresh_d, actor=actor)
+                    account_after = nh_get_account(db, fresh_d)
+                    account_status = (account_after.get('account_status') or '').strip().upper() or None
+                    auto_activated = prior_status != NH_ACCOUNT_STATUS_ACTIVE and account_status == NH_ACCOUNT_STATUS_ACTIVE
+                else:
+                    _ncr_upsert_account_batch_link(
+                        db,
+                        fresh_d,
+                        actor=actor,
+                        preserve_active=(prior_status == NH_ACCOUNT_STATUS_ACTIVE)
+                    )
+                    account_after = nh_get_account(db, fresh_d)
+                    account_status = (account_after.get('account_status') or '').strip().upper() or None
+                    if batch_status == NH_BATCH_STATUS_ARRIVED and missing_activation_fields and prior_status != NH_ACCOUNT_STATUS_ACTIVE:
+                        activation_deferred_reason = (
+                            'Batch / Flight No. updated, but account remains pending because '
+                            'required identity details are incomplete: '
+                            + ', '.join(missing_activation_fields)
+                            + '.'
+                        )
+        except Exception as exc:
+            print(f"[NurseCorrection] account refresh failed: {exc}", flush=True)
+    return {
+        'auto_activated': auto_activated,
+        'account_status': account_status,
+        'activation_deferred_reason': activation_deferred_reason,
+        'missing_activation_fields': missing_activation_fields,
+    }
+
+
+def _ncr_audit(db, request_row, event_type, actor, note=''):
+    """Mirror correction events into nh_audit + nurse_activity_log for the
+    admin timeline. nh_audit is append-only; we never delete entries."""
+    try:
+        _nh_write_audit(
+            db,
+            'nurse_correction_request',
+            request_row.get('id') or 0,
+            event_type,
+            nurse_registration_id=int(request_row.get('nurse_id') or 0),
+            old_value=request_row.get('old_value') or '',
+            new_value=request_row.get('requested_value') or '',
+            note=_ncr_clean(note or request_row.get('reason') or '', 400),
+            actor=actor,
+        )
+    except Exception as exc:
+        print(f"[NurseCorrection] nh_audit write failed: {exc}", flush=True)
+    try:
+        _nurse_log(
+            db,
+            event_type,
+            request_row.get('nurse_reference_id') or '',
+            request_row.get('passport_number') or '',
+            _ncr_clean(actor, 80) or 'system',
+            {
+                'request_id': request_row.get('id'),
+                'field': request_row.get('field_name'),
+                'old': request_row.get('old_value'),
+                'new': request_row.get('requested_value'),
+                'note': _ncr_clean(note, 400),
+            }
+        )
+    except Exception as exc:
+        print(f"[NurseCorrection] nurse_activity_log write failed: {exc}", flush=True)
+
+
+def api_nurse_correction_request_submit(data):
+    """Nurse-portal endpoint. Authenticated via the same session_marker pattern
+    as api_nurse_profile_update. Adds a PENDING correction entry — does NOT
+    update the nurse record."""
+    field_name = _ncr_canonical_field_name(data.get('field_name'))
+    if field_name not in NURSE_LOCKED_FIELDS:
+        return {'success': False, 'error': 'This field cannot be corrected through this workflow.'}
+    reason = _ncr_clean(data.get('reason') or '', 400)
+    if not reason or len(reason) < 5:
+        return {'success': False, 'error': 'Please briefly describe the reason for the correction (at least a sentence).'}
+    db = get_db()
+    try:
+        _ncr_ensure_schema(db)
+        rec = _ncr_authenticated_nurse_lookup(db, data)
+        if not rec:
+            return {'success': False, 'error': 'Session expired. Please sign in again.', 'status_code': 403}
+        nurse = dict(rec)
+        requested_value = _ncr_normalize_requested_value(field_name, data.get('requested_value') or data.get('new_value') or '')
+        old_value = _ncr_current_value_for_field(nurse, field_name)
+        if _ncr_comparable_value(field_name, requested_value) == _ncr_comparable_value(field_name, old_value):
+            return {'success': False, 'error': 'The corrected value matches the current value on file.'}
+        # Reject if a pending request already exists for this field — staff
+        # would otherwise see duplicates in the queue.
+        existing_rows = db.execute(
+            "SELECT id, field_name FROM nurse_correction_requests "
+            "WHERE nurse_id = ? AND UPPER(COALESCE(status, '')) = ?",
+            [nurse.get('id'), NCR_STATUS_PENDING]
+        ).fetchall()
+        existing = next((r for r in existing_rows if _ncr_canonical_field_name(r['field_name']) == field_name), None)
+        if existing:
+            return {
+                'success': False,
+                'error': (
+                    'A correction request for this field is already pending Embassy review. '
+                    'Please wait for the current review to complete.'
+                ),
+            }
+        cur = db.execute(
+            """INSERT INTO nurse_correction_requests
+               (nurse_id, ref_id, nurse_reference_id, passport_number, field_name,
+                field_label, old_value, requested_value, reason, status, requested_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+            [
+                int(nurse.get('id') or 0),
+                nurse.get('reference_id') or '',
+                nurse.get('reference_id') or '',
+                nurse.get('passport_number') or '',
+                field_name,
+                _ncr_field_label(field_name),
+                old_value,
+                requested_value,
+                reason,
+                NCR_STATUS_PENDING,
+                'nurse_portal',
+            ]
+        )
+        new_id = cur.lastrowid
+        row = db.execute(
+            "SELECT * FROM nurse_correction_requests WHERE id = ? LIMIT 1", [new_id]
+        ).fetchone()
+        _ncr_audit(db, dict(row), 'correction_submitted', 'nurse_portal', note=reason)
+        db.commit()
+        return {
+            'success': True,
+            'message': 'Your correction request has been submitted for Embassy review.',
+            'request': _ncr_serialize(row, nurse),
+        }
+    except ValueError as exc:
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[NurseCorrection] submit failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Correction request could not be submitted. Please try again.'}
+    finally:
+        db.close()
+
+
+def api_nurse_correction_request_list_mine(data):
+    """Nurse-portal: list this nurse's own correction requests (own ownership only)."""
+    db = get_db()
+    try:
+        _ncr_ensure_schema(db)
+        rec = _ncr_authenticated_nurse_lookup(db, data)
+        if not rec:
+            return {'success': False, 'error': 'Session expired.', 'status_code': 403}
+        nurse = dict(rec)
+        pending = _ncr_pending_for_nurse(db, nurse.get('id'))
+        return {
+            'success': True,
+            'requests': _ncr_requests_for_nurse(db, nurse.get('id'), nurse, limit=50),
+            'locked_fields': [
+                {
+                    'name': fn,
+                    'label': _ncr_field_label(fn),
+                    'help': NURSE_LOCKED_FIELD_HELP.get(fn, ''),
+                    'current_value': _ncr_current_value_for_field(nurse, fn),
+                    'pending_request_id': (pending.get(fn) or {}).get('id'),
+                    'pending_requested_value': (pending.get(fn) or {}).get('requested_value') or '',
+                }
+                for fn in NURSE_LOCKED_FIELDS
+            ],
+        }
+    finally:
+        db.close()
+
+
+def _ncr_admin_can_manage(user):
+    role = (user or {}).get('role') if user else None
+    return is_full_admin_role(role) or is_community_desk_role(role)
+
+
+def api_admin_nurse_correction_list(params, user=None):
+    if not _ncr_admin_can_manage(user):
+        return {'success': False, 'error': 'Unauthorized', 'status_code': 403}
+    status = (params.get('status') or '').strip().upper()
+    field = _ncr_canonical_field_name(params.get('field_name'))
+    search = _ncr_clean(params.get('search') or '', 120)
+    where = ['1=1']
+    args = []
+    if status:
+        where.append('UPPER(COALESCE(c.status, \'\')) = ?')
+        args.append(status)
+    if field:
+        where.append('c.field_name = ?')
+        args.append(field)
+    if search:
+        where.append(
+            '(UPPER(COALESCE(NULLIF(c.ref_id, \'\'), c.nurse_reference_id, \'\')) LIKE UPPER(?) OR '
+            'UPPER(COALESCE(c.passport_number, \'\')) LIKE UPPER(?) OR '
+            'UPPER(COALESCE(n.full_name, \'\')) LIKE UPPER(?))'
+        )
+        wild = f'%{search}%'
+        args.extend([wild, wild, wild])
+    db = get_db()
+    try:
+        _ncr_ensure_schema(db)
+        rows = db.execute(
+            f"""SELECT c.*, n.full_name AS nurse_full_name,
+                       COALESCE(NULLIF(c.ref_id, ''), c.nurse_reference_id, n.reference_id, '') AS ref_id_live
+                FROM nurse_correction_requests c
+                LEFT JOIN nurse_registrations n ON n.id = c.nurse_id
+                WHERE {' AND '.join(where)}
+                ORDER BY CASE UPPER(COALESCE(c.status, '')) WHEN 'PENDING' THEN 0 ELSE 1 END, c.id DESC
+                LIMIT 250""",
+            args
+        ).fetchall()
+        items = [_ncr_serialize(r, {'full_name': r['nurse_full_name']}) for r in rows]
+        # KPI: how many pending across all fields
+        kpi_row = db.execute(
+            "SELECT status, COUNT(*) c FROM nurse_correction_requests GROUP BY status"
+        ).fetchall()
+        counts = {str(r['status'] or '').upper(): int(r['c'] or 0) for r in kpi_row}
+        return {
+            'success': True,
+            'items': items,
+            'total': len(items),
+            'kpis': {
+                'pending': counts.get(NCR_STATUS_PENDING, 0),
+                'approved': counts.get(NCR_STATUS_APPROVED, 0),
+                'rejected': counts.get(NCR_STATUS_REJECTED, 0),
+                'cancelled': counts.get(NCR_STATUS_CANCELLED, 0),
+                'total': sum(counts.values()),
+            },
+            'filters': {
+                'fields': [
+                    {'name': fn, 'label': _ncr_field_label(fn)} for fn in NURSE_LOCKED_FIELDS
+                ],
+                'statuses': [NCR_STATUS_PENDING, NCR_STATUS_APPROVED, NCR_STATUS_REJECTED, NCR_STATUS_CANCELLED],
+            },
+        }
+    finally:
+        db.close()
+
+
+def api_admin_nurse_correction_detail(params, user=None):
+    if not _ncr_admin_can_manage(user):
+        return {'success': False, 'error': 'Unauthorized', 'status_code': 403}
+    try:
+        request_id = int(params.get('id') or 0)
+    except Exception:
+        request_id = 0
+    if not request_id:
+        return {'success': False, 'error': 'Correction request id required.'}
+    db = get_db()
+    try:
+        _ncr_ensure_schema(db)
+        row = db.execute(
+            "SELECT * FROM nurse_correction_requests WHERE id = ? LIMIT 1", [request_id]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Correction request not found.'}
+        nurse = db.execute(
+            "SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [int(row['nurse_id'] or 0)]
+        ).fetchone()
+        nurse_d = dict(nurse) if nurse else {}
+        timeline = _nurse_registration_actions(db, nurse_d.get('reference_id') or '')
+        return {
+            'success': True,
+            'request': _ncr_serialize(row, nurse_d),
+            'nurse': {
+                'id': nurse_d.get('id'),
+                'reference_id': nurse_d.get('reference_id') or '',
+                'full_name': nurse_d.get('full_name') or '',
+                'passport_number': nurse_d.get('passport_number') or '',
+                'civil_id': nurse_d.get('civil_id') or '',
+                'batch_number': nurse_d.get('batch_number') or '',
+                'arrival_date': nurse_d.get('arrival_date') or '',
+                'visa_number': nurse_d.get('visa_number') or '',
+                'hospital_workplace': nurse_d.get('hospital_workplace') or nurse_d.get('hospital') or '',
+                'registration_status': nurse_d.get('registration_status') or '',
+            },
+            'timeline': timeline[:50],
+            'correction_requests': _ncr_requests_for_nurse(db, nurse_d.get('id'), nurse_d, limit=25),
+        }
+    finally:
+        db.close()
+
+
+def _ncr_admin_actor(user):
+    if not user:
+        return 'admin'
+    return _ncr_clean(user.get('username') or user.get('user') or user.get('name') or 'admin', 80)
+
+
+def api_admin_nurse_correction_approve(data, user=None):
+    if not _ncr_admin_can_manage(user):
+        return {'success': False, 'error': 'Unauthorized', 'status_code': 403}
+    try:
+        request_id = int(data.get('id') or 0)
+    except Exception:
+        request_id = 0
+    if not request_id:
+        return {'success': False, 'error': 'Correction request id required.'}
+    remarks = _ncr_clean(data.get('remarks') or data.get('review_remarks') or '', 400)
+    db = get_db()
+    try:
+        _ncr_ensure_schema(db)
+        row = db.execute(
+            "SELECT * FROM nurse_correction_requests WHERE id = ? LIMIT 1", [request_id]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Correction request not found.'}
+        request_d = dict(row)
+        request_d['field_name'] = _ncr_canonical_field_name(request_d.get('field_name'))
+        if (request_d.get('status') or '').upper() != NCR_STATUS_PENDING:
+            return {'success': False, 'error': 'Only pending correction requests can be approved.'}
+        nurse_row = db.execute(
+            "SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [int(request_d['nurse_id'] or 0)]
+        ).fetchone()
+        if not nurse_row:
+            return {'success': False, 'error': 'Linked nurse record could not be found.'}
+        nurse_d = dict(nurse_row)
+        actor = _ncr_admin_actor(user)
+        # Re-read the live old value at approval time so the audit reflects
+        # what was actually replaced (the field may have moved since submit).
+        live_old = _ncr_current_value_for_field(nurse_d, request_d['field_name'])
+        update_summary = _ncr_apply_field_update(
+            db, nurse_d, request_d['field_name'], request_d['requested_value'], actor
+        )
+        db.execute(
+            """UPDATE nurse_correction_requests
+               SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP,
+                   review_remarks = ?, old_value = ?, auto_activated = ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [
+                NCR_STATUS_APPROVED, actor, remarks, live_old,
+                1 if update_summary.get('auto_activated') else 0,
+                request_id,
+            ]
+        )
+        # Refresh in-memory request_d so the audit helpers carry the live old value.
+        request_d['old_value'] = live_old
+        request_d['requested_by'] = request_d.get('requested_by') or 'nurse_portal'
+        _ncr_audit(
+            db, request_d, 'correction_approved', actor,
+            note=(remarks or f"Approved correction for {_ncr_field_label(request_d['field_name'])}.")
+        )
+        if update_summary.get('auto_activated') and request_d['field_name'] == 'batch_number':
+            note = (
+                f"Batch / Flight No. corrected from {live_old or '—'} → "
+                f"{request_d['requested_value'] or '—'}. "
+                f"Nurse account automatically marked Active / Arrived."
+            )
+            _ncr_audit(db, request_d, 'account_auto_activated', actor, note=note)
+        elif update_summary.get('activation_deferred_reason'):
+            _ncr_audit(
+                db,
+                request_d,
+                'account_activation_deferred',
+                actor,
+                note=update_summary.get('activation_deferred_reason') or '',
+            )
+        db.commit()
+        fresh = db.execute(
+            "SELECT * FROM nurse_correction_requests WHERE id = ? LIMIT 1", [request_id]
+        ).fetchone()
+        return {
+            'success': True,
+            'message': 'Correction request approved and applied.',
+            'request': _ncr_serialize(fresh, nurse_d),
+            'auto_activated': bool(update_summary.get('auto_activated')),
+            'account_status': update_summary.get('account_status'),
+            'missing_activation_fields': update_summary.get('missing_activation_fields') or [],
+        }
+    except ValueError as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {'success': False, 'error': str(exc)}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[NurseCorrection] approve failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Correction request could not be approved.'}
+    finally:
+        db.close()
+
+
+def api_admin_nurse_correction_reject(data, user=None):
+    if not _ncr_admin_can_manage(user):
+        return {'success': False, 'error': 'Unauthorized', 'status_code': 403}
+    try:
+        request_id = int(data.get('id') or 0)
+    except Exception:
+        request_id = 0
+    if not request_id:
+        return {'success': False, 'error': 'Correction request id required.'}
+    remarks = _ncr_clean(data.get('remarks') or data.get('review_remarks') or '', 400)
+    if not remarks:
+        return {'success': False, 'error': 'Please add a remark explaining why this correction is being rejected.'}
+    db = get_db()
+    try:
+        _ncr_ensure_schema(db)
+        row = db.execute(
+            "SELECT * FROM nurse_correction_requests WHERE id = ? LIMIT 1", [request_id]
+        ).fetchone()
+        if not row:
+            return {'success': False, 'error': 'Correction request not found.'}
+        request_d = dict(row)
+        if (request_d.get('status') or '').upper() != NCR_STATUS_PENDING:
+            return {'success': False, 'error': 'Only pending correction requests can be rejected.'}
+        actor = _ncr_admin_actor(user)
+        db.execute(
+            """UPDATE nurse_correction_requests
+               SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP,
+                   review_remarks = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [NCR_STATUS_REJECTED, actor, remarks, request_id]
+        )
+        _ncr_audit(db, request_d, 'correction_rejected', actor, note=remarks)
+        db.commit()
+        fresh = db.execute(
+            "SELECT * FROM nurse_correction_requests WHERE id = ? LIMIT 1", [request_id]
+        ).fetchone()
+        return {
+            'success': True,
+            'message': 'Correction request rejected.',
+            'request': _ncr_serialize(fresh),
+        }
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[NurseCorrection] reject failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Correction request could not be rejected.'}
+    finally:
+        db.close()
+
+
 def api_admin_nurses_summary(user=None):
     db = get_db()
     try:
+        _ncr_ensure_schema(db)
         normalized_changed = False
         normalized_batches = {}
         if nh_feature_enabled():
@@ -13678,6 +14583,10 @@ def api_admin_nurses_summary(user=None):
                                                WHERE COALESCE(category, complaint_category) = 'Facility Assistance Request'
                                                  AND COALESCE(status, complaint_status) NOT IN ('Resolved','Closed')"""),
             'facility_my_assigned': _count("SELECT COUNT(*) c FROM facility_roster WHERE active = 1 AND assigned_to = ?", [username]) if username else 0,
+            'correction_requests_pending': _count("SELECT COUNT(*) c FROM nurse_correction_requests WHERE UPPER(COALESCE(status, '')) = ?", [NCR_STATUS_PENDING]),
+            'correction_requests_total': _count("SELECT COUNT(*) c FROM nurse_correction_requests"),
+            'correction_requests_approved': _count("SELECT COUNT(*) c FROM nurse_correction_requests WHERE UPPER(COALESCE(status, '')) = ?", [NCR_STATUS_APPROVED]),
+            'correction_requests_rejected': _count("SELECT COUNT(*) c FROM nurse_correction_requests WHERE UPPER(COALESCE(status, '')) = ?", [NCR_STATUS_REJECTED]),
             'total_health_workers': _count("SELECT COUNT(*) c FROM nurse_registrations"),
             'embassy_facilitated_residents': facility_totals.get('embassy_facilitated_residents', 0),
             'aja_care_residents': facility_totals.get('total_aja_care_residents', 0),
@@ -14010,6 +14919,8 @@ def _nurse_registration_public_dict(row):
     d['email_status'] = _email_status_label(d)
     d['father_name'] = d.get('father_name') or ''
     d['mton_number'] = d.get('mton_number') or ''
+    d['visa_number'] = d.get('visa_number') or ''
+    d['batch_number'] = _normalize_arrival_batch_number(d.get('batch_number') or '') or d.get('batch_number') or ''
     return d
 
 
@@ -32207,6 +33118,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_admin_nurses_summary(user))
+        elif path in ('/api/admin/nurses/correction-requests', '/api/admin/nurses/corrections'):
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            res = api_admin_nurse_correction_list(params, user)
+            self.send_json(res, 200 if res.get('success') else int(res.get('status_code') or 400))
+        elif path in ('/api/admin/nurses/correction/detail', '/api/admin/nurses/corrections/detail'):
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            res = api_admin_nurse_correction_detail(params, user)
+            self.send_json(res, 200 if res.get('success') else int(res.get('status_code') or 404))
         elif path == '/api/admin/nurses/pending-accounts':
             user = self.require_auth()
             if not user: return
@@ -32379,6 +33304,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'success': False, 'error': 'id required'}, 400); return
             db = get_db()
             try:
+                _ncr_ensure_schema(db)
                 select_sql = """SELECT n.*,
                                        f.id AS facility_roster_id,
                                        f.roster_reference,
@@ -32437,11 +33363,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                        ORDER BY id DESC LIMIT 5""",
                     [record.get('reference_id') or '', record.get('passport_number') or '']
                 ).fetchall()
+                correction_requests = db.execute(
+                    """SELECT * FROM nurse_correction_requests
+                       WHERE nurse_id = ? OR UPPER(COALESCE(NULLIF(ref_id, ''), nurse_reference_id, '')) = UPPER(?)
+                       ORDER BY id DESC LIMIT 25""",
+                    [int(record.get('id') or 0), record.get('reference_id') or '']
+                ).fetchall()
                 self.send_json({
                     'success': True,
                     'record': record,
                     'actions': actions,
-                    'recent_requests': [dict(r) for r in recent_requests]
+                    'recent_requests': [dict(r) for r in recent_requests],
+                    'correction_requests': [_ncr_serialize(r, record) for r in correction_requests],
                 })
             finally:
                 db.close()
@@ -35098,6 +36031,22 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             result = api_nurse_profile_update(data)
             self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
             return
+        elif path in ('/api/nurses/corrections/list', '/api/nurses/correction-requests'):
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_correction_request_list_mine(data)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
+            return
+        elif path in ('/api/nurses/corrections/submit', '/api/nurses/correction-request/submit'):
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_nurse_correction_request_submit(data)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
+            return
         elif path == '/api/nurses/update-email':
             try:
                 data = json.loads(body) if body else {}
@@ -35251,6 +36200,30 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             err = (result.get('error') or '').lower()
             status = 200 if result.get('success') else (403 if 'permission' in err else (503 if 'temporarily unavailable' in err else (404 if 'not found' in err else 400)))
             self.send_json(result, status)
+            return
+        elif path in ('/api/admin/nurses/corrections/approve', '/api/admin/nurses/correction/approve'):
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_nurse_correction_approve(data, user)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
+            return
+        elif path in ('/api/admin/nurses/corrections/reject', '/api/admin/nurses/correction/reject'):
+            user = self.require_auth()
+            if not user: return
+            if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
+                self.send_json({'error': 'Unauthorized'}, 403); return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_nurse_correction_reject(data, user)
+            self.send_json(result, 200 if result.get('success') else int(result.get('status_code') or 400))
             return
         elif path == '/api/nurses/mton/save':
             try:
@@ -35506,7 +36479,7 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 if 'batch_number' in data and data.get('batch_number') is not None:
                     normalized_batch_number = _normalize_arrival_batch_number(data.get('batch_number') or '')
                     if not normalized_batch_number:
-                        self.send_json({'success': False, 'error': 'Batch number must contain digits only.'}, 400); return
+                        self.send_json({'success': False, 'error': 'Batch / Flight No. must contain digits only.'}, 400); return
                     updates.append("batch_number = ?")
                     vals.append(normalized_batch_number)
                 for col, _lbl in NURSE_PROCESS_STEPS:
@@ -39007,7 +39980,7 @@ NURSES_REGISTER_PAGE = nurse_simple_page("New Nurses Registration", """
             <h3>Personal Information</h3>
             <div class="grid"><div><label>Full Name *</label><input id="full_name" required></div><div><label>Passport Number *</label><input id="passport_number" required></div></div>
             <div class="grid"><div><label>CNIC *</label><input id="cnic" required></div><div><label>Civil ID Number</label><input id="civil_id"></div></div>
-            <div class="grid"><div><label>Date of Arrival in Kuwait *</label><input id="arrival_date" type="date" required></div><div><label>Batch Number *</label><input id="batch_number" type="number" inputmode="numeric" pattern="[0-9]*" required></div></div>
+            <div class="grid"><div><label>Date of Arrival in Kuwait *</label><input id="arrival_date" type="date" required></div><div><label>Batch / Flight No. *</label><input id="batch_number" type="number" inputmode="numeric" pattern="[0-9]*" required><div class="note" style="margin-top:6px">Enter the Kuwait arrival batch or flight number associated with your nursing group (e.g. 37, 38, 39).</div></div></div>
           </div>
         </div>
         <div class="nurses-pane" data-pane="2">
@@ -39184,7 +40157,7 @@ async function submitForm(e){
   const networkErrorMessage='Registration could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.';
   const val=id=>{const el=document.getElementById(id);return el?el.value:''};
   const batchNumber=val('batch_number');
-  if(!/^[0-9]+$/.test(String(batchNumber||'').trim())){msg.textContent='Batch number must contain digits only.';return false;}
+  if(!/^[0-9]+$/.test(String(batchNumber||'').trim())){msg.textContent='Batch / Flight No. must contain digits only.';return false;}
   syncMohHotelFields();
   if(!validateMohHotelFields(false)) return false;
   const p={full_name:val('full_name'),passport_number:val('passport_number'),cnic:val('cnic'),civil_id:val('civil_id'),mobile:val('mobile'),email:val('email'),password:val('password'),confirm_password:val('confirm_password'),arrival_date:val('arrival_date'),batch_number:batchNumber,hospital:val('hospital'),designation:val('designation'),qualification_degree:val('qualification_degree'),qualification_degree_other:val('qualification_degree_other'),degree_type:val('degree_type'),moh_offer_salary_kwd:val('moh_offer_salary_kwd'),grading_letter_issued:val('grading_letter_issued'),current_arrangement:val('current_arrangement'),current_accommodation:val('current_arrangement'),current_accommodation_status:val('current_accommodation_status_v3'),emergency_contact:val('emergency_contact_v3'),applying_for_accommodation:val('applying_for_accommodation'),moh_hotel_name:isMohHotelArrangement()?val('moh_hotel_name'):'',moh_hotel_area:isMohHotelArrangement()?val('moh_hotel_area'):'',moh_hotel_start_date:isMohHotelArrangement()?val('moh_hotel_start_date'):'',moh_hotel_duration_months:isMohHotelArrangement()?val('moh_hotel_duration_months'):'',moh_hotel_expected_end_date:isMohHotelArrangement()?val('moh_hotel_expected_end_date'):'',remarks:val('remarks'),issue_notice:val('issue_notice')};
@@ -39246,7 +40219,7 @@ async function doTrack(e){
   const complaintForm='<h4>Submit Complaint / Welfare Issue</h4><form onsubmit="return submitComplaintFromDash(event)"><input type="hidden" id="dash_ref" value="'+esc(x.reference_id)+'"><input type="hidden" id="dash_pp" value="'+esc(x.passport_number)+'"><label>Category</label><select id="dash_category"><option>Accommodation</option><option>Maintenance</option><option>Cleanliness</option><option>Safety / Security</option><option>Roommate Issue</option><option>Hospital / Workplace Concern</option><option>Welfare Assistance</option><option>Grading Letter / OEC Issue</option><option>MOFA Attestation Issue</option><option>Civil ID / Iqama Issue</option><option>Salary / Locum Payment Issue</option><option>Medical License Issue</option><option>General Request</option><option>Other</option></select><label>Priority</label><select id="dash_priority"><option>Normal</option><option>Important</option><option>Urgent</option></select><label>Subject</label><input id="dash_subject" required><label>Detailed Description</label><textarea id="dash_desc" required></textarea><label>Preferred Contact Method</label><select id="dash_contact"><option>Phone Call</option><option>WhatsApp</option><option>Email</option></select><label><input type="checkbox" id="dash_consent" required> I understand that this request will be reviewed by the Community Welfare Wing and may be assigned to relevant staff for follow-up.</label><button>Submit Complaint</button><div id="dash_msg" class="note"></div></form>';
   out.innerHTML =
     '<h3>Nurse Profile Summary</h3>'
-    +'<p><strong>Reference ID:</strong> '+esc(x.reference_id)+'<br><strong>Full Name:</strong> '+esc(x.full_name)+'<br><strong>Father Name:</strong> '+esc(x.father_name||'')+'<br><strong>Passport Number:</strong> '+esc(x.passport_number)+'<br><strong>CNIC:</strong> '+esc(x.cnic)+'<br><strong>Civil ID:</strong> '+esc(x.civil_id)+'<br><strong>Mobile:</strong> '+esc(x.mobile)+'<br><strong>Email:</strong> '+esc(x.email)+'<br><strong>MOH / MTON Number:</strong> '+esc(x.mton_number||'')+'<br><strong>Batch Number:</strong> '+esc(x.batch_number)+'<br><strong>Date of Arrival:</strong> '+esc(x.arrival_date)+'<br><strong>Hospital / Medical Center:</strong> '+esc(x.hospital)+'<br><strong>Degree Type:</strong> '+esc(x.degree_type)+'<br><strong>Job Title in MOH Kuwait:</strong> '+esc(x.job_title_moh)+'<br><strong>Salary on MOH Offer Letter:</strong> '+esc(x.moh_offer_salary_kwd)+'<br><strong>Current Accommodation:</strong> '+esc(x.accommodation_status)+'<br><strong>Grading Letter Issued:</strong> '+esc(x.grading_letter_issued)+'<br><strong>Registration Status:</strong> '+esc(x.registration_status)+'<br><strong>Documents Status:</strong> '+esc(x.documents_status)+'<br><strong>Latest Admin Remarks:</strong> '+esc(x.latest_admin_remarks)+'</p>'
+    +'<p><strong>Reference ID:</strong> '+esc(x.reference_id)+'<br><strong>Full Name:</strong> '+esc(x.full_name)+'<br><strong>Father Name:</strong> '+esc(x.father_name||'')+'<br><strong>Passport Number:</strong> '+esc(x.passport_number)+'<br><strong>CNIC:</strong> '+esc(x.cnic)+'<br><strong>Civil ID:</strong> '+esc(x.civil_id)+'<br><strong>Mobile:</strong> '+esc(x.mobile)+'<br><strong>Email:</strong> '+esc(x.email)+'<br><strong>MOH / MTON Number:</strong> '+esc(x.mton_number||'')+'<br><strong>Batch / Flight No.:</strong> '+esc(x.batch_number)+'<br><strong>Date of Arrival:</strong> '+esc(x.arrival_date)+'<br><strong>Hospital / Medical Center:</strong> '+esc(x.hospital)+'<br><strong>Degree Type:</strong> '+esc(x.degree_type)+'<br><strong>Job Title in MOH Kuwait:</strong> '+esc(x.job_title_moh)+'<br><strong>Salary on MOH Offer Letter:</strong> '+esc(x.moh_offer_salary_kwd)+'<br><strong>Current Accommodation:</strong> '+esc(x.accommodation_status)+'<br><strong>Grading Letter Issued:</strong> '+esc(x.grading_letter_issued)+'<br><strong>Registration Status:</strong> '+esc(x.registration_status)+'<br><strong>Documents Status:</strong> '+esc(x.documents_status)+'<br><strong>Latest Admin Remarks:</strong> '+esc(x.latest_admin_remarks)+'</p>'
     +'<h3>Civil Services Process Tracker</h3><p class="note"><strong>Process status is subject to verification and update by the Community Welfare Wing.</strong></p><p><strong>Civil Services Progress: '+esc(x.steps_completed)+' of '+esc(x.steps_total)+' completed</strong> ('+esc(x.progress_percent)+'%)<br><strong>Last Updated:</strong> '+esc(x.process_last_updated_at||'N/A')+'</p><table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left;border-bottom:1px solid #ccc;padding:6px">Step</th><th style="text-align:left;border-bottom:1px solid #ccc;padding:6px">Status</th></tr></thead><tbody>'+steps+'</tbody></table>'
     +'<h3>Remarks / Issues</h3><p><strong>Remarks:</strong> '+esc(x.remarks)+'<br><strong>Issue Notice:</strong> '+esc(x.issue_notice)+'<br><strong>Admin Remarks:</strong> '+esc(x.latest_admin_remarks)+'</p>'
     +'<h3>My Complaints</h3><table style="width:100%;border-collapse:collapse"><thead><tr><th>Complaint ID</th><th>Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Submitted</th><th>Last Update</th><th>Public Response</th></tr></thead><tbody>'+compRows+'</tbody></table>'

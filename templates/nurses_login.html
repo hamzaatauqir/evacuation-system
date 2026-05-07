@@ -20,6 +20,18 @@
     .portal-table-wrap{overflow:auto}
     .portal-table-wrap table{width:100%;border-collapse:collapse}
     .portal-table-wrap th,.portal-table-wrap td{border-bottom:1px solid #e2e8f0;padding:8px;text-align:left;font-size:13px}
+    .nurse-status-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid #d8e3ea;background:#f8fbfd;font-size:12px;font-weight:700}
+    .nurse-status-badge.pending{background:#fff7ed;border-color:#fed7aa;color:#9a3412}
+    .nurse-status-badge.approved{background:#f0fff4;border-color:#b7e4c7;color:#166534}
+    .nurse-status-badge.rejected{background:#fee2e2;border-color:#fecaca;color:#991b1b}
+    .nurse-status-badge.cancelled{background:#f1f5f9;border-color:#cbd5e1;color:#475569}
+    .correction-card{border:1px solid #d8e3ea;border-radius:10px;background:#fff;padding:14px;display:grid;gap:10px}
+    .correction-card__top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+    .correction-card__value{font-size:15px;color:var(--cwa-navy);font-weight:700}
+    .correction-card__help{font-size:12px;color:var(--cwa-muted)}
+    .correction-form{display:none;gap:10px}
+    .correction-form.is-open{display:grid}
+    .correction-history{margin-top:14px}
     @media(max-width:640px){.nurse-tabs .tab{flex:1 1 100%;text-align:center}.nurse-info-grid{grid-template-columns:1fr}}
   </style>
 </head>
@@ -58,6 +70,7 @@
   let glFlash='';
   let glLoaded=false;
   let latestGlSummary=null;
+  let latestCorrectionSummary=null;
   function esc(v){return String(v||'').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
   function friendlyError(msg,fallback){
     const text=String(msg||'');
@@ -502,8 +515,12 @@
     renderGradingLetter(d);
   }
   function renderOverview(x){
+    const corrections=x.correction_requests||[];
+    const pendingCorrections=corrections.filter(r=>String(r.status||'').toUpperCase()==='PENDING');
     const steps=(x.steps||[]).map(s=>'<tr><td>'+esc(s.label)+'</td><td>'+esc(s.status)+'</td></tr>').join('');
     return '<h3>Nurse Profile</h3>'+identityGrid(x)
+      +'<div class="nurse-info-grid"><div><strong>Batch / Flight No.</strong>'+esc(x.batch_number||'—')+'</div><div><strong>Date of Arrival</strong>'+esc(x.arrival_date||'—')+'</div><div><strong>Employer / Hospital</strong>'+esc(x.hospital_workplace||x.hospital||'—')+'</div><div><strong>Visa Number</strong>'+esc(x.visa_number||'—')+'</div></div>'
+      +(pendingCorrections.length?'<div class="nurse-alert warn"><strong>'+esc(String(pendingCorrections.length))+' correction request(s) are pending Embassy review.</strong><div style="margin-top:6px">Use the Corrections tab to track or submit updates for locked identity fields.</div></div>':'')
       +'<h3>Progress</h3><p><strong>'+esc(x.steps_completed)+' / '+esc(x.steps_total)+'</strong> completed ('+esc(x.progress_percent)+'%)</p>'
       +'<div class="portal-table-wrap"><table><thead><tr><th>Step</th><th>Status</th></tr></thead><tbody>'+steps+'</tbody></table></div>';
   }
@@ -562,8 +579,104 @@
     const target=document.getElementById('requestsPanel');
     if(!target || !nurseProfile) return;
     const complaints=nurseProfile.complaints||[];
+    const corrections=nurseProfile.correction_requests||[];
     const complaintRows=complaints.length?'<h4>Complaints / Requests</h4><div class="portal-table-wrap"><table><thead><tr><th>Reference</th><th>Subject</th><th>Category</th><th>Status</th><th>Submitted</th></tr></thead><tbody>'+complaints.map(c=>'<tr><td>'+esc(c.complaint_id)+'</td><td>'+esc(c.subject)+'</td><td>'+esc(c.category)+'</td><td>'+esc(c.status)+'</td><td>'+esc(c.submitted_date)+'</td></tr>').join('')+'</tbody></table></div>':'<p class="muted">No complaint requests found.</p>';
-    target.innerHTML='<h3>My Requests</h3>'+complaintRows+(latestGlSummary?appRows(latestGlSummary.applications||latestGlSummary.history||[]):'<p class="muted">Open the Grading Letter tab to load grading letter requests.</p>');
+    const correctionRows=corrections.length
+      ?'<h4>Correction Requests</h4><div class="portal-table-wrap"><table><thead><tr><th>Field</th><th>Requested Value</th><th>Status</th><th>Submitted</th><th>Remarks</th></tr></thead><tbody>'
+        +corrections.map(r=>'<tr><td>'+esc(r.field_label||r.field_name)+'</td><td>'+esc(r.requested_value||'—')+'</td><td>'+correctionStatusBadge(r.status)+'</td><td>'+esc(r.created_at||'—')+'</td><td>'+esc(r.review_remarks||'—')+'</td></tr>').join('')
+        +'</tbody></table></div>'
+      :'<p class="muted">No correction requests found.</p>';
+    target.innerHTML='<h3>My Requests</h3>'+complaintRows+correctionRows+(latestGlSummary?appRows(latestGlSummary.applications||latestGlSummary.history||[]):'<p class="muted">Open the Grading Letter tab to load grading letter requests.</p>');
+  }
+  function correctionStatusClass(status){
+    const s=String(status||'').toUpperCase();
+    if(s==='APPROVED') return 'approved';
+    if(s==='REJECTED') return 'rejected';
+    if(s==='CANCELLED') return 'cancelled';
+    return 'pending';
+  }
+  function correctionStatusBadge(status){
+    const s=String(status||'PENDING').toUpperCase();
+    return '<span class="nurse-status-badge '+correctionStatusClass(s)+'">'+esc(s.replace(/_/g,' '))+'</span>';
+  }
+  function renderCorrectionHistoryRows(rows){
+    if(!rows || !rows.length){
+      return '<p class="muted">No correction requests submitted yet.</p>';
+    }
+    return '<div class="portal-table-wrap"><table><thead><tr><th>Field</th><th>Old Value</th><th>Requested Value</th><th>Status</th><th>Submitted</th><th>Review Remarks</th></tr></thead><tbody>'
+      +rows.map(r=>'<tr><td>'+esc(r.field_label||r.field_name)+'</td><td>'+esc(r.old_value||'—')+'</td><td>'+esc(r.requested_value||'—')+'</td><td>'+correctionStatusBadge(r.status)+'</td><td>'+esc(r.created_at||'—')+'</td><td>'+esc(r.review_remarks||'—')+'</td></tr>').join('')
+      +'</tbody></table></div>';
+  }
+  function renderCorrectionTabData(summary){
+    const target=document.getElementById('correctionPanel');
+    if(!target || !nurseProfile) return;
+    summary=summary||latestCorrectionSummary||{};
+    const lockedFields=summary.locked_fields||nurseProfile.locked_correction_fields||[];
+    const requests=summary.requests||nurseProfile.correction_requests||[];
+    target.innerHTML='<h3>Applicant Detail Corrections</h3>'
+      +'<div class="nurse-alert warn"><strong>These identity and arrival fields are locked after submission.</strong><div style="margin-top:6px">If any of them are incorrect, submit a correction request below. Embassy staff must approve the request before your profile is updated.</div></div>'
+      +lockedFields.map(function(field){
+        const pending=Number(field.pending_request_id||0)>0;
+        const formId='corr-form-'+field.name;
+        const valueId='corr-value-'+field.name;
+        const reasonId='corr-reason-'+field.name;
+        const msgId='corr-msg-'+field.name;
+        return '<div class="correction-card">'
+          +'<div class="correction-card__top"><div><div style="font-weight:700;color:var(--cwa-navy)">'+esc(field.label)+'</div><div class="correction-card__value">'+esc(field.current_value||'—')+'</div><div class="correction-card__help">'+esc(field.help||'')+'</div></div><div>'+(pending?correctionStatusBadge('PENDING'):'')+'</div></div>'
+          +(pending?'<div class="nurse-alert warn" style="margin:0"><strong>A request for this field is already pending review.</strong><div style="margin-top:6px">Requested value: '+esc(field.pending_requested_value||'—')+'</div></div>':'')
+          +'<div><button type="button" class="btn-outline" onclick="toggleCorrectionForm(\''+esc(field.name)+'\')" '+(pending?'disabled':'')+'>Request Correction</button></div>'
+          +'<div id="'+formId+'" class="correction-form"><div><label>Corrected value</label><input id="'+valueId+'" value=""></div><div><label>Reason for correction</label><textarea id="'+reasonId+'" rows="3" placeholder="Explain briefly why this field should be corrected."></textarea></div><div class="actions"><button type="button" onclick="submitCorrectionRequest(\''+esc(field.name)+'\')">Submit Request</button><span id="'+msgId+'" class="muted"></span></div></div>'
+          +'</div>';
+      }).join('')
+      +'<div class="correction-history"><h4>Correction Request History</h4>'+renderCorrectionHistoryRows(requests)+'</div>';
+  }
+  function toggleCorrectionForm(fieldName){
+    const el=document.getElementById('corr-form-'+fieldName);
+    if(!el) return;
+    el.classList.toggle('is-open');
+  }
+  function applyCorrectionSummary(summary){
+    latestCorrectionSummary=summary||{};
+    if(!nurseProfile) return;
+    nurseProfile.correction_requests=latestCorrectionSummary.requests||[];
+    nurseProfile.locked_correction_fields=latestCorrectionSummary.locked_fields||[];
+    const overview=document.getElementById('panel-overview');
+    if(overview) overview.innerHTML=renderOverview(nurseProfile);
+    renderCorrectionTabData(latestCorrectionSummary);
+    renderMyRequests();
+  }
+  async function loadCorrections(force){
+    if(!nurseProfile) return;
+    if(latestCorrectionSummary && !force){
+      renderCorrectionTabData(latestCorrectionSummary);
+      return;
+    }
+    const target=document.getElementById('correctionPanel');
+    if(target) target.innerHTML='<div class="muted">Loading correction workflow…</div>';
+    const d=await postJson('/api/nurses/corrections/list',Object.assign(glBase(),{identity:identity.value,verifier:nurseVerifier||verifier.value}),'Correction history could not be loaded. Please try again.');
+    if(!d.success){
+      if(target) target.innerHTML='<div class="nurse-alert error">'+esc(friendlyError(d.error))+'</div>';
+      return;
+    }
+    applyCorrectionSummary(d);
+  }
+  async function submitCorrectionRequest(fieldName){
+    const msgEl=document.getElementById('corr-msg-'+fieldName);
+    if(msgEl) msgEl.textContent='Submitting...';
+    const d=await postJson('/api/nurses/corrections/submit',Object.assign(glBase(),{
+      identity:identity.value,
+      verifier:nurseVerifier||verifier.value,
+      field_name:fieldName,
+      requested_value:(document.getElementById('corr-value-'+fieldName)||{}).value||'',
+      reason:(document.getElementById('corr-reason-'+fieldName)||{}).value||''
+    }),'Correction request could not be submitted. Please try again.');
+    if(!d.success){
+      if(msgEl) msgEl.textContent=friendlyError(d.error);
+      return;
+    }
+    if(msgEl) msgEl.textContent=d.message||'Correction request submitted.';
+    await loadCorrections(true);
+    switchNurseTab('corrections');
   }
   function renderPasswordTab(){
     return '<h3>Change password</h3><form id="portalPasswordForm" class="nurses-grid">'
@@ -587,12 +700,14 @@
     document.querySelectorAll('.nurse-tab-panel').forEach(p=>p.classList.toggle('is-active',p.id==='panel-'+tab));
     if(tab==='grading') loadGradingLetter(false);
     if(tab==='requests') renderMyRequests();
+    if(tab==='corrections') loadCorrections(false);
   }
   function renderPortal(x){
     out.className='panel';
     out.innerHTML='<div><h3 style="margin-top:0">Nurse Dashboard</h3><p class="muted">Reference: '+esc(x.reference_id)+' | '+esc(x.full_name)+' | Passport: '+esc(x.passport_number)+'</p></div>'
       +'<div class="nurse-tabs">'
       +'<button type="button" class="tab is-active" data-tab="overview" onclick="switchNurseTab(\'overview\')">Overview</button>'
+      +'<button type="button" class="tab" data-tab="corrections" onclick="switchNurseTab(\'corrections\')">Corrections</button>'
       +'<button type="button" class="tab" data-tab="stay" onclick="switchNurseTab(\'stay\')">Stay Arrangement</button>'
       +'<button type="button" class="tab" data-tab="complaint" onclick="switchNurseTab(\'complaint\')">Complaint</button>'
       +'<button type="button" class="tab" data-tab="grading" onclick="switchNurseTab(\'grading\')">Grading Letter</button>'
@@ -601,6 +716,7 @@
       +'<button type="button" class="tab" data-tab="password" onclick="switchNurseTab(\'password\')">Change password</button>'
       +'</div>'
       +'<section id="panel-overview" class="nurse-tab-panel is-active">'+renderOverview(x)+'</section>'
+      +'<section id="panel-corrections" class="nurse-tab-panel"><div id="correctionPanel">Open the Corrections tab to load correction requests.</div></section>'
       +'<section id="panel-stay" class="nurse-tab-panel">'+renderStay(x)+'</section>'
       +'<section id="panel-complaint" class="nurse-tab-panel">'+renderComplaintTab()+'</section>'
       +'<section id="panel-grading" class="nurse-tab-panel"><div id="glPanel">Select the Grading Letter tab to load details.</div></section>'
@@ -610,6 +726,10 @@
     wireComplaintTab();
     wireLeavingTab();
     wirePasswordTab();
+    applyCorrectionSummary({
+      requests:x.correction_requests||[],
+      locked_fields:x.locked_correction_fields||[]
+    });
     renderMyRequests();
     if(location.hash==='#grading-letter' || location.pathname.indexOf('/nurses/grading-letter')===0) switchNurseTab('grading');
   }
@@ -623,6 +743,7 @@
     nurseVerifier=verifier.value;
     glLoaded=false;
     latestGlSummary=null;
+    latestCorrectionSummary=null;
     renderPortal(x);
     return false;
   });

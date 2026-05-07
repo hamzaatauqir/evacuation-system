@@ -65,6 +65,7 @@
         <div class="cwa-kpi-grid" id="kpiGrid">
           <div class="cwa-kpi"><div><div class="cwa-kpi__label">Total Health Workers</div><div class="cwa-kpi__value" id="kpiTotal">—</div></div><div class="cwa-kpi__icon">◉</div></div>
           <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Review</div><div class="cwa-kpi__value" id="kpiPending">—</div></div><div class="cwa-kpi__icon">⏱</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Corrections</div><div class="cwa-kpi__value" id="kpiCorrections">—</div></div><div class="cwa-kpi__icon">✎</div></div>
           <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Embassy-Facilitated Residents</div><div class="cwa-kpi__value" id="kpiFacility">—</div></div><div class="cwa-kpi__icon">⌂</div></div>
           <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">AJA Care Residents</div><div class="cwa-kpi__value" id="kpiAja">—</div></div><div class="cwa-kpi__icon">A</div></div>
           <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">Confirmed Staying</div><div class="cwa-kpi__value" id="kpiConfirmed">—</div></div><div class="cwa-kpi__icon">✓</div></div>
@@ -95,6 +96,10 @@
             <option value="Approved">Approved</option>
             <option value="Rejected">Rejected</option>
             <option value="Needs More Information">Needs More Information</option>
+            <option value="PENDING">PENDING</option>
+            <option value="APPROVED">APPROVED</option>
+            <option value="REJECTED">REJECTED</option>
+            <option value="CANCELLED">CANCELLED</option>
             <option value="Assigned">Assigned</option>
             <option value="In Progress">In Progress</option>
             <option value="Resolved">Resolved</option>
@@ -144,6 +149,7 @@ const TABS = [
   { key: 'needs_assistance', label: 'Needs Assistance', endpoint: 'registrations', params: { welfare_followup_required: '1' } },
   { key: 'no_response', label: 'No Response', endpoint: 'registrations', params: { monthly_checkin_status: 'No Response' } },
   { key: 'reconciliation', label: 'Reconciliation Required', endpoint: 'registrations', params: { reconciliation_status: 'Reconciliation Required' } },
+  { key: 'corrections', label: 'Correction Requests', endpoint: 'correction-requests', params: {} },
   { key: 'requests',     label: 'Nurse Requests',      endpoint: 'complaints', params: {} },
   { key: 'welfare',      label: 'Welfare Issues',      endpoint: 'complaints', params: { scope: 'welfare' } },
   { key: 'facility',     label: 'Facility Assistance', endpoint: 'complaints', params: { category: 'Facility Assistance Request' } },
@@ -168,6 +174,7 @@ function statusType(s){const x=(s||'').toLowerCase();if(x.includes('approved')||
 function priorityType(p){const x=(p||'').toLowerCase();if(x.includes('urgent'))return 'urgent';if(x.includes('important')||x.includes('high'))return 'high';if(x.includes('low'))return 'low';return 'medium';}
 function fmtTime(s){if(!s)return '—';return String(s).slice(0,16).replace('T',' ');}
 function isRegistrationTab(){const t=TABS.find(x=>x.key===activeTab);return !t || t.endpoint==='registrations';}
+function isCorrectionTab(){const t=TABS.find(x=>x.key===activeTab);return !!t && t.endpoint==='correction-requests';}
 async function api(url,opts){
   const r=await fetch(url,Object.assign({credentials:'include'},opts||{}));
   let d={};
@@ -185,11 +192,21 @@ function renderTabs(){
   const bar=document.getElementById('tabBar');
   bar.innerHTML=TABS.map(t=>`<button class="cwa-tab${t.key===activeTab?' is-active':''}" onclick="switchTab('${t.key}')">${esc(t.label)}<span class="cwa-tab__count" id="tc-${t.key}">—</span></button>`).join('');
 }
-function switchTab(k){activeTab=k;renderTabs();loadList();}
+function switchTab(k){
+  activeTab=k;
+  if(isCorrectionTab()){
+    document.getElementById('filterStatus').value='';
+    document.getElementById('filterPriority').value='';
+  }
+  renderTabs();
+  loadList();
+}
 
 function buildHeader(){
   const cols = activeTab==='leaving'
     ? ['Reference','Nurse','Passport','Reason','Status','Updated','Actions']
+    : isCorrectionTab()
+    ? ['Ref ID','Nurse Name','Field','Old Value','Requested Value','Reason','Date','Status','Actions']
     : isRegistrationTab()
     ? ['Nurse ID / Reference','Roster Reference','Name','Passport / Civil ID','Primary Mobile','WhatsApp','Workplace','Current Stay Arrangement','Vendor','Facility / Area','Current Status','Monthly Check-in Status','Last Confirmed At','Last Check-in Response At','Welfare Follow-up Required','Reconciliation Status','Assigned Officer','Actions']
     : ['Reference','Nurse','Passport / Civil ID','Phone / WhatsApp','Category','Subject','Priority','Status','Assigned','Submitted','Updated','Actions'];
@@ -200,6 +217,9 @@ function buildHeader(){
 function rowHtml(r){
   if(activeTab==='leaving'){
     return `<tr onclick="openDetail('${esc(r.nurse_reference_id||r.reference||'')}','leaving')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(r.reference_id||r.id||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_full_name||r.full_name||'')}</td><td>${esc(r.passport_number||'')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc((r.reason||'').slice(0,80))}</td><td><span class="cwa-badge" data-type="${statusType(r.status)}">${esc(r.status||'—')}</span></td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openDetail('${esc(r.nurse_reference_id||'')}','leaving')">View</button></td></tr>`;
+  }
+  if(isCorrectionTab()){
+    return `<tr onclick="openCorrectionDetail(${Number(r.id||0)})"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(r.ref_id||r.nurse_reference_id||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_name||'—')}</td><td>${esc(r.field_label||r.field_name||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.old_value||'—')}</td><td style="font-size:12px">${esc(r.requested_value||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc((r.reason||'').slice(0,120)||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.created_at))}</td><td><span class="cwa-badge" data-type="${statusType(r.status)}">${esc(r.status_label||r.status||'—')}</span></td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openCorrectionDetail(${Number(r.id||0)})">Review</button></td></tr>`;
   }
   if(isRegistrationTab()){
     const ref=r.nurse_reference_id||r.reference_id||r.reference||'';
@@ -228,6 +248,7 @@ async function loadSummary(){
     const t=summary.totals||{};
     document.getElementById('kpiTotal').textContent=(t.registrations||0).toLocaleString();
     document.getElementById('kpiPending').textContent=(t.pending_registrations||0).toLocaleString();
+    document.getElementById('kpiCorrections').textContent=(t.correction_requests_pending||0).toLocaleString();
     document.getElementById('kpiFacility').textContent=(t.facility_embassy_arranged||0).toLocaleString();
     document.getElementById('kpiAja').textContent=(t.aja_care_residents||t.total_aja_care_residents||0).toLocaleString();
     document.getElementById('kpiConfirmed').textContent=(t.confirmed_staying||0).toLocaleString();
@@ -248,6 +269,7 @@ async function loadSummary(){
       confirmed_staying:t.confirmed_staying||0,intending_leave:t.intending_to_leave||0,left_facility:t.left_facility||0,needs_assistance:t.needs_assistance||0,
       no_response:t.no_response||0,reconciliation:t.reconciliation_required||0,
       moh_arranged:t.moh_arranged||0,moh_hotel:t.moh_hotel_arrival_stay||t.moh_hotel||0,private:t.private_self_arranged||0,
+      corrections:t.correction_requests_pending||0,
       requests:t.open_complaints||0,
       welfare:t.welfare_complaints||0,facility:t.open_welfare_requests||0,leaving:t.facility_leaving||0,
       mine:t.my_complaints||t.facility_my_assigned||0,resolved:t.resolved_complaints||0,registrations:t.registrations||0
@@ -271,6 +293,8 @@ async function loadList(){
   if(isRegistrationTab()){
     if(fs) params.set('registration_status',fs);
     if(fa) params.set('assigned_to',fa);
+  }else if(isCorrectionTab()){
+    if(fs) params.set('status',fs);
   }else{
     if(fs) params.set('status',fs);
     if(fp) params.set('priority',fp);
@@ -280,7 +304,7 @@ async function loadList(){
     const d=await api('/api/admin/nurses/'+tab.endpoint+'?'+params.toString());
     activeRows=d.items||[];
     if(!activeRows.length){
-      document.getElementById('rows').innerHTML=`<tr><td colspan="${colCount}" class="cwa-empty">${isRegistrationTab()?'No nurse registrations found.':'No nurse requests or welfare issues found.'}</td></tr>`;
+      document.getElementById('rows').innerHTML=`<tr><td colspan="${colCount}" class="cwa-empty">${isRegistrationTab()?'No nurse registrations found.':(isCorrectionTab()?'No correction requests found.':'No nurse requests or welfare issues found.')}</td></tr>`;
       return;
     }
     document.getElementById('rows').innerHTML=activeRows.map(rowHtml).join('');
@@ -318,6 +342,9 @@ async function openRegDetail(ref){
     profile: [
       ['Passport', r.passport_number||''],
       ['Civil ID', r.civil_id||'—'],
+      ['Batch / Flight No.', r.batch_number||'—'],
+      ['Arrival Date', r.arrival_date||'—'],
+      ['Visa Number', r.visa_number||'—'],
       ['Email', r.email||'—'],
       ['Email Status', r.email_status||'Verification Pending'],
       ['Verification Email Sent At', r.email_verification_sent_at||'—'],
@@ -352,6 +379,7 @@ async function openRegDetail(ref){
       ['Address', r.current_address||r.address||''],
     ],
     relatedRequests: d.recent_requests||[],
+    correctionRequests: d.correction_requests||[],
     canReviewRegistration: true,
     actions: d.actions||[],
     timeline: d.actions||[],
@@ -450,6 +478,49 @@ async function openDetail(ref, kind){
   });
 }
 
+async function openCorrectionDetail(id){
+  if(!id) return;
+  const d=await api('/api/admin/nurses/correction/detail?id='+encodeURIComponent(id)).catch(e=>({success:false,error:e.message}));
+  if(!d.success){
+    toast(d.error||'Correction request could not be loaded.','error');
+    return;
+  }
+  const r=d.request||{};
+  const n=d.nurse||{};
+  showDrawer({
+    kind: 'correction',
+    ref: r.ref_id||r.nurse_reference_id||'—',
+    title: n.full_name||r.nurse_name||'Nurse',
+    sub: 'Applicant Detail Correction Workflow',
+    status: r.status||'PENDING',
+    priority: '',
+    profile: [
+      ['Passport', n.passport_number||r.passport_number||'—'],
+      ['Civil ID', n.civil_id||'—'],
+      ['Batch / Flight No.', n.batch_number||'—'],
+      ['Arrival Date', n.arrival_date||'—'],
+      ['Visa Number', n.visa_number||'—'],
+      ['Employer / Hospital', n.hospital_workplace||'—'],
+    ],
+    requestDetails: [
+      ['Field', r.field_label||r.field_name||'—'],
+      ['Old Value', r.old_value||'—'],
+      ['Requested Value', r.requested_value||'—'],
+      ['Reason', r.reason||'—'],
+      ['Requested By', r.requested_by||'—'],
+      ['Submitted At', fmtTime(r.created_at)],
+      ['Status', r.status_label||r.status||'—'],
+      ['Reviewed By', r.reviewed_by||'—'],
+      ['Reviewed At', fmtTime(r.reviewed_at)],
+      ['Review Remarks', r.review_remarks||'—'],
+    ],
+    canReviewCorrection: String(r.status||'').toUpperCase()==='PENDING',
+    correctionRequestId: Number(r.id||0),
+    timeline: d.timeline||[],
+    correctionRequests: d.correction_requests||[],
+  });
+}
+
 function showDrawer(d){
   const host=document.getElementById('drawerHost');
   const profileHtml=(d.profile||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
@@ -457,6 +528,7 @@ function showDrawer(d){
   const requestHtml=(d.requestDetails||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
   const facilityHtml=(d.facilityContext||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
   const relatedHtml=(d.relatedRequests||[]).map(x=>`<tr><td>${esc(x.complaint_id||'—')}</td><td>${esc(x.category||'—')}</td><td>${esc(x.subject||'—')}</td><td><span class="cwa-badge" data-type="${statusType(x.status)}">${esc(x.status||'—')}</span></td><td>${esc(fmtTime(x.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="openDetail('${esc(x.complaint_id||'')}','complaint')">Open</button></td></tr>`).join('');
+  const correctionHtml=(d.correctionRequests||[]).map(x=>`<tr><td>${esc(x.field_label||x.field_name||'—')}</td><td>${esc(x.requested_value||'—')}</td><td><span class="cwa-badge" data-type="${statusType(x.status)}">${esc(x.status_label||x.status||'—')}</span></td><td>${esc(fmtTime(x.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="openCorrectionDetail(${Number(x.id||0)})">Open</button></td></tr>`).join('');
   const assignSel=(d.assignees||[]).length?`<select id="dwAssign" class="cwa-select">${d.assignees.map(a=>`<option value="${esc(a.username)}" ${a.username===d.currentAssign?'selected':''}>${esc(a.display_name||a.username)}</option>`).join('')}</select>`:`<input id="dwAssign" class="cwa-input" placeholder="Username">`;
   const statusOpts=['Submitted','Seen by Admin','Assigned','In Progress','Resolved','Closed'].map(s=>`<option value="${esc(s)}" ${s===d.status?'selected':''}>${esc(s)}</option>`).join('');
   host.innerHTML = `
@@ -488,6 +560,7 @@ function showDrawer(d){
         ${requestHtml?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Submitted Request</div><dl class="cwa-drawer__profile">${requestHtml}</dl></div>`:''}
         ${facilityHtml?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Facility Context</div><dl class="cwa-drawer__profile">${facilityHtml}</dl></div>`:''}
         ${d.relatedRequests?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Recent Nurse Requests / Welfare Issues</div>${(d.relatedRequests||[]).length?`<table class="cwa-table"><thead><tr><th>Reference</th><th>Category</th><th>Subject</th><th>Status</th><th>Submitted</th><th>Action</th></tr></thead><tbody>${relatedHtml}</tbody></table>`:'<div class="cwa-empty" style="padding:12px 0">No recent nurse requests.</div>'}</div>`:''}
+        ${d.correctionRequests?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Correction Requests</div>${(d.correctionRequests||[]).length?`<table class="cwa-table"><thead><tr><th>Field</th><th>Requested Value</th><th>Status</th><th>Submitted</th><th>Action</th></tr></thead><tbody>${correctionHtml}</tbody></table>`:'<div class="cwa-empty" style="padding:12px 0">No correction requests.</div>'}</div>`:''}
 
         ${d.canReviewRegistration?`
         <div class="cwa-drawer__section">
@@ -500,6 +573,17 @@ function showDrawer(d){
           </div>
           <textarea id="dwRegNote" class="cwa-textarea" placeholder="Review note…" style="margin-top:10px"></textarea>
           <label style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:var(--cwa-muted)"><input id="dwRegVisible" type="checkbox"> Nurse-visible message</label>
+        </div>
+        `:''}
+
+        ${d.canReviewCorrection?`
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Correction Review Decision</div>
+          <textarea id="dwCorrectionRemarks" class="cwa-textarea" placeholder="Add approval/rejection remarks for the nurse portal and audit trail." rows="3"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="doCorrectionApprove(${Number(d.correctionRequestId||0)})">Approve & Apply</button>
+            <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doCorrectionReject(${Number(d.correctionRequestId||0)})">Reject Request</button>
+          </div>
         </div>
         `:''}
 
@@ -554,6 +638,8 @@ function doNote(ref){const n=document.getElementById('dwNote').value;const t=doc
 function doResolve(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/nurses/complaint/resolve',{complaint_id:ref,resolution_note:n},'Resolved');}
 function doClose(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/nurses/complaint/close',{complaint_id:ref,note:n},'Closed');}
 function doRegStatus(id){const s=document.getElementById('dwRegStatus').value;const n=document.getElementById('dwRegNote').value;const v=document.getElementById('dwRegVisible').checked;postAction('/api/admin/nurses/registration/status',{id:id,status:s,note:n,visible_to_nurse:v},'Registration updated');}
+function doCorrectionApprove(id){const remarks=(document.getElementById('dwCorrectionRemarks')||{}).value||'';postAction('/api/admin/nurses/corrections/approve',{id:id,remarks:remarks},'Correction request approved');}
+function doCorrectionReject(id){const remarks=(document.getElementById('dwCorrectionRemarks')||{}).value||'';if(!String(remarks||'').trim()){toast('Please add rejection remarks before rejecting this request.','error');return;}postAction('/api/admin/nurses/corrections/reject',{id:id,remarks:remarks},'Correction request rejected');}
 
 applyRoleScope();
 renderTabs();

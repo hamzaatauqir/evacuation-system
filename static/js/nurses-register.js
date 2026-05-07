@@ -168,7 +168,7 @@
     if (!validateStep(4)) return false;
     const batchNumber = valueOf('batch_number');
     if (!isValidBatchNumber(batchNumber)) {
-      msg.textContent = 'Batch number must contain digits only.';
+      msg.textContent = 'Batch / Flight No. must contain digits only.';
       return false;
     }
     syncMohHotelFields();
