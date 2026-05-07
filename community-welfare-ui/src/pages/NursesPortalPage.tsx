@@ -80,11 +80,8 @@ type GradingIdentity = {
   qualification_degree_other?: string;
 };
 
-type GradingApplication = {
+type GradingQualificationRecord = {
   id?: number;
-  ref_no?: string;
-  reference?: string;
-  status?: string;
   qualification_code?: string;
   qualification_other?: string;
   qualification_label?: string;
@@ -92,6 +89,9 @@ type GradingApplication = {
   student_no?: string;
   student_identifier_type?: string;
   student_no_label?: string;
+  identifier_type?: string;
+  identifier_type_label?: string;
+  identifier_value?: string;
   institute?: string;
   university?: string;
   year_of_passing?: number | string;
@@ -100,13 +100,23 @@ type GradingApplication = {
   obtained_marks?: number | string | null;
   entered_percentage?: number | string | null;
   entered_gpa?: number | string | null;
+  computed_percentage?: number | string | null;
   final_percentage?: number | null;
   final_grade_label?: string;
+  remarks?: string;
+};
+
+type GradingApplication = GradingQualificationRecord & {
+  id?: number;
+  ref_no?: string;
+  reference?: string;
+  status?: string;
   submitted_at?: string;
   created_at?: string;
   correction_notes?: string;
   can_nurse_edit?: boolean;
   can_nurse_cancel?: boolean;
+  qualifications?: GradingQualificationRecord[];
 };
 
 type GradingSummaryResponse = {
@@ -118,9 +128,9 @@ type GradingSummaryResponse = {
   error?: string;
 };
 
-type GradingFormState = {
-  application_id: number | null;
+type GradingQualificationFormState = {
   qualification_code: string;
+  qualification_other: string;
   degree_title: string;
   student_identifier_type: string;
   student_no: string;
@@ -132,8 +142,27 @@ type GradingFormState = {
   obtained_marks: string;
   entered_percentage: string;
   entered_gpa: string;
+  remarks: string;
+};
+
+type GradingFormState = {
+  application_id: number | null;
+  qualifications: GradingQualificationFormState[];
   declaration_accepted: boolean;
   preview_confirmed: boolean;
+};
+
+type GradingQualificationPreview = {
+  percentage: number | null;
+  gradeLabel: string;
+  validationMessage: string;
+  canPreview: boolean;
+};
+
+type GradingPreviewState = {
+  qualificationPreviews: GradingQualificationPreview[];
+  validationMessage: string;
+  canSubmit: boolean;
 };
 
 type ProfileFormState = {
@@ -229,24 +258,66 @@ function qualificationLabelFromCode(code: string, other = "") {
   return GRADING_QUALIFICATIONS.find((item) => item.value === normalized)?.label || code || DASH_VALUE;
 }
 
+function gradingQualificationOptions(
+  qualification?: Pick<GradingQualificationFormState, "qualification_code" | "qualification_other">
+) {
+  const currentCode = normalizeQualificationCode(qualification?.qualification_code || "");
+  if (currentCode && !GRADING_ALLOWED_QUALIFICATION_CODES.has(currentCode)) {
+    return [
+      ...GRADING_QUALIFICATIONS,
+      {
+        value: currentCode,
+        label: qualificationLabelFromCode(currentCode, qualification?.qualification_other?.trim() || ""),
+      },
+    ];
+  }
+  return GRADING_QUALIFICATIONS;
+}
+
+function normalizeGradingMode(value?: string) {
+  if (value === "PERCENT" || value === "GPA") return value;
+  return "MARKS";
+}
+
+function createGradingQualificationForm(
+  qualification?: GradingQualificationRecord | null
+): GradingQualificationFormState {
+  const qualificationCode = normalizeQualificationCode(qualification?.qualification_code || "");
+  const identifierType =
+    qualification?.student_identifier_type || qualification?.identifier_type || qualification?.student_no_label || "";
+  return {
+    qualification_code: qualificationCode,
+    qualification_other: qualification?.qualification_other || "",
+    degree_title: qualification?.degree_title || "",
+    student_identifier_type: normalizeGradingIdentifierType(identifierType),
+    student_no: qualification?.student_no || qualification?.identifier_value || "",
+    institute: qualification?.institute || "",
+    university: qualification?.university || "",
+    year_of_passing: qualification?.year_of_passing ? String(qualification.year_of_passing) : "",
+    mode: normalizeGradingMode(qualification?.mode),
+    total_marks: qualification?.total_marks == null ? "" : String(qualification.total_marks),
+    obtained_marks: qualification?.obtained_marks == null ? "" : String(qualification.obtained_marks),
+    entered_percentage: qualification?.entered_percentage == null ? "" : String(qualification.entered_percentage),
+    entered_gpa: qualification?.entered_gpa == null ? "" : String(qualification.entered_gpa),
+    remarks: qualification?.remarks || "",
+  };
+}
+
+function gradingApplicationQualifications(application?: GradingApplication | null) {
+  if (Array.isArray(application?.qualifications) && application.qualifications.length) {
+    return application.qualifications;
+  }
+  if (application) {
+    return [application];
+  }
+  return [];
+}
+
 function createGradingForm(application?: GradingApplication | null): GradingFormState {
-  const qualificationCode = normalizeQualificationCode(application?.qualification_code || "");
+  const qualifications = gradingApplicationQualifications(application).map((item) => createGradingQualificationForm(item));
   return {
     application_id: typeof application?.id === "number" ? application.id : null,
-    qualification_code: GRADING_ALLOWED_QUALIFICATION_CODES.has(qualificationCode) ? qualificationCode : "",
-    degree_title: application?.degree_title || "",
-    student_identifier_type: normalizeGradingIdentifierType(
-      application?.student_identifier_type || application?.student_no_label || ""
-    ),
-    student_no: application?.student_no || "",
-    institute: application?.institute || "",
-    university: application?.university || "",
-    year_of_passing: application?.year_of_passing ? String(application.year_of_passing) : "",
-    mode: (application?.mode as GradingMode) || "MARKS",
-    total_marks: application?.total_marks == null ? "" : String(application.total_marks),
-    obtained_marks: application?.obtained_marks == null ? "" : String(application.obtained_marks),
-    entered_percentage: application?.entered_percentage == null ? "" : String(application.entered_percentage),
-    entered_gpa: application?.entered_gpa == null ? "" : String(application.entered_gpa),
+    qualifications: qualifications.length ? qualifications : [createGradingQualificationForm()],
     declaration_accepted: false,
     preview_confirmed: false,
   };
@@ -333,32 +404,42 @@ function formatGradingPercent(value: number | string | null | undefined) {
   return Number.isFinite(num) ? `${num.toFixed(2)}%` : DASH_VALUE;
 }
 
-function computeGradingPreview(form: GradingFormState) {
-  const commonComplete =
-    !!form.qualification_code.trim() &&
-    !!form.degree_title.trim() &&
-    !!form.student_identifier_type.trim() &&
-    !!form.student_no.trim() &&
-    !!form.institute.trim() &&
-    !!form.university.trim() &&
-    !!form.year_of_passing.trim();
+function computeGradingQualificationPreview(form: GradingQualificationFormState): GradingQualificationPreview {
+  const qualificationCode = normalizeQualificationCode(form.qualification_code);
+  const identifierType = form.student_identifier_type.trim();
+  let validationMessage = "";
 
-  if (!GRADING_IDENTIFIER_TYPE_SET.has(form.student_identifier_type.trim())) {
-    return {
-      percentage: null,
-      gradeLabel: DASH_VALUE,
-      validationMessage: "Please select a valid identifier type.",
-      canSubmit: false,
-    };
+  if (!qualificationCode) {
+    validationMessage = "Qualification type is required.";
+  } else if (!GRADING_ALLOWED_QUALIFICATION_CODES.has(qualificationCode)) {
+    validationMessage = "Please select a valid qualification type.";
+  } else if (qualificationCode === "OTHER" && !form.qualification_other.trim()) {
+    validationMessage = "Other qualification text is required.";
+  } else if (!form.degree_title.trim()) {
+    validationMessage = "Degree title is required.";
+  } else if (!identifierType) {
+    validationMessage = "Identifier type is required.";
+  } else if (!GRADING_IDENTIFIER_TYPE_SET.has(identifierType)) {
+    validationMessage = "Please select a valid identifier type.";
+  } else if (!form.student_no.trim()) {
+    validationMessage = "Identifier value is required.";
+  } else if (!form.institute.trim()) {
+    validationMessage = "College / institute is required.";
+  } else if (!form.university.trim()) {
+    validationMessage = "University / affiliating body is required.";
+  } else if (!form.year_of_passing.trim()) {
+    validationMessage = "Year of passing is required.";
   }
 
   let percentage: number | null = null;
-  let validationMessage = "";
-
-  if (form.mode === "MARKS") {
+  if (!validationMessage && form.mode === "MARKS") {
     const totalRaw = form.total_marks.trim();
     const obtainedRaw = form.obtained_marks.trim();
-    if (totalRaw || obtainedRaw) {
+    if (!totalRaw) {
+      validationMessage = "Total marks / CGPA scale is required.";
+    } else if (!obtainedRaw) {
+      validationMessage = "Obtained marks / CGPA is required.";
+    } else {
       const total = Number(totalRaw);
       const obtained = Number(obtainedRaw);
       if (!Number.isFinite(total) || total <= 0) {
@@ -366,59 +447,66 @@ function computeGradingPreview(form: GradingFormState) {
       } else if (!Number.isFinite(obtained) || obtained < 0 || obtained > total) {
         validationMessage = "Obtained marks cannot exceed total marks.";
       } else {
-        percentage = (obtained / total) * 100;
+        percentage = Number(((obtained / total) * 100).toFixed(2));
       }
     }
-  } else if (form.mode === "PERCENT") {
+  } else if (!validationMessage && form.mode === "PERCENT") {
     const percentRaw = form.entered_percentage.trim();
-    if (percentRaw) {
+    if (!percentRaw) {
+      validationMessage = "Percentage is required.";
+    } else {
       const percent = Number(percentRaw);
       if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
         validationMessage = "Percentage must be between 0 and 100.";
       } else {
-        percentage = percent;
+        percentage = Number(percent.toFixed(2));
       }
     }
-  } else {
+  } else if (!validationMessage) {
     const gpaRaw = form.entered_gpa.trim();
-    if (gpaRaw) {
+    if (!gpaRaw) {
+      validationMessage = "GPA obtained is required.";
+    } else {
       const gpa = Number(gpaRaw);
       if (!Number.isFinite(gpa) || gpa < 0 || gpa > 4) {
         validationMessage = "GPA cannot exceed 4.00.";
       } else {
-        percentage = (gpa / 4) * 100;
+        percentage = Number(((gpa / 4) * 100).toFixed(2));
       }
     }
-  }
-
-  if (percentage != null) {
-    percentage = Number(percentage.toFixed(2));
-  }
-
-  const modeReady =
-    form.mode === "MARKS"
-      ? !!form.total_marks.trim() && !!form.obtained_marks.trim()
-      : form.mode === "PERCENT"
-        ? !!form.entered_percentage.trim()
-        : !!form.entered_gpa.trim();
-
-  if (!validationMessage && commonComplete && modeReady && percentage != null && !form.preview_confirmed) {
-    validationMessage = "Please review the preview and confirm the information before submission.";
-  }
-  if (!validationMessage && commonComplete && modeReady && percentage != null && !form.declaration_accepted) {
-    validationMessage = "Please accept the declaration before submission.";
   }
 
   return {
     percentage,
     gradeLabel: percentage != null ? gradingGradeLabel(percentage) : DASH_VALUE,
     validationMessage,
+    canPreview: !validationMessage && percentage != null,
+  };
+}
+
+function computeGradingPreview(form: GradingFormState): GradingPreviewState {
+  const qualificationPreviews = form.qualifications.map((qualification) => computeGradingQualificationPreview(qualification));
+  const invalidIndex = qualificationPreviews.findIndex((item) => item.validationMessage);
+  let validationMessage = "";
+
+  if (!qualificationPreviews.length) {
+    validationMessage = "At least one qualification is required.";
+  } else if (invalidIndex >= 0) {
+    validationMessage = `Qualification ${invalidIndex + 1}: ${qualificationPreviews[invalidIndex].validationMessage}`;
+  } else if (!form.preview_confirmed) {
+    validationMessage = "Please review the preview and confirm the information before submission.";
+  } else if (!form.declaration_accepted) {
+    validationMessage = "Please accept the declaration before submission.";
+  }
+
+  return {
+    qualificationPreviews,
+    validationMessage,
     canSubmit:
-      commonComplete &&
-      modeReady &&
+      qualificationPreviews.length > 0 &&
+      qualificationPreviews.every((item) => item.canPreview) &&
       form.declaration_accepted &&
       form.preview_confirmed &&
-      percentage != null &&
       !validationMessage,
   };
 }
@@ -434,7 +522,7 @@ function parentRelationForGender(gender?: string) {
   return "S/o/D/o";
 }
 
-function qualificationSubtitleFromForm(_form: GradingFormState) {
+function qualificationSubtitleFromForm(_form: GradingQualificationFormState) {
   // Per accepted Embassy sample: never auto-add a parenthetical that duplicates
   // the qualification (e.g., "BSN Nursing" + "(Post RN BSN)"). The degree
   // title is the canonical label; an explicit subtype like "(Generic)" must be
@@ -442,7 +530,7 @@ function qualificationSubtitleFromForm(_form: GradingFormState) {
   return "";
 }
 
-function gradingModeSummary(form: GradingFormState) {
+function gradingModeSummary(form: GradingQualificationFormState) {
   if (form.mode === "MARKS") {
     return form.total_marks.trim() && form.obtained_marks.trim()
       ? `Marks: ${form.obtained_marks.trim()} out of ${form.total_marks.trim()}`
@@ -456,22 +544,35 @@ function gradingModeSummary(form: GradingFormState) {
 
 function buildGradingPreviewLetterModel(
   ctx: NursePortalContext,
-  profile: GradingIdentity,
-  form: GradingFormState,
-  computed: ReturnType<typeof computeGradingPreview>
+  profile: GradingIdentity
 ) {
   const applicantName = (profile.full_name || ctx.fullName || "").trim() || DASH_VALUE;
   const fatherName = (profile.father_name || ctx.fatherName || "").trim() || DASH_VALUE;
   const passportNumber = (profile.passport_number || ctx.passportNumber || "").trim() || DASH_VALUE;
-  const degreeTitle = form.degree_title.trim() || DASH_VALUE;
-  const identifierLabel = normalizeGradingIdentifierType(form.student_identifier_type || "Student Number")
-    .replace("Number", "No.");
   return {
     applicantName,
     fatherName,
     relationText: `${parentRelationForGender(profile.gender || ctx.gender)} ${fatherName}`,
     passportNumber,
-    degreeTitle,
+    cnic: (profile.cnic || ctx.cnic || "").trim() || DASH_VALUE,
+    civilId: (profile.civil_id || ctx.civilId || "").trim() || DASH_VALUE,
+    mobile: (profile.mobile || ctx.mobileFull || ctx.mobile || "").trim() || DASH_VALUE,
+    whatsapp: (profile.whatsapp || ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "").trim() || DASH_VALUE,
+    email: (profile.email || ctx.email || "").trim() || DASH_VALUE,
+    mtonNumber: normalizeMtonNumber(profile.mton_number || ctx.mtonNumber || "") || DASH_VALUE,
+    workplace: (profile.workplace || ctx.hospital || "").trim() || DASH_VALUE,
+  };
+}
+
+function buildGradingPreviewQualificationModel(
+  form: GradingQualificationFormState,
+  computed: GradingQualificationPreview
+) {
+  const identifierLabel = normalizeGradingIdentifierType(form.student_identifier_type || "Student Number")
+    .replace("Number", "No.");
+  return {
+    degreeTitle: form.degree_title.trim() || DASH_VALUE,
+    qualificationType: qualificationLabelFromCode(form.qualification_code || "", form.qualification_other.trim()),
     qualificationSubtitle: qualificationSubtitleFromForm(form),
     identifierLabel,
     identifierValue: form.student_no.trim() || DASH_VALUE,
@@ -484,16 +585,8 @@ function buildGradingPreviewLetterModel(
       computed.percentage != null && computed.gradeLabel && computed.gradeLabel !== DASH_VALUE
         ? `${computed.percentage.toFixed(2)}% "${computed.gradeLabel}"`
         : DASH_VALUE,
-    cnic: (profile.cnic || ctx.cnic || "").trim() || DASH_VALUE,
-    civilId: (profile.civil_id || ctx.civilId || "").trim() || DASH_VALUE,
-    mobile: (profile.mobile || ctx.mobileFull || ctx.mobile || "").trim() || DASH_VALUE,
-    whatsapp: (profile.whatsapp || ctx.whatsappFull || ctx.mobileFull || ctx.mobile || "").trim() || DASH_VALUE,
-    email: (profile.email || ctx.email || "").trim() || DASH_VALUE,
-    mtonNumber: normalizeMtonNumber(profile.mton_number || ctx.mtonNumber || "") || DASH_VALUE,
-    qualificationType: qualificationLabelFromCode(form.qualification_code || "", ""),
     gradingMode: form.mode,
     gradingModeSummary: gradingModeSummary(form),
-    workplace: (profile.workplace || ctx.hospital || "").trim() || DASH_VALUE,
   };
 }
 
@@ -501,9 +594,20 @@ function OfficialLetterPreview(props: {
   ctx: NursePortalContext;
   profile: GradingIdentity;
   form: GradingFormState;
-  computed: ReturnType<typeof computeGradingPreview>;
+  computed: GradingPreviewState;
 }) {
-  const letter = buildGradingPreviewLetterModel(props.ctx, props.profile, props.form, props.computed);
+  const letter = buildGradingPreviewLetterModel(props.ctx, props.profile);
+  const qualifications = props.form.qualifications.map((qualification, index) =>
+    buildGradingPreviewQualificationModel(
+      qualification,
+      props.computed.qualificationPreviews[index] || {
+        percentage: null,
+        gradeLabel: DASH_VALUE,
+        validationMessage: "",
+        canPreview: false,
+      }
+    )
+  );
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <div
@@ -525,12 +629,36 @@ function OfficialLetterPreview(props: {
           <Field label="Primary Mobile" value={letter.mobile} />
           <Field label="WhatsApp" value={letter.whatsapp} />
           <Field label="Email" value={letter.email} />
-          <Field label="Qualification Type" value={letter.qualificationType} />
-          <Field label="Grading Mode" value={letter.gradingMode} />
-          <Field label="Marks / GPA / %" value={letter.gradingModeSummary} />
-          <Field label="Computed Percentage" value={letter.finalPercentage} />
-          <Field label="Provisional Grade" value={letter.finalGradeLabel} />
           <Field label="Current Workplace / Hospital" value={letter.workplace} />
+        </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {qualifications.map((qualification, index) => (
+            <div
+              key={`preview-qualification-${index}`}
+              style={{
+                border: "1px solid #D9E2EC",
+                borderRadius: 10,
+                background: "#FFFFFF",
+                padding: 12,
+                display: "grid",
+                gap: 8,
+              }}
+            >
+              <div style={{ fontWeight: 700, color: "#2D4A6B" }}>Qualification {index + 1}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10 }}>
+                <Field label="Qualification Type" value={qualification.qualificationType} />
+                <Field label="Degree Title" value={qualification.degreeTitle} />
+                <Field label="Identifier" value={`${qualification.identifierLabel} ${qualification.identifierValue}`} />
+                <Field label="Institute" value={qualification.institute} />
+                <Field label="University" value={qualification.university} />
+                <Field label="Year of Passing" value={qualification.yearOfPassing} />
+                <Field label="Grading Mode" value={qualification.gradingMode} />
+                <Field label="Marks / GPA / %" value={qualification.gradingModeSummary} />
+                <Field label="Computed Percentage" value={qualification.finalPercentage} />
+                <Field label="Provisional Grade" value={qualification.finalGradeLabel} />
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -645,28 +773,32 @@ function OfficialLetterPreview(props: {
             the examination of:
           </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))",
-              gap: 18,
-              margin: "18px 0 22px",
-              textAlign: "center",
-              fontSize: 16,
-              lineHeight: 1.45,
-            }}
-          >
-            <div>
-              <div>{letter.degreeTitle}</div>
-              {letter.qualificationSubtitle ? <div>({letter.qualificationSubtitle})</div> : null}
-              <div>{letter.identifierLabel} {letter.identifierValue}</div>
-            </div>
-            <div>
-              <div>{letter.institute}</div>
-              <div>Affiliated with {letter.university}</div>
-              <div>{letter.yearOfPassing}</div>
-              <div>{letter.finalResultText}</div>
-            </div>
+          <div style={{ display: "grid", gap: 12, margin: "18px 0 22px", fontSize: 15.5, lineHeight: 1.45 }}>
+            {qualifications.map((qualification, index) => (
+              <div
+                key={`letter-qualification-${index}`}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))",
+                  gap: 18,
+                  textAlign: "center",
+                  borderTop: index === 0 ? "none" : "1px solid #D9E2EC",
+                  paddingTop: index === 0 ? 0 : 10,
+                }}
+              >
+                <div>
+                  <div>{qualification.degreeTitle}</div>
+                  {qualification.qualificationSubtitle ? <div>({qualification.qualificationSubtitle})</div> : null}
+                  <div>{qualification.identifierLabel} {qualification.identifierValue}</div>
+                </div>
+                <div>
+                  <div>{qualification.institute}</div>
+                  <div>Affiliated with {qualification.university}</div>
+                  <div>{qualification.yearOfPassing}</div>
+                  <div>{qualification.finalResultText}</div>
+                </div>
+              </div>
+            ))}
           </div>
 
           <div style={{ fontSize: 16, lineHeight: 1.85, maxWidth: 680, margin: "0 auto" }}>
@@ -877,6 +1009,7 @@ export function NursesPortalPage() {
   );
   const gradingPreview = useMemo(() => computeGradingPreview(gradingForm), [gradingForm]);
   const gradingActiveRequest = gradingSummary?.active_application || null;
+  const gradingActiveQualifications = gradingApplicationQualifications(gradingActiveRequest);
   const gradingHistory = gradingSummary?.applications || gradingSummary?.history || [];
   const gradingProfile = gradingSummary?.profile || {};
   const savedMtonNumber = normalizeMtonNumber(gradingProfile.mton_number || ctx.mtonNumber || "");
@@ -887,6 +1020,39 @@ export function NursesPortalPage() {
     : (gradingActiveRequest?.status || "").toUpperCase() === "CORRECTION_REQUIRED"
       ? "Resubmit Corrected Request"
       : "Update Submitted Request";
+
+  function updateGradingQualification(index: number, patch: Partial<GradingQualificationFormState>) {
+    setGradingForm((current) => ({
+      ...current,
+      qualifications: current.qualifications.map((qualification, qualificationIndex) =>
+        qualificationIndex === index ? { ...qualification, ...patch } : qualification
+      ),
+    }));
+  }
+
+  function addGradingQualification() {
+    const nextIndex = gradingForm.qualifications.length;
+    setGradingForm((current) => ({
+      ...current,
+      qualifications: [...current.qualifications, createGradingQualificationForm()],
+    }));
+    setTimeout(() => {
+      const card = document.getElementById(`grading-qualification-card-${nextIndex}`);
+      card?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const focusTarget = card?.querySelector("select, input, textarea") as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
+      focusTarget?.focus();
+    }, 0);
+  }
+
+  function removeGradingQualification(index: number) {
+    setGradingForm((current) => {
+      if (current.qualifications.length <= 1) return current;
+      return {
+        ...current,
+        qualifications: current.qualifications.filter((_, qualificationIndex) => qualificationIndex !== index),
+      };
+    });
+  }
 
   const refreshGradingSummary = useEffectEvent(async (showLoading = true) => {
     if (!ctx) return;
@@ -1146,25 +1312,42 @@ export function NursesPortalPage() {
       return;
     }
 
+    const [primaryQualification] = gradingForm.qualifications;
     const payload = {
       nurse_reference_id: ctx.referenceId,
       passport_number: ctx.passportNumber,
       verifier: ctx.mobile || ctx.civilId || "",
       session_marker: ctx.sessionMarker || "",
       id: gradingForm.application_id || undefined,
-      qualification_code: gradingForm.qualification_code,
-      qualification_other: "",
-      degree_title: gradingForm.degree_title.trim(),
-      student_identifier_type: gradingForm.student_identifier_type.trim(),
-      student_no: gradingForm.student_no.trim(),
-      institute: gradingForm.institute.trim(),
-      university: gradingForm.university.trim(),
-      year_of_passing: gradingForm.year_of_passing.trim(),
-      mode: gradingForm.mode,
-      total_marks: gradingForm.mode === "MARKS" ? gradingForm.total_marks.trim() : "",
-      obtained_marks: gradingForm.mode === "MARKS" ? gradingForm.obtained_marks.trim() : "",
-      entered_percentage: gradingForm.mode === "PERCENT" ? gradingForm.entered_percentage.trim() : "",
-      entered_gpa: gradingForm.mode === "GPA" ? gradingForm.entered_gpa.trim() : "",
+      qualification_code: primaryQualification?.qualification_code || "",
+      qualification_other: primaryQualification?.qualification_other.trim() || "",
+      degree_title: primaryQualification?.degree_title.trim() || "",
+      student_identifier_type: primaryQualification?.student_identifier_type.trim() || "",
+      student_no: primaryQualification?.student_no.trim() || "",
+      institute: primaryQualification?.institute.trim() || "",
+      university: primaryQualification?.university.trim() || "",
+      year_of_passing: primaryQualification?.year_of_passing.trim() || "",
+      mode: primaryQualification?.mode || "MARKS",
+      total_marks: primaryQualification?.mode === "MARKS" ? primaryQualification.total_marks.trim() : "",
+      obtained_marks: primaryQualification?.mode === "MARKS" ? primaryQualification.obtained_marks.trim() : "",
+      entered_percentage: primaryQualification?.mode === "PERCENT" ? primaryQualification.entered_percentage.trim() : "",
+      entered_gpa: primaryQualification?.mode === "GPA" ? primaryQualification.entered_gpa.trim() : "",
+      qualifications: gradingForm.qualifications.map((qualification) => ({
+        qualification_code: qualification.qualification_code,
+        qualification_other: qualification.qualification_other.trim(),
+        degree_title: qualification.degree_title.trim(),
+        student_identifier_type: qualification.student_identifier_type.trim(),
+        student_no: qualification.student_no.trim(),
+        institute: qualification.institute.trim(),
+        university: qualification.university.trim(),
+        year_of_passing: qualification.year_of_passing.trim(),
+        mode: qualification.mode,
+        total_marks: qualification.mode === "MARKS" ? qualification.total_marks.trim() : "",
+        obtained_marks: qualification.mode === "MARKS" ? qualification.obtained_marks.trim() : "",
+        entered_percentage: qualification.mode === "PERCENT" ? qualification.entered_percentage.trim() : "",
+        entered_gpa: qualification.mode === "GPA" ? qualification.entered_gpa.trim() : "",
+        remarks: qualification.remarks.trim(),
+      })),
       declaration_accepted: gradingForm.declaration_accepted,
       preview_confirmed: gradingForm.preview_confirmed,
     };
@@ -1674,9 +1857,8 @@ export function NursesPortalPage() {
             <style>{`@media print {.grading-preview-print-hide{display:none!important}.grading-preview-shell{display:none!important}}`}</style>
             <FormCard title="Grading Letter Request">
               <NoticeBox>
-                Use this form to request an Embassy grading letter for one nursing qualification. One qualification
-                requires one application. Midwifery or additional qualification should be submitted as a separate
-                request.
+                Add all nursing qualifications that should appear on your Embassy grading letter. They will be printed
+                together on one official letter.
               </NoticeBox>
               <NoticeBox tone="warning">
                 Submitting this form does not generate the official letter automatically. Embassy/Nurses Desk will
@@ -1723,19 +1905,36 @@ export function NursesPortalPage() {
                       label={prettifyGradingStatus(gradingActiveRequest.status || "SUBMITTED")}
                     />
                   </div>
-                  <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
-                    Qualification:{" "}
-                    {qualificationLabelFromCode(
-                      gradingActiveRequest.qualification_code || "",
-                      gradingActiveRequest.qualification_other || ""
-                    )}
-                  </p>
-                  <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
-                    {normalizeGradingIdentifierType(
-                      gradingActiveRequest.student_identifier_type || gradingActiveRequest.student_no_label || ""
-                    )}
-                    : {gradingActiveRequest.student_no || DASH_VALUE}
-                  </p>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {gradingActiveQualifications.map((qualification, index) => (
+                      <div
+                        key={`active-grading-qualification-${qualification.id || index}`}
+                        style={{
+                          border: "1px solid #D9E2EC",
+                          borderRadius: 10,
+                          padding: 10,
+                          background: "#FFFFFF",
+                          display: "grid",
+                          gap: 4,
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, color: "#2D4A6B", fontSize: 13 }}>Qualification {index + 1}</div>
+                        <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                          {qualificationLabelFromCode(qualification.qualification_code || "", qualification.qualification_other || "")}
+                        </p>
+                        <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                          {normalizeGradingIdentifierType(
+                            qualification.student_identifier_type || qualification.identifier_type || qualification.student_no_label || ""
+                          )}
+                          : {qualification.student_no || qualification.identifier_value || DASH_VALUE}
+                        </p>
+                        <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                          Final %: {formatGradingPercent(qualification.final_percentage || qualification.computed_percentage)} | Grade:{" "}
+                          {qualification.final_grade_label || DASH_VALUE}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                   <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
                     Submitted date: {gradingActiveRequest.submitted_at || gradingActiveRequest.created_at || DASH_VALUE}
                   </p>
@@ -1802,191 +2001,286 @@ export function NursesPortalPage() {
                 </div>
               ) : null}
 
-              {hasSavedMtonNumber && !gradingLoading && !gradingError && (!gradingActiveRequest || gradingActiveRequest.can_nurse_edit) ? (
+              {hasSavedMtonNumber && !gradingLoading && (!gradingActiveRequest || gradingActiveRequest.can_nurse_edit) ? (
                 <>
-                  <label>
-                    Qualification Type
-                    <select
-                      className="f-input"
-                      value={gradingForm.qualification_code}
-                      onChange={(e) => setGradingForm({ ...gradingForm, qualification_code: e.target.value })}
+                  <div style={{ display: "grid", gap: 12 }}>
+                    <div
+                      style={{
+                        border: "1px solid #E3EBF0",
+                        borderRadius: 10,
+                        padding: 14,
+                        background: "#F7FAFC",
+                        display: "grid",
+                        gap: 6,
+                      }}
                     >
-                      <option value="">Select</option>
-                      {GRADING_QUALIFICATIONS.map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label>
-                    Degree Title as printed on certificate
-                    <input
-                      className="f-input"
-                      value={gradingForm.degree_title}
-                      onChange={(e) => setGradingForm({ ...gradingForm, degree_title: e.target.value })}
-                    />
-                  </label>
-                  <label>
-                    Identifier Type
-                    <select
-                      className="f-input"
-                      value={gradingForm.student_identifier_type}
-                      onChange={(e) =>
-                        setGradingForm({
-                          ...gradingForm,
-                          student_identifier_type: normalizeGradingIdentifierType(e.target.value),
-                        })
-                      }
-                    >
-                      {GRADING_IDENTIFIER_TYPES.map((label) => (
-                        <option key={label} value={label}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Identifier Value
-                    <input
-                      className="f-input"
-                      placeholder="Enter the number exactly as printed on your certificate/transcript."
-                      value={gradingForm.student_no}
-                      onChange={(e) => setGradingForm({ ...gradingForm, student_no: e.target.value })}
-                    />
-                  </label>
-                  <label>
-                    College / Institute
-                    <input
-                      className="f-input"
-                      value={gradingForm.institute}
-                      onChange={(e) => setGradingForm({ ...gradingForm, institute: e.target.value })}
-                    />
-                  </label>
-                  <label>
-                    University / Affiliating Body
-                    <input
-                      className="f-input"
-                      value={gradingForm.university}
-                      onChange={(e) => setGradingForm({ ...gradingForm, university: e.target.value })}
-                    />
-                  </label>
-                  <label>
-                    Year of Passing
-                    <input
-                      className="f-input"
-                      type="number"
-                      min="1950"
-                      max={new Date().getFullYear() + 1}
-                      value={gradingForm.year_of_passing}
-                      onChange={(e) => setGradingForm({ ...gradingForm, year_of_passing: e.target.value })}
-                    />
-                  </label>
-
-                  <label>
-                    Grading Mode
-                    <select
-                      className="f-input"
-                      value={gradingForm.mode}
-                      onChange={(e) =>
-                        setGradingForm({
-                          ...gradingForm,
-                          mode: e.target.value as GradingMode,
-                          total_marks: e.target.value === "MARKS" ? gradingForm.total_marks : "",
-                          obtained_marks: e.target.value === "MARKS" ? gradingForm.obtained_marks : "",
-                          entered_percentage: e.target.value === "PERCENT" ? gradingForm.entered_percentage : "",
-                          entered_gpa: e.target.value === "GPA" ? gradingForm.entered_gpa : "",
-                        })
-                      }
-                    >
-                      <option value="MARKS">Marks</option>
-                      <option value="PERCENT">Percentage</option>
-                      <option value="GPA">GPA out of 4.00</option>
-                    </select>
-                  </label>
-
-                  {gradingForm.mode === "MARKS" ? (
-                    <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
-                      <label>
-                        Total Marks
-                        <input
-                          className="f-input"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={gradingForm.total_marks}
-                          onChange={(e) => setGradingForm({ ...gradingForm, total_marks: e.target.value })}
-                        />
-                      </label>
-                      <label>
-                        Obtained Marks
-                        <input
-                          className="f-input"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={gradingForm.obtained_marks}
-                          onChange={(e) => setGradingForm({ ...gradingForm, obtained_marks: e.target.value })}
-                        />
-                      </label>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: "#2D4A6B" }}>Qualifications</div>
+                      <p style={{ margin: 0, color: "#5B6773", fontSize: 13, lineHeight: 1.6 }}>
+                        Add all nursing qualifications that should appear on your Embassy grading letter. They will be
+                        printed together on one official letter.
+                      </p>
                     </div>
-                  ) : null}
 
-                  {gradingForm.mode === "PERCENT" ? (
-                    <label>
-                      Percentage
-                      <input
-                        className="f-input"
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.01"
-                        value={gradingForm.entered_percentage}
-                        onChange={(e) => setGradingForm({ ...gradingForm, entered_percentage: e.target.value })}
-                      />
-                    </label>
-                  ) : null}
+                    {gradingForm.qualifications.map((qualification, index) => {
+                      const qualificationPreview = gradingPreview.qualificationPreviews[index] || {
+                        percentage: null,
+                        gradeLabel: DASH_VALUE,
+                        validationMessage: "",
+                        canPreview: false,
+                      };
+                      const qualificationOptions = gradingQualificationOptions(qualification);
+                      return (
+                        <div
+                          key={`grading-qualification-${index}`}
+                          id={`grading-qualification-card-${index}`}
+                          style={{
+                            border: "1px solid #D9E2EC",
+                            borderRadius: 12,
+                            padding: 14,
+                            background: "#FFFFFF",
+                            display: "grid",
+                            gap: 10,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                            <div>
+                              <div style={{ fontSize: 18, fontWeight: 800, color: "#2D4A6B" }}>Qualification {index + 1}</div>
+                              <p style={{ margin: "4px 0 0", color: "#5B6773", fontSize: 13 }}>
+                                Enter the qualification exactly as it should appear on the grading letter.
+                              </p>
+                            </div>
+                            {index > 0 ? (
+                              <Btn variant="light" onClick={() => removeGradingQualification(index)} disabled={gradingSubmitBusy}>
+                                Remove
+                              </Btn>
+                            ) : null}
+                          </div>
 
-                  {gradingForm.mode === "GPA" ? (
-                    <div style={{ display: "grid", gap: 8 }}>
-                      <label>
-                        GPA Obtained
-                        <input
-                          className="f-input"
-                          type="number"
-                          min="0"
-                          max="4"
-                          step="0.01"
-                          value={gradingForm.entered_gpa}
-                          onChange={(e) => setGradingForm({ ...gradingForm, entered_gpa: e.target.value })}
-                        />
-                      </label>
-                      <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>Maximum GPA: 4.00</p>
+                          <label>
+                            Qualification Type
+                            <select
+                              className="f-input"
+                              value={qualification.qualification_code}
+                              onChange={(e) =>
+                                updateGradingQualification(index, {
+                                  qualification_code: e.target.value,
+                                  qualification_other: e.target.value === "OTHER" ? qualification.qualification_other : "",
+                                })
+                              }
+                            >
+                              <option value="">Select</option>
+                              {qualificationOptions.map((item) => (
+                                <option key={item.value} value={item.value}>
+                                  {item.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          {qualification.qualification_code === "OTHER" ? (
+                            <label>
+                              Other qualification text
+                              <input
+                                className="f-input"
+                                value={qualification.qualification_other}
+                                onChange={(e) => updateGradingQualification(index, { qualification_other: e.target.value })}
+                              />
+                            </label>
+                          ) : null}
+
+                          <label>
+                            Degree Title as printed on certificate
+                            <input
+                              className="f-input"
+                              value={qualification.degree_title}
+                              onChange={(e) => updateGradingQualification(index, { degree_title: e.target.value })}
+                            />
+                          </label>
+
+                          <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
+                            <label>
+                              Identifier Type
+                              <select
+                                className="f-input"
+                                value={qualification.student_identifier_type}
+                                onChange={(e) =>
+                                  updateGradingQualification(index, {
+                                    student_identifier_type: normalizeGradingIdentifierType(e.target.value),
+                                  })
+                                }
+                              >
+                                {GRADING_IDENTIFIER_TYPES.map((label) => (
+                                  <option key={label} value={label}>
+                                    {label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Identifier Value
+                              <input
+                                className="f-input"
+                                placeholder="Enter the number exactly as printed on your certificate/transcript."
+                                value={qualification.student_no}
+                                onChange={(e) => updateGradingQualification(index, { student_no: e.target.value })}
+                              />
+                            </label>
+                          </div>
+
+                          <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
+                            <label>
+                              College / Institute
+                              <input
+                                className="f-input"
+                                value={qualification.institute}
+                                onChange={(e) => updateGradingQualification(index, { institute: e.target.value })}
+                              />
+                            </label>
+                            <label>
+                              University / Affiliating Body
+                              <input
+                                className="f-input"
+                                value={qualification.university}
+                                onChange={(e) => updateGradingQualification(index, { university: e.target.value })}
+                              />
+                            </label>
+                          </div>
+
+                          <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
+                            <label>
+                              Year of Passing
+                              <input
+                                className="f-input"
+                                type="number"
+                                min="1950"
+                                max={new Date().getFullYear() + 1}
+                                value={qualification.year_of_passing}
+                                onChange={(e) => updateGradingQualification(index, { year_of_passing: e.target.value })}
+                              />
+                            </label>
+                            <label>
+                              Grading Mode
+                              <select
+                                className="f-input"
+                                value={qualification.mode}
+                                onChange={(e) =>
+                                  updateGradingQualification(index, {
+                                    mode: e.target.value as GradingMode,
+                                    total_marks: e.target.value === "MARKS" ? qualification.total_marks : "",
+                                    obtained_marks: e.target.value === "MARKS" ? qualification.obtained_marks : "",
+                                    entered_percentage: e.target.value === "PERCENT" ? qualification.entered_percentage : "",
+                                    entered_gpa: e.target.value === "GPA" ? qualification.entered_gpa : "",
+                                  })
+                                }
+                              >
+                                <option value="MARKS">Marks</option>
+                                <option value="PERCENT">Percentage</option>
+                                <option value="GPA">GPA out of 4.00</option>
+                              </select>
+                            </label>
+                          </div>
+
+                          {qualification.mode === "MARKS" ? (
+                            <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
+                              <label>
+                                Total Marks / CGPA Scale
+                                <input
+                                  className="f-input"
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={qualification.total_marks}
+                                  onChange={(e) => updateGradingQualification(index, { total_marks: e.target.value })}
+                                />
+                              </label>
+                              <label>
+                                Obtained Marks / CGPA
+                                <input
+                                  className="f-input"
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={qualification.obtained_marks}
+                                  onChange={(e) => updateGradingQualification(index, { obtained_marks: e.target.value })}
+                                />
+                              </label>
+                            </div>
+                          ) : null}
+
+                          {qualification.mode === "PERCENT" ? (
+                            <label>
+                              Entered Percentage
+                              <input
+                                className="f-input"
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="0.01"
+                                value={qualification.entered_percentage}
+                                onChange={(e) => updateGradingQualification(index, { entered_percentage: e.target.value })}
+                              />
+                            </label>
+                          ) : null}
+
+                          {qualification.mode === "GPA" ? (
+                            <div style={{ display: "grid", gap: 8 }}>
+                              <label>
+                                GPA Obtained
+                                <input
+                                  className="f-input"
+                                  type="number"
+                                  min="0"
+                                  max="4"
+                                  step="0.01"
+                                  value={qualification.entered_gpa}
+                                  onChange={(e) => updateGradingQualification(index, { entered_gpa: e.target.value })}
+                                />
+                              </label>
+                              <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>Maximum GPA: 4.00</p>
+                            </div>
+                          ) : null}
+
+                          <div
+                            style={{
+                              border: "1px solid #E3EBF0",
+                              borderRadius: 10,
+                              padding: 14,
+                              background: "#F7FAFC",
+                              display: "grid",
+                              gap: 6,
+                            }}
+                          >
+                            <div style={{ color: "#2D4A6B", fontWeight: 700 }}>Computed Percentage</div>
+                            <div style={{ fontSize: 18, fontWeight: 800, color: "#1F2933" }}>
+                              {qualificationPreview.percentage != null
+                                ? `${qualificationPreview.percentage.toFixed(2)}%`
+                                : DASH_VALUE}
+                            </div>
+                            <div style={{ color: "#2D4A6B", fontWeight: 700 }}>Provisional Grade Label</div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: "#1F2933" }}>
+                              {qualificationPreview.gradeLabel}
+                            </div>
+                            <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
+                              Final grade is verified by Embassy/Nurses Desk before letter is issued.
+                            </p>
+                            {qualificationPreview.validationMessage ? (
+                              <p style={{ margin: 0, color: "#C0392B", fontSize: 13 }}>
+                                Qualification {index + 1}: {qualificationPreview.validationMessage}
+                              </p>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                      <Btn variant="light" onClick={addGradingQualification} disabled={gradingSubmitBusy}>
+                        + Add Additional Qualification
+                      </Btn>
                     </div>
-                  ) : null}
 
-                  <div
-                    style={{
-                      border: "1px solid #E3EBF0",
-                      borderRadius: 10,
-                      padding: 14,
-                      background: "#F7FAFC",
-                      display: "grid",
-                      gap: 6,
-                    }}
-                  >
-                    <div style={{ color: "#2D4A6B", fontWeight: 700 }}>Computed Percentage</div>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: "#1F2933" }}>
-                      {gradingPreview.percentage != null ? `${gradingPreview.percentage.toFixed(2)}%` : DASH_VALUE}
-                    </div>
-                    <div style={{ color: "#2D4A6B", fontWeight: 700 }}>Provisional Grade Label</div>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: "#1F2933" }}>{gradingPreview.gradeLabel}</div>
-                    <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>
-                      Final grade is verified by Embassy/Nurses Desk before letter is issued.
-                    </p>
                     {gradingPreview.validationMessage ? (
-                      <p style={{ margin: 0, color: "#C0392B", fontSize: 13 }}>{gradingPreview.validationMessage}</p>
+                      <NoticeBox tone="error">{gradingPreview.validationMessage}</NoticeBox>
                     ) : null}
                   </div>
 
@@ -2050,13 +2344,22 @@ export function NursesPortalPage() {
                           label={prettifyGradingStatus(item.status || "SUBMITTED")}
                         />
                       </div>
-                      <p style={{ fontSize: 12, color: "#5B6773", margin: "8px 0 4px" }}>
-                        Qualification: {qualificationLabelFromCode(item.qualification_code || "", item.qualification_other || "")}
-                      </p>
-                      <p style={{ fontSize: 12, color: "#5B6773", margin: 0 }}>
-                        {normalizeGradingIdentifierType(item.student_identifier_type || item.student_no_label || "")}:{" "}
-                        {item.student_no || DASH_VALUE}
-                      </p>
+                      <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
+                        {gradingApplicationQualifications(item).map((qualification, qualificationIndex) => (
+                          <p
+                            key={`grading-history-qualification-${item.id || item.ref_no || index}-${qualification.id || qualificationIndex}`}
+                            style={{ fontSize: 12, color: "#5B6773", margin: 0 }}
+                          >
+                            Qualification {qualificationIndex + 1}:{" "}
+                            {qualificationLabelFromCode(qualification.qualification_code || "", qualification.qualification_other || "")}
+                            {" · "}
+                            {normalizeGradingIdentifierType(
+                              qualification.student_identifier_type || qualification.identifier_type || qualification.student_no_label || ""
+                            )}
+                            : {qualification.student_no || qualification.identifier_value || DASH_VALUE}
+                          </p>
+                        ))}
+                      </div>
                       <p style={{ fontSize: 12, color: "#5B6773", margin: 0 }}>
                         Final %: {formatGradingPercent(item.final_percentage)} | Grade: {item.final_grade_label || DASH_VALUE}
                       </p>
@@ -2340,7 +2643,12 @@ export function NursesPortalPage() {
                       />
                     </div>
                     <p style={{ fontSize: 12, color: "#5B6773", margin: "8px 0 0" }}>
-                      Qualification: {qualificationLabelFromCode(item.qualification_code || "", item.qualification_other || "")}
+                      Qualifications:{" "}
+                      {gradingApplicationQualifications(item)
+                        .map((qualification) =>
+                          qualificationLabelFromCode(qualification.qualification_code || "", qualification.qualification_other || "")
+                        )
+                        .join(", ")}
                     </p>
                   </div>
                 ))}

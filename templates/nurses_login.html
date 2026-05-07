@@ -111,17 +111,40 @@
     if(p>=50) return 'Pass';
     return 'Fail';
   }
-  function qualificationOptions(selected){
+  function canonicalQualificationCode(value){
+    const code=String(value||'').trim().toUpperCase();
+    if(code==='MIDWIFERY_ADDITIONAL') return 'SPECIALIZATION_MIDWIFERY';
+    if(code==='MASTERS_IN_NURSING_MSN') return 'MASTERS_NURSING_MSN';
+    return code;
+  }
+  function qualificationLabel(code, other){
+    const normalized=canonicalQualificationCode(code);
+    const labels={
+      BSN_4Y:'BSN Nursing 4 Years',
+      POST_RN_BSN:'Post RN BSN',
+      GENERAL_NURSING_DIPLOMA:'General Nursing Diploma',
+      SPECIALIZATION_MIDWIFERY:'Specialization / Midwifery',
+      MASTERS_NURSING_MSN:'Masters in Nursing (MSN)',
+      NURSING_DIPLOMA:'Nursing Diploma (Legacy)',
+      OTHER:other||'Other (Legacy)'
+    };
+    return labels[normalized]||normalized||'—';
+  }
+  function qualificationOptions(selected, other){
+    const normalized=canonicalQualificationCode(selected);
     const opts=[
       ['BSN_4Y','BSN Nursing 4 Years'],
       ['POST_RN_BSN','Post RN BSN'],
       ['GENERAL_NURSING_DIPLOMA','General Nursing Diploma'],
+      ['SPECIALIZATION_MIDWIFERY','Specialization / Midwifery'],
       ['MASTERS_NURSING_MSN','Masters in Nursing (MSN)'],
-      ['NURSING_DIPLOMA','Nursing Diploma'],
-      ['MIDWIFERY_ADDITIONAL','Midwifery / Additional Course'],
-      ['OTHER','Other']
+      ['NURSING_DIPLOMA','Nursing Diploma (Legacy)'],
+      ['OTHER','Other (Legacy)']
     ];
-    return opts.map(o=>'<option value="'+o[0]+'" '+(selected===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
+    if(normalized && !opts.some(o=>o[0]===normalized)){
+      opts.push([normalized,qualificationLabel(normalized,other)]);
+    }
+    return opts.map(o=>'<option value="'+o[0]+'" '+(normalized===o[0]?'selected':'')+'>'+esc(o[1])+'</option>').join('');
   }
   function identifierType(value){
     const opts=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number','Serial Number'];
@@ -136,103 +159,303 @@
   function appRows(apps){
     if(!apps||!apps.length) return '<p class="muted">No previous grading letter requests found.</p>';
     return '<h4>Previous Grading Letter Requests</h4><div class="portal-table-wrap"><table><thead><tr><th>Reference</th><th>Qualification</th><th>Final %</th><th>Grade</th><th>Status</th></tr></thead><tbody>'
-      +apps.map(a=>'<tr><td>'+esc(a.ref_no)+'</td><td>'+esc(a.qualification_label)+'</td><td>'+esc(a.final_percentage==null?'':Number(a.final_percentage).toFixed(2))+'</td><td>'+esc(a.final_grade_label)+'</td><td>'+esc(a.status)+'</td></tr>').join('')
+      +apps.map(a=>{
+        const quals=appQualifications(a);
+        const labels=quals.map(q=>qualificationLabel(q.qualification_code,q.qualification_other)).join(', ');
+        return '<tr><td>'+esc(a.ref_no)+'</td><td>'+esc(labels||a.qualification_label||'—')+'</td><td>'+esc(a.final_percentage==null?'':Number(a.final_percentage).toFixed(2))+'</td><td>'+esc(a.final_grade_label)+'</td><td>'+esc(a.status)+'</td></tr>';
+      }).join('')
       +'</tbody></table></div>';
+  }
+  function normalizeGlMode(value){
+    return value==='PERCENT'||value==='GPA'?value:'MARKS';
+  }
+  function blankQualification(){
+    return {
+      qualification_code:'',
+      qualification_other:'',
+      degree_title:'',
+      student_identifier_type:'Student Number',
+      student_no:'',
+      institute:'',
+      university:'',
+      year_of_passing:'',
+      mode:'MARKS',
+      total_marks:'',
+      obtained_marks:'',
+      entered_percentage:'',
+      entered_gpa:'',
+      remarks:''
+    };
+  }
+  function normalizeQualificationRecord(raw){
+    raw=raw||{};
+    return {
+      qualification_code:canonicalQualificationCode(raw.qualification_code||''),
+      qualification_other:raw.qualification_other||'',
+      degree_title:raw.degree_title||'',
+      student_identifier_type:identifierType(raw.student_identifier_type||raw.identifier_type||raw.student_no_label||''),
+      student_no:raw.student_no||raw.identifier_value||'',
+      institute:raw.institute||'',
+      university:raw.university||'',
+      year_of_passing:raw.year_of_passing==null?'':String(raw.year_of_passing),
+      mode:normalizeGlMode(raw.mode),
+      total_marks:raw.total_marks==null?'':String(raw.total_marks),
+      obtained_marks:raw.obtained_marks==null?'':String(raw.obtained_marks),
+      entered_percentage:raw.entered_percentage==null?'':String(raw.entered_percentage),
+      entered_gpa:raw.entered_gpa==null?'':String(raw.entered_gpa),
+      remarks:raw.remarks||'',
+      final_percentage:raw.final_percentage,
+      final_grade_label:raw.final_grade_label||''
+    };
+  }
+  function appQualifications(app){
+    if(app && Array.isArray(app.qualifications) && app.qualifications.length){
+      return app.qualifications.map(normalizeQualificationRecord);
+    }
+    if(app){
+      return [normalizeQualificationRecord(app)];
+    }
+    return [blankQualification()];
+  }
+  function glQualificationCardHtml(q,index,total){
+    q=normalizeQualificationRecord(q);
+    const mode=q.mode||'MARKS';
+    return '<div class="gl-qualification-card" data-index="'+index+'" style="border:1px solid #d8e3ea;border-radius:10px;background:#fff;padding:14px;display:grid;gap:10px">'
+      +'<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">'
+      +'<div><strong style="color:var(--cwa-navy);font-size:16px">Qualification '+(index+1)+'</strong><p class="muted" style="margin:4px 0 0">Enter the qualification exactly as it should appear on the grading letter.</p></div>'
+      +(index>0?'<button type="button" class="btn-outline gl-remove-qualification" data-remove-index="'+index+'">Remove</button>':'')
+      +'</div>'
+      +'<div><label>Qualification Type</label><select data-field="qualification_code">'+qualificationOptions(q.qualification_code,q.qualification_other)+'</select></div>'
+      +'<div data-role="other-wrap" style="display:'+(q.qualification_code==='OTHER'?'block':'none')+'"><label>Other qualification text</label><input data-field="qualification_other" value="'+esc(q.qualification_other)+'"></div>'
+      +'<div><label>Degree Title as printed on certificate</label><input data-field="degree_title" value="'+esc(q.degree_title)+'"></div>'
+      +'<div class="nurses-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">'
+      +'<div><label>Identifier Type</label><select data-field="student_identifier_type">'+identifierOptions(q.student_identifier_type)+'</select></div>'
+      +'<div><label>Identifier Value</label><input data-field="student_no" placeholder="Enter the number exactly as printed on your certificate/transcript." value="'+esc(q.student_no)+'"></div>'
+      +'</div>'
+      +'<div class="nurses-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">'
+      +'<div><label>College / Institute</label><input data-field="institute" value="'+esc(q.institute)+'"></div>'
+      +'<div><label>University / Affiliating Body</label><input data-field="university" value="'+esc(q.university)+'"></div>'
+      +'</div>'
+      +'<div class="nurses-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">'
+      +'<div><label>Year of Passing</label><input data-field="year_of_passing" type="number" min="1950" max="2035" value="'+esc(q.year_of_passing)+'"></div>'
+      +'<div><label>Grading Mode</label><select data-field="mode"><option value="MARKS" '+(mode==='MARKS'?'selected':'')+'>Marks</option><option value="PERCENT" '+(mode==='PERCENT'?'selected':'')+'>Percentage</option><option value="GPA" '+(mode==='GPA'?'selected':'')+'>GPA out of 4.00</option></select></div>'
+      +'</div>'
+      +'<div class="nurses-grid" data-mode-wrap="MARKS" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;display:'+(mode==='MARKS'?'grid':'none')+'">'
+      +'<div><label>Total Marks / CGPA Scale</label><input data-field="total_marks" type="number" step="0.01" min="0" value="'+esc(q.total_marks)+'"></div>'
+      +'<div><label>Obtained Marks / CGPA</label><input data-field="obtained_marks" type="number" step="0.01" min="0" value="'+esc(q.obtained_marks)+'"></div>'
+      +'</div>'
+      +'<div data-mode-wrap="PERCENT" style="display:'+(mode==='PERCENT'?'block':'none')+'"><label>Entered Percentage</label><input data-field="entered_percentage" type="number" step="0.01" min="0" max="100" value="'+esc(q.entered_percentage)+'"></div>'
+      +'<div data-mode-wrap="GPA" style="display:'+(mode==='GPA'?'block':'none')+'"><label>GPA Obtained</label><input data-field="entered_gpa" type="number" step="0.01" min="0" max="4" value="'+esc(q.entered_gpa)+'"><p class="muted" style="margin:6px 0 0">Maximum GPA: 4.00</p></div>'
+      +'<div style="padding:12px;border:1px solid #d8e3ea;border-radius:8px;background:#f8fbfd"><strong>Computed Percentage:</strong> <span data-role="preview-pct">—</span><br><strong>Provisional Grade Label:</strong> <span data-role="preview-grade">—</span><p class="muted" style="margin:8px 0 0">Final grade is verified by Embassy/Nurses Desk before letter is issued.</p><div data-role="validation-msg" class="muted" style="margin-top:8px;color:#991b1b"></div></div>'
+      +'</div>';
+  }
+  function glFieldValue(card,field){
+    const el=card.querySelector('[data-field="'+field+'"]');
+    return el&&typeof el.value!=='undefined'?el.value:'';
+  }
+  function collectQualificationFromCard(card){
+    return {
+      qualification_code:canonicalQualificationCode(glFieldValue(card,'qualification_code')),
+      qualification_other:glFieldValue(card,'qualification_other'),
+      degree_title:glFieldValue(card,'degree_title'),
+      student_identifier_type:identifierType(glFieldValue(card,'student_identifier_type')),
+      student_no:glFieldValue(card,'student_no'),
+      institute:glFieldValue(card,'institute'),
+      university:glFieldValue(card,'university'),
+      year_of_passing:glFieldValue(card,'year_of_passing'),
+      mode:normalizeGlMode(glFieldValue(card,'mode')),
+      total_marks:glFieldValue(card,'total_marks'),
+      obtained_marks:glFieldValue(card,'obtained_marks'),
+      entered_percentage:glFieldValue(card,'entered_percentage'),
+      entered_gpa:glFieldValue(card,'entered_gpa'),
+      remarks:''
+    };
+  }
+  function collectGlQualifications(){
+    return Array.from(document.querySelectorAll('.gl-qualification-card')).map(collectQualificationFromCard);
+  }
+  function computeQualificationPreview(q){
+    q=normalizeQualificationRecord(q);
+    let validation='';
+    let pct=NaN;
+    if(!q.qualification_code) validation='Qualification type is required.';
+    else if(!q.degree_title.trim()) validation='Degree title is required.';
+    else if(!q.student_identifier_type.trim()) validation='Identifier type is required.';
+    else if(!q.student_no.trim()) validation='Identifier value is required.';
+    else if(!q.institute.trim()) validation='College / institute is required.';
+    else if(!q.university.trim()) validation='University / affiliating body is required.';
+    else if(!q.year_of_passing.trim()) validation='Year of passing is required.';
+    if(!validation && q.mode==='MARKS'){
+      if(!String(q.total_marks||'').trim()) validation='Total marks / CGPA scale is required.';
+      else if(!String(q.obtained_marks||'').trim()) validation='Obtained marks / CGPA is required.';
+      else{
+        const total=parseFloat(q.total_marks), got=parseFloat(q.obtained_marks);
+        if(!(total>0)) validation='Total marks must be greater than zero.';
+        else if(!(got>=0&&got<=total)) validation='Obtained marks cannot exceed total marks.';
+        else pct=got/total*100;
+      }
+    }else if(!validation && q.mode==='PERCENT'){
+      if(!String(q.entered_percentage||'').trim()) validation='Percentage is required.';
+      else{
+        const p=parseFloat(q.entered_percentage);
+        if(!(p>=0&&p<=100)) validation='Percentage must be between 0 and 100.';
+        else pct=p;
+      }
+    }else if(!validation){
+      if(!String(q.entered_gpa||'').trim()) validation='GPA obtained is required.';
+      else{
+        const g=parseFloat(q.entered_gpa);
+        if(!(g>=0&&g<=4)) validation='GPA cannot exceed 4.00.';
+        else pct=g/4*100;
+      }
+    }
+    return {
+      percentage:isFinite(pct)?Number(pct.toFixed(2)):NaN,
+      grade:isFinite(pct)?glGrade(pct):'—',
+      validation:validation,
+      canPreview:!validation && isFinite(pct)
+    };
   }
   function glFormHtml(app){
     app=app||{};
-    const mode=app.mode||'MARKS';
-    return '<form id="glForm" class="nurses-grid" data-app-id="'+esc(app.id||'')+'" data-status="'+esc(app.status||'')+'">'
-      +'<div><label>Qualification Type</label><select id="gl_qualification_code">'+qualificationOptions(app.qualification_code||'')+'</select></div>'
-      +'<div id="glOtherWrap" style="display:none"><label>Other qualification text</label><input id="gl_qualification_other" value="'+esc(app.qualification_other)+'"></div>'
-      +'<div><label>Degree Title as printed on certificate</label><input id="gl_degree_title" value="'+esc(app.degree_title)+'"></div>'
-      +'<div><label>Identifier Type</label><select id="gl_student_identifier_type">'+identifierOptions(app.student_identifier_type||app.student_no_label||'')+'</select></div>'
-      +'<div><label>Identifier Value</label><input id="gl_student_no" placeholder="Enter the number exactly as printed on your certificate/transcript." value="'+esc(app.student_no)+'"></div>'
-      +'<div><label>College / Institute</label><input id="gl_institute" value="'+esc(app.institute)+'"></div>'
-      +'<div><label>University / Affiliating Body</label><input id="gl_university" value="'+esc(app.university)+'"></div>'
-      +'<div><label>Year of Passing</label><input id="gl_year_of_passing" type="number" min="1950" max="2030" value="'+esc(app.year_of_passing)+'"></div>'
-      +'<div style="grid-column:1/-1"><label>Grading Mode</label><div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px">'
-      +'<label><input type="radio" name="gl_mode" value="MARKS" '+(mode==='MARKS'?'checked':'')+'> Marks</label>'
-      +'<label><input type="radio" name="gl_mode" value="PERCENT" '+(mode==='PERCENT'?'checked':'')+'> Percentage</label>'
-      +'<label><input type="radio" name="gl_mode" value="GPA" '+(mode==='GPA'?'checked':'')+'> GPA out of 4.00</label>'
-      +'</div></div>'
-      +'<div data-mode-wrap="MARKS"><label>Total Marks</label><input id="gl_total_marks" type="number" step="0.01" min="0" value="'+esc(app.total_marks)+'"></div>'
-      +'<div data-mode-wrap="MARKS"><label>Obtained Marks</label><input id="gl_obtained_marks" type="number" step="0.01" min="0" value="'+esc(app.obtained_marks)+'"></div>'
-      +'<div data-mode-wrap="PERCENT"><label>Percentage</label><input id="gl_entered_percentage" type="number" step="0.01" min="0" max="100" value="'+esc(app.entered_percentage)+'"></div>'
-      +'<div data-mode-wrap="GPA"><label>GPA Obtained</label><input id="gl_entered_gpa" type="number" step="0.01" min="0" max="4" value="'+esc(app.entered_gpa)+'"><p class="muted" style="margin:6px 0 0">Maximum GPA: 4.00</p></div>'
-      +'<div style="grid-column:1/-1;padding:12px;border:1px solid #d8e3ea;border-radius:8px;background:#f8fbfd"><strong>Computed Percentage:</strong> <span id="glPreviewPct">—</span><br><strong>Provisional Grade Label:</strong> <span id="glPreviewGrade">—</span><p class="muted" style="margin:8px 0 0">Final grade is verified by Embassy/Nurses Desk before letter is issued.</p><div id="glValidationMsg" class="muted" style="margin-top:8px"></div></div>'
+    const quals=appQualifications(app);
+    const submitLabel=(app.status==='CORRECTION_REQUIRED'?'Resubmit Corrected Request':app.can_nurse_edit?'Update Submitted Request':'Submit Grading Letter Request');
+    return '<form id="glForm" class="nurses-grid" data-app-id="'+esc(app.id||'')+'" data-status="'+esc(app.status||'')+'" data-can-edit="'+(app.can_nurse_edit?'1':'0')+'">'
+      +'<div style="grid-column:1/-1" class="nurse-alert">Add all nursing qualifications that should appear on your Embassy grading letter. They will be printed together on one official letter.</div>'
+      +'<div id="glQualificationsWrap" style="grid-column:1/-1;display:grid;gap:12px">'+quals.map((q,index)=>glQualificationCardHtml(q,index,quals.length)).join('')+'</div>'
+      +'<div style="grid-column:1/-1"><button id="glAddQualificationBtn" type="button" class="btn-outline">+ Add Additional Qualification</button></div>'
+      +'<div id="glValidationMsg" style="grid-column:1/-1;color:#991b1b;font-size:13px"></div>'
       +'<div style="grid-column:1/-1" class="nurse-alert">Please bring original degree/transcript/marksheet for verification when requested by Embassy.</div>'
+      +'<label style="grid-column:1/-1"><input id="gl_preview_confirmed" type="checkbox"> I have reviewed the preview details and confirm the information is correct to the best of my knowledge.</label>'
       +'<label style="grid-column:1/-1"><input id="gl_declaration" type="checkbox"> I confirm the information is true and based on my documents. I understand the Embassy issues this letter on request without liability.</label>'
-      +'<div class="actions" style="grid-column:1/-1"><button id="glSubmitBtn" type="submit" disabled>'+(app.status==='CORRECTION_REQUIRED'?'Resubmit':'Submit Grading Letter Request')+'</button><span id="glMsg" class="muted"></span></div>'
+      +'<div class="actions" style="grid-column:1/-1"><button id="glSubmitBtn" type="submit" disabled>'+esc(submitLabel)+'</button><span id="glMsg" class="muted"></span></div>'
       +'</form>';
   }
   function collectGlPayload(){
-    const mode=(document.querySelector('input[name="gl_mode"]:checked')||{}).value||'MARKS';
     const form=document.getElementById('glForm');
+    const qualifications=collectGlQualifications();
+    const first=qualifications[0]||blankQualification();
     return Object.assign(glBase(),{
       id:form.dataset.appId||'',
-      qualification_code:gl_qualification_code.value,
-      qualification_other:gl_qualification_other.value,
-      degree_title:gl_degree_title.value,
-      student_identifier_type:gl_student_identifier_type.value,
-      student_no:gl_student_no.value,
-      institute:gl_institute.value,
-      university:gl_university.value,
-      year_of_passing:gl_year_of_passing.value,
-      mode:mode,
-      total_marks:gl_total_marks.value,
-      obtained_marks:gl_obtained_marks.value,
-      entered_percentage:gl_entered_percentage.value,
-      entered_gpa:gl_entered_gpa.value,
-      declaration_accepted:true,
-      preview_confirmed:true
+      qualification_code:first.qualification_code,
+      qualification_other:first.qualification_other,
+      degree_title:first.degree_title,
+      student_identifier_type:first.student_identifier_type,
+      student_no:first.student_no,
+      institute:first.institute,
+      university:first.university,
+      year_of_passing:first.year_of_passing,
+      mode:first.mode,
+      total_marks:first.mode==='MARKS'?first.total_marks:'',
+      obtained_marks:first.mode==='MARKS'?first.obtained_marks:'',
+      entered_percentage:first.mode==='PERCENT'?first.entered_percentage:'',
+      entered_gpa:first.mode==='GPA'?first.entered_gpa:'',
+      qualifications:qualifications.map(q=>({
+        qualification_code:q.qualification_code,
+        qualification_other:q.qualification_other,
+        degree_title:q.degree_title,
+        student_identifier_type:q.student_identifier_type,
+        student_no:q.student_no,
+        institute:q.institute,
+        university:q.university,
+        year_of_passing:q.year_of_passing,
+        mode:q.mode,
+        total_marks:q.mode==='MARKS'?q.total_marks:'',
+        obtained_marks:q.mode==='MARKS'?q.obtained_marks:'',
+        entered_percentage:q.mode==='PERCENT'?q.entered_percentage:'',
+        entered_gpa:q.mode==='GPA'?q.entered_gpa:'',
+        remarks:''
+      })),
+      declaration_accepted:!!(document.getElementById('gl_declaration')||{}).checked,
+      preview_confirmed:!!(document.getElementById('gl_preview_confirmed')||{}).checked
     });
+  }
+  function renderGlQualificationCards(quals){
+    const wrap=document.getElementById('glQualificationsWrap');
+    if(!wrap) return;
+    wrap.innerHTML=quals.map((q,index)=>glQualificationCardHtml(q,index,quals.length)).join('');
+    updateGlForm();
+  }
+  function glAddQualification(){
+    const quals=collectGlQualifications();
+    quals.push(blankQualification());
+    renderGlQualificationCards(quals);
+    setTimeout(function(){
+      const card=document.querySelector('.gl-qualification-card[data-index="'+(quals.length-1)+'"]');
+      if(card && card.scrollIntoView) card.scrollIntoView({behavior:'smooth',block:'start'});
+      const input=card&&card.querySelector('select,input,textarea');
+      if(input&&input.focus) input.focus();
+    },0);
+  }
+  function glRemoveQualification(index){
+    const quals=collectGlQualifications();
+    if(quals.length<=1) return;
+    quals.splice(index,1);
+    renderGlQualificationCards(quals);
+  }
+  function updateGlForm(){
+    const form=document.getElementById('glForm');
+    if(!form) return;
+    const previewConfirmed=document.getElementById('gl_preview_confirmed');
+    const declaration=document.getElementById('gl_declaration');
+    const validationEl=document.getElementById('glValidationMsg');
+    const submitBtn=document.getElementById('glSubmitBtn');
+    const cards=Array.from(form.querySelectorAll('.gl-qualification-card'));
+    const previews=cards.map(function(card,index){
+      const q=collectQualificationFromCard(card);
+      const mode=q.mode;
+      card.querySelectorAll('[data-mode-wrap]').forEach(function(el){
+        el.style.display=el.getAttribute('data-mode-wrap')===mode?(el.getAttribute('data-mode-wrap')==='MARKS'?'grid':'block'):'none';
+      });
+      const otherWrap=card.querySelector('[data-role="other-wrap"]');
+      if(otherWrap) otherWrap.style.display=q.qualification_code==='OTHER'?'block':'none';
+      const preview=computeQualificationPreview(q);
+      const pctEl=card.querySelector('[data-role="preview-pct"]');
+      const gradeEl=card.querySelector('[data-role="preview-grade"]');
+      const msgEl=card.querySelector('[data-role="validation-msg"]');
+      if(pctEl) pctEl.textContent=isFinite(preview.percentage)?preview.percentage.toFixed(2)+'%':'—';
+      if(gradeEl) gradeEl.textContent=preview.grade||'—';
+      if(msgEl) msgEl.textContent=preview.validation?'Qualification '+(index+1)+': '+preview.validation:'';
+      return preview;
+    });
+    let validation='';
+    const firstBadIndex=previews.findIndex(function(p){return !!p.validation;});
+    if(firstBadIndex>=0) validation='Qualification '+(firstBadIndex+1)+': '+previews[firstBadIndex].validation;
+    else if(!(previewConfirmed&&previewConfirmed.checked)) validation='Please review the preview details and confirm the information before submission.';
+    else if(!(declaration&&declaration.checked)) validation='Please accept the declaration before submission.';
+    if(validationEl) validationEl.textContent=validation;
+    if(submitBtn) submitBtn.disabled=!(cards.length && previews.every(function(p){return p.canPreview;}) && previewConfirmed&&previewConfirmed.checked && declaration&&declaration.checked && !validation);
   }
   function wireGlForm(){
     const form=document.getElementById('glForm');
     if(!form) return;
-    const update=()=>{
-      const mode=(document.querySelector('input[name="gl_mode"]:checked')||{}).value||'MARKS';
-      document.querySelectorAll('[data-mode-wrap]').forEach(el=>{el.style.display=el.getAttribute('data-mode-wrap')===mode?'block':'none';});
-      glOtherWrap.style.display=gl_qualification_code.value==='OTHER'?'block':'none';
-      let pct=NaN, validation='';
-      if(mode==='MARKS'){
-        const total=parseFloat(gl_total_marks.value), got=parseFloat(gl_obtained_marks.value);
-        if(total>0 && got>=0 && got<=total) pct=got/total*100;
-        else if(gl_total_marks.value || gl_obtained_marks.value) validation='Obtained marks cannot exceed total marks, and total marks must be greater than zero.';
-      }else if(mode==='PERCENT'){
-        const p=parseFloat(gl_entered_percentage.value);
-        if(p>=0 && p<=100) pct=p;
-        else if(gl_entered_percentage.value) validation='Percentage must be between 0 and 100.';
-      }else{
-        const g=parseFloat(gl_entered_gpa.value);
-        if(g>=0 && g<=4) pct=g/4*100;
-        else if(gl_entered_gpa.value) validation='GPA cannot exceed 4.00.';
-      }
-      if(!gl_student_identifier_type.value) validation='Please select an identifier type.';
-      const required=[gl_degree_title.value,gl_student_identifier_type.value,gl_student_no.value,gl_institute.value,gl_university.value,gl_year_of_passing.value,gl_qualification_code.value];
-      if(gl_qualification_code.value==='OTHER') required.push(gl_qualification_other.value);
-      const complete=required.every(v=>String(v||'').trim()) && isFinite(pct) && gl_declaration.checked;
-      glPreviewPct.textContent=isFinite(pct)?pct.toFixed(2)+'%':'—';
-      glPreviewGrade.textContent=isFinite(pct)?glGrade(pct):'—';
-      glValidationMsg.textContent=validation;
-      glSubmitBtn.disabled=!complete;
-    };
-    form.addEventListener('input',update);
-    form.addEventListener('change',update);
+    const addBtn=document.getElementById('glAddQualificationBtn');
+    if(addBtn) addBtn.addEventListener('click',glAddQualification);
+    form.addEventListener('click',function(e){
+      const btn=e.target&&e.target.closest?e.target.closest('.gl-remove-qualification'):null;
+      if(!btn) return;
+      e.preventDefault();
+      glRemoveQualification(Number(btn.getAttribute('data-remove-index')||0));
+    });
+    form.addEventListener('input',updateGlForm);
+    form.addEventListener('change',updateGlForm);
     form.addEventListener('submit',async function(e){
       e.preventDefault();
-      glMsg.textContent='Submitting...';
-      const endpoint=form.dataset.status==='CORRECTION_REQUIRED'?'/api/nurses/grading-letter/resubmit':'/api/nurses/grading-letter/submit';
+      updateGlForm();
+      const submitBtn=document.getElementById('glSubmitBtn');
+      const msgEl=document.getElementById('glMsg');
+      if(submitBtn&&submitBtn.disabled) return false;
+      if(msgEl) msgEl.textContent='Submitting...';
+      const endpoint=form.dataset.canEdit==='1'?'/api/nurses/grading-letter/resubmit':'/api/nurses/grading-letter/submit';
       const d=await postJson(endpoint,collectGlPayload(),'Request could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.');
-      if(!d.success){glMsg.textContent=friendlyError(d.error);return false;}
-      const msg=d.message || (form.dataset.status==='CORRECTION_REQUIRED'?'Grading letter request resubmitted successfully.':'Grading letter request submitted successfully.');
+      if(!d.success){if(msgEl) msgEl.textContent=friendlyError(d.error);return false;}
+      const msg=d.message || (form.dataset.canEdit==='1'?'Grading letter request resubmitted successfully.':'Grading letter request submitted successfully.');
       glFlash=msg+' Reference: '+(d.reference||'');
-      glMsg.textContent=glFlash;
+      if(msgEl) msgEl.textContent=glFlash;
       await loadGradingLetter(true);
       return false;
     });
-    update();
+    updateGlForm();
   }
   async function glCancel(id){
     if(!confirm('Cancel this grading letter request?')) return;
@@ -246,16 +469,21 @@
     const a=d.active_application||d.active_request||d.activeRequest||null;
     const history=d.applications||d.history||[];
     let html='<h3>Grading Letter Request</h3>'
-      +'<div class="nurse-alert">Use this form to request an Embassy grading letter for one nursing qualification. One qualification requires one application. Midwifery or additional qualification should be submitted as a separate request.</div>'
+      +'<div class="nurse-alert">Add all nursing qualifications that should appear on your Embassy grading letter. They will be printed together on one official letter.</div>'
       +'<div class="nurse-alert warn">Submitting this form does not generate the official letter automatically. Embassy/Nurses Desk will verify the details before issuing the final letter.</div>'
       +(glFlash?'<div class="nurse-alert success">'+esc(glFlash)+'</div>':'')
       +identityGrid(p);
     if(a){
-      html+='<div class="nurse-alert"><strong>Reference No.:</strong> '+esc(a.ref_no||a.reference||'')+'<br><strong>Status:</strong> '+esc(a.status||'')+'<br><strong>Qualification:</strong> '+esc(a.qualification_label||a.qualification_code||'')+'<br><strong>Submitted date:</strong> '+esc(a.submitted_at||a.created_at||'')+(a.correction_notes?'<br><strong>Admin correction notes:</strong> '+esc(a.correction_notes):'')+'</div>';
+      const quals=appQualifications(a);
+      html+='<div class="nurse-alert"><strong>Reference No.:</strong> '+esc(a.ref_no||a.reference||'')+'<br><strong>Status:</strong> '+esc(a.status||'')+'<br><strong>Submitted date:</strong> '+esc(a.submitted_at||a.created_at||'')+(a.correction_notes?'<br><strong>Admin correction notes:</strong> '+esc(a.correction_notes):'')+'</div>';
+      html+='<div style="display:grid;gap:8px;margin-bottom:12px">'+quals.map(function(q,index){
+        const pct=q.final_percentage==null&&q.computed_percentage==null?'—':Number(q.final_percentage==null?q.computed_percentage:q.final_percentage).toFixed(2)+'%';
+        return '<div style="border:1px solid #d8e3ea;border-radius:8px;background:#f8fbfd;padding:10px"><strong style="color:var(--cwa-navy)">Qualification '+(index+1)+'</strong><div style="margin-top:4px">'+esc(qualificationLabel(q.qualification_code,q.qualification_other))+'</div><div class="muted">'+esc(identifierType(q.student_identifier_type||q.identifier_type||q.student_no_label||''))+': '+esc(q.student_no||q.identifier_value||'—')+'</div><div class="muted">Final %: '+esc(pct)+' | Grade: '+esc(q.final_grade_label||'—')+'</div></div>';
+      }).join('')+'</div>';
       if(a.letter_download_url){html+='<p><a class="btn-outline" href="'+esc(a.letter_download_url)+'">Download Letter</a></p>';}
-      if(a.status==='CORRECTION_REQUIRED'){html+=glFormHtml(a);}
-      if(a.status==='SUBMITTED'||a.status==='CORRECTION_REQUIRED'){html+='<p><button class="btn-outline" type="button" onclick="glCancel('+Number(a.id)+')">Cancel Request</button></p>';}
-      if(a.status!=='CORRECTION_REQUIRED'){html+='<p class="muted">You already have an active grading letter request. You can submit a new request after the current one is issued, rejected, or cancelled.</p>';}
+      if(a.can_nurse_edit){html+=glFormHtml(a);}
+      if(a.can_nurse_cancel){html+='<p><button class="btn-outline" type="button" onclick="glCancel('+Number(a.id)+')">Cancel Request</button></p>';}
+      if(!a.can_nurse_edit){html+='<p class="muted">You already have an active grading letter request. You can submit a new request after the current one is issued, rejected, or cancelled.</p>';}
     }else{
       html+=glFormHtml(null);
     }
