@@ -12974,10 +12974,12 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 @page {{ size: A4; margin: 12mm 14mm 12mm 14mm; }}
 .gl-official-letter__preview-title{{font-family:Georgia,"Times New Roman",serif;font-size:18px;font-weight:700;color:#102a43;margin:0 0 10px;text-align:left}}
 .gl-official-letter__notice{{font-family:Georgia,"Times New Roman",serif;font-size:13px;line-height:1.55;color:#7c2d12;background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:10px 12px;margin:0 auto 12px;max-width:794px}}
-.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:6px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:28px 40px 24px;font-family:"Times New Roman",Georgia,serif;line-height:1.36;width:100%;max-width:794px;min-height:auto;margin:0 auto;box-sizing:border-box;overflow:hidden}}
+.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:6px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:28px 40px 24px;font-family:"Times New Roman",Georgia,serif;line-height:1.36;width:100%;max-width:794px;min-height:297mm;margin:0 auto;box-sizing:border-box;overflow:hidden}}
 .gl-official-letter--preview{{width:min(210mm,100%);min-height:297mm;padding:12mm 14mm 12mm}}
 .gl-official-letter__watermark{{position:absolute;inset:0;pointer-events:none;z-index:0}}
 .gl-official-letter__watermark-text{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-28deg);font-size:34pt;line-height:1.2;text-align:center;font-weight:800;letter-spacing:.04em;color:rgba(160,30,30,.13);text-shadow:none;white-space:pre-line}}
+.gl-official-letter__content{{position:relative;z-index:1;min-height:283.25mm;padding-bottom:18mm;box-sizing:border-box}}
+.gl-official-letter--preview .gl-official-letter__content{{min-height:273mm}}
 .gl-official-letter__body,.gl-official-letter__footer{{position:relative;z-index:1}}
 .gl-official-letter table{{width:100%;border-collapse:collapse}}
 .gl-official-letter__header{{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;margin:0 0 4px}}
@@ -13001,7 +13003,7 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 .gl-official-letter__qual-degree{{font-size:11px;color:#1f2937}}
 .gl-official-letter__liability{{margin-top:10px;max-width:680px}}
 .gl-official-letter__body{{display:block}}
-.gl-official-letter__footer{{margin-top:18px;padding-top:8px;border-top:1px solid #111}}
+.gl-official-letter__footer{{position:absolute;left:0;right:0;bottom:0;margin-top:0;padding-top:8px;border-top:1px solid #111}}
 .gl-official-letter__footer td{{font-size:13.5px;padding-top:6px;vertical-align:top}}
 .gl-official-letter__footer-mid{{text-align:center}}
 .gl-official-letter__footer-right{{text-align:right}}
@@ -13010,7 +13012,8 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 }}
 @media (max-width: 820px) {{
   .gl-official-letter{{padding:24px 18px 18px;min-height:auto}}
-  .gl-official-letter--preview{{width:100%;min-height:auto;padding:24px 18px 18px}}
+  .gl-official-letter--preview{{width:100%;min-height:297mm;padding:24px 18px 18px}}
+  .gl-official-letter--preview .gl-official-letter__content{{min-height:285.9mm}}
   .gl-official-letter__header{{gap:12px}}
   .gl-official-letter__crest{{flex:0 0 88px}}
   .gl-official-letter__crest img{{width:64px}}
@@ -13030,31 +13033,33 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 {notice_html}
 <div class="gl-official-letter{preview_class} grading-letter-page">
   {watermark_html}
-  <div class="gl-official-letter__body">
-    <div class="gl-official-letter__header">
-      <div class="gl-official-letter__crest">{f'<img src="{emblem}" alt="Government of Pakistan emblem">' if emblem else ''}</div>
-      <div class="gl-official-letter__heading">
-        <div class="gl-official-letter__heading-en">Embassy of Islamic Republic of Pakistan<br>Kuwait</div>
-        <div class="gl-official-letter__heading-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
+  <div class="gl-official-letter__content">
+    <div class="gl-official-letter__body gl-official-letter__main">
+      <div class="gl-official-letter__header">
+        <div class="gl-official-letter__crest">{f'<img src="{emblem}" alt="Government of Pakistan emblem">' if emblem else ''}</div>
+        <div class="gl-official-letter__heading">
+          <div class="gl-official-letter__heading-en">Embassy of Islamic Republic of Pakistan<br>Kuwait</div>
+          <div class="gl-official-letter__heading-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
+        </div>
       </div>
+      <div class="gl-official-letter__ref">{esc(letter['reference_line'])}</div>
+      <div class="gl-official-letter__title">TO WHOM IT MAY CONCERN</div>
+      <p class="gl-official-letter__para">
+        {esc(letter['certificate_line_1'])} {esc(letter['applicant_name'])} {esc(letter['certificate_line_2'])} {esc(letter['certificate_line_3'])}
+      </p>
+      {qualifications_block_html}
+      <p class="gl-official-letter__para gl-official-letter__liability">
+        This certificate is issued on the request of the applicant without any liability on the part of this Embassy whatsoever.
+      </p>
     </div>
-    <div class="gl-official-letter__ref">{esc(letter['reference_line'])}</div>
-    <div class="gl-official-letter__title">TO WHOM IT MAY CONCERN</div>
-    <p class="gl-official-letter__para">
-      {esc(letter['certificate_line_1'])} {esc(letter['applicant_name'])} {esc(letter['certificate_line_2'])} {esc(letter['certificate_line_3'])}
-    </p>
-    {qualifications_block_html}
-    <p class="gl-official-letter__para gl-official-letter__liability">
-      This certificate is issued on the request of the applicant without any liability on the part of this Embassy whatsoever.
-    </p>
+    <table class="gl-official-letter__footer">
+      <tr>
+        <td>Telephone: {esc(letter['footer_telephone'])}</td>
+        <td class="gl-official-letter__footer-mid">Fax: {esc(letter['footer_fax'])}</td>
+        <td class="gl-official-letter__footer-right">Email: {esc(letter['footer_email'])}</td>
+      </tr>
+    </table>
   </div>
-  <table class="gl-official-letter__footer">
-    <tr>
-      <td>Telephone: {esc(letter['footer_telephone'])}</td>
-      <td class="gl-official-letter__footer-mid">Fax: {esc(letter['footer_fax'])}</td>
-      <td class="gl-official-letter__footer-right">Email: {esc(letter['footer_email'])}</td>
-    </tr>
-  </table>
 </div>
 """.strip()
 
