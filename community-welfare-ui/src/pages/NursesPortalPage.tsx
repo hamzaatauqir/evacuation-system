@@ -15,7 +15,16 @@ import {
   type NursePortalContext,
 } from "../lib/nursePortal";
 
-type PortalTab = "overview" | "stay" | "complaint" | "grading" | "onboarding" | "leaving" | "requests" | "password";
+type PortalTab =
+  | "overview"
+  | "stay"
+  | "complaint"
+  | "grading"
+  | "onboarding"
+  | "leaving"
+  | "corrections"
+  | "requests"
+  | "password";
 
 type OnboardingStep = {
   step_code: string;
@@ -178,11 +187,78 @@ type ProfileFormState = {
   workplace: string;
 };
 
+type CorrectionLockedFieldKey =
+  | "flight_number"
+  | "passport_number"
+  | "civil_id"
+  | "hospital_workplace"
+  | "arrival_date"
+  | "visa_number";
+
+type CorrectionLockedField = {
+  name?: string;
+  label?: string;
+  help?: string;
+  current_value?: string;
+  pending_request_id?: number | null;
+  pending_requested_value?: string;
+};
+
+type CorrectionRequestItem = {
+  id?: number;
+  nurse_id?: number;
+  ref_id?: string;
+  nurse_reference_id?: string;
+  nurse_name?: string;
+  field_name?: string;
+  field_label?: string;
+  old_value?: string;
+  requested_value?: string;
+  reason?: string;
+  status?: string;
+  status_label?: string;
+  requested_by?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  review_remarks?: string;
+  auto_activated?: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type CorrectionListResponse = {
+  success?: boolean;
+  locked_fields?: CorrectionLockedField[];
+  requests?: CorrectionRequestItem[];
+  error?: string;
+};
+
+type CorrectionFieldCard = {
+  uiKey: CorrectionLockedFieldKey;
+  apiFieldName: string;
+  label: string;
+  help: string;
+  currentValueRaw: string;
+  pendingRequestId?: number;
+  pendingRequestedValue: string;
+};
+
+type CorrectionFormState = {
+  field_name: CorrectionLockedFieldKey;
+  current_value: string;
+  requested_value: string;
+  reason: string;
+};
+
 const DASH_VALUE = "—";
 const GRADING_SUMMARY_FALLBACK = "Could not load grading letter status. Please try again.";
 const GRADING_SUBMIT_FALLBACK =
   "Request could not be submitted. Please check your connection and try again. If the problem continues, contact the Embassy.";
 const GRADING_MTON_FALLBACK = "MTON number could not be saved. Please check your connection and try again.";
+const CORRECTION_LIST_FALLBACK =
+  "Correction requests could not be loaded. Please try again or sign in again if the problem continues.";
+const CORRECTION_SUBMIT_FALLBACK =
+  "Correction request could not be submitted. Please check your details and try again.";
 const GRADING_QUALIFICATIONS = [
   { value: "BSN_4Y", label: "BSN Nursing 4 Years" },
   { value: "POST_RN_BSN", label: "Post RN BSN" },
@@ -207,6 +283,49 @@ const PROFILE_QUALIFICATION_OPTIONS = [
   "Doctor MBBS",
   "Doctor BDS",
   "Other",
+] as const;
+const CORRECTION_FIELD_CONFIG: Array<{
+  uiKey: CorrectionLockedFieldKey;
+  apiFieldName: string;
+  label: string;
+  help: string;
+}> = [
+  {
+    uiKey: "flight_number",
+    apiFieldName: "flight_number",
+    label: "Batch / Flight No.",
+    help: "Enter the Kuwait arrival batch or flight number associated with your nursing group (e.g. 37, 38, 39).",
+  },
+  {
+    uiKey: "passport_number",
+    apiFieldName: "passport_number",
+    label: "Passport Number",
+    help: "Enter the passport number exactly as printed on your passport.",
+  },
+  {
+    uiKey: "civil_id",
+    apiFieldName: "civil_id",
+    label: "Civil ID",
+    help: "Enter your 12-digit Kuwait Civil ID, if it has been issued.",
+  },
+  {
+    uiKey: "hospital_workplace",
+    apiFieldName: "hospital_workplace",
+    label: "Employer / Hospital",
+    help: "Enter the employer / hospital where you are currently posted.",
+  },
+  {
+    uiKey: "arrival_date",
+    apiFieldName: "arrival_date",
+    label: "Arrival Date",
+    help: "Enter your Kuwait arrival date in YYYY-MM-DD format.",
+  },
+  {
+    uiKey: "visa_number",
+    apiFieldName: "visa_number",
+    label: "Visa Number",
+    help: "Enter your Kuwait visa number as printed on the visa stamp.",
+  },
 ] as const;
 
 function normalizeMtonNumber(value: string) {
@@ -363,6 +482,103 @@ function onboardingIdentityPayload(ctx: NursePortalContext) {
     verifier: ctx.mobile || ctx.civilId || "",
     session_marker: ctx.sessionMarker,
   };
+}
+
+function normalizeCorrectionFieldName(value: string) {
+  const normalized = (value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (normalized === "flight_number") return "batch_number";
+  if (normalized === "hospital" || normalized === "employer" || normalized === "employer_hospital") {
+    return "hospital_workplace";
+  }
+  return normalized;
+}
+
+function correctionUiKey(value: string): CorrectionLockedFieldKey | "" {
+  switch (normalizeCorrectionFieldName(value)) {
+    case "batch_number":
+      return "flight_number";
+    case "passport_number":
+      return "passport_number";
+    case "civil_id":
+      return "civil_id";
+    case "hospital_workplace":
+      return "hospital_workplace";
+    case "arrival_date":
+      return "arrival_date";
+    case "visa_number":
+      return "visa_number";
+    default:
+      return "";
+  }
+}
+
+function correctionCurrentValueFallback(ctx: NursePortalContext, field: CorrectionLockedFieldKey) {
+  switch (field) {
+    case "flight_number":
+      return normalizeArrivalBatchNumber(ctx.housingAccount?.batchCode || "");
+    case "passport_number":
+      return ctx.passportNumber || "";
+    case "civil_id":
+      return ctx.civilId || "";
+    case "hospital_workplace":
+      return ctx.hospital || "";
+    case "arrival_date":
+      return ctx.housingAccount?.arrivalDate || "";
+    case "visa_number":
+      return "";
+    default:
+      return "";
+  }
+}
+
+function createCorrectionForm(fieldName: CorrectionLockedFieldKey = "flight_number", currentValue = ""): CorrectionFormState {
+  return {
+    field_name: fieldName,
+    current_value: currentValue,
+    requested_value: "",
+    reason: "",
+  };
+}
+
+function buildCorrectionFieldCards(ctx: NursePortalContext, response?: CorrectionListResponse | null): CorrectionFieldCard[] {
+  const lockedFieldMap = new Map<CorrectionLockedFieldKey, CorrectionLockedField>();
+  (response?.locked_fields || []).forEach((field) => {
+    const key = correctionUiKey(field.name || "");
+    if (key && !lockedFieldMap.has(key)) {
+      lockedFieldMap.set(key, field);
+    }
+  });
+
+  return CORRECTION_FIELD_CONFIG.map((config) => {
+    const field = lockedFieldMap.get(config.uiKey);
+    return {
+      uiKey: config.uiKey,
+      apiFieldName: config.apiFieldName,
+      label: field?.label || config.label,
+      help: field?.help || config.help,
+      currentValueRaw: String(field?.current_value || correctionCurrentValueFallback(ctx, config.uiKey) || "").trim(),
+      pendingRequestId:
+        typeof field?.pending_request_id === "number" && field.pending_request_id > 0
+          ? field.pending_request_id
+          : undefined,
+      pendingRequestedValue: String(field?.pending_requested_value || "").trim(),
+    };
+  });
+}
+
+function prettifyCorrectionStatus(status: string) {
+  return (status || "PENDING")
+    .toLowerCase()
+    .split("_")
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(" ");
+}
+
+function correctionStatusType(status: string) {
+  const normalized = (status || "PENDING").toUpperCase();
+  if (normalized === "APPROVED") return "resolved";
+  if (normalized === "REJECTED" || normalized === "CANCELLED") return "rejected";
+  return "pending";
 }
 
 function prettifyOnboardingHelpStatus(status: string) {
@@ -916,6 +1132,13 @@ export function NursesPortalPage() {
   const [onboardingForm, setOnboardingForm] = useState<{ current_stage_code: string; issue_status: string; nurse_note: string }>(
     { current_stage_code: "", issue_status: "NO_ISSUE", nurse_note: "" }
   );
+  const [correctionSummary, setCorrectionSummary] = useState<CorrectionListResponse | null>(null);
+  const [correctionLoading, setCorrectionLoading] = useState(false);
+  const [correctionError, setCorrectionError] = useState("");
+  const [correctionFlash, setCorrectionFlash] = useState("");
+  const [correctionSubmitBusy, setCorrectionSubmitBusy] = useState(false);
+  const [openCorrectionField, setOpenCorrectionField] = useState<CorrectionLockedFieldKey | "">("");
+  const [correctionForm, setCorrectionForm] = useState<CorrectionFormState>(() => createCorrectionForm());
 
   function commitPortalContext(next: NursePortalContext | ((prev: NursePortalContext) => NursePortalContext)) {
     setCtx((prev) => {
@@ -934,8 +1157,8 @@ export function NursesPortalPage() {
   const isDoctor = (ctx.professionalCategory || "").toLowerCase() === "doctor";
   const tab = (params.get("tab") || "overview") as PortalTab;
   const tabs = isDoctor
-    ? (["overview", "complaint", "grading", "onboarding", "requests", "password"] as PortalTab[])
-    : (["overview", "stay", "complaint", "grading", "onboarding", "leaving", "requests", "password"] as PortalTab[]);
+    ? (["overview", "complaint", "grading", "onboarding", "corrections", "requests", "password"] as PortalTab[])
+    : (["overview", "stay", "complaint", "grading", "onboarding", "leaving", "corrections", "requests", "password"] as PortalTab[]);
   const activeTab = tabs.includes(tab) ? tab : "overview";
   const pagePadding = "clamp(16px, 4vw, 24px)";
   const overviewGridColumns = "repeat(auto-fit,minmax(320px,1fr))";
@@ -1012,6 +1235,12 @@ export function NursesPortalPage() {
   const gradingActiveQualifications = gradingApplicationQualifications(gradingActiveRequest);
   const gradingHistory = gradingSummary?.applications || gradingSummary?.history || [];
   const gradingProfile = gradingSummary?.profile || {};
+  const correctionCards = buildCorrectionFieldCards(ctx, correctionSummary);
+  const correctionHistory = correctionSummary?.requests || [];
+  const activeCorrectionCard =
+    openCorrectionField
+      ? correctionCards.find((card) => card.uiKey === openCorrectionField) || null
+      : null;
   const savedMtonNumber = normalizeMtonNumber(gradingProfile.mton_number || ctx.mtonNumber || "");
   const hasSavedMtonNumber = isValidMtonNumber(savedMtonNumber);
   const canEditActiveGradingRequest = Boolean(gradingActiveRequest?.can_nurse_edit);
@@ -1100,6 +1329,27 @@ export function NursesPortalPage() {
       );
     } finally {
       setOnboardingLoading(false);
+    }
+  });
+
+  const refreshCorrectionSummary = useEffectEvent(async (showLoading = true) => {
+    if (!ctx) return;
+    if (showLoading) setCorrectionLoading(true);
+    setCorrectionError("");
+    try {
+      const res = await api.post<CorrectionListResponse>("/api/nurses/corrections/list", {
+        ...onboardingIdentityPayload(ctx),
+        identity: ctx.referenceId || ctx.passportNumber,
+      });
+      if (!res?.success) {
+        throw new Error(res?.error || CORRECTION_LIST_FALLBACK);
+      }
+      setCorrectionSummary(res);
+    } catch (error) {
+      setCorrectionSummary(null);
+      setCorrectionError(normalizeRequestError(error, CORRECTION_LIST_FALLBACK));
+    } finally {
+      setCorrectionLoading(false);
     }
   });
 
@@ -1195,6 +1445,64 @@ export function NursesPortalPage() {
     if (pendingArrival) return;
     void refreshOnboardingSummary();
   }, [activeTab, pendingArrival]);
+
+  useEffect(() => {
+    if (activeTab !== "corrections") return;
+    void refreshCorrectionSummary();
+  }, [activeTab, ctx.referenceId, ctx.passportNumber, ctx.mobile, ctx.civilId, ctx.sessionMarker]);
+
+  function openCorrectionRequest(card: CorrectionFieldCard) {
+    if (card.pendingRequestId) return;
+    setCorrectionError("");
+    setCorrectionFlash("");
+    setOpenCorrectionField(card.uiKey);
+    setCorrectionForm(createCorrectionForm(card.uiKey, card.currentValueRaw));
+  }
+
+  function closeCorrectionRequest() {
+    setOpenCorrectionField("");
+    setCorrectionForm(createCorrectionForm());
+  }
+
+  async function submitCorrectionRequest() {
+    if (!ctx || !activeCorrectionCard) return;
+    const requestedValue = correctionForm.requested_value.trim();
+    const reason = correctionForm.reason.trim();
+    if (!requestedValue) {
+      setCorrectionError("Please enter the requested new value.");
+      return;
+    }
+    if (reason.length < 5) {
+      setCorrectionError("Please briefly describe the reason for change.");
+      return;
+    }
+    setCorrectionSubmitBusy(true);
+    setCorrectionError("");
+    setCorrectionFlash("");
+    try {
+      const res = await api.post<{ success?: boolean; error?: string; message?: string }>(
+        "/api/nurses/corrections/submit",
+        {
+          ...onboardingIdentityPayload(ctx),
+          identity: ctx.referenceId || ctx.passportNumber,
+          field_name: activeCorrectionCard.apiFieldName,
+          current_value: correctionForm.current_value,
+          requested_value: requestedValue,
+          reason,
+        }
+      );
+      if (!res?.success) {
+        throw new Error(res?.error || CORRECTION_SUBMIT_FALLBACK);
+      }
+      setCorrectionFlash(res.message || "Correction request submitted for Embassy review.");
+      closeCorrectionRequest();
+      await refreshCorrectionSummary(false);
+    } catch (error) {
+      setCorrectionError(normalizeRequestError(error, CORRECTION_SUBMIT_FALLBACK));
+    } finally {
+      setCorrectionSubmitBusy(false);
+    }
+  }
 
   async function submitFacilityRequest() {
     setBusy(true); setErr(""); setMsg("");
@@ -1558,14 +1866,16 @@ export function NursesPortalPage() {
                 ? "Overview"
                 : t === "stay"
                   ? "Stay Arrangement"
-                  : t === "complaint"
-                    ? "Complaint"
+                    : t === "complaint"
+                      ? "Complaint"
                     : t === "grading"
                       ? "Grading Letter"
                     : t === "onboarding"
                       ? "MOH Onboarding"
                     : t === "leaving"
                       ? "Leaving Notice"
+                      : t === "corrections"
+                        ? "Correction Requests"
                       : t === "requests"
                         ? "My Requests"
                         : "Change password"}
@@ -2567,6 +2877,136 @@ export function NursesPortalPage() {
               <Btn variant="primary" disabled={busy} onClick={submitLeavingNotice}>{busy ? "Submitting..." : "Submit Leaving Notice"}</Btn>
             </FormCard>
           )
+        ) : null}
+
+        {activeTab === "corrections" ? (
+          <div style={{ display: "grid", gap: 14 }}>
+            <FormCard title="Correction Requests">
+              <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6, margin: 0 }}>
+                These important identity and arrival fields are locked after submission. If any detail is incorrect, submit a correction request for Embassy review.
+              </p>
+              {correctionFlash ? <NoticeBox tone="success">{correctionFlash}</NoticeBox> : null}
+              {correctionError ? <NoticeBox tone="error">{correctionError}</NoticeBox> : null}
+              {correctionLoading && !correctionSummary ? (
+                <p style={{ color: "#5B6773", margin: 0 }}>Loading correction requests...</p>
+              ) : null}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 12 }}>
+                {correctionCards.map((card) => (
+                  <div
+                    key={card.uiKey}
+                    style={{
+                      border: "1px solid #E3EBF0",
+                      borderRadius: 12,
+                      padding: 12,
+                      background: card.pendingRequestId ? "#FFFDF5" : "#F9FBFC",
+                      display: "grid",
+                      gap: 10,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                      <div style={{ color: "#2D4A6B", fontSize: 15, fontWeight: 700 }}>{card.label}</div>
+                      {card.pendingRequestId ? <StatusBadge type="pending" label="Pending review" /> : null}
+                    </div>
+                    <Field label="Current Value" value={displayValue(card.currentValueRaw)} />
+                    <p style={{ color: "#5B6773", fontSize: 12, lineHeight: 1.6, margin: 0 }}>{card.help}</p>
+                    {card.pendingRequestId ? (
+                      <NoticeBox tone="warning">
+                        Pending review
+                        {card.pendingRequestedValue ? `: ${displayValue(card.pendingRequestedValue)}` : "."}
+                      </NoticeBox>
+                    ) : null}
+                    <Btn
+                      variant={card.pendingRequestId ? "light" : "primary"}
+                      disabled={Boolean(card.pendingRequestId)}
+                      onClick={() => openCorrectionRequest(card)}
+                    >
+                      {card.pendingRequestId ? "Pending review" : "Request Correction"}
+                    </Btn>
+                  </div>
+                ))}
+              </div>
+            </FormCard>
+
+            {activeCorrectionCard ? (
+              <FormCard title="Submit Correction Request">
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 10 }}>
+                  <label>
+                    Field to Correct
+                    <input className="f-input" value={activeCorrectionCard.label} readOnly />
+                  </label>
+                  <label>
+                    Current Value
+                    <input className="f-input" value={correctionForm.current_value} readOnly />
+                  </label>
+                </div>
+                <label>
+                  Requested New Value
+                  <input
+                    className="f-input"
+                    value={correctionForm.requested_value}
+                    onChange={(e) => setCorrectionForm((current) => ({ ...current, requested_value: e.target.value }))}
+                    placeholder={`Enter corrected ${activeCorrectionCard.label.toLowerCase()}`}
+                  />
+                </label>
+                <label>
+                  Reason for Change
+                  <textarea
+                    className="f-input"
+                    value={correctionForm.reason}
+                    onChange={(e) => setCorrectionForm((current) => ({ ...current, reason: e.target.value }))}
+                    placeholder="Please explain what needs to be corrected and why."
+                  />
+                </label>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <Btn variant="primary" disabled={correctionSubmitBusy} onClick={submitCorrectionRequest}>
+                    {correctionSubmitBusy ? "Submitting..." : "Submit Request"}
+                  </Btn>
+                  <Btn variant="light" onClick={closeCorrectionRequest} disabled={correctionSubmitBusy}>
+                    Cancel
+                  </Btn>
+                </div>
+              </FormCard>
+            ) : null}
+
+            <FormCard title="Correction Request History">
+              {correctionLoading && correctionSummary ? (
+                <p style={{ color: "#5B6773", margin: 0 }}>Refreshing correction history...</p>
+              ) : null}
+              {correctionHistory.length ? (
+                <div style={{ display: "grid", gap: 10 }}>
+                  {correctionHistory.map((request) => (
+                    <div key={request.id || `${request.field_name}-${request.created_at}`} style={{ border: "1px solid #E3EBF0", borderRadius: 12, padding: 12, display: "grid", gap: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                        <strong style={{ color: "#2D4A6B" }}>{request.field_label || "Correction Request"}</strong>
+                        <StatusBadge
+                          type={correctionStatusType(request.status || "PENDING") as any}
+                          label={request.status_label || prettifyCorrectionStatus(request.status || "PENDING")}
+                        />
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10 }}>
+                        <Field label="Current Value" value={displayValue(request.old_value)} />
+                        <Field label="Requested New Value" value={displayValue(request.requested_value)} />
+                        <Field label="Submitted" value={displayValue(request.created_at)} />
+                        <Field label="Reviewed" value={displayValue(request.reviewed_at)} />
+                      </div>
+                      <p style={{ fontSize: 13, color: "#374151", margin: 0 }}>
+                        <strong>Reason:</strong> {request.reason || DASH_VALUE}
+                      </p>
+                      {request.review_remarks ? (
+                        <p style={{ fontSize: 13, color: "#374151", margin: 0 }}>
+                          <strong>Review remarks:</strong> {request.review_remarks}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ color: "#5B6773", margin: 0 }}>
+                  No correction requests submitted yet. Choose a locked field above to request a correction.
+                </p>
+              )}
+            </FormCard>
+          </div>
         ) : null}
 
         {activeTab === "password" ? (
