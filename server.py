@@ -12962,7 +12962,8 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
                 '</div>'
             )
         qualifications_block_html = (
-            '<div class="gl-multi-qualification-list">'
+            f'<!-- gl multi-qualification block: {len(qualifications)} qualifications rendered -->'
+            f'<div class="gl-multi-qualification-list" data-qualification-count="{len(qualifications)}">'
             f'{"".join(rows_html)}'
             '</div>'
         )
@@ -13018,9 +13019,11 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 .gl-official-letter__qualifications .gl-official-letter__qual-num{{text-align:center;white-space:nowrap}}
 .gl-official-letter__qual-name{{font-weight:700}}
 .gl-official-letter__qual-degree{{font-size:11px;color:#1f2937}}
-.gl-multi-qualification-list{{margin:7mm auto 7mm;max-width:680px}}
-.gl-multi-qualification-row{{display:grid;grid-template-columns:42% 58%;column-gap:8mm;margin:4mm 0;break-inside:avoid;page-break-inside:avoid}}
-.gl-multi-qualification-left,.gl-multi-qualification-right{{text-align:center;font-size:11pt;line-height:1.28}}
+.gl-multi-qualification-list{{display:table;width:100%;max-width:680px;margin:7mm auto 7mm;border-collapse:separate;border-spacing:0 4mm;table-layout:fixed}}
+.gl-multi-qualification-row{{display:table-row;break-inside:avoid;page-break-inside:avoid}}
+.gl-multi-qualification-left,.gl-multi-qualification-right{{display:table-cell;text-align:center;vertical-align:top;font-size:11pt;line-height:1.28;padding:0 4mm}}
+.gl-multi-qualification-left{{width:42%}}
+.gl-multi-qualification-right{{width:58%}}
 .gl-multi-qualification-left>div,.gl-multi-qualification-right>div{{display:block}}
 .gl-multi-qualification-list .gl-degree{{font-weight:600}}
 .gl-official-letter__liability{{margin-top:10px;max-width:680px}}
@@ -13047,8 +13050,9 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
   .gl-official-letter__para{{font-size:14.5px;line-height:1.6;text-align:justify}}
   .gl-official-letter__grid td{{display:block;width:100%;padding:0 0 14px}}
   .gl-official-letter__qualifications{{font-size:11px}}
-  .gl-multi-qualification-row{{grid-template-columns:1fr;column-gap:0;row-gap:3mm}}
-  .gl-multi-qualification-left,.gl-multi-qualification-right{{font-size:14.5px}}
+  .gl-multi-qualification-list{{display:block;border-spacing:0}}
+  .gl-multi-qualification-row{{display:block;margin:0 0 4mm}}
+  .gl-multi-qualification-left,.gl-multi-qualification-right{{display:block;width:100%;padding:0 0 2mm;font-size:14.5px}}
   .gl-official-letter__footer td{{display:block;text-align:left!important;padding-top:4px}}
   .gl-official-letter__footer-mid,.gl-official-letter__footer-right{{text-align:left}}
 }}
