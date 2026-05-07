@@ -12346,6 +12346,114 @@ def api_admin_gl_export_csv(params, user):
         db.close()
 
 
+def _gl_format_letter_percentage(value):
+    """Format a percentage for display on the letter. Returns '—' when the
+    value is missing/blank, otherwise a two-decimal number with no trailing
+    '%' (callers add it where appropriate)."""
+    if value is None:
+        return '—'
+    s = str(value).strip()
+    if not s:
+        return '—'
+    s_no_pct = s.rstrip('%').strip()
+    try:
+        return f"{float(s_no_pct):.2f}"
+    except (TypeError, ValueError):
+        cleaned = _gl_clean_text(s, 20)
+        return cleaned or '—'
+
+
+def _gl_letter_qualification_view(q):
+    """Phase-3: build the formatted view of ONE qualification for the letter.
+
+    Input ``q`` is a dict produced by ``_gl_qualification_row_to_dict`` (Phase-1)
+    or ``_gl_synth_qualification_from_flat`` (legacy fallback).  Output keeps
+    pre-formatted display strings alongside their raw values so warnings and
+    blockers can still be computed without re-parsing display text.
+    """
+    qualification_label = _gl_clean_text(q.get('qualification_label'), 220)
+    degree_title = _gl_clean_text(q.get('degree_title'), 220)
+    if not qualification_label:
+        qualification_label = degree_title or _gl_clean_text(q.get('qualification_code'), 80)
+    normalized_label = re.sub(r'\s+', ' ', qualification_label).strip().lower()
+    normalized_degree = re.sub(r'\s+', ' ', degree_title).strip().lower()
+    degree_title_secondary = degree_title if degree_title and normalized_degree != normalized_label else ''
+    institute = _gl_clean_text(q.get('institute'), 220)
+    university = _gl_clean_text(q.get('university'), 220)
+    if institute and university and institute != university:
+        institute_university = f"{institute} / {university}"
+    else:
+        institute_university = institute or university
+    identifier_type = _gl_student_identifier_type(
+        q.get('identifier_type') or q.get('student_identifier_type')
+    )
+    identifier_value = _gl_clean_text(q.get('identifier_value') or q.get('student_no'), 120)
+    identifier_type_label = _gl_identifier_print_label(identifier_type)
+    identifier_display = (
+        f"{identifier_type_label} {identifier_value}".strip() if identifier_value else ''
+    )
+    year_of_passing = _gl_clean_text(q.get('year_of_passing'), 20)
+    mode = _gl_clean_text(q.get('mode'), 20).upper()
+    total_marks = _gl_clean_text(q.get('total_marks'), 40)
+    obtained_marks = _gl_clean_text(q.get('obtained_marks'), 40)
+    entered_gpa = _gl_clean_text(q.get('entered_gpa'), 20)
+    if mode == 'MARKS' and (total_marks or obtained_marks):
+        marks_display = f"{obtained_marks or '—'} / {total_marks or '—'}"
+    elif mode == 'GPA' and entered_gpa:
+        marks_display = f"GPA {entered_gpa} / 4.00"
+    elif obtained_marks and total_marks:
+        marks_display = f"{obtained_marks} / {total_marks}"
+    elif entered_gpa:
+        marks_display = f"GPA {entered_gpa}"
+    else:
+        marks_display = '—'
+    final_percentage_raw = q.get('final_percentage')
+    if final_percentage_raw is None or str(final_percentage_raw).strip() == '':
+        final_percentage_raw = q.get('computed_percentage')
+    if final_percentage_raw is None or str(final_percentage_raw).strip() == '':
+        final_percentage_raw = q.get('entered_percentage')
+    final_percentage = _gl_format_letter_percentage(final_percentage_raw)
+    final_grade_label = _gl_clean_text(q.get('final_grade_label'), 80)
+    final_result_text = (
+        f'{final_percentage}% "{final_grade_label}"'
+        if final_percentage != '—' and final_grade_label
+        else '—'
+    )
+    percentage_display = f'{final_percentage}%' if final_percentage != '—' else '—'
+    remarks = _gl_clean_text(q.get('remarks'), 1000)
+    return {
+        'qualification_label': qualification_label or '—',
+        'degree_title': degree_title or qualification_label or '—',
+        'degree_title_secondary': degree_title_secondary,
+        'institute': institute or '—',
+        'university': university or '—',
+        'institute_university': institute_university or '—',
+        'identifier_type': identifier_type_label or '—',
+        'identifier_type_label': identifier_type_label,
+        'identifier_value': identifier_value or '—',
+        'identifier_display': identifier_display or '—',
+        'student_no': identifier_value or '—',
+        'year_of_passing': year_of_passing or '—',
+        'mode': mode,
+        'marks_display': marks_display,
+        'total_marks': total_marks,
+        'obtained_marks': obtained_marks,
+        'final_percentage': final_percentage,
+        'percentage_display': percentage_display,
+        'final_grade_label': final_grade_label or '—',
+        'final_result_text': final_result_text,
+        'remarks': remarks,
+        # Raw values used for warnings/blockers — never rendered:
+        'qualification_label_raw': qualification_label,
+        'degree_title_raw': degree_title,
+        'institute_raw': institute,
+        'university_raw': university,
+        'identifier_value_raw': identifier_value,
+        'year_of_passing_raw': year_of_passing,
+        'final_grade_label_raw': final_grade_label,
+    }
+
+
 def _gl_letter_context(app):
     d = _gl_admin_app_dict(app)
     identity = d.get('letter_identity') or {}
@@ -12356,48 +12464,49 @@ def _gl_letter_context(app):
     relation_text = _gl_clean_text(d.get('relation_override'), 180)
     if not relation_text:
         relation_text = f"{_gl_parent_relation_for_gender(identity.get('gender'))} {father_name or '—'}".strip()
-    degree_title = _gl_clean_text(d.get('degree_title'), 220)
-    identifier_type = _gl_student_identifier_type(d.get('student_identifier_type'))
-    identifier_value = _gl_clean_text(d.get('student_no'), 120)
-    institute = _gl_clean_text(d.get('institute'), 220)
-    university = _gl_clean_text(d.get('university'), 220)
-    year_of_passing = _gl_clean_text(d.get('year_of_passing'), 20)
+    # Phase-3: pull all qualifications for the application.  Phase-1 backfill
+    # guarantees every existing application has at least one child row, but we
+    # still synthesize from the flat fields defensively if it's somehow empty
+    # (e.g. fresh deploy before backfill landed).
+    raw_quals = list(d.get('qualifications') or [])
+    if not raw_quals:
+        raw_quals = [_gl_synth_qualification_from_flat(d)]
+    formatted_quals = [_gl_letter_qualification_view(q) for q in raw_quals]
+    primary = formatted_quals[0]
+    is_multi = len(formatted_quals) > 1
     subtitle = _gl_qualification_subtitle(d)
-    final_percentage_value = d.get('final_percentage')
-    final_percentage = '—'
-    if final_percentage_value is not None:
-        try:
-            final_percentage = f"{float(final_percentage_value):.2f}"
-        except Exception:
-            final_percentage = _gl_clean_text(final_percentage_value, 20) or '—'
-    final_grade_label = _gl_clean_text(d.get('final_grade_label'), 80)
-    final_result_text = (
-        f'{final_percentage}% "{final_grade_label}"'
-        if final_percentage != '—' and final_grade_label
-        else '—'
-    )
-    warning_and_blocker_checks = [
-        ('Missing Father Name', father_name),
-        ('Missing Identifier Value', identifier_value),
-        ('Missing Institute', institute),
-        ('Missing University', university),
-        ('Missing Year', year_of_passing),
-    ]
-    warnings = [label for label, value in warning_and_blocker_checks if not value]
-    blockers = list(warnings)
-    for label, value in (
-        ('Missing Applicant Name', applicant_name),
-        ('Missing Passport Number', passport_number),
-        ('Missing Degree Title', degree_title),
-        ('Missing Final Percentage', '' if final_percentage == '—' else final_percentage),
-        ('Missing Final Grade', final_grade_label),
-    ):
-        if not value:
-            blockers.append(label)
+    warnings = []
+    blockers = []
+    for idx, q in enumerate(formatted_quals):
+        prefix = f'Qualification {idx + 1}: ' if is_multi else ''
+        for label, value in (
+            (f'{prefix}Missing Identifier Value', q['identifier_value_raw']),
+            (f'{prefix}Missing Institute', q['institute_raw']),
+            (f'{prefix}Missing University', q['university_raw']),
+            (f'{prefix}Missing Year', q['year_of_passing_raw']),
+        ):
+            if not value:
+                warnings.append(label)
+                blockers.append(label)
+        for label, value in (
+            (f'{prefix}Missing Degree Title', q['degree_title_raw']),
+            (f'{prefix}Missing Final Percentage',
+             '' if q['final_percentage'] == '—' else q['final_percentage']),
+            (f'{prefix}Missing Final Grade', q['final_grade_label_raw']),
+        ):
+            if not value:
+                blockers.append(label)
+    if not father_name:
+        warnings.append('Missing Father Name')
+        blockers.append('Missing Father Name')
+    if not applicant_name:
+        blockers.append('Missing Applicant Name')
+    if not passport_number:
+        blockers.append('Missing Passport Number')
     certificate_line_2 = f"{relation_text} and holding Pakistani Passport No. {passport_number or '—'}"
     if passport_issue_date:
         certificate_line_2 += f" Dated {passport_issue_date}"
-    certificate_line_2 += ", passed"
+    certificate_line_2 += ','
     return {
         'application': d,
         'identity': identity,
@@ -12405,22 +12514,35 @@ def _gl_letter_context(app):
         'father_name': father_name or '—',
         'passport_number': passport_number or '—',
         'passport_issue_date': passport_issue_date,
-        'degree_title': degree_title or '—',
+        # Legacy flat fields — first qualification mirror.  Kept so any reader
+        # that still consumes the flat shape (CSV, plain-text fallback,
+        # external integrations) continues to work after Phase-3.
+        'degree_title': primary['degree_title'],
         'qualification_subtitle': subtitle or '',
-        'identifier_label': _gl_identifier_print_label(identifier_type),
-        'identifier_value': identifier_value or '—',
-        'institute': institute or '—',
-        'university': university or '—',
-        'year_of_passing': year_of_passing or '—',
-        'final_percentage': final_percentage,
-        'final_grade_label': final_grade_label or '—',
-        'final_result_text': final_result_text,
+        'identifier_label': primary['identifier_type_label'],
+        'identifier_value': primary['identifier_value'],
+        'institute': primary['institute'],
+        'university': primary['university'],
+        'year_of_passing': primary['year_of_passing'],
+        'final_percentage': primary['final_percentage'],
+        'final_grade_label': primary['final_grade_label'],
+        'final_result_text': primary['final_result_text'],
+        # NEW for Phase-3:
+        'qualifications': formatted_quals,
+        'is_multi_qualification': is_multi,
         'warnings': warnings,
         'generation_blockers': blockers,
         'relation_text': relation_text,
         'certificate_line_1': 'This is to certify that according to the documents produced in this Embassy,',
         'certificate_line_2': certificate_line_2,
-        'certificate_line_3': 'the examination of:',
+        # Bridge phrase between the certificate paragraph and the qualifications
+        # block.  Single-qualification wording is preserved verbatim; the
+        # multi variant uses neutral wording that fits both the table render
+        # and a screen reader.
+        'certificate_line_3': (
+            'the following nursing qualification(s) have been verified from the documents presented:'
+            if is_multi else 'passed the examination of:'
+        ),
         'footer_telephone': GL_OFFICIAL_TELEPHONE,
         'footer_fax': GL_OFFICIAL_FAX,
         'footer_email': GL_OFFICIAL_EMAIL,
@@ -12435,6 +12557,38 @@ def _gl_letter_text(app):
     passport_line = f"Pakistani Passport No. {letter.get('passport_number') or '—'}"
     if letter.get('passport_issue_date'):
         passport_line += f" Dated {letter['passport_issue_date']}"
+    qualifications = letter.get('qualifications') or []
+    if len(qualifications) <= 1:
+        # Single-qualification text layout — preserved verbatim from the
+        # legacy renderer so existing accessibility consumers see no change.
+        body = (
+            f"{letter['degree_title']}\n"
+            f"{subtitle_line}"
+            f"{letter['identifier_label']} {letter['identifier_value']}\n\n"
+            f"{letter['institute']}\n"
+            f"Affiliated with {letter['university']}\n"
+            f"{letter['year_of_passing']}\n"
+            f"{letter['final_result_text']}\n"
+        )
+    else:
+        # Phase-3: numbered text blocks, one per qualification.
+        blocks = []
+        for idx, q in enumerate(qualifications, start=1):
+            ident_line = f"{q['identifier_type_label']} {q['identifier_value']}".strip()
+            lines = [f"{idx}. {q['qualification_label']}"]
+            if q.get('degree_title_secondary'):
+                lines.append(f"   {q['degree_title_secondary']}")
+            lines.extend([
+                f"   {ident_line}",
+                f"   {q['institute']}",
+                f"   Affiliated with {q['university']}",
+                f"   Year of passing: {q['year_of_passing']}",
+                f"   Marks / CGPA: {q['marks_display']}",
+                f"   Percentage: {q['percentage_display']}",
+                f"   Grade: {q['final_grade_label']}",
+            ])
+            blocks.append("\n".join(lines))
+        body = "\n\n".join(blocks) + "\n"
     return (
         "Embassy of Islamic Republic of Pakistan\n"
         "Kuwait\n"
@@ -12443,15 +12597,8 @@ def _gl_letter_text(app):
         f"{letter['reference_line']}\n\n"
         "TO WHOM IT MAY CONCERN\n\n"
         f"{letter['certificate_line_1']} {letter['applicant_name']}\n"
-        f"{letter['relation_text']} and holding {passport_line}, passed\n"
-        f"{letter['certificate_line_3']}\n\n"
-        f"{letter['degree_title']}\n"
-        f"{subtitle_line}"
-        f"{letter['identifier_label']} {letter['identifier_value']}\n\n"
-        f"{letter['institute']}\n"
-        f"Affiliated with {letter['university']}\n"
-        f"{letter['year_of_passing']}\n"
-        f"{letter['final_result_text']}\n\n"
+        f"{letter['relation_text']} and holding {passport_line}, {letter['certificate_line_3']}\n\n"
+        f"{body}\n"
         "This certificate is issued on the request of the applicant without any liability on the part\n"
         "of this Embassy whatsoever.\n\n"
         f"Telephone: {letter['footer_telephone']}    Fax: {letter['footer_fax']}    Email: {letter['footer_email']}"
@@ -12461,11 +12608,17 @@ def _gl_letter_text(app):
 def _gl_preview_html(letter, include_watermark=False, preview_title=''):
     """Render the grading letter HTML.
 
-    The HTML is reused for: nurse-side preview (include_watermark=True),
+    The same HTML is reused for: nurse-side preview (include_watermark=True),
     admin-side preview before generation (include_watermark=True), and the
-    PyMuPDF-rendered official PDF (include_watermark=False) — see _gl_build_pdf_bytes.
-    Page is sized to A4 portrait (~794px x ~1123px at 96dpi) with the footer
-    anchored near the bottom via flex layout.
+    PyMuPDF-rendered official PDF (include_watermark=False) — see
+    _gl_build_pdf_bytes.
+
+    Phase-3: the page is rendered at A4 portrait (~794px x ~1123px at 96dpi)
+    using natural block flow rather than a flex column with min-height, so
+    short and tall letters both start near the top after the letterhead.
+    Multi-qualification applications render a compact qualifications table;
+    single-qualification applications keep the legacy 2-cell grid so the
+    look of existing letters is preserved exactly.
     """
     emblem = _gop_emblem_data_url()
     watermark_html = ''
@@ -12491,46 +12644,115 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
         f'<div class="gl-official-letter__cell-line">({esc(letter.get("qualification_subtitle") or "")})</div>'
         if letter.get('qualification_subtitle') else ''
     )
+    qualifications = letter.get('qualifications') or []
+    if len(qualifications) > 1:
+        # Phase-3 multi-qualification block: compact tabular layout.
+        rows_html = []
+        for idx, q in enumerate(qualifications, start=1):
+            ident = q['identifier_display'] if q.get('identifier_display') and q['identifier_display'] != '—' else ''
+            degree_html = (
+                f'<div class="gl-official-letter__qual-degree">{esc(q["degree_title_secondary"])}</div>'
+                if q.get('degree_title_secondary') else ''
+            )
+            rows_html.append(
+                '<tr>'
+                f'<td class="gl-official-letter__qual-num">{idx}</td>'
+                f'<td><div class="gl-official-letter__qual-name">{esc(q["qualification_label"])}</div>'
+                f'{degree_html}</td>'
+                f'<td>{esc(q["institute_university"])}</td>'
+                f'<td>{esc(ident)}</td>'
+                f'<td class="gl-official-letter__qual-num">{esc(q["year_of_passing"])}</td>'
+                f'<td class="gl-official-letter__qual-num">{esc(q["marks_display"])}</td>'
+                f'<td class="gl-official-letter__qual-num">{esc(q["percentage_display"])}</td>'
+                f'<td>{esc(q["final_grade_label"])}</td>'
+                '</tr>'
+            )
+        qualifications_block_html = (
+            '<table class="gl-official-letter__qualifications">'
+            '<thead><tr>'
+            '<th>No.</th>'
+            '<th>Qualification</th>'
+            '<th>Institute / University</th>'
+            '<th>Identifier</th>'
+            '<th>Year</th>'
+            '<th>Marks / CGPA</th>'
+            '<th>Percentage</th>'
+            '<th>Grade</th>'
+            '</tr></thead>'
+            f'<tbody>{"".join(rows_html)}</tbody>'
+            '</table>'
+        )
+    else:
+        # Single-qualification: keep the legacy 2-cell grid so the look of
+        # existing letters is preserved character-for-character.
+        qualifications_block_html = (
+            '<table class="gl-official-letter__grid">'
+            '<tr>'
+            '<td>'
+            f'<span class="gl-official-letter__cell-line">{esc(letter["degree_title"])}</span>'
+            f'{subtitle_html}'
+            f'<span class="gl-official-letter__cell-line">{esc(letter["identifier_label"])} {esc(letter["identifier_value"])}</span>'
+            '</td>'
+            '<td>'
+            f'<span class="gl-official-letter__cell-line">{esc(letter["institute"])}</span>'
+            f'<span class="gl-official-letter__cell-line">Affiliated with {esc(letter["university"])}</span>'
+            f'<span class="gl-official-letter__cell-line">{esc(letter["year_of_passing"])}</span>'
+            f'<span class="gl-official-letter__cell-line">{esc(letter["final_result_text"])}</span>'
+            '</td>'
+            '</tr>'
+            '</table>'
+        )
     return f"""
 <style>
+@page {{ size: A4; margin: 12mm 14mm 12mm 14mm; }}
 .gl-official-letter__preview-title{{font-family:Georgia,"Times New Roman",serif;font-size:18px;font-weight:700;color:#102a43;margin:0 0 10px;text-align:left}}
 .gl-official-letter__notice{{font-family:Georgia,"Times New Roman",serif;font-size:13px;line-height:1.55;color:#7c2d12;background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:10px 12px;margin:0 auto 12px;max-width:794px}}
-.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:6px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:54px 56px 36px;font-family:"Times New Roman",Georgia,serif;line-height:1.42;width:100%;max-width:794px;min-height:1123px;margin:0 auto;box-sizing:border-box;overflow:hidden;display:flex;flex-direction:column}}
+.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:6px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:28px 40px 24px;font-family:"Times New Roman",Georgia,serif;line-height:1.36;width:100%;max-width:794px;min-height:auto;margin:0 auto;box-sizing:border-box;overflow:hidden}}
 .gl-official-letter__watermark{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0}}
 .gl-official-letter__watermark-text{{transform:rotate(-28deg);font-size:48px;line-height:1.25;text-align:center;font-weight:800;letter-spacing:.06em;color:rgba(185,28,28,.16);text-shadow:0 1px 2px rgba(0,0,0,0.04)}}
 .gl-official-letter > *{{position:relative;z-index:1}}
 .gl-official-letter table{{width:100%;border-collapse:collapse}}
-.gl-official-letter__header{{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;margin:0 0 8px}}
+.gl-official-letter__header{{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;margin:0 0 6px}}
 .gl-official-letter__crest{{flex:0 0 110px;text-align:left}}
 .gl-official-letter__crest img{{width:84px;height:auto;display:block;object-fit:contain}}
 .gl-official-letter__heading{{flex:0 1 auto;margin-left:auto;text-align:center;padding-right:2px}}
 .gl-official-letter__heading-en{{font-size:19px;font-weight:700;line-height:1.25}}
-.gl-official-letter__heading-ar{{margin-top:6px;font-size:17px;font-weight:700;line-height:1.4;direction:rtl}}
-.gl-official-letter__ref{{margin-top:24px;font-size:16px;max-width:680px;margin-left:auto;margin-right:auto;width:100%}}
-.gl-official-letter__title{{margin:22px 0 16px;text-align:center;font-size:20px;font-weight:700;text-decoration:underline}}
-.gl-official-letter__para{{font-size:16px;line-height:1.85;text-align:justify;text-justify:inter-word;hyphens:auto;margin:0 auto 16px;max-width:680px;width:100%}}
+.gl-official-letter__heading-ar{{margin-top:5px;font-size:17px;font-weight:700;line-height:1.4;direction:rtl}}
+.gl-official-letter__ref{{margin-top:14px;font-size:15px;max-width:680px;margin-left:auto;margin-right:auto;width:100%}}
+.gl-official-letter__title{{margin:14px 0 12px;text-align:center;font-size:20px;font-weight:700;text-decoration:underline}}
+.gl-official-letter__para{{font-size:15.5pt;font-size:15.5px;line-height:1.65;text-align:justify;text-justify:inter-word;hyphens:auto;margin:0 auto 12px;max-width:680px;width:100%}}
 .gl-official-letter__para--last-center{{text-align:justify}}
-.gl-official-letter__grid{{margin:18px auto 22px;max-width:680px}}
-.gl-official-letter__grid td{{width:50%;padding:0 14px;text-align:center;vertical-align:top;font-size:16px;line-height:1.45}}
+.gl-official-letter__grid{{margin:12px auto 18px;max-width:680px}}
+.gl-official-letter__grid td{{width:50%;padding:0 14px;text-align:center;vertical-align:top;font-size:15.5px;line-height:1.4}}
 .gl-official-letter__cell-line{{display:block}}
-.gl-official-letter__liability{{margin-top:14px;max-width:680px}}
-.gl-official-letter__body{{flex:1 1 auto}}
-.gl-official-letter__footer{{margin-top:auto;padding-top:10px;border-top:1px solid #111}}
-.gl-official-letter__footer td{{font-size:14px;padding-top:6px;vertical-align:top}}
+.gl-official-letter__qualifications{{margin:10px auto 16px;max-width:740px;font-size:11.5px;line-height:1.32;table-layout:fixed}}
+.gl-official-letter__qualifications th,.gl-official-letter__qualifications td{{border:1px solid #222;padding:4px 6px;vertical-align:top;text-align:left;word-break:break-word}}
+.gl-official-letter__qualifications th{{background:#f3f4f6;font-weight:700;text-align:center}}
+.gl-official-letter__qualifications .gl-official-letter__qual-num{{text-align:center;white-space:nowrap}}
+.gl-official-letter__qual-name{{font-weight:700}}
+.gl-official-letter__qual-degree{{font-size:11px;color:#1f2937}}
+.gl-official-letter__liability{{margin-top:10px;max-width:680px}}
+.gl-official-letter__body{{display:block}}
+.gl-official-letter__footer{{margin-top:18px;padding-top:8px;border-top:1px solid #111}}
+.gl-official-letter__footer td{{font-size:13.5px;padding-top:6px;vertical-align:top}}
 .gl-official-letter__footer-mid{{text-align:center}}
 .gl-official-letter__footer-right{{text-align:right}}
+@media print {{
+  .gl-official-letter{{border:none;box-shadow:none;border-radius:0;padding:0;max-width:none}}
+}}
 @media (max-width: 820px) {{
-  .gl-official-letter{{padding:32px 22px 24px;min-height:auto}}
+  .gl-official-letter{{padding:24px 18px 18px;min-height:auto}}
   .gl-official-letter__header{{gap:12px}}
   .gl-official-letter__crest{{flex:0 0 88px}}
   .gl-official-letter__crest img{{width:64px}}
   .gl-official-letter__heading{{padding-right:0}}
   .gl-official-letter__heading-en{{font-size:17px}}
   .gl-official-letter__heading-ar{{font-size:15px}}
-  .gl-official-letter__ref{{font-size:15px}}
+  .gl-official-letter__ref{{font-size:14px}}
   .gl-official-letter__title{{font-size:18px}}
-  .gl-official-letter__para{{font-size:15px;line-height:1.7;text-align:justify}}
+  .gl-official-letter__para{{font-size:14.5px;line-height:1.6;text-align:justify}}
   .gl-official-letter__grid td{{display:block;width:100%;padding:0 0 14px}}
+  .gl-official-letter__qualifications{{font-size:11px}}
   .gl-official-letter__footer td{{display:block;text-align:left!important;padding-top:4px}}
   .gl-official-letter__footer-mid,.gl-official-letter__footer-right{{text-align:left}}
 }}
@@ -12552,21 +12774,7 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
     <p class="gl-official-letter__para">
       {esc(letter['certificate_line_1'])} {esc(letter['applicant_name'])} {esc(letter['certificate_line_2'])} {esc(letter['certificate_line_3'])}
     </p>
-    <table class="gl-official-letter__grid">
-      <tr>
-        <td>
-          <span class="gl-official-letter__cell-line">{esc(letter['degree_title'])}</span>
-          {subtitle_html}
-          <span class="gl-official-letter__cell-line">{esc(letter['identifier_label'])} {esc(letter['identifier_value'])}</span>
-        </td>
-        <td>
-          <span class="gl-official-letter__cell-line">{esc(letter['institute'])}</span>
-          <span class="gl-official-letter__cell-line">Affiliated with {esc(letter['university'])}</span>
-          <span class="gl-official-letter__cell-line">{esc(letter['year_of_passing'])}</span>
-          <span class="gl-official-letter__cell-line">{esc(letter['final_result_text'])}</span>
-        </td>
-      </tr>
-    </table>
+    {qualifications_block_html}
     <p class="gl-official-letter__para gl-official-letter__liability">
       This certificate is issued on the request of the applicant without any liability on the part of this Embassy whatsoever.
     </p>
