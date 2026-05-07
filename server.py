@@ -12913,41 +12913,58 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
     )
     qualifications = letter.get('qualifications') or []
     if len(qualifications) > 1:
-        # Phase-3 multi-qualification block: compact tabular layout.
+        # Multi-qualification block: stacked narrative two-column layout to
+        # match the MOH-Kuwait accepted sample (no borders, no table).  Each
+        # qualification renders as one row with a left (degree + identifier)
+        # column and a right (institute / university / grade) column.
+        def _missing(value):
+            text = (value or '').strip()
+            return not text or text == '—'
+
         rows_html = []
-        for idx, q in enumerate(qualifications, start=1):
-            ident = q['identifier_display'] if q.get('identifier_display') and q['identifier_display'] != '—' else ''
-            degree_html = (
-                f'<div class="gl-official-letter__qual-degree">{esc(q["degree_title_secondary"])}</div>'
-                if q.get('degree_title_secondary') else ''
-            )
+        for q in qualifications:
+            left_lines = [
+                f'<div class="gl-degree">{esc(q["qualification_label"])}</div>'
+            ]
+            if q.get('degree_title_secondary'):
+                left_lines.append(f'<div>{esc(q["degree_title_secondary"])}</div>')
+            ident_label = (q.get('identifier_type_label') or '').strip()
+            ident_value = (q.get('identifier_value') or '').strip()
+            if ident_value and ident_value != '—':
+                ident_line = f'{ident_label} {ident_value}'.strip()
+                left_lines.append(f'<div>{esc(ident_line)}</div>')
+
+            right_lines = []
+            institute = (q.get('institute') or '').strip()
+            year = (q.get('year_of_passing') or '').strip()
+            if not _missing(institute) and not _missing(year):
+                right_lines.append(f'<div>{esc(institute)}-{esc(year)}</div>')
+            elif not _missing(institute):
+                right_lines.append(f'<div>{esc(institute)}</div>')
+            elif not _missing(year):
+                right_lines.append(f'<div>{esc(year)}</div>')
+            university = (q.get('university') or '').strip()
+            if not _missing(university):
+                right_lines.append(f'<div>Affiliated with {esc(university)}</div>')
+            percentage = (q.get('final_percentage') or '').strip()
+            grade = (q.get('final_grade_label') or '').strip()
+            if not _missing(percentage) and not _missing(grade):
+                right_lines.append(f'<div>({esc(percentage)}% &ldquo;{esc(grade)}&rdquo;)</div>')
+            elif not _missing(percentage):
+                right_lines.append(f'<div>({esc(percentage)}%)</div>')
+            elif not _missing(grade):
+                right_lines.append(f'<div>(&ldquo;{esc(grade)}&rdquo;)</div>')
+
             rows_html.append(
-                '<tr>'
-                f'<td class="gl-official-letter__qual-num">{idx}</td>'
-                f'<td><div class="gl-official-letter__qual-name">{esc(q["qualification_label"])}</div>'
-                f'{degree_html}</td>'
-                f'<td>{esc(q["institute_university"])}</td>'
-                f'<td>{esc(ident)}</td>'
-                f'<td class="gl-official-letter__qual-num">{esc(q["year_of_passing"])}</td>'
-                f'<td class="gl-official-letter__qual-num">{esc(q["marks_display"])}</td>'
-                f'<td class="gl-official-letter__qual-num">{esc(q["percentage_display"])}</td>'
-                f'<td>{esc(q["final_grade_label"])}</td>'
-                '</tr>'
+                '<div class="gl-multi-qualification-row">'
+                f'<div class="gl-multi-qualification-left">{"".join(left_lines)}</div>'
+                f'<div class="gl-multi-qualification-right">{"".join(right_lines)}</div>'
+                '</div>'
             )
         qualifications_block_html = (
-            '<table class="gl-official-letter__qualifications">'
-            '<thead><tr>'
-            '<th>No.</th>'
-            '<th>Qualification</th>'
-            '<th>Institute / University</th>'
-            '<th>Identifier</th>'
-            '<th>Year</th>'
-            '<th>Marks / CGPA</th>'
-            '<th>Percentage</th>'
-            '<th>Grade</th>'
-            '</tr></thead>'
-            f'<tbody>{"".join(rows_html)}</tbody>'
-            '</table>'
+            '<div class="gl-multi-qualification-list">'
+            f'{"".join(rows_html)}'
+            '</div>'
         )
     else:
         # Single-qualification: keep the legacy 2-cell grid so the look of
@@ -13001,6 +13018,11 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 .gl-official-letter__qualifications .gl-official-letter__qual-num{{text-align:center;white-space:nowrap}}
 .gl-official-letter__qual-name{{font-weight:700}}
 .gl-official-letter__qual-degree{{font-size:11px;color:#1f2937}}
+.gl-multi-qualification-list{{margin:7mm auto 7mm;max-width:680px}}
+.gl-multi-qualification-row{{display:grid;grid-template-columns:42% 58%;column-gap:8mm;margin:4mm 0;break-inside:avoid;page-break-inside:avoid}}
+.gl-multi-qualification-left,.gl-multi-qualification-right{{text-align:center;font-size:11pt;line-height:1.28}}
+.gl-multi-qualification-left>div,.gl-multi-qualification-right>div{{display:block}}
+.gl-multi-qualification-list .gl-degree{{font-weight:600}}
 .gl-official-letter__liability{{margin-top:10px;max-width:680px}}
 .gl-official-letter__body{{display:block}}
 .gl-official-letter__footer{{position:absolute;left:0;right:0;bottom:0;margin-top:0;padding-top:8px;border-top:1px solid #111}}
@@ -13025,6 +13047,8 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
   .gl-official-letter__para{{font-size:14.5px;line-height:1.6;text-align:justify}}
   .gl-official-letter__grid td{{display:block;width:100%;padding:0 0 14px}}
   .gl-official-letter__qualifications{{font-size:11px}}
+  .gl-multi-qualification-row{{grid-template-columns:1fr;column-gap:0;row-gap:3mm}}
+  .gl-multi-qualification-left,.gl-multi-qualification-right{{font-size:14.5px}}
   .gl-official-letter__footer td{{display:block;text-align:left!important;padding-top:4px}}
   .gl-official-letter__footer-mid,.gl-official-letter__footer-right{{text-align:left}}
 }}
