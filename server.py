@@ -32062,11 +32062,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._cors_headers_if_api()
         self.end_headers()
 
-    def send_html(self, html, status=200):
+    def send_html(self, html, status=200, extra_headers=None):
         body = html.encode()
         self.send_response(status)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', len(body))
+        for header, value in (extra_headers or {}).items():
+            self.send_header(str(header), str(value))
         self._security_headers()
         self.end_headers()
         self.wfile.write(body)
@@ -32207,11 +32209,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         role = user.get('role') or ''
         return _default_redirect_for_role(role)
 
-    def render_template(self, template_name: str):
+    def render_template(self, template_name: str, extra_headers=None):
         template_path = Path(__file__).resolve().parent / 'templates' / template_name
         try:
             html = template_path.read_text(encoding='utf-8')
-            self.send_html(html)
+            self.send_html(html, extra_headers=extra_headers)
             return True
         except Exception:
             return False
@@ -32639,10 +32641,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/nurses/register/success':
             self.send_html(NURSES_REGISTER_SUCCESS_PAGE)
         elif path in ('/nurses/track', '/nurses/login'):
-            if not self.render_template('nurses_login.html'):
+            nurse_page_headers = {
+                'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            }
+            if not self.render_template('nurses_login.html', extra_headers=nurse_page_headers):
                 self.send_html(NURSES_TRACK_PAGE)
         elif path == '/nurses/grading-letter':
-            if not self.render_template('nurses_login.html'):
+            nurse_page_headers = {
+                'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            }
+            if not self.render_template('nurses_login.html', extra_headers=nurse_page_headers):
                 self.send_html(NURSES_TRACK_PAGE)
         elif path == '/nurses/accommodation':
             if not self.render_template('nurses_accommodation.html'):

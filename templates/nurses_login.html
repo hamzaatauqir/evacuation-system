@@ -4,9 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Nurses Login / Track</title>
-  <link rel="stylesheet" href="/static/css/cwa-ui.css">
+  <link rel="stylesheet" href="/static/css/cwa-ui.css?v=20260508-corrections-ui">
   <style>
     .nurse-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px}
+    .nurse-tabs .tab{background:#fff;border:1px solid #cbd5e1;color:var(--cwa-navy);font-weight:700}
+    .nurse-tabs .tab:hover{background:#eef4fd}
     .nurse-tabs .tab.is-active{background:var(--cwa-navy);border-color:var(--cwa-navy);color:#fff}
     .nurse-tab-panel{display:none}
     .nurse-tab-panel.is-active{display:block}
@@ -31,6 +33,7 @@
     .correction-card__help{font-size:12px;color:var(--cwa-muted)}
     .correction-form{display:none;gap:10px}
     .correction-form.is-open{display:grid}
+    .correction-card input[readonly]{background:#f8fbfd;color:var(--cwa-muted)}
     .correction-history{margin-top:14px}
     @media(max-width:640px){.nurse-tabs .tab{flex:1 1 100%;text-align:center}.nurse-info-grid{grid-template-columns:1fr}}
   </style>
@@ -613,7 +616,7 @@
     summary=summary||latestCorrectionSummary||{};
     const lockedFields=summary.locked_fields||nurseProfile.locked_correction_fields||[];
     const requests=summary.requests||nurseProfile.correction_requests||[];
-    target.innerHTML='<h3>Applicant Detail Corrections</h3>'
+    target.innerHTML='<h3>Correction Requests</h3>'
       +'<div class="nurse-alert warn"><strong>These identity and arrival fields are locked after submission.</strong><div style="margin-top:6px">If any of them are incorrect, submit a correction request below. Embassy staff must approve the request before your profile is updated.</div></div>'
       +lockedFields.map(function(field){
         const pending=Number(field.pending_request_id||0)>0;
@@ -624,8 +627,8 @@
         return '<div class="correction-card">'
           +'<div class="correction-card__top"><div><div style="font-weight:700;color:var(--cwa-navy)">'+esc(field.label)+'</div><div class="correction-card__value">'+esc(field.current_value||'—')+'</div><div class="correction-card__help">'+esc(field.help||'')+'</div></div><div>'+(pending?correctionStatusBadge('PENDING'):'')+'</div></div>'
           +(pending?'<div class="nurse-alert warn" style="margin:0"><strong>A request for this field is already pending review.</strong><div style="margin-top:6px">Requested value: '+esc(field.pending_requested_value||'—')+'</div></div>':'')
-          +'<div><button type="button" class="btn-outline" onclick="toggleCorrectionForm(\''+esc(field.name)+'\')" '+(pending?'disabled':'')+'>Request Correction</button></div>'
-          +'<div id="'+formId+'" class="correction-form"><div><label>Corrected value</label><input id="'+valueId+'" value=""></div><div><label>Reason for correction</label><textarea id="'+reasonId+'" rows="3" placeholder="Explain briefly why this field should be corrected."></textarea></div><div class="actions"><button type="button" onclick="submitCorrectionRequest(\''+esc(field.name)+'\')">Submit Request</button><span id="'+msgId+'" class="muted"></span></div></div>'
+          +'<div><button type="button" class="btn-outline" onclick="toggleCorrectionForm(\''+esc(field.name)+'\')" '+(pending?'disabled':'')+'>'+(pending?'Pending review':'Request Correction')+'</button></div>'
+          +'<div id="'+formId+'" class="correction-form"><div><label>Field to Correct</label><input value="'+esc(field.label||'')+'" readonly></div><div><label>Current Value</label><input value="'+esc(field.current_value||'')+'" readonly></div><div><label>Requested New Value</label><input id="'+valueId+'" value=""></div><div><label>Reason for Change</label><textarea id="'+reasonId+'" rows="3" placeholder="Explain briefly why this field should be corrected."></textarea></div><div class="actions"><button type="button" onclick="submitCorrectionRequest(\''+esc(field.name)+'\')">Submit Request</button><span id="'+msgId+'" class="muted"></span></div></div>'
           +'</div>';
       }).join('')
       +'<div class="correction-history"><h4>Correction Request History</h4>'+renderCorrectionHistoryRows(requests)+'</div>';
@@ -706,8 +709,8 @@
     out.className='panel';
     out.innerHTML='<div><h3 style="margin-top:0">Nurse Dashboard</h3><p class="muted">Reference: '+esc(x.reference_id)+' | '+esc(x.full_name)+' | Passport: '+esc(x.passport_number)+'</p></div>'
       +'<div class="nurse-tabs">'
-      +'<button type="button" class="tab is-active" data-tab="overview" onclick="switchNurseTab(\'overview\')">Overview</button>'
-      +'<button type="button" class="tab" data-tab="corrections" onclick="switchNurseTab(\'corrections\')">Corrections</button>'
+      +'<button type="button" class="tab" data-tab="overview" onclick="switchNurseTab(\'overview\')">Overview</button>'
+      +'<button type="button" class="tab is-active" data-tab="corrections" onclick="switchNurseTab(\'corrections\')">Correction Requests</button>'
       +'<button type="button" class="tab" data-tab="stay" onclick="switchNurseTab(\'stay\')">Stay Arrangement</button>'
       +'<button type="button" class="tab" data-tab="complaint" onclick="switchNurseTab(\'complaint\')">Complaint</button>'
       +'<button type="button" class="tab" data-tab="grading" onclick="switchNurseTab(\'grading\')">Grading Letter</button>'
@@ -715,8 +718,8 @@
       +'<button type="button" class="tab" data-tab="requests" onclick="switchNurseTab(\'requests\')">My Requests</button>'
       +'<button type="button" class="tab" data-tab="password" onclick="switchNurseTab(\'password\')">Change password</button>'
       +'</div>'
-      +'<section id="panel-overview" class="nurse-tab-panel is-active">'+renderOverview(x)+'</section>'
-      +'<section id="panel-corrections" class="nurse-tab-panel"><div id="correctionPanel">Open the Corrections tab to load correction requests.</div></section>'
+      +'<section id="panel-overview" class="nurse-tab-panel">'+renderOverview(x)+'</section>'
+      +'<section id="panel-corrections" class="nurse-tab-panel is-active"><div id="correctionPanel">Loading Correction Requests...</div></section>'
       +'<section id="panel-stay" class="nurse-tab-panel">'+renderStay(x)+'</section>'
       +'<section id="panel-complaint" class="nurse-tab-panel">'+renderComplaintTab()+'</section>'
       +'<section id="panel-grading" class="nurse-tab-panel"><div id="glPanel">Select the Grading Letter tab to load details.</div></section>'
@@ -730,6 +733,8 @@
       requests:x.correction_requests||[],
       locked_fields:x.locked_correction_fields||[]
     });
+    switchNurseTab('corrections');
+    loadCorrections(true);
     renderMyRequests();
     if(location.hash==='#grading-letter' || location.pathname.indexOf('/nurses/grading-letter')===0) switchNurseTab('grading');
   }
