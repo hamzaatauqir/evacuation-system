@@ -305,6 +305,9 @@ def _init_grading_letter_db(db):
         internal_notes TEXT DEFAULT '',
         letter_path TEXT DEFAULT '',
         letter_pdf_path TEXT DEFAULT '',
+        document_visit_email_sent_at TEXT DEFAULT '',
+        document_visit_email_sent_by TEXT DEFAULT '',
+        document_visit_email_error TEXT DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         submitted_at TIMESTAMP,
@@ -434,6 +437,9 @@ def _init_grading_letter_db(db):
             ('internal_notes', "TEXT DEFAULT ''"),
             ('letter_path', "TEXT DEFAULT ''"),
             ('letter_pdf_path', "TEXT DEFAULT ''"),
+            ('document_visit_email_sent_at', "TEXT DEFAULT ''"),
+            ('document_visit_email_sent_by', "TEXT DEFAULT ''"),
+            ('document_visit_email_error', "TEXT DEFAULT ''"),
             ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
             ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
             ('submitted_at', 'TIMESTAMP'),
@@ -9444,6 +9450,17 @@ GL_STATUSES = {
 GL_ACTIVE_STATUSES = {'SUBMITTED', 'UNDER_REVIEW', 'CORRECTION_REQUIRED', 'APPROVED', 'LETTER_GENERATED'}
 GL_TERMINAL_STATUSES = {'ISSUED', 'REJECTED', 'CANCELLED'}
 GL_GRADE_LABELS = {'Excellent', 'Very Good', 'Good', 'Pass', 'Fail'}
+GL_QUALIFICATION_VERIFICATION_STATUSES = {
+    'PENDING': 'Pending Review',
+    'VERIFIED': 'Verified',
+    'CORRECTED_BY_OPERATOR': 'Corrected by Operator',
+    'VERIFICATION_OVERRIDE': 'Verification Override',
+}
+GL_VERIFIED_QUALIFICATION_STATUSES = {'VERIFIED', 'VERIFICATION_OVERRIDE'}
+GL_DOCUMENT_VISIT_NOTICE_SUBJECT = 'Grading Letter Request Received – Original Documents Required'
+GL_DOCUMENT_VISIT_NOTICE_ELIGIBLE_STATUSES = {
+    'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'LETTER_GENERATED'
+}
 GL_STUDENT_IDENTIFIER_TYPES = (
     'Student Number',
     'Seat Number',
@@ -10089,7 +10106,7 @@ def _gl_sync_first_qualification_from_flat(db, application_id, validated_payload
     if not application_id:
         return
     existing = db.execute(
-        "SELECT id FROM gl_application_qualifications "
+        "SELECT * FROM gl_application_qualifications "
         "WHERE application_id = ? ORDER BY sort_order ASC, id ASC LIMIT 1",
         [int(application_id)]
     ).fetchone()
@@ -10121,6 +10138,17 @@ def _gl_sync_first_qualification_from_flat(db, application_id, validated_payload
         'remarks': _gl_clean_text(validated_payload.get('remarks'), 1000),
     }
     if existing:
+        current = _gl_qualification_row_to_dict(existing)
+        changed = any(
+            str(current.get(key) or '') != str(fields.get(key) or '')
+            for key in fields
+        )
+        if changed:
+            fields.update({
+                'verification_status': 'CORRECTED_BY_OPERATOR',
+                'verified_by': '',
+                'verified_at': '',
+            })
         sets = ', '.join(f"{k} = ?" for k in fields)
         db.execute(
             f"UPDATE gl_application_qualifications SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -10174,6 +10202,103 @@ def _gl_fetch_qualifications(db, application_id):
     except sqlite3.OperationalError:
         return []
     return [_gl_qualification_row_to_dict(r) for r in rows]
+
+
+def _gl_qualification_status_label(status):
+    code = (status or 'PENDING').strip().upper() or 'PENDING'
+    return GL_QUALIFICATION_VERIFICATION_STATUSES.get(
+        code, code.replace('_', ' ').title()
+    )
+
+
+def _gl_is_qualification_verified(status):
+    return (status or 'PENDING').strip().upper() in GL_VERIFIED_QUALIFICATION_STATUSES
+
+
+def _gl_attach_qualification_verification_summary(d):
+    qualifications = list(d.get('qualifications') or [])
+    verified_count = 0
+    for idx, q in enumerate(qualifications, start=1):
+        status = (q.get('verification_status') or 'PENDING').strip().upper() or 'PENDING'
+        q['verification_status'] = status
+        q['verification_status_label'] = _gl_qualification_status_label(status)
+        q['is_verified'] = _gl_is_qualification_verified(status)
+        q['display_title'] = (
+            _gl_clean_text(q.get('qualification_label'), 220)
+            or _gl_clean_text(q.get('degree_title'), 220)
+            or f'Qualification {idx}'
+        )
+        q['display_identifier'] = _gl_clean_text(
+            q.get('identifier_value') or q.get('student_no'), 120
+        )
+        if q['is_verified']:
+            verified_count += 1
+    total = len(qualifications)
+    d['qualifications'] = qualifications
+    d['verified_qualification_count'] = verified_count
+    d['total_qualification_count'] = total
+    d['all_qualifications_verified'] = bool(total) and verified_count == total
+    d['qualification_verification_summary'] = {
+        'verified': verified_count,
+        'total': total,
+        'remaining': max(total - verified_count, 0),
+        'all_verified': bool(total) and verified_count == total,
+        'text': f'{verified_count} of {total} qualifications verified' if total else '0 qualifications verified',
+    }
+    return d
+
+
+def _gl_fetch_target_qualification(db, application_id, qualification_id=None, qualification_index=None):
+    if db is None or not application_id:
+        return None
+    if qualification_id:
+        row = db.execute(
+            "SELECT * FROM gl_application_qualifications WHERE application_id = ? AND id = ? LIMIT 1",
+            [int(application_id), int(qualification_id)]
+        ).fetchone()
+        return _gl_qualification_row_to_dict(row) if row else None
+    try:
+        offset = int(qualification_index or 0)
+    except Exception:
+        offset = 0
+    row = db.execute(
+        "SELECT * FROM gl_application_qualifications "
+        "WHERE application_id = ? ORDER BY sort_order ASC, id ASC LIMIT 1 OFFSET ?",
+        [int(application_id), max(offset, 0)]
+    ).fetchone()
+    return _gl_qualification_row_to_dict(row) if row else None
+
+
+def _gl_sync_parent_from_first_qualification(db, application_id):
+    if db is None or not application_id:
+        return
+    first = _gl_fetch_target_qualification(db, application_id, qualification_index=0)
+    if not first:
+        return
+    fields = {
+        'qualification_code': first.get('qualification_code') or '',
+        'qualification_other': first.get('qualification_other') or '',
+        'degree_title': first.get('degree_title') or '',
+        'student_no': first.get('student_no') or first.get('identifier_value') or '',
+        'student_identifier_type': _gl_student_identifier_type(first.get('identifier_type')),
+        'institute': first.get('institute') or '',
+        'university': first.get('university') or '',
+        'year_of_passing': _gl_qualification_text_value(first.get('year_of_passing')),
+        'mode': first.get('mode') or '',
+        'total_marks': _gl_qualification_text_value(first.get('total_marks')),
+        'obtained_marks': _gl_qualification_text_value(first.get('obtained_marks')),
+        'entered_percentage': _gl_qualification_text_value(first.get('entered_percentage')),
+        'entered_gpa': _gl_qualification_text_value(first.get('entered_gpa')),
+        'computed_percentage': _gl_qualification_text_value(first.get('computed_percentage')),
+        'final_percentage': _gl_qualification_text_value(first.get('final_percentage')),
+        'final_grade_label': first.get('final_grade_label') or '',
+        'scale_version_id': first.get('scale_version_id'),
+    }
+    sets = ', '.join(f"{k} = ?" for k in fields)
+    db.execute(
+        f"UPDATE gl_applications SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [*fields.values(), int(application_id)]
+    )
 
 
 def _gl_synth_qualification_from_flat(d):
@@ -10248,6 +10373,7 @@ def _gl_attach_qualifications(d, db=None):
         # entry from the flat fields so the API contract is stable.
         qualifications = [_gl_synth_qualification_from_flat(d)]
     d['qualifications'] = qualifications
+    _gl_attach_qualification_verification_summary(d)
     return d
 
 
@@ -10278,6 +10404,113 @@ def _gl_application_dict(row, db=None):
     }
     _gl_attach_qualifications(d, db=db)
     return d
+
+
+def _gl_notice_actor_meta(actor):
+    if isinstance(actor, dict):
+        return (
+            _gl_clean_text(actor.get('role') or 'system', 60),
+            _gl_clean_text(actor.get('user') or actor.get('username') or actor.get('name') or 'system', 120),
+        )
+    actor_text = _gl_clean_text(actor or 'system', 120)
+    return ('system', actor_text or 'system')
+
+
+def _gl_document_visit_notice_email_body(app, qualifications=None):
+    app_data = app if isinstance(app, dict) else _gl_application_dict(app)
+    identity = app_data.get('letter_identity') or {}
+    nurse = app_data.get('nurse') or {}
+    nurse_name = (
+        _gl_clean_text(identity.get('full_name'), 220)
+        or _gl_clean_text(nurse.get('full_name'), 220)
+        or 'Nurse'
+    )
+    return (
+        f"Dear {nurse_name},\n\n"
+        "Your grading letter request has been received by the Embassy of Pakistan, Kuwait.\n\n"
+        "You are requested to visit the Embassy with your original educational documents/certificates for verification. "
+        "The grading letter will be processed after verification of the original documents by the Embassy staff.\n\n"
+        "Please bring:\n"
+        "- Original nursing qualification certificates/degrees\n"
+        "- Original marks sheets/transcripts\n"
+        "- Passport or Civil ID\n"
+        "- Any related registration/serial/roll number document\n\n"
+        "Regards,\n"
+        "Community Welfare Wing\n"
+        "Embassy of Pakistan, Kuwait"
+    )
+
+
+def _gl_send_document_visit_notice(db, app, actor):
+    app_data = app if isinstance(app, dict) else _gl_application_dict(app, db=db)
+    app_id = int(app_data.get('id') or 0)
+    actor_role, actor_id = _gl_notice_actor_meta(actor)
+    identity = app_data.get('letter_identity') or {}
+    nurse = app_data.get('nurse') or {}
+    to_email = _first_value(
+        identity.get('email'),
+        nurse.get('email'),
+        app_data.get('email_snapshot'),
+        app_data.get('nurse_email'),
+    )
+    to_email = _gl_clean_text(to_email, 320)
+    if not to_email:
+        reason = 'No email is available for this nurse.'
+        db.execute(
+            "UPDATE gl_applications SET document_visit_email_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [reason, app_id]
+        )
+        _gl_write_audit(
+            db, app_id, actor_role, actor_id,
+            'document_visit_email_failed', 'document_visit_email', '', '',
+            reason
+        )
+        return {'status': 'skipped', 'reason': 'missing_email'}
+    if not _is_valid_email_loose(to_email):
+        reason = f'Invalid nurse email: {to_email}'
+        db.execute(
+            "UPDATE gl_applications SET document_visit_email_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [reason, app_id]
+        )
+        _gl_write_audit(
+            db, app_id, actor_role, actor_id,
+            'document_visit_email_failed', 'document_visit_email', '', to_email,
+            reason
+        )
+        return {'status': 'skipped', 'reason': 'invalid_email'}
+    body = _gl_document_visit_notice_email_body(app_data, app_data.get('qualifications') or [])
+    send_result = send_notification_email(
+        to_email,
+        GL_DOCUMENT_VISIT_NOTICE_SUBJECT,
+        body,
+    )
+    if send_result.get('ok'):
+        db.execute(
+            """UPDATE gl_applications
+               SET document_visit_email_sent_at = CURRENT_TIMESTAMP,
+                   document_visit_email_sent_by = ?,
+                   document_visit_email_error = '',
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [actor_id, app_id]
+        )
+        _gl_write_audit(
+            db, app_id, actor_role, actor_id,
+            'document_visit_email_sent', 'document_visit_email', '', to_email,
+            f'Sent original-document visit notice to {to_email}.'
+        )
+        return {'status': 'sent', 'reason': 'sent'}
+    reason = _gl_clean_text(send_result.get('reason') or 'send_failed', 300)
+    db.execute(
+        "UPDATE gl_applications SET document_visit_email_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [reason, app_id]
+    )
+    _gl_write_audit(
+        db, app_id, actor_role, actor_id,
+        'document_visit_email_failed', 'document_visit_email', '', to_email,
+        reason
+    )
+    return {'status': 'failed', 'reason': reason}
 
 
 def _gl_invalid_mton_response():
@@ -10415,6 +10648,21 @@ def api_gl_nurse_submit(data):
             'submitted', note=submit_note
         )
         db.commit()
+        try:
+            fresh = _gl_fetch_application(db, app_id)
+            if fresh:
+                _gl_send_document_visit_notice(
+                    db,
+                    _gl_admin_app_dict(fresh, db=db),
+                    {'role': 'nurse', 'user': nurse.get('reference_id') or nurse.get('id')}
+                )
+                db.commit()
+        except Exception as email_exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[GradingLetter] document visit notice after submit failed: {email_exc}", flush=True)
         return {
             'success': True,
             'reference': ref_no,
@@ -10490,6 +10738,21 @@ def api_gl_nurse_resubmit(data):
                 f'Updated grading-letter qualifications: {qualification_count} qualification(s) submitted.'
             )
         db.commit()
+        try:
+            fresh = _gl_fetch_application(db, app_id)
+            if fresh:
+                _gl_send_document_visit_notice(
+                    db,
+                    _gl_admin_app_dict(fresh, db=db),
+                    {'role': 'nurse', 'user': nurse.get('reference_id') or nurse.get('id')}
+                )
+                db.commit()
+        except Exception as email_exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[GradingLetter] document visit notice after resubmit failed: {email_exc}", flush=True)
         success_message = 'Grading letter request resubmitted successfully.' if old.get('status') == 'CORRECTION_REQUIRED' else 'Submitted grading letter request updated successfully.'
         return {'success': True, 'reference': old.get('ref_no'), 'qualification_count': qualification_count, 'message': success_message}
     except ValueError as exc:
@@ -12477,6 +12740,7 @@ def _gl_letter_context(app):
     subtitle = _gl_qualification_subtitle(d)
     warnings = []
     blockers = []
+    verification_summary = d.get('qualification_verification_summary') or {}
     for idx, q in enumerate(formatted_quals):
         prefix = f'Qualification {idx + 1}: ' if is_multi else ''
         for label, value in (
@@ -12503,6 +12767,8 @@ def _gl_letter_context(app):
         blockers.append('Missing Applicant Name')
     if not passport_number:
         blockers.append('Missing Passport Number')
+    if raw_quals and not verification_summary.get('all_verified'):
+        blockers.append('All qualifications must be verified before generating the final grading letter.')
     certificate_line_2 = f"{relation_text} and holding Pakistani Passport No. {passport_number or '—'}"
     if passport_issue_date:
         certificate_line_2 += f" Dated {passport_issue_date}"
@@ -12640,6 +12906,7 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
     preview_banner = (
         f'<div class="gl-official-letter__preview-title">{esc(preview_title)}</div>' if preview_title else ''
     )
+    preview_class = ' gl-official-letter--preview' if include_watermark else ''
     subtitle_html = (
         f'<div class="gl-official-letter__cell-line">({esc(letter.get("qualification_subtitle") or "")})</div>'
         if letter.get('qualification_subtitle') else ''
@@ -12708,18 +12975,19 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 .gl-official-letter__preview-title{{font-family:Georgia,"Times New Roman",serif;font-size:18px;font-weight:700;color:#102a43;margin:0 0 10px;text-align:left}}
 .gl-official-letter__notice{{font-family:Georgia,"Times New Roman",serif;font-size:13px;line-height:1.55;color:#7c2d12;background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:10px 12px;margin:0 auto 12px;max-width:794px}}
 .gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:6px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:28px 40px 24px;font-family:"Times New Roman",Georgia,serif;line-height:1.36;width:100%;max-width:794px;min-height:auto;margin:0 auto;box-sizing:border-box;overflow:hidden}}
-.gl-official-letter__watermark{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0}}
-.gl-official-letter__watermark-text{{transform:rotate(-28deg);font-size:48px;line-height:1.25;text-align:center;font-weight:800;letter-spacing:.06em;color:rgba(185,28,28,.16);text-shadow:0 1px 2px rgba(0,0,0,0.04)}}
-.gl-official-letter > *{{position:relative;z-index:1}}
+.gl-official-letter--preview{{width:min(210mm,100%);min-height:297mm;padding:12mm 14mm 12mm}}
+.gl-official-letter__watermark{{position:absolute;inset:0;pointer-events:none;z-index:0}}
+.gl-official-letter__watermark-text{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-28deg);font-size:34pt;line-height:1.2;text-align:center;font-weight:800;letter-spacing:.04em;color:rgba(160,30,30,.13);text-shadow:none;white-space:pre-line}}
+.gl-official-letter__body,.gl-official-letter__footer{{position:relative;z-index:1}}
 .gl-official-letter table{{width:100%;border-collapse:collapse}}
-.gl-official-letter__header{{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;margin:0 0 6px}}
+.gl-official-letter__header{{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;margin:0 0 4px}}
 .gl-official-letter__crest{{flex:0 0 110px;text-align:left}}
 .gl-official-letter__crest img{{width:84px;height:auto;display:block;object-fit:contain}}
 .gl-official-letter__heading{{flex:0 1 auto;margin-left:auto;text-align:center;padding-right:2px}}
 .gl-official-letter__heading-en{{font-size:19px;font-weight:700;line-height:1.25}}
 .gl-official-letter__heading-ar{{margin-top:5px;font-size:17px;font-weight:700;line-height:1.4;direction:rtl}}
-.gl-official-letter__ref{{margin-top:14px;font-size:15px;max-width:680px;margin-left:auto;margin-right:auto;width:100%}}
-.gl-official-letter__title{{margin:14px 0 12px;text-align:center;font-size:20px;font-weight:700;text-decoration:underline}}
+.gl-official-letter__ref{{margin-top:10px;font-size:15px;max-width:680px;margin-left:auto;margin-right:auto;width:100%}}
+.gl-official-letter__title{{margin:12px 0 10px;text-align:center;font-size:20px;font-weight:700;text-decoration:underline}}
 .gl-official-letter__para{{font-size:15.5pt;font-size:15.5px;line-height:1.65;text-align:justify;text-justify:inter-word;hyphens:auto;margin:0 auto 12px;max-width:680px;width:100%}}
 .gl-official-letter__para--last-center{{text-align:justify}}
 .gl-official-letter__grid{{margin:12px auto 18px;max-width:680px}}
@@ -12742,6 +13010,7 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 }}
 @media (max-width: 820px) {{
   .gl-official-letter{{padding:24px 18px 18px;min-height:auto}}
+  .gl-official-letter--preview{{width:100%;min-height:auto;padding:24px 18px 18px}}
   .gl-official-letter__header{{gap:12px}}
   .gl-official-letter__crest{{flex:0 0 88px}}
   .gl-official-letter__crest img{{width:64px}}
@@ -12759,7 +13028,7 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 </style>
 {preview_banner}
 {notice_html}
-<div class="gl-official-letter grading-letter-page">
+<div class="gl-official-letter{preview_class} grading-letter-page">
   {watermark_html}
   <div class="gl-official-letter__body">
     <div class="gl-official-letter__header">
@@ -12942,6 +13211,54 @@ def api_admin_gl_detail(app_id, user):
             db.close()
 
 
+def api_admin_gl_send_document_visit_notices(data, user):
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    if not gl_user_can_manage(user):
+        return {'success': False, 'error': 'Unauthorized'}
+    db = get_db()
+    try:
+        eligible_rows = db.execute(
+            f"""SELECT id
+                FROM gl_applications
+                WHERE status IN ({','.join(['?'] * len(GL_DOCUMENT_VISIT_NOTICE_ELIGIBLE_STATUSES))})
+                  AND COALESCE(document_visit_email_sent_at, '') = ''
+                ORDER BY id ASC""",
+            [*sorted(GL_DOCUMENT_VISIT_NOTICE_ELIGIBLE_STATUSES)]
+        ).fetchall()
+        sent = 0
+        skipped = 0
+        failed = 0
+        for item in eligible_rows:
+            row = _gl_fetch_application(db, item['id'])
+            if not row:
+                skipped += 1
+                continue
+            result = _gl_send_document_visit_notice(
+                db,
+                _gl_admin_app_dict(row, user, db=db),
+                user
+            )
+            db.commit()
+            outcome = result.get('status')
+            if outcome == 'sent':
+                sent += 1
+            elif outcome == 'failed':
+                failed += 1
+            else:
+                skipped += 1
+        return {'success': True, 'sent': sent, 'skipped': skipped, 'failed': failed}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[GradingLetter] bulk document visit notices failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Document visit notices could not be sent.'}
+    finally:
+        db.close()
+
+
 def _gl_transition(db, app, user, new_status, event_type, note=''):
     old_status = app.get('status') or ''
     app_id = app.get('id')
@@ -12956,6 +13273,30 @@ def _gl_transition(db, app, user, new_status, event_type, note=''):
         [new_status, app_id]
     )
     _gl_write_audit(db, app_id, user.get('role'), user.get('user'), event_type, 'status', old_status, new_status, note)
+
+
+def _gl_update_application_shared_fields(db, app_id, app, data, user, note='Admin/Nurses desk correction'):
+    updates = {}
+    if 'internal_notes' in data:
+        updates['internal_notes'] = _gl_clean_text(data.get('internal_notes'), 2000)
+    if 'relation_override' in data:
+        updates['relation_override'] = _gl_clean_text(data.get('relation_override'), 180)
+    if 'father_name' in data:
+        updates['father_name_snapshot'] = _gl_clean_text(data.get('father_name'), 180)
+    if not updates:
+        return {}
+    sets = ', '.join(f"{k} = ?" for k in updates)
+    db.execute(
+        f"UPDATE gl_applications SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [*updates.values(), app_id]
+    )
+    for key, new_value in updates.items():
+        if str(app.get(key) or '') != str(new_value or ''):
+            _gl_write_audit(
+                db, app_id, user.get('role'), user.get('user'),
+                'field_edit', key, app.get(key), new_value, note
+            )
+    return updates
 
 
 def api_admin_gl_action(data, user):
@@ -12986,13 +13327,7 @@ def api_admin_gl_action(data, user):
             # for the matching qualification; route it onto the child row
             # rather than the parent (which has no such column).
             qualification_remarks = payload.pop('remarks', '') if 'remarks' in payload else ''
-            internal_notes = _gl_clean_text(data.get('internal_notes'), 2000)
-            if 'internal_notes' in data:
-                payload['internal_notes'] = internal_notes
-            if 'relation_override' in data:
-                payload['relation_override'] = _gl_clean_text(data.get('relation_override'), 180)
-            if 'father_name' in data:
-                payload['father_name_snapshot'] = _gl_clean_text(data.get('father_name'), 180)
+            _gl_update_application_shared_fields(db, app_id, app, data, user)
             payload['override_reason'] = ''
             sets = [f"{k} = ?" for k in payload]
             db.execute(
@@ -13010,6 +13345,114 @@ def api_admin_gl_action(data, user):
             sync_payload = dict(payload)
             sync_payload['remarks'] = qualification_remarks
             _gl_sync_first_qualification_from_flat(db, app_id, sync_payload)
+        elif action == 'edit-qualification':
+            if status in {'APPROVED', 'LETTER_GENERATED', 'ISSUED', 'REJECTED', 'CANCELLED'}:
+                return {'success': False, 'error': 'This request cannot be edited in its current status.'}
+            qualification = _gl_fetch_target_qualification(
+                db,
+                app_id,
+                qualification_id=data.get('qualification_id'),
+                qualification_index=data.get('qualification_index'),
+            )
+            if not qualification:
+                return {'success': False, 'error': 'Qualification not found.'}
+            _gl_update_application_shared_fields(db, app_id, app, data, user)
+            payload = _gl_validate_application_payload(data, db)
+            qualification_number = max(1, int(qualification.get('sort_order') or 0) + 1)
+            code = payload.get('qualification_code') or ''
+            other = payload.get('qualification_other') or ''
+            fields = {
+                'qualification_code': code,
+                'qualification_label': _gl_qualification_label(code, other),
+                'qualification_other': other,
+                'degree_title': payload.get('degree_title') or '',
+                'institute': payload.get('institute') or '',
+                'university': payload.get('university') or '',
+                'identifier_type': _gl_student_identifier_type(payload.get('student_identifier_type')),
+                'identifier_value': payload.get('student_no') or '',
+                'student_no': payload.get('student_no') or '',
+                'year_of_passing': _gl_qualification_text_value(payload.get('year_of_passing')),
+                'mode': payload.get('mode') or '',
+                'total_marks': _gl_qualification_text_value(payload.get('total_marks')),
+                'obtained_marks': _gl_qualification_text_value(payload.get('obtained_marks')),
+                'entered_percentage': _gl_qualification_text_value(payload.get('entered_percentage')),
+                'entered_gpa': _gl_qualification_text_value(payload.get('entered_gpa')),
+                'computed_percentage': _gl_qualification_text_value(payload.get('computed_percentage')),
+                'final_percentage': _gl_qualification_text_value(payload.get('final_percentage')),
+                'final_grade_label': payload.get('final_grade_label') or '',
+                'scale_version_id': payload.get('scale_version_id'),
+                'remarks': _gl_clean_text(data.get('remarks'), 1000),
+            }
+            changed_keys = [
+                key for key, new_value in fields.items()
+                if str(qualification.get(key) or '') != str(new_value or '')
+            ]
+            if changed_keys:
+                fields.update({
+                    'verification_status': 'CORRECTED_BY_OPERATOR',
+                    'verified_by': '',
+                    'verified_at': '',
+                })
+            sets = ', '.join(f"{k} = ?" for k in fields)
+            db.execute(
+                f"UPDATE gl_application_qualifications SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [*fields.values(), int(qualification.get('id') or 0)]
+            )
+            for key in changed_keys:
+                _gl_write_audit(
+                    db, app_id, user.get('role'), user.get('user'),
+                    'qualification_field_edit',
+                    f'qualification_{qualification_number}.{key}',
+                    qualification.get(key), fields.get(key),
+                    f'Qualification {qualification_number} corrected by operator/admin.'
+                )
+            if changed_keys and qualification.get('verification_status') != 'CORRECTED_BY_OPERATOR':
+                _gl_write_audit(
+                    db, app_id, user.get('role'), user.get('user'),
+                    'qualification_status',
+                    f'qualification_{qualification_number}.verification_status',
+                    qualification.get('verification_status'),
+                    'CORRECTED_BY_OPERATOR',
+                    f'Qualification {qualification_number} requires reverification after operator correction.'
+                )
+            _gl_sync_parent_from_first_qualification(db, app_id)
+            if qualification_number == 1 and changed_keys:
+                db.execute(
+                    "UPDATE gl_applications SET override_reason = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    [app_id]
+                )
+        elif action == 'verify-qualification':
+            if status not in {'UNDER_REVIEW', 'APPROVED'}:
+                return {'success': False, 'error': 'Qualifications can only be verified while a request is under review or approved.'}
+            qualification = _gl_fetch_target_qualification(
+                db,
+                app_id,
+                qualification_id=data.get('qualification_id'),
+                qualification_index=data.get('qualification_index'),
+            )
+            if not qualification:
+                return {'success': False, 'error': 'Qualification not found.'}
+            qualification_number = max(1, int(qualification.get('sort_order') or 0) + 1)
+            verifier = _gl_clean_text(user.get('user') or user.get('username') or 'system', 120)
+            db.execute(
+                """UPDATE gl_application_qualifications
+                   SET verification_status = 'VERIFIED',
+                       verified_by = ?,
+                       verified_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [verifier, int(qualification.get('id') or 0)]
+            )
+            _gl_write_audit(
+                db, app_id, user.get('role'), user.get('user'),
+                'verify_qualification',
+                f'qualification_{qualification_number}.verification_status',
+                qualification.get('verification_status'),
+                'VERIFIED',
+                f'Qualification {qualification_number} marked verified.'
+            )
+        elif action == 'override-qualification':
+            return {'success': False, 'error': 'Per-qualification verification override is not enabled in this phase.'}
         elif action == 'override':
             if status != 'UNDER_REVIEW':
                 return {'success': False, 'error': 'Start review before applying an override.'}
@@ -13073,7 +13516,11 @@ def api_admin_gl_action(data, user):
                 return {'success': False, 'error': 'Only approved requests can generate a letter.'}
             fresh_letter = _gl_letter_context(row)
             if fresh_letter.get('generation_blockers'):
-                return {'success': False, 'error': 'Official letter cannot be generated until all required fields are completed: ' + ', '.join(fresh_letter['generation_blockers'])}
+                blockers = list(fresh_letter.get('generation_blockers') or [])
+                verification_blocker = 'All qualifications must be verified before generating the final grading letter.'
+                if verification_blocker in blockers:
+                    return {'success': False, 'error': verification_blocker}
+                return {'success': False, 'error': 'Official letter cannot be generated until all required fields are completed: ' + ', '.join(blockers)}
             rel_path = _gl_generate_letter_file(row)
             db.execute(
                 "UPDATE gl_applications SET letter_pdf_path = ?, letter_path = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -34788,6 +35235,16 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             except json.JSONDecodeError:
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_admin_gl_action(data, user)
+            self.send_json(result, 200 if result.get('success') else (403 if result.get('error') == 'Unauthorized' else 400))
+            return
+        elif path == '/api/admin/gl/send-document-visit-notices':
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_gl_send_document_visit_notices(data, user)
             self.send_json(result, 200 if result.get('success') else (403 if result.get('error') == 'Unauthorized' else 400))
             return
         elif path == '/api/admin/facility-occupancy/send-confirmation-campaign':
