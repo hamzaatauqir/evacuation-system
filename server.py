@@ -9870,19 +9870,59 @@ def _gl_validate_year(value):
     return year
 
 
-def _gl_validate_application_payload(data, db):
-    qualification_code = _gl_normalize_qualification_code(data.get('qualification_code') or data.get('qualification_type'))
+def _gl_normalize_qualifications_payload(data):
+    """Phase-2: turn an incoming submission payload into a list of
+    per-qualification sub-payloads suitable for individual validation.
+
+    Accepts either:
+    - {"qualifications": [ {...}, {...} ]} — preferred multi-qualification shape
+    - {"qualification_code": ..., "student_no": ..., ...} — legacy flat shape
+
+    Returns a non-empty list of dicts in submission order.  When the payload
+    only carries flat keys, those keys are wrapped into a single-element list,
+    so existing single-qualification submissions continue working unchanged.
+    """
+    if not isinstance(data, dict):
+        return [{}]
+    quals = data.get('qualifications')
+    if isinstance(quals, list) and quals:
+        cleaned = [q for q in quals if isinstance(q, dict)]
+        if cleaned:
+            return cleaned
+    legacy_keys = (
+        'qualification_code', 'qualification_type', 'qualification_other',
+        'degree_title', 'student_identifier_type', 'student_no_label',
+        'student_no', 'roll_no', 'institute', 'college',
+        'university', 'affiliating_body', 'year_of_passing',
+        'mode', 'total_marks', 'obtained_marks',
+        'entered_percentage', 'entered_gpa', 'remarks',
+    )
+    legacy = {k: data.get(k) for k in legacy_keys if data.get(k) is not None}
+    return [legacy] if legacy else [{}]
+
+
+def _gl_validate_single_qualification_payload(payload, db=None):
+    """Validate one qualification's worth of fields and compute its grade.
+
+    Identical rules to the legacy single-qualification validator; extracted so
+    multi-qualification submissions can call it once per entry.  Returns a
+    flat dict whose shape exactly matches the legacy
+    `_gl_validate_application_payload` return value, plus an optional
+    ``remarks`` string carried from the submission payload."""
+    qualification_code = _gl_normalize_qualification_code(
+        payload.get('qualification_code') or payload.get('qualification_type')
+    )
     if qualification_code not in GL_QUALIFICATIONS:
         raise ValueError(
             'Please select BSN Nursing 4 Years, Post RN BSN, General Nursing Diploma, Specialization / Midwifery, or Masters in Nursing (MSN).'
         )
-    degree_title = _gl_clean_text(data.get('degree_title'), 220)
+    degree_title = _gl_clean_text(payload.get('degree_title'), 220)
     student_identifier_type = _gl_normalize_student_identifier_type(
-        data.get('student_identifier_type') or data.get('student_no_label')
+        payload.get('student_identifier_type') or payload.get('student_no_label')
     )
-    student_no = _gl_clean_text(data.get('student_no') or data.get('roll_no'), 120)
-    institute = _gl_clean_text(data.get('institute') or data.get('college'), 220)
-    university = _gl_clean_text(data.get('university') or data.get('affiliating_body'), 220)
+    student_no = _gl_clean_text(payload.get('student_no') or payload.get('roll_no'), 120)
+    institute = _gl_clean_text(payload.get('institute') or payload.get('college'), 220)
+    university = _gl_clean_text(payload.get('university') or payload.get('affiliating_body'), 220)
     if not degree_title:
         raise ValueError('Degree title is required.')
     if not student_identifier_type:
@@ -9893,21 +9933,21 @@ def _gl_validate_application_payload(data, db):
         raise ValueError('College / Institute is required.')
     if not university:
         raise ValueError('University / Affiliating Body is required.')
-    year_of_passing = _gl_validate_year(data.get('year_of_passing'))
-    mode = _gl_clean_text(data.get('mode'), 20).upper()
+    year_of_passing = _gl_validate_year(payload.get('year_of_passing'))
+    mode = _gl_clean_text(payload.get('mode'), 20).upper()
     if mode not in {'MARKS', 'PERCENT', 'GPA'}:
         raise ValueError('Please select a grading mode.')
-    total_marks = _gl_to_float(data.get('total_marks'), 'Total marks') if mode == 'MARKS' else None
-    obtained_marks = _gl_to_float(data.get('obtained_marks'), 'Obtained marks') if mode == 'MARKS' else None
-    entered_percentage = _gl_to_float(data.get('entered_percentage'), 'Percentage') if mode == 'PERCENT' else None
-    entered_gpa = _gl_to_float(data.get('entered_gpa'), 'GPA obtained') if mode == 'GPA' else None
-    rounding_dp = _gl_rounding_dp(db)
+    total_marks = _gl_to_float(payload.get('total_marks'), 'Total marks') if mode == 'MARKS' else None
+    obtained_marks = _gl_to_float(payload.get('obtained_marks'), 'Obtained marks') if mode == 'MARKS' else None
+    entered_percentage = _gl_to_float(payload.get('entered_percentage'), 'Percentage') if mode == 'PERCENT' else None
+    entered_gpa = _gl_to_float(payload.get('entered_gpa'), 'GPA obtained') if mode == 'GPA' else None
+    rounding_dp = _gl_rounding_dp(db) if db is not None else 2
     computed_percentage = gl_compute_percentage(
         mode, total_marks=total_marks, obtained_marks=obtained_marks,
         entered_percentage=entered_percentage, entered_gpa=entered_gpa,
         rounding_dp=rounding_dp
     )
-    scale_id = _gl_active_scale_id(db)
+    scale_id = _gl_active_scale_id(db) if db is not None else None
     grade = gl_lookup_grade(computed_percentage, db=db, scale_id=scale_id)
     if grade not in GL_GRADE_LABELS:
         raise ValueError('Invalid grading scale: highest grade must be Excellent.')
@@ -9929,7 +9969,170 @@ def _gl_validate_application_payload(data, db):
         'final_percentage': computed_percentage,
         'final_grade_label': grade,
         'scale_version_id': scale_id,
+        'remarks': _gl_clean_text(payload.get('remarks'), 1000),
     }
+
+
+def _gl_validate_qualifications_payload(data, db):
+    """Validate either a multi-qualification or legacy flat submission payload.
+
+    Returns a list of validated qualification dicts in submission order.
+    Index 0 always matches the legacy ``_gl_validate_application_payload``
+    return shape and can drop straight into the legacy ``gl_applications``
+    flat columns. When more than one qualification is present, error messages
+    are prefixed with ``Qualification N:`` so the nurse can see which entry
+    needs a fix."""
+    qualifications = _gl_normalize_qualifications_payload(data)
+    validated = []
+    for idx, qpayload in enumerate(qualifications):
+        try:
+            validated.append(_gl_validate_single_qualification_payload(qpayload, db))
+        except ValueError as exc:
+            if len(qualifications) > 1:
+                raise ValueError(f'Qualification {idx + 1}: {exc}')
+            raise
+    if not validated:
+        raise ValueError('At least one qualification is required.')
+    return validated
+
+
+def _gl_validate_application_payload(data, db):
+    """Legacy single-qualification entry point.
+
+    Kept for the admin-edit and nurse-resubmit code paths that still operate
+    on one flat qualification.  Internally normalizes through the multi-
+    qualification helper and returns the first qualification's flat dict so
+    every existing UPDATE statement keeps working unchanged."""
+    return _gl_validate_qualifications_payload(data, db)[0]
+
+
+def _gl_qualification_text_value(value):
+    """Coerce numeric/None payload values into the TEXT shape stored in
+    gl_application_qualifications."""
+    if value is None:
+        return ''
+    return str(value)
+
+
+def _gl_replace_application_qualifications(db, application_id, qualifications):
+    """Phase-2 helper: rewrite the child qualification rows for an
+    application.  Deletes any existing children and inserts the supplied list
+    in submission order with verification_status='PENDING'.
+
+    ``qualifications`` is a list of normalized dicts as returned by
+    ``_gl_validate_single_qualification_payload`` (optionally extended with a
+    ``remarks`` string)."""
+    if not application_id:
+        return
+    db.execute(
+        "DELETE FROM gl_application_qualifications WHERE application_id = ?",
+        [int(application_id)]
+    )
+    cols = [
+        'application_id', 'qualification_code', 'qualification_label',
+        'qualification_other', 'degree_title', 'institute', 'university',
+        'identifier_type', 'identifier_value', 'student_no',
+        'year_of_passing', 'mode',
+        'total_marks', 'obtained_marks',
+        'entered_percentage', 'entered_gpa',
+        'computed_percentage', 'final_percentage',
+        'final_grade_label', 'scale_version_id',
+        'remarks', 'verification_status', 'sort_order',
+    ]
+    placeholders = ', '.join(['?'] * len(cols))
+    insert_sql = (
+        f"INSERT INTO gl_application_qualifications ({', '.join(cols)}) "
+        f"VALUES ({placeholders})"
+    )
+    for idx, q in enumerate(qualifications):
+        code = q.get('qualification_code') or ''
+        other = q.get('qualification_other') or ''
+        label = _gl_qualification_label(code, other)
+        identifier_type = _gl_student_identifier_type(q.get('student_identifier_type'))
+        student_no = q.get('student_no') or ''
+        db.execute(insert_sql, [
+            int(application_id),
+            code,
+            label,
+            other,
+            q.get('degree_title') or '',
+            q.get('institute') or '',
+            q.get('university') or '',
+            identifier_type,
+            student_no,
+            student_no,
+            _gl_qualification_text_value(q.get('year_of_passing')),
+            q.get('mode') or '',
+            _gl_qualification_text_value(q.get('total_marks')),
+            _gl_qualification_text_value(q.get('obtained_marks')),
+            _gl_qualification_text_value(q.get('entered_percentage')),
+            _gl_qualification_text_value(q.get('entered_gpa')),
+            _gl_qualification_text_value(q.get('computed_percentage')),
+            _gl_qualification_text_value(q.get('final_percentage')),
+            q.get('final_grade_label') or '',
+            q.get('scale_version_id'),
+            _gl_clean_text(q.get('remarks'), 1000),
+            'PENDING',
+            idx,
+        ])
+
+
+def _gl_sync_first_qualification_from_flat(db, application_id, validated_payload):
+    """Phase-2 helper: when admin/nurse edits one qualification through the
+    legacy flat path, mirror the new values onto the FIRST child row so the
+    `qualifications` array exposed by the read-side helpers stays consistent.
+
+    Leaves any additional child rows (qualifications 2+) untouched, since the
+    legacy flat-edit path has no way to address them.  Creates the first
+    child row from scratch if none exists yet (defensive — Phase-1 backfill
+    normally provides one)."""
+    if not application_id:
+        return
+    existing = db.execute(
+        "SELECT id FROM gl_application_qualifications "
+        "WHERE application_id = ? ORDER BY sort_order ASC, id ASC LIMIT 1",
+        [int(application_id)]
+    ).fetchone()
+    code = validated_payload.get('qualification_code') or ''
+    other = validated_payload.get('qualification_other') or ''
+    label = _gl_qualification_label(code, other)
+    identifier_type = _gl_student_identifier_type(validated_payload.get('student_identifier_type'))
+    student_no = validated_payload.get('student_no') or ''
+    fields = {
+        'qualification_code': code,
+        'qualification_label': label,
+        'qualification_other': other,
+        'degree_title': validated_payload.get('degree_title') or '',
+        'institute': validated_payload.get('institute') or '',
+        'university': validated_payload.get('university') or '',
+        'identifier_type': identifier_type,
+        'identifier_value': student_no,
+        'student_no': student_no,
+        'year_of_passing': _gl_qualification_text_value(validated_payload.get('year_of_passing')),
+        'mode': validated_payload.get('mode') or '',
+        'total_marks': _gl_qualification_text_value(validated_payload.get('total_marks')),
+        'obtained_marks': _gl_qualification_text_value(validated_payload.get('obtained_marks')),
+        'entered_percentage': _gl_qualification_text_value(validated_payload.get('entered_percentage')),
+        'entered_gpa': _gl_qualification_text_value(validated_payload.get('entered_gpa')),
+        'computed_percentage': _gl_qualification_text_value(validated_payload.get('computed_percentage')),
+        'final_percentage': _gl_qualification_text_value(validated_payload.get('final_percentage')),
+        'final_grade_label': validated_payload.get('final_grade_label') or '',
+        'scale_version_id': validated_payload.get('scale_version_id'),
+        'remarks': _gl_clean_text(validated_payload.get('remarks'), 1000),
+    }
+    if existing:
+        sets = ', '.join(f"{k} = ?" for k in fields)
+        db.execute(
+            f"UPDATE gl_application_qualifications SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [*fields.values(), int(existing['id'])]
+        )
+    else:
+        cols = ['application_id', *fields.keys(), 'verification_status', 'sort_order']
+        placeholders = ', '.join(['?'] * len(cols))
+        db.execute(
+            f"INSERT INTO gl_application_qualifications ({', '.join(cols)}) VALUES ({placeholders})",
+            [int(application_id), *fields.values(), 'PENDING', 0]
+        )
 
 
 def _gl_qualification_row_to_dict(row):
@@ -10143,7 +10346,13 @@ def api_gl_nurse_submit(data):
             return blocked
         if not _valid_mton_number(_normalize_mton_number(nurse.get('mton_number') or '')):
             return _gl_invalid_mton_response()
-        payload = _gl_validate_application_payload(data, db)
+        # Phase-2: validate every qualification independently. The first entry
+        # mirrors the legacy flat shape and is used for the gl_applications
+        # INSERT below; the full list is replicated into
+        # gl_application_qualifications so the API contract from Phase 1
+        # ("qualifications": [...]) reflects the real submission.
+        qualifications = _gl_validate_qualifications_payload(data, db)
+        payload = qualifications[0]
         submission_flags = _gl_validate_submission_flags(data)
         snapshot = _gl_snapshot_from_nurse(nurse)
         db.execute("BEGIN IMMEDIATE")
@@ -10193,11 +10402,23 @@ def api_gl_nurse_submit(data):
             vals
         )
         app_id = cur.lastrowid
-        _gl_write_audit(db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'), 'submitted', note='Submitted by nurse portal')
+        _gl_replace_application_qualifications(db, app_id, qualifications)
+        qualification_count = len(qualifications)
+        if qualification_count > 1:
+            submit_note = (
+                f'Submitted by nurse portal with {qualification_count} qualification(s).'
+            )
+        else:
+            submit_note = 'Submitted by nurse portal'
+        _gl_write_audit(
+            db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'),
+            'submitted', note=submit_note
+        )
         db.commit()
         return {
             'success': True,
             'reference': ref_no,
+            'qualification_count': qualification_count,
             'message': 'Grading letter request submitted successfully.'
         }
     except ValueError as exc:
@@ -10233,10 +10454,21 @@ def api_gl_nurse_resubmit(data):
         old = dict(row)
         if old.get('status') not in {'SUBMITTED', 'CORRECTION_REQUIRED'}:
             return {'success': False, 'error': 'Only submitted or correction-required requests can be updated from the nurse portal.'}
-        payload = _gl_validate_application_payload(data, db)
+        # Phase-2: nurse resubmission accepts the same multi-qualification
+        # payload shape as initial submission. The first qualification is
+        # mirrored back into the legacy flat columns; the full list replaces
+        # any previous child rows so resubmissions cannot leave stale
+        # qualifications behind.
+        qualifications = _gl_validate_qualifications_payload(data, db)
+        payload = qualifications[0]
         submission_flags = _gl_validate_submission_flags(data)
         snapshot = _gl_snapshot_from_nurse(nurse)
-        fields = dict(payload)
+        # Drop the per-qualification ``remarks`` carried on the validated dict
+        # before it hits gl_applications — the parent table has no such
+        # column, but the value is preserved on the child row by
+        # _gl_replace_application_qualifications below.
+        flat_payload = {k: v for k, v in payload.items() if k != 'remarks'}
+        fields = dict(flat_payload)
         fields.update(snapshot)
         fields.update(submission_flags)
         fields.update({'status': 'SUBMITTED', 'submitted_at': datetime.utcnow().isoformat(timespec='seconds')})
@@ -10245,13 +10477,21 @@ def api_gl_nurse_resubmit(data):
             f"UPDATE gl_applications SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             [*fields.values(), app_id]
         )
+        _gl_replace_application_qualifications(db, app_id, qualifications)
         for k, new_v in fields.items():
             if str(old.get(k) or '') != str(new_v or ''):
                 note = 'Nurse corrected and resubmitted the request' if old.get('status') == 'CORRECTION_REQUIRED' else 'Nurse updated submitted request before review'
                 _gl_write_audit(db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'), 'resubmitted', k, old.get(k), new_v, note)
+        qualification_count = len(qualifications)
+        if qualification_count > 1:
+            _gl_write_audit(
+                db, app_id, 'nurse', nurse.get('reference_id') or nurse.get('id'),
+                'resubmitted_qualifications', '', '', '',
+                f'Updated grading-letter qualifications: {qualification_count} qualification(s) submitted.'
+            )
         db.commit()
         success_message = 'Grading letter request resubmitted successfully.' if old.get('status') == 'CORRECTION_REQUIRED' else 'Submitted grading letter request updated successfully.'
-        return {'success': True, 'reference': old.get('ref_no'), 'message': success_message}
+        return {'success': True, 'reference': old.get('ref_no'), 'qualification_count': qualification_count, 'message': success_message}
     except ValueError as exc:
         return {'success': False, 'error': str(exc)}
     except Exception as exc:
@@ -12534,6 +12774,10 @@ def api_admin_gl_action(data, user):
             if status in {'APPROVED', 'LETTER_GENERATED', 'ISSUED', 'REJECTED', 'CANCELLED'}:
                 return {'success': False, 'error': 'This request cannot be edited in its current status.'}
             payload = _gl_validate_application_payload(data, db)
+            # The validated payload now carries an optional 'remarks' string
+            # for the matching qualification; route it onto the child row
+            # rather than the parent (which has no such column).
+            qualification_remarks = payload.pop('remarks', '') if 'remarks' in payload else ''
             internal_notes = _gl_clean_text(data.get('internal_notes'), 2000)
             if 'internal_notes' in data:
                 payload['internal_notes'] = internal_notes
@@ -12550,6 +12794,14 @@ def api_admin_gl_action(data, user):
             for k, new_v in payload.items():
                 if str(app.get(k) or '') != str(new_v or ''):
                     _gl_write_audit(db, app_id, user.get('role'), user.get('user'), 'field_edit', k, app.get(k), new_v, 'Admin/Nurses desk correction')
+            # Phase-2: keep the first child qualification row in sync with the
+            # legacy flat-field admin edit so the qualifications array stays
+            # consistent with the parent. Additional child rows
+            # (qualifications 2+) are deliberately left untouched here — this
+            # path is single-qualification by design.
+            sync_payload = dict(payload)
+            sync_payload['remarks'] = qualification_remarks
+            _gl_sync_first_qualification_from_flat(db, app_id, sync_payload)
         elif action == 'override':
             if status != 'UNDER_REVIEW':
                 return {'success': False, 'error': 'Start review before applying an override.'}
@@ -12571,6 +12823,19 @@ def api_admin_gl_action(data, user):
                        updated_at = CURRENT_TIMESTAMP
                    WHERE id = ?""",
                 [final_pct, final_grade, reason, app_id]
+            )
+            # Phase-2: mirror the override onto the first child qualification
+            # so the API's qualifications[0] and the parent flat fields agree.
+            db.execute(
+                """UPDATE gl_application_qualifications
+                   SET final_percentage = ?, final_grade_label = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = (
+                       SELECT id FROM gl_application_qualifications
+                       WHERE application_id = ?
+                       ORDER BY sort_order ASC, id ASC LIMIT 1
+                   )""",
+                [_gl_qualification_text_value(final_pct), final_grade or '', app_id]
             )
             _gl_write_audit(db, app_id, user.get('role'), user.get('user'), 'override', 'final_percentage', app.get('final_percentage'), final_pct, reason)
             _gl_write_audit(db, app_id, user.get('role'), user.get('user'), 'override', 'final_grade_label', app.get('final_grade_label'), final_grade, reason)
