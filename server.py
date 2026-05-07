@@ -354,11 +354,43 @@ def _init_grading_letter_db(db):
         year INTEGER PRIMARY KEY,
         next_seq INTEGER
     );
+    CREATE TABLE IF NOT EXISTS gl_application_qualifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER NOT NULL,
+        qualification_code TEXT DEFAULT '',
+        qualification_label TEXT DEFAULT '',
+        qualification_other TEXT DEFAULT '',
+        degree_title TEXT DEFAULT '',
+        institute TEXT DEFAULT '',
+        university TEXT DEFAULT '',
+        identifier_type TEXT DEFAULT 'Student Number',
+        identifier_value TEXT DEFAULT '',
+        student_no TEXT DEFAULT '',
+        year_of_passing TEXT DEFAULT '',
+        mode TEXT DEFAULT '',
+        total_marks TEXT DEFAULT '',
+        obtained_marks TEXT DEFAULT '',
+        entered_percentage TEXT DEFAULT '',
+        entered_gpa TEXT DEFAULT '',
+        computed_percentage TEXT DEFAULT '',
+        final_percentage TEXT DEFAULT '',
+        final_grade_label TEXT DEFAULT '',
+        scale_version_id INTEGER,
+        remarks TEXT DEFAULT '',
+        verification_status TEXT DEFAULT 'PENDING',
+        verified_by TEXT DEFAULT '',
+        verified_at TEXT DEFAULT '',
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE INDEX IF NOT EXISTS idx_gl_app_nurse_id ON gl_applications(nurse_id);
     CREATE INDEX IF NOT EXISTS idx_gl_app_status ON gl_applications(status);
     CREATE INDEX IF NOT EXISTS idx_gl_app_ref_no ON gl_applications(ref_no);
     CREATE INDEX IF NOT EXISTS idx_gl_app_submitted_at ON gl_applications(submitted_at);
     CREATE INDEX IF NOT EXISTS idx_gl_audit_application ON gl_audit(application_id);
+    CREATE INDEX IF NOT EXISTS idx_gl_app_quals_app_id ON gl_application_qualifications(application_id);
+    CREATE INDEX IF NOT EXISTS idx_gl_app_quals_app_sort ON gl_application_qualifications(application_id, sort_order);
     """)
     for table_name, cols in {
         'gl_applications': [
@@ -420,6 +452,35 @@ def _init_grading_letter_db(db):
             ('note', 'TEXT'),
             ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
         ],
+        'gl_application_qualifications': [
+            ('application_id', 'INTEGER'),
+            ('qualification_code', "TEXT DEFAULT ''"),
+            ('qualification_label', "TEXT DEFAULT ''"),
+            ('qualification_other', "TEXT DEFAULT ''"),
+            ('degree_title', "TEXT DEFAULT ''"),
+            ('institute', "TEXT DEFAULT ''"),
+            ('university', "TEXT DEFAULT ''"),
+            ('identifier_type', "TEXT DEFAULT 'Student Number'"),
+            ('identifier_value', "TEXT DEFAULT ''"),
+            ('student_no', "TEXT DEFAULT ''"),
+            ('year_of_passing', "TEXT DEFAULT ''"),
+            ('mode', "TEXT DEFAULT ''"),
+            ('total_marks', "TEXT DEFAULT ''"),
+            ('obtained_marks', "TEXT DEFAULT ''"),
+            ('entered_percentage', "TEXT DEFAULT ''"),
+            ('entered_gpa', "TEXT DEFAULT ''"),
+            ('computed_percentage', "TEXT DEFAULT ''"),
+            ('final_percentage', "TEXT DEFAULT ''"),
+            ('final_grade_label', "TEXT DEFAULT ''"),
+            ('scale_version_id', 'INTEGER'),
+            ('remarks', "TEXT DEFAULT ''"),
+            ('verification_status', "TEXT DEFAULT 'PENDING'"),
+            ('verified_by', "TEXT DEFAULT ''"),
+            ('verified_at', "TEXT DEFAULT ''"),
+            ('sort_order', 'INTEGER DEFAULT 0'),
+            ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+            ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+        ],
     }.items():
         for col, coltype in cols:
             try:
@@ -455,6 +516,59 @@ def _init_grading_letter_db(db):
             "INSERT OR IGNORE INTO gl_settings (key, value) VALUES (?, ?)",
             [key, value]
         )
+    # Idempotent Phase-1 backfill: derive one qualification child row from the
+    # legacy flat fields on every gl_applications row that has no children yet.
+    # Safe to run on every startup — rows that already have children are
+    # skipped by the NOT EXISTS guard, so existing single-qualification
+    # applications are never duplicated and previously generated PDFs are
+    # untouched.
+    try:
+        db.execute(
+            """
+            INSERT INTO gl_application_qualifications (
+                application_id, qualification_code, qualification_other,
+                degree_title, institute, university,
+                identifier_type, identifier_value, student_no,
+                year_of_passing, mode,
+                total_marks, obtained_marks,
+                entered_percentage, entered_gpa,
+                computed_percentage, final_percentage,
+                final_grade_label, scale_version_id,
+                verification_status, sort_order
+            )
+            SELECT
+                a.id,
+                COALESCE(a.qualification_code, ''),
+                COALESCE(a.qualification_other, ''),
+                COALESCE(a.degree_title, ''),
+                COALESCE(a.institute, ''),
+                COALESCE(a.university, ''),
+                COALESCE(NULLIF(TRIM(COALESCE(a.student_identifier_type, '')), ''), 'Student Number'),
+                COALESCE(a.student_no, ''),
+                COALESCE(a.student_no, ''),
+                CASE WHEN a.year_of_passing IS NULL THEN '' ELSE CAST(a.year_of_passing AS TEXT) END,
+                COALESCE(a.mode, ''),
+                CASE WHEN a.total_marks IS NULL THEN '' ELSE CAST(a.total_marks AS TEXT) END,
+                CASE WHEN a.obtained_marks IS NULL THEN '' ELSE CAST(a.obtained_marks AS TEXT) END,
+                CASE WHEN a.entered_percentage IS NULL THEN '' ELSE CAST(a.entered_percentage AS TEXT) END,
+                CASE WHEN a.entered_gpa IS NULL THEN '' ELSE CAST(a.entered_gpa AS TEXT) END,
+                CASE WHEN a.computed_percentage IS NULL THEN '' ELSE CAST(a.computed_percentage AS TEXT) END,
+                CASE WHEN a.final_percentage IS NULL THEN '' ELSE CAST(a.final_percentage AS TEXT) END,
+                COALESCE(a.final_grade_label, ''),
+                a.scale_version_id,
+                'PENDING',
+                0
+            FROM gl_applications a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM gl_application_qualifications q
+                WHERE q.application_id = a.id
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        # If the table or any expected column is missing on a transient race,
+        # skip the backfill — it will run cleanly on a later call.
+        pass
     db.commit()
 
 
@@ -563,6 +677,35 @@ def _nh_ensure_schema(db):
             ('new_value', 'TEXT'),
             ('note', 'TEXT'),
             ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+        ],
+        'gl_application_qualifications': [
+            ('application_id', 'INTEGER'),
+            ('qualification_code', "TEXT DEFAULT ''"),
+            ('qualification_label', "TEXT DEFAULT ''"),
+            ('qualification_other', "TEXT DEFAULT ''"),
+            ('degree_title', "TEXT DEFAULT ''"),
+            ('institute', "TEXT DEFAULT ''"),
+            ('university', "TEXT DEFAULT ''"),
+            ('identifier_type', "TEXT DEFAULT 'Student Number'"),
+            ('identifier_value', "TEXT DEFAULT ''"),
+            ('student_no', "TEXT DEFAULT ''"),
+            ('year_of_passing', "TEXT DEFAULT ''"),
+            ('mode', "TEXT DEFAULT ''"),
+            ('total_marks', "TEXT DEFAULT ''"),
+            ('obtained_marks', "TEXT DEFAULT ''"),
+            ('entered_percentage', "TEXT DEFAULT ''"),
+            ('entered_gpa', "TEXT DEFAULT ''"),
+            ('computed_percentage', "TEXT DEFAULT ''"),
+            ('final_percentage', "TEXT DEFAULT ''"),
+            ('final_grade_label', "TEXT DEFAULT ''"),
+            ('scale_version_id', 'INTEGER'),
+            ('remarks', "TEXT DEFAULT ''"),
+            ('verification_status', "TEXT DEFAULT 'PENDING'"),
+            ('verified_by', "TEXT DEFAULT ''"),
+            ('verified_at', "TEXT DEFAULT ''"),
+            ('sort_order', 'INTEGER DEFAULT 0'),
+            ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+            ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
         ],
     }.items():
         for col, coltype in cols:
@@ -9789,7 +9932,123 @@ def _gl_validate_application_payload(data, db):
     }
 
 
-def _gl_application_dict(row):
+def _gl_qualification_row_to_dict(row):
+    """Normalize a row from gl_application_qualifications into the JSON shape
+    that frontends consume. Phase-1 helper — does not mutate the underlying row."""
+    d = _gl_row_to_dict(row)
+    code = d.get('qualification_code') or ''
+    other = d.get('qualification_other') or ''
+    # Always recompute the label so legacy aliases (MIDWIFERY_ADDITIONAL etc.)
+    # render with their current canonical wording.
+    d['qualification_label'] = _gl_qualification_label(code, other)
+    identifier_type = _gl_student_identifier_type(
+        d.get('identifier_type') or d.get('student_no_label')
+    )
+    d['identifier_type'] = identifier_type
+    d['identifier_type_label'] = _gl_identifier_print_label(identifier_type)
+    # Mirror identifier_value <-> student_no so older consumers still see
+    # student_no while new consumers can use identifier_value.
+    identifier_value = (d.get('identifier_value') or d.get('student_no') or '').strip()
+    d['identifier_value'] = identifier_value
+    d['student_no'] = d.get('student_no') or identifier_value
+    d['verification_status'] = (d.get('verification_status') or 'PENDING').strip().upper() or 'PENDING'
+    return d
+
+
+def _gl_fetch_qualifications(db, application_id):
+    """Read all qualification child rows for an application, ordered by
+    sort_order then id. Returns [] when the row has no children or the table
+    has not yet been provisioned (defensive — Phase-1 backfill handles real
+    rows on startup)."""
+    if db is None or not application_id:
+        return []
+    try:
+        rows = db.execute(
+            "SELECT * FROM gl_application_qualifications "
+            "WHERE application_id = ? ORDER BY sort_order ASC, id ASC",
+            [int(application_id)]
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [_gl_qualification_row_to_dict(r) for r in rows]
+
+
+def _gl_synth_qualification_from_flat(d):
+    """Build a single qualification entry from the legacy flat fields on
+    gl_applications. Used as a Phase-1 fallback for rows that have not been
+    backfilled yet (e.g. the helper was called before _init_grading_letter_db
+    completed). Does not touch the database."""
+    code = d.get('qualification_code') or ''
+    other = d.get('qualification_other') or ''
+    identifier_type = _gl_student_identifier_type(d.get('student_identifier_type'))
+    identifier_value = d.get('student_no') or ''
+    return {
+        'id': None,
+        'application_id': d.get('id'),
+        'qualification_code': code,
+        'qualification_other': other,
+        'qualification_label': _gl_qualification_label(code, other),
+        'degree_title': d.get('degree_title') or '',
+        'institute': d.get('institute') or '',
+        'university': d.get('university') or '',
+        'identifier_type': identifier_type,
+        'identifier_type_label': _gl_identifier_print_label(identifier_type),
+        'identifier_value': identifier_value,
+        'student_no': identifier_value,
+        'year_of_passing': d.get('year_of_passing'),
+        'mode': d.get('mode') or '',
+        'total_marks': d.get('total_marks'),
+        'obtained_marks': d.get('obtained_marks'),
+        'entered_percentage': d.get('entered_percentage'),
+        'entered_gpa': d.get('entered_gpa'),
+        'computed_percentage': d.get('computed_percentage'),
+        'final_percentage': d.get('final_percentage'),
+        'final_grade_label': d.get('final_grade_label') or '',
+        'scale_version_id': d.get('scale_version_id'),
+        'remarks': '',
+        'verification_status': 'PENDING',
+        'verified_by': '',
+        'verified_at': '',
+        'sort_order': 0,
+        'created_at': d.get('created_at') or '',
+        'updated_at': d.get('updated_at') or '',
+    }
+
+
+def _gl_attach_qualifications(d, db=None):
+    """Phase-1: attach a `qualifications` array to an application dict without
+    changing any of its existing flat fields. The first entry mirrors the
+    legacy single-qualification flat fields, so existing consumers that read
+    `qualification_label`, `student_no`, etc. keep working unchanged."""
+    qualifications = []
+    application_id = d.get('id')
+    if application_id is not None:
+        owns_db = False
+        if db is None:
+            try:
+                db = get_db()
+                owns_db = True
+            except Exception:
+                db = None
+        if db is not None:
+            try:
+                qualifications = _gl_fetch_qualifications(db, application_id)
+            finally:
+                if owns_db:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+    if not qualifications:
+        # Backfill is idempotent and runs on startup; if it has not landed
+        # yet (e.g. very first request after a fresh deploy), synthesize one
+        # entry from the flat fields so the API contract is stable.
+        qualifications = [_gl_synth_qualification_from_flat(d)]
+    d['qualifications'] = qualifications
+    return d
+
+
+def _gl_application_dict(row, db=None):
     d = _gl_row_to_dict(row)
     status = d.get('status') or 'SUBMITTED'
     d['student_identifier_type'] = _gl_student_identifier_type(
@@ -9814,6 +10073,7 @@ def _gl_application_dict(row):
         'workplace': _first_value(d.get('workplace_snapshot'), d.get('nurse_workplace')),
         'gender': _first_value(d.get('gender_snapshot'), d.get('nurse_gender')),
     }
+    _gl_attach_qualifications(d, db=db)
     return d
 
 
@@ -9853,8 +10113,8 @@ def api_gl_nurse_summary(data):
         return {
             'success': True,
             'profile': _gl_nurse_identity(nurse),
-            'active_application': _gl_application_dict(active) if active else None,
-            'applications': [_gl_application_dict(a) for a in apps],
+            'active_application': _gl_application_dict(active, db=db) if active else None,
+            'applications': [_gl_application_dict(a, db=db) for a in apps],
             'grade_bands': [
                 {'min': 80, 'max': 100, 'label': 'Excellent'},
                 {'min': 70, 'max': 79.99, 'label': 'Very Good'},
@@ -11698,8 +11958,8 @@ def _gl_fetch_application(db, app_id):
     ).fetchone()
 
 
-def _gl_admin_app_dict(row, user=None):
-    d = _gl_application_dict(row)
+def _gl_admin_app_dict(row, user=None, db=None):
+    d = _gl_application_dict(row, db=db)
     d['nurse'] = {
         'reference_id': d.get('nurse_reference_id') or '',
         'full_name': d.get('nurse_full_name') or '',
@@ -11805,7 +12065,7 @@ def api_admin_gl_list(params, user):
             'total': total,
             'page': page,
             'page_size': page_size,
-            'items': [_gl_admin_app_dict(r, user) for r in rows],
+            'items': [_gl_admin_app_dict(r, user, db=db) for r in rows],
             'kpis': kpis,
         }
     except Exception as exc:
@@ -11828,7 +12088,7 @@ def api_admin_gl_export_csv(params, user):
         writer = csv.writer(out)
         writer.writerow(['Ref No', 'Nurse Name', 'Passport', 'Qualification', 'Mode', 'Computed %', 'Final %', 'Grade', 'Status', 'Submitted'])
         for r in rows:
-            d = _gl_admin_app_dict(r, user)
+            d = _gl_admin_app_dict(r, user, db=db)
             writer.writerow([
                 d.get('ref_no') or '',
                 d.get('nurse', {}).get('full_name') or '',
@@ -12205,7 +12465,7 @@ def api_admin_gl_detail(app_id, user):
         if not row:
             return {'success': False, 'error': 'Application not found.'}
         letter = _gl_letter_context(row)
-        application = _gl_admin_app_dict(row, user)
+        application = _gl_admin_app_dict(row, user, db=db)
         application['preview_warnings'] = list(letter.get('warnings') or [])
         application['generation_blockers'] = list(letter.get('generation_blockers') or [])
         application['can_generate_official'] = bool(letter.get('can_generate_official'))
@@ -12371,7 +12631,7 @@ def api_admin_gl_action(data, user):
             return {'success': False, 'error': 'Unknown grading letter action.'}
         db.commit()
         fresh = _gl_fetch_application(db, app_id)
-        return {'success': True, 'application': _gl_admin_app_dict(fresh, user)}
+        return {'success': True, 'application': _gl_admin_app_dict(fresh, user, db=db)}
     except ValueError as exc:
         try: db.rollback()
         except Exception: pass
