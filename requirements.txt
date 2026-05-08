@@ -8,3 +8,8 @@ PyMuPDF>=1.24.0
 Pillow>=10.0.0
 pytesseract>=0.3.10
 pdf2image>=1.16.0
+
+# Dormant Phase 0 TOTP 2FA dependencies.
+pyotp>=2.9.0
+qrcode>=7.4.2
+cryptography>=42.0.0

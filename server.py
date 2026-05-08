@@ -2968,6 +2968,17 @@ def init_db():
             except Exception:
                 pass
 
+    # Dormant Phase 0 bootstrap: load additive TOTP schema if present,
+    # but never let it break normal startup.
+    try:
+        totp_schema_path = PROJECT_ROOT / 'schema' / 'totp.sql'
+        if totp_schema_path.is_file():
+            db.executescript(totp_schema_path.read_text(encoding='utf-8'))
+        else:
+            print(f"[totp] schema bootstrap skipped; missing file: {totp_schema_path}", flush=True)
+    except Exception as exc:
+        print(f"[totp] schema bootstrap skipped: {exc}", flush=True)
+
     db.commit()
     db.close()
 
