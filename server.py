@@ -19,6 +19,7 @@ from pathlib import Path
 from queue import Queue, Full
 from email.message import EmailMessage
 from decimal import Decimal, ROUND_HALF_UP
+from html import escape as html_escape
 
 HAVE_PYMUPDF = False
 PYMUPDF_IMPORT_ERROR = None
@@ -36,6 +37,15 @@ if HAVE_PYMUPDF:
     print("INFO: PyMuPDF available for controlled NV rendering", flush=True)
 else:
     print(f"WARNING: PyMuPDF unavailable; controlled NV rendering disabled ({PYMUPDF_IMPORT_ERROR or 'unknown import error'})", flush=True)
+
+TOTP_AUTH = None
+TOTP_IMPORT_ERROR = None
+try:
+    import totp_auth as _totp_auth
+    TOTP_AUTH = _totp_auth
+except Exception as exc:
+    TOTP_IMPORT_ERROR = exc
+    print(f"[totp] helper import skipped: {exc}", flush=True)
 
 PORT = int(os.environ.get('PORT', 8080))
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -21694,22 +21704,206 @@ def record_login_failure(ip):
 def record_login_success(ip):
     LOGIN_ATTEMPTS.pop(ip, None)
 
-def create_session(username, role):
-    token = secrets.token_hex(32)
-    with SESSIONS_LOCK:
-        SESSIONS[token] = {'user': username, 'role': role, 'expires': time.time() + 86400}
-    return token
+PENDING_2FA_ALLOWED_PATHS = {
+    '/auth/2fa/verify',
+    '/api/auth/2fa/verify',
+    '/auth/2fa/setup',
+    '/api/auth/2fa/setup',
+    '/logout',
+}
 
-def get_session(cookie_str):
-    if not cookie_str: return None
+
+def _totp_env_disabled():
+    return str(os.environ.get('TOTP_ENABLED', '1')).strip().lower() in ('0', 'false', 'no', 'off')
+
+
+def _totp_runtime_state():
+    if _totp_env_disabled():
+        return {
+            'active': False,
+            'setup_allowed': False,
+            'reason': 'Two-factor authentication is currently disabled by TOTP_ENABLED=0.',
+            'diagnostics': {},
+        }
+    if TOTP_AUTH is None:
+        return {
+            'active': False,
+            'setup_allowed': False,
+            'reason': f'Two-factor authentication is currently unavailable because totp_auth.py could not be loaded: {TOTP_IMPORT_ERROR or "unknown error"}.',
+            'diagnostics': {},
+        }
+    try:
+        diagnostics = TOTP_AUTH.diagnose()
+    except Exception as exc:
+        return {
+            'active': False,
+            'setup_allowed': False,
+            'reason': f'Two-factor authentication diagnostics failed: {exc}',
+            'diagnostics': {},
+        }
+    active = bool(diagnostics.get('enabled'))
+    setup_allowed = active and bool(diagnostics.get('encryption_key_set')) and bool(diagnostics.get('qrcode_available'))
+    reason = ''
+    if not active:
+        if not diagnostics.get('pyotp_available'):
+            reason = 'Two-factor authentication is unavailable because pyotp is not installed.'
+        elif not diagnostics.get('cryptography_available'):
+            reason = 'Two-factor authentication is unavailable because cryptography is not installed.'
+        else:
+            reason = 'Two-factor authentication is currently unavailable.'
+    elif not diagnostics.get('encryption_key_set'):
+        reason = 'TOTP_ENCRYPTION_KEY is missing. Add it in Render before enrolling any users.'
+    elif not diagnostics.get('qrcode_available'):
+        reason = 'The qrcode dependency is unavailable, so enrollment cannot show a QR code right now.'
+    return {
+        'active': active,
+        'setup_allowed': setup_allowed,
+        'reason': reason,
+        'diagnostics': diagnostics,
+    }
+
+
+def _totp_pending_ttl_seconds():
+    try:
+        ttl = int(os.environ.get('TOTP_PENDING_TTL_SECONDS', '600'))
+    except Exception:
+        ttl = 600
+    return max(60, min(ttl, 86400))
+
+
+def _totp_super_admins():
+    if TOTP_AUTH is not None:
+        try:
+            admins = TOTP_AUTH.get_super_admins()
+            if admins:
+                return {str(item).strip() for item in admins if str(item).strip()}
+        except Exception:
+            pass
+    raw = os.environ.get('TOTP_SUPER_ADMINS', '') or ''
+    parsed = {item.strip() for item in raw.split(',') if item.strip()}
+    return parsed or {'admin'}
+
+
+def get_session_token(cookie_str):
+    if not cookie_str:
+        return ''
     c = SimpleCookie()
     c.load(cookie_str)
     token = c.get('session')
-    if not token: return None
+    return token.value if token else ''
+
+
+def destroy_session(token):
+    if not token:
+        return
+    with SESSIONS_LOCK:
+        SESSIONS.pop(token, None)
+
+
+def is_pending_2fa_session(user):
+    return bool(user and user.get('pending_2fa'))
+
+
+def session_requires_2fa(user):
+    return is_pending_2fa_session(user) and _totp_runtime_state().get('active')
+
+
+def create_session(username, role, user_id=None, ttl_seconds=86400, pending_2fa=False):
+    token = secrets.token_hex(32)
+    session_payload = {
+        'user': username,
+        'role': role,
+        'expires': time.time() + max(60, int(ttl_seconds or 86400)),
+    }
+    if user_id is not None:
+        try:
+            session_payload['user_id'] = int(user_id)
+        except Exception:
+            pass
+    if pending_2fa:
+        session_payload['pending_2fa'] = True
+    with SESSIONS_LOCK:
+        SESSIONS[token] = session_payload
+    return token
+
+def get_session(cookie_str):
+    if not cookie_str:
+        return None
+    c = SimpleCookie()
+    c.load(cookie_str)
+    token = c.get('session')
+    if not token:
+        return None
     with SESSIONS_LOCK:
         s = SESSIONS.get(token.value)
-    if s and s['expires'] > time.time(): return s
+    if s and s['expires'] > time.time():
+        return dict(s)
+    destroy_session(token.value)
     return None
+
+
+def _session_user_id(user):
+    if not user:
+        return None
+    try:
+        return int(user.get('user_id'))
+    except Exception:
+        return None
+
+
+def _lookup_session_user_row(db, user):
+    user_id = _session_user_id(user)
+    if user_id is not None:
+        row = db.execute(
+            "SELECT id, username, role, COALESCE(full_name, username) AS full_name FROM users WHERE id = ? LIMIT 1",
+            [user_id],
+        ).fetchone()
+        if row:
+            return row
+    username = (user or {}).get('user') or ''
+    if username:
+        return db.execute(
+            "SELECT id, username, role, COALESCE(full_name, username) AS full_name FROM users WHERE username = ? LIMIT 1",
+            [username],
+        ).fetchone()
+    return None
+
+
+def _totp_user_state(db, user_id):
+    state = {
+        'has_record': False,
+        'enabled': False,
+        'confirmed_at': '',
+        'backup_codes_remaining': 0,
+    }
+    if user_id is None:
+        return state
+    try:
+        row = db.execute(
+            "SELECT enabled, confirmed_at FROM user_totp WHERE user_id = ?",
+            [int(user_id)],
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return state
+    if not row:
+        return state
+    state['has_record'] = True
+    state['enabled'] = int(row['enabled'] or 0) == 1
+    state['confirmed_at'] = row['confirmed_at'] or ''
+    if state['enabled']:
+        try:
+            remaining = db.execute(
+                "SELECT COUNT(*) AS n FROM user_backup_codes WHERE user_id = ? AND used_at IS NULL",
+                [int(user_id)],
+            ).fetchone()
+            state['backup_codes_remaining'] = int(remaining['n'] if remaining and remaining['n'] is not None else 0)
+        except sqlite3.OperationalError:
+            state['backup_codes_remaining'] = 0
+    return state
+
+
+def _user_has_enabled_totp(db, user_id):
+    return bool(_totp_user_state(db, user_id).get('enabled'))
 
 def _is_restricted_staff_user(user):
     return bool(user) and is_limited_staff_role(user.get('role') or '')
@@ -32051,11 +32245,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 
-    def send_json(self, data, status=200):
+    def send_json(self, data, status=200, extra_headers=None):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', len(body))
+        for header, value in (extra_headers or {}).items():
+            self.send_header(str(header), str(value))
         self._security_headers()
         self._cors_headers_if_api()
         self.end_headers()
@@ -32217,6 +32413,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         user = self.get_user()
         if not user:
             return self.public_frontend_url()
+        if session_requires_2fa(user):
+            return '/auth/2fa/verify'
         role = user.get('role') or ''
         return _default_redirect_for_role(role)
 
@@ -32293,12 +32491,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def get_user_agent(self):
         return (self.headers.get('User-Agent') or '').strip()
 
+    def request_path_only(self):
+        return self.normalize_request_path(urlparse(getattr(self, 'path', '')).path)
+
+    def pending_2fa_allowed(self, path=None):
+        return (path or self.request_path_only()) in PENDING_2FA_ALLOWED_PATHS
+
+    def deny_pending_2fa(self, path=None):
+        path = path or self.request_path_only()
+        if path.startswith('/api/'):
+            self.send_json({
+                'success': False,
+                'error': 'Two-factor authentication required. Please continue verification.',
+                'redirect_url': '/auth/2fa/verify',
+            }, 401)
+        else:
+            self.send_redirect('/auth/2fa/verify')
+
     def require_auth(self):
         user = self.get_user()
         if not user:
             self.send_redirect('/login')
             return None
-        path = self.normalize_request_path(urlparse(getattr(self, 'path', '')).path)
+        path = self.request_path_only()
+        if session_requires_2fa(user) and not self.pending_2fa_allowed(path):
+            self.deny_pending_2fa(path)
+            return None
         role = user.get('role') or ''
         allowed = can_access_api_route(role, path) if path.startswith('/api/') else can_access_admin_route(role, path)
         if not allowed:
@@ -32349,6 +32567,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.get_user()
             if not user:
                 self.send_redirect('/login')
+                return
+            if session_requires_2fa(user):
+                self.send_redirect('/auth/2fa/verify')
                 return
             allowed = can_access_admin_route(user.get('role') or '', path)
             if not allowed:
@@ -32636,6 +32857,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_html(generate_poster_page(base))
         elif path == '/login':
             self.send_html(LOGIN_PAGE)
+        elif path == '/auth/2fa/setup':
+            user = self.get_user()
+            if not user:
+                self.send_redirect('/login')
+                return
+            if session_requires_2fa(user):
+                self.send_redirect('/auth/2fa/verify')
+                return
+            db = get_db()
+            try:
+                user_row = _lookup_session_user_row(db, user)
+                if not user_row:
+                    self.send_redirect('/login')
+                    return
+                user_row = dict(user_row)
+                if (user_row.get('role') or '') != 'admin':
+                    self.send_redirect(_default_redirect_for_role(user_row.get('role') or ''))
+                    return
+                if _totp_user_state(db, user_row.get('id')).get('enabled'):
+                    self.send_redirect('/admin/security')
+                    return
+                runtime_state = _totp_runtime_state()
+                if not runtime_state.get('setup_allowed'):
+                    self.send_html(_totp_setup_page_html(user_row, None, runtime_state.get('reason') or 'Two-factor authentication setup is not available right now.'), 503)
+                    return
+                try:
+                    enrollment = TOTP_AUTH.enroll_start(db, int(user_row['id']), user_row['username'])
+                except Exception as exc:
+                    self.send_html(_totp_setup_page_html(user_row, None, str(exc)), 503)
+                    return
+                if enrollment.get('already_enrolled'):
+                    self.send_redirect('/admin/security')
+                    return
+                self.send_html(_totp_setup_page_html(user_row, enrollment))
+            finally:
+                db.close()
+        elif path == '/auth/2fa/verify':
+            user = self.get_user()
+            if not user:
+                self.send_redirect('/login')
+                return
+            if not session_requires_2fa(user):
+                self.send_redirect(_default_redirect_for_role(user.get('role') or ''))
+                return
+            db = get_db()
+            try:
+                user_row = _lookup_session_user_row(db, user)
+                user_data = dict(user_row) if user_row else {'username': user.get('user') or '', 'role': user.get('role') or ''}
+            finally:
+                db.close()
+            self.send_html(_totp_verify_page_html(user_data, _totp_runtime_state()))
         elif path == '/':
             if self.should_render_local_public_home():
                 self.render_public_home()
@@ -32704,6 +32976,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             if not self.render_template_with_context('admin_aja_reconciliation.html', {'USER_NAME': user['user'], 'USER_ROLE': user['role']}):
                 self.send_html('<html><body><h1>AJA Care Reconciliation</h1><p>Reconciliation template is unavailable.</p><a href="/logout">Logout</a></body></html>')
+        elif path == '/admin/security':
+            user = self.require_auth()
+            if not user:
+                return
+            db = get_db()
+            try:
+                user_row = _lookup_session_user_row(db, user)
+                if not user_row:
+                    self.send_redirect('/login')
+                    return
+                user_row = dict(user_row)
+                if (user_row.get('role') or '') != 'admin':
+                    self.send_json({'error': 'Unauthorized'}, 403)
+                    return
+                totp_state = _totp_user_state(db, user_row.get('id'))
+                self.send_html(_totp_security_page_html(user_row, totp_state, _totp_runtime_state()))
+            finally:
+                db.close()
         elif path == '/admin/dashboard':
             user = self.require_auth()
             if not user: return
@@ -33674,6 +33964,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user:
                 self.send_json(_nurse_accommodation_blocked_response(), 403)
                 return
+            if session_requires_2fa(user):
+                self.deny_pending_2fa(path)
+                return
             res = api_admin_nurses_accommodation_list(params, user)
             err = (res.get('error') or '').lower()
             status = 200 if res.get('success') else (403 if 'permission' in err else (503 if 'temporarily unavailable' in err else 400))
@@ -33684,6 +33977,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user:
                 self.send_json(_nurse_accommodation_blocked_response(), 403)
                 return
+            if session_requires_2fa(user):
+                self.deny_pending_2fa(path)
+                return
             res = api_admin_nurses_accommodation_detail(params, user)
             err = (res.get('error') or '').lower()
             status = 200 if res.get('success') else (403 if 'permission' in err else (503 if 'temporarily unavailable' in err else (404 if 'not found' in err else 400)))
@@ -33693,6 +33989,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = self.get_user()
             if not user:
                 self.send_json(_nurse_accommodation_blocked_response(), 403)
+                return
+            if session_requires_2fa(user):
+                self.deny_pending_2fa(path)
                 return
             body_csv, fname, err = api_admin_nurses_accommodation_export_csv(params, user)
             if err:
@@ -36201,6 +36500,9 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             if not user:
                 self.send_json(_nurse_accommodation_blocked_response(), 403)
                 return
+            if session_requires_2fa(user):
+                self.deny_pending_2fa(path)
+                return
             try:
                 data = json.loads(body) if body else {}
             except json.JSONDecodeError:
@@ -36214,6 +36516,9 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             user = self.get_user()
             if not user:
                 self.send_json(_nurse_accommodation_blocked_response(), 403)
+                return
+            if session_requires_2fa(user):
+                self.deny_pending_2fa(path)
                 return
             try:
                 data = json.loads(body) if body else {}
@@ -37345,33 +37650,254 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             return
 
         elif path == '/api/login':
-            client_ip = self.client_address[0]
+            client_ip = self.get_client_ip()
             if not check_login_rate(client_ip):
                 self.send_json({'success': False, 'error': 'Too many failed attempts. Please wait 5 minutes.'}, 429)
                 return
-            data = json.loads(body)
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
             db = get_db()
-            user = db.execute("SELECT * FROM users WHERE username = ?", [data.get('username', '')]).fetchone()
-            db.close()
-            if user and not _user_is_active(user):
-                record_login_failure(client_ip)
-                self.send_json({'success': False, 'error': 'User account is inactive. Please contact the administrator.'}, 403)
-            elif user and user['password_hash'] == hash_pw(data.get('password', '')):
-                record_login_success(client_ip)
-                token = create_session(user['username'], user['role'])
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Set-Cookie', f'session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400')
-                redirect_url = _default_redirect_for_role(user['role'])
-                resp = json.dumps({'success': True, 'user': user['username'], 'role': user['role'], 'redirect_url': redirect_url}).encode()
-                self.send_header('Content-Length', len(resp))
-                self.end_headers()
-                self.wfile.write(resp)
-            else:
-                record_login_failure(client_ip)
-                remaining = 5 - LOGIN_ATTEMPTS.get(client_ip, {}).get('count', 0)
-                msg = 'Invalid credentials' + (f' ({remaining} attempts remaining)' if remaining > 0 else '')
-                self.send_json({'success': False, 'error': msg}, 401)
+            try:
+                user = db.execute("SELECT * FROM users WHERE username = ?", [data.get('username', '')]).fetchone()
+                if user and not _user_is_active(user):
+                    record_login_failure(client_ip)
+                    self.send_json({'success': False, 'error': 'User account is inactive. Please contact the administrator.'}, 403)
+                elif user and user['password_hash'] == hash_pw(data.get('password', '')):
+                    record_login_success(client_ip)
+                    totp_enabled_for_user = _totp_runtime_state().get('active') and _user_has_enabled_totp(db, user['id'])
+                    if totp_enabled_for_user:
+                        ttl = _totp_pending_ttl_seconds()
+                        token = create_session(user['username'], user['role'], user_id=user['id'], ttl_seconds=ttl, pending_2fa=True)
+                        self.send_json({
+                            'success': True,
+                            'user': user['username'],
+                            'role': user['role'],
+                            'redirect_url': '/auth/2fa/verify',
+                            'pending_2fa': True,
+                        }, extra_headers={'Set-Cookie': f'session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ttl}'})
+                    else:
+                        token = create_session(user['username'], user['role'], user_id=user['id'])
+                        redirect_url = _default_redirect_for_role(user['role'])
+                        self.send_json({
+                            'success': True,
+                            'user': user['username'],
+                            'role': user['role'],
+                            'redirect_url': redirect_url,
+                        }, extra_headers={'Set-Cookie': 'session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400'.format(token)})
+                else:
+                    record_login_failure(client_ip)
+                    remaining = 5 - LOGIN_ATTEMPTS.get(client_ip, {}).get('count', 0)
+                    msg = 'Invalid credentials' + (f' ({remaining} attempts remaining)' if remaining > 0 else '')
+                    self.send_json({'success': False, 'error': msg}, 401)
+            finally:
+                db.close()
+
+        elif path == '/api/auth/2fa/setup':
+            user = self.get_user()
+            if not user:
+                self.send_json({'success': False, 'error': 'Login required.'}, 401)
+                return
+            if session_requires_2fa(user):
+                self.deny_pending_2fa(path)
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            code = str(data.get('code') or '').strip()
+            if not code:
+                self.send_json({'success': False, 'error': 'Please enter the 6-digit code from your authenticator app.'}, 400)
+                return
+            runtime_state = _totp_runtime_state()
+            if not runtime_state.get('setup_allowed') or TOTP_AUTH is None:
+                self.send_json({'success': False, 'error': runtime_state.get('reason') or 'Two-factor authentication setup is unavailable right now.'}, 503)
+                return
+            db = get_db()
+            try:
+                user_row = _lookup_session_user_row(db, user)
+                if not user_row:
+                    self.send_json({'success': False, 'error': 'Login required.'}, 401)
+                    return
+                user_row = dict(user_row)
+                if (user_row.get('role') or '') != 'admin':
+                    self.send_json({'success': False, 'error': 'Unauthorized'}, 403)
+                    return
+                try:
+                    result = TOTP_AUTH.enroll_confirm(db, int(user_row['id']), code)
+                except Exception as exc:
+                    self.send_json({'success': False, 'error': str(exc)}, 503)
+                    return
+                if result.get('ok'):
+                    self.send_json({'success': True, 'backup_codes': result.get('backup_codes') or []})
+                    return
+                err = result.get('error') or 'invalid_code'
+                if err == 'invalid_code':
+                    self.send_json({'success': False, 'error': 'Invalid code. Please try again.'}, 400)
+                elif err == 'already_enrolled':
+                    self.send_json({'success': False, 'error': 'Two-factor authentication is already enabled for this account.'}, 409)
+                else:
+                    self.send_json({'success': False, 'error': 'Open the setup page again and try once more.'}, 400)
+            finally:
+                db.close()
+
+        elif path == '/api/auth/2fa/verify':
+            user = self.get_user()
+            if not user:
+                self.send_json({'success': False, 'error': 'Login required.'}, 401)
+                return
+            if not session_requires_2fa(user):
+                self.send_json({'success': True, 'redirect_url': _default_redirect_for_role(user.get('role') or '')})
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            code = str(data.get('code') or '').strip()
+            if not code:
+                self.send_json({'success': False, 'error': 'Invalid code. Please try again.'}, 400)
+                return
+            db = get_db()
+            try:
+                user_row = _lookup_session_user_row(db, user)
+                if not user_row:
+                    self.send_json({'success': False, 'error': 'Login required.'}, 401)
+                    return
+                user_row = dict(user_row)
+                if TOTP_AUTH is None:
+                    self.send_json({'success': False, 'error': 'Two-factor authentication is unavailable right now.'}, 503)
+                    return
+                client_ip = self.get_client_ip()
+                if TOTP_AUTH.is_2fa_locked(db, int(user_row['id']), client_ip):
+                    try:
+                        TOTP_AUTH.audit(db, user_row.get('username') or '', 'verify.fail', {
+                            'user_id': user_row.get('id'),
+                            'method': 'locked',
+                            'ip': client_ip,
+                            'reason': 'rate_limit',
+                        })
+                    except Exception:
+                        pass
+                    self.send_json({'success': False, 'error': 'Too many failed attempts. Please wait a few minutes and try again.'}, 429)
+                    return
+                try:
+                    verified = TOTP_AUTH.verify_for_login(db, int(user_row['id']), code, client_ip)
+                except Exception as exc:
+                    self.send_json({'success': False, 'error': str(exc)}, 503)
+                    return
+                if not verified:
+                    self.send_json({'success': False, 'error': 'Invalid code. Please try again.'}, 401)
+                    return
+                destroy_session(get_session_token(self.headers.get('Cookie')))
+                token = create_session(user_row['username'], user_row['role'], user_id=user_row['id'])
+                self.send_json({
+                    'success': True,
+                    'user': user_row['username'],
+                    'role': user_row['role'],
+                    'redirect_url': _default_redirect_for_role(user_row['role']),
+                }, extra_headers={'Set-Cookie': f'session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400'})
+            finally:
+                db.close()
+
+        elif path == '/api/auth/2fa/backup-codes/regenerate':
+            user = self.get_user()
+            if not user:
+                self.send_json({'success': False, 'error': 'Login required.'}, 401)
+                return
+            if session_requires_2fa(user):
+                self.deny_pending_2fa(path)
+                return
+            runtime_state = _totp_runtime_state()
+            if not runtime_state.get('active') or TOTP_AUTH is None:
+                self.send_json({'success': False, 'error': runtime_state.get('reason') or 'Two-factor authentication is unavailable right now.'}, 503)
+                return
+            db = get_db()
+            try:
+                user_row = _lookup_session_user_row(db, user)
+                if not user_row:
+                    self.send_json({'success': False, 'error': 'Login required.'}, 401)
+                    return
+                user_row = dict(user_row)
+                if (user_row.get('role') or '') != 'admin':
+                    self.send_json({'success': False, 'error': 'Unauthorized'}, 403)
+                    return
+                if not _totp_user_state(db, user_row.get('id')).get('enabled'):
+                    self.send_json({'success': False, 'error': 'Two-factor authentication is not enabled for this account.'}, 400)
+                    return
+                try:
+                    codes = TOTP_AUTH.regenerate_backup_codes(db, int(user_row['id']))
+                except Exception as exc:
+                    self.send_json({'success': False, 'error': str(exc)}, 503)
+                    return
+                self.send_json({'success': True, 'backup_codes': codes})
+            finally:
+                db.close()
+
+        elif path == '/api/admin/users/2fa-reset':
+            user = self.require_auth()
+            if not user:
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            actor_username = (user.get('user') or '').strip()
+            if (user.get('role') or '') != 'admin' or actor_username not in _totp_super_admins():
+                self.send_json({'success': False, 'error': 'Unauthorized'}, 403)
+                return
+            target_username = str(data.get('username') or '').strip()
+            target_user_id = data.get('user_id')
+            if not target_username and target_user_id in (None, ''):
+                self.send_json({'success': False, 'error': 'username or user_id is required.'}, 400)
+                return
+            db = get_db()
+            try:
+                if target_username:
+                    target_row = db.execute(
+                        "SELECT id, username FROM users WHERE username = ? LIMIT 1",
+                        [target_username],
+                    ).fetchone()
+                else:
+                    try:
+                        target_row = db.execute(
+                            "SELECT id, username FROM users WHERE id = ? LIMIT 1",
+                            [int(target_user_id)],
+                        ).fetchone()
+                    except Exception:
+                        self.send_json({'success': False, 'error': 'Invalid user_id.'}, 400)
+                        return
+                if not target_row:
+                    self.send_json({'success': False, 'error': 'User not found.'}, 404)
+                    return
+                target_row = dict(target_row)
+                if target_row.get('username') == actor_username:
+                    self.send_json({'success': False, 'error': 'Use a separate super-admin account to reset your own 2FA.'}, 400)
+                    return
+                if TOTP_AUTH is not None:
+                    TOTP_AUTH.admin_reset(db, int(target_row['id']), actor_username)
+                else:
+                    db.execute(
+                        "UPDATE user_totp SET enabled = 0, confirmed_at = NULL, last_used_at = NULL, "
+                        "last_used_counter = NULL, failed_attempts = 0, locked_until = NULL WHERE user_id = ?",
+                        [int(target_row['id'])],
+                    )
+                    db.execute("DELETE FROM user_backup_codes WHERE user_id = ?", [int(target_row['id'])])
+                    db.execute(
+                        "INSERT INTO audit_log (action, user, details) VALUES (?, ?, ?)",
+                        ['2fa.admin_reset', actor_username, json.dumps({
+                            'target_user_id': target_row.get('id'),
+                            'target_username': target_row.get('username') or '',
+                        })],
+                    )
+                    db.commit()
+                self.send_json({'success': True, 'username': target_row.get('username') or ''})
+            finally:
+                db.close()
 
         elif path == '/api/record':
             user = self.require_auth()
@@ -41106,6 +41632,225 @@ out.innerHTML='<h3>Request '+esc(x.reference_id)+'</h3>'
 return false;}
 </script>
 """)
+
+def _totp_shell_html(title, subtitle, body_html, wide=False):
+    box_class = 'login-box wide' if wide else 'login-box'
+    template = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ - Citizen Support for Transit KSA</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#006600,#004d00);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.login-box{background:#fff;border-radius:16px;padding:40px;width:380px;max-width:92vw;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.login-box.wide{width:min(760px,96vw)}
+@media(max-width:640px){body{padding:16px}.login-box,.login-box.wide{padding:28px 20px;border-radius:12px;width:100%}}
+h1{text-align:center;color:#006600;font-size:1.45em;margin-bottom:8px}
+.sub{text-align:center;color:#6b7280;font-size:.92em;margin-bottom:26px;line-height:1.45}
+.meta{text-align:center;color:#6b7280;font-size:.83em;margin:-6px 0 20px}
+.panel{border:1px solid #e5e7eb;border-radius:12px;padding:16px;background:#f9fafb;margin-bottom:16px}
+.panel h2,.panel h3{margin:0 0 10px;color:#111827;font-size:1.02em}
+.panel p{color:#4b5563;line-height:1.55;margin:0 0 10px}
+.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px}
+.status-card{border:1px solid #d1d5db;border-radius:12px;padding:14px;background:#fff}
+.status-card .label{display:block;font-size:.76em;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.status-card .value{font-size:1.04em;font-weight:700;color:#111827}
+.notice{border-radius:12px;padding:14px 16px;margin-bottom:16px;line-height:1.5}
+.notice.info{background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8}
+.notice.warn{background:#fff7ed;border:1px solid #fdba74;color:#9a3412}
+.notice.success{background:#ecfdf5;border:1px solid #86efac;color:#166534}
+.qr-wrap{text-align:center;margin:18px 0}
+.qr-wrap img{max-width:240px;width:100%;height:auto;border-radius:12px;border:1px solid #d1d5db;background:#fff;padding:12px}
+.code-block{display:block;padding:12px 14px;border-radius:10px;border:1px solid #d1d5db;background:#111827;color:#f9fafb;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.08em;word-break:break-all}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:.82em;font-weight:700;color:#4b5563;margin-bottom:6px}
+.form-group input{width:100%;padding:12px;border:1px solid #d1d5db;border-radius:8px;font-size:1em}
+.form-group input:focus{border-color:#006600;outline:none;box-shadow:0 0 0 3px rgba(0,102,0,.1)}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:13px 16px;background:#006600;color:#fff;border:none;border-radius:8px;font-size:1em;font-weight:700;cursor:pointer;text-decoration:none}
+.btn.full{width:100%}
+.btn:hover{background:#004d00}
+.btn.secondary{background:#fff;color:#111827;border:1px solid #d1d5db}
+.btn.secondary:hover{background:#f3f4f6}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+.error{color:#b91c1c;font-size:.9em;margin-top:10px;display:none}
+.muted{font-size:.86em;color:#6b7280;line-height:1.5}
+.list{margin:14px 0 0 18px;color:#111827}
+.list li{margin-bottom:8px}
+.top-links{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:20px}
+.top-links a{color:#006600;font-weight:700;text-decoration:none}
+</style></head><body><div class="__BOX_CLASS__"><h1>__TITLE__</h1><div class="sub">__SUBTITLE__</div>__BODY__</div></body></html>"""
+    return (
+        template
+        .replace('__BOX_CLASS__', box_class)
+        .replace('__TITLE__', html_escape(title))
+        .replace('__SUBTITLE__', html_escape(subtitle))
+        .replace('__BODY__', body_html)
+    )
+
+
+def _totp_security_page_html(user_row, totp_state, runtime_state):
+    username = html_escape((user_row or {}).get('username') or '')
+    status_label = 'Enabled' if totp_state.get('enabled') else 'Not enabled'
+    pending_note = ''
+    if totp_state.get('has_record') and not totp_state.get('enabled'):
+        pending_note = '<p class="muted">An unfinished enrollment exists. Opening setup again will rotate the secret and replace the pending setup.</p>'
+    runtime_notice = ''
+    if runtime_state.get('reason'):
+        notice_type = 'warn' if runtime_state.get('active') else 'info'
+        runtime_notice = f'<div class="notice {notice_type}">{html_escape(runtime_state.get("reason") or "")}</div>'
+    enable_action = (
+        '<a class="btn" href="/auth/2fa/setup">Enable Two-Factor Authentication</a>'
+        if (not totp_state.get('enabled')) and runtime_state.get('setup_allowed')
+        else '<button class="btn" type="button" disabled>Enable Two-Factor Authentication</button>'
+    )
+    regenerate_action = ''
+    if totp_state.get('enabled'):
+        regenerate_action = (
+            '<button class="btn secondary" type="button" onclick="regenerateBackupCodes()">Regenerate Backup Codes</button>'
+            if runtime_state.get('active')
+            else '<button class="btn secondary" type="button" disabled>Regenerate Backup Codes</button>'
+        )
+    body = f"""
+<div class="top-links"><a href="/admin/dashboard">Back to Dashboard</a><a href="/logout">Logout</a></div>
+{runtime_notice}
+<div class="meta">Signed in as {username}</div>
+<div class="status-grid">
+  <div class="status-card"><span class="label">2FA Status</span><span class="value">{html_escape(status_label)}</span></div>
+  <div class="status-card"><span class="label">Backup Codes Remaining</span><span class="value">{int(totp_state.get('backup_codes_remaining') or 0)}</span></div>
+  <div class="status-card"><span class="label">Confirmed At</span><span class="value">{html_escape(totp_state.get('confirmed_at') or 'Not confirmed')}</span></div>
+</div>
+<div class="panel">
+  <h2>Security Settings</h2>
+  <p>Optional Phase 1 enrollment is available only for admin users who choose to turn it on. Existing public routes and non-admin workflows remain unchanged.</p>
+  {pending_note}
+  <div class="actions">{enable_action}{regenerate_action}</div>
+</div>
+<div id="backupWrap" class="panel" style="display:none"></div>
+<div class="panel">
+  <h3>Self-Disable</h3>
+  <p>Self-service disable is intentionally deferred in Phase 1 to keep rollback and recovery paths conservative. If you lose access, ask a super-admin listed in <code>TOTP_SUPER_ADMINS</code> to run a 2FA reset.</p>
+</div>
+<script>
+async function regenerateBackupCodes(){{
+  const wrap=document.getElementById('backupWrap');
+  wrap.style.display='block';
+  wrap.innerHTML='<p>Generating new backup codes...</p>';
+  try{{
+    const r=await fetch('/api/auth/2fa/backup-codes/regenerate',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:'{{}}'}});
+    const d=await r.json();
+    if(!r.ok||!d.success)throw new Error(d.error||'Request failed');
+    const items=(d.backup_codes||[]).map(code=>'<li><code>'+code+'</code></li>').join('');
+    wrap.innerHTML='<div class="notice success"><strong>New backup codes generated.</strong><br>Store these in a safe place. They are shown only once.</div><ol class="list">'+items+'</ol>';
+  }}catch(err){{
+    wrap.innerHTML='<div class="notice warn">'+String((err&&err.message)||err||'Unable to regenerate backup codes')+'</div>';
+  }}
+}}
+</script>
+"""
+    return _totp_shell_html('Security Settings', 'Manage optional two-factor authentication for your admin account.', body, wide=True)
+
+
+def _totp_setup_page_html(user_row, enrollment=None, error_message=''):
+    username = html_escape((user_row or {}).get('username') or '')
+    notice = ''
+    if error_message:
+        notice = f'<div class="notice warn">{html_escape(error_message)}</div>'
+    if not enrollment:
+        body = f"""
+<div class="top-links"><a href="/admin/security">Back to Security Settings</a><a href="/logout">Logout</a></div>
+{notice}
+<div class="panel"><p>Two-factor authentication setup is not available right now.</p></div>
+"""
+        return _totp_shell_html('Set Up Two-Factor Authentication', 'Admin enrollment', body, wide=True)
+    body = f"""
+<div class="top-links"><a href="/admin/security">Back to Security Settings</a><a href="/logout">Logout</a></div>
+{notice}
+<div class="meta">Signed in as {username}</div>
+<div class="panel">
+  <p>Scan this QR code using Google Authenticator, Microsoft Authenticator, Authy, 1Password, or Bitwarden.</p>
+  <div class="qr-wrap"><img src="{html_escape(enrollment.get('qr_data_uri') or '')}" alt="Authenticator QR code"></div>
+  <p><strong>Manual setup key</strong></p>
+  <code class="code-block">{html_escape(enrollment.get('secret_plain') or '')}</code>
+  <p class="muted" style="margin-top:12px">If you reopen this page before confirming, the pending secret will be rotated and this QR code will stop working.</p>
+</div>
+<div class="panel">
+  <h3>Confirm Enrollment</h3>
+  <form onsubmit="return confirmTwoFactor(event)">
+    <div class="form-group">
+      <label for="code">6-digit code</label>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{{6}}" placeholder="123456" required>
+    </div>
+    <button class="btn full" type="submit">Confirm and Enable 2FA</button>
+    <div class="error" id="setupError"></div>
+  </form>
+</div>
+<div id="backupWrap" class="panel" style="display:none"></div>
+<script>
+async function confirmTwoFactor(e){{
+  e.preventDefault();
+  const errorEl=document.getElementById('setupError');
+  errorEl.style.display='none';
+  const code=(document.getElementById('code').value||'').trim();
+  try{{
+    const r=await fetch('/api/auth/2fa/setup',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{code}})}});
+    const d=await r.json();
+    if(!r.ok||!d.success)throw new Error(d.error||'Invalid code. Please try again.');
+    const items=(d.backup_codes||[]).map(item=>'<li><code>'+item+'</code></li>').join('');
+    document.getElementById('backupWrap').style.display='block';
+    document.getElementById('backupWrap').innerHTML='<div class="notice success"><strong>Two-factor authentication is now enabled.</strong><br>Store these backup codes now. They are shown only once.</div><ol class="list">'+items+'</ol><div class="actions"><a class="btn" href="/admin/security">Return to Security Settings</a></div>';
+    document.getElementById('code').disabled=true;
+  }}catch(err){{
+    errorEl.textContent=String((err&&err.message)||err||'Invalid code. Please try again.');
+    errorEl.style.display='block';
+  }}
+  return false;
+}}
+</script>
+"""
+    return _totp_shell_html('Set Up Two-Factor Authentication', 'Admin enrollment', body, wide=True)
+
+
+def _totp_verify_page_html(user_row, runtime_state):
+    username = html_escape((user_row or {}).get('username') or '')
+    runtime_notice = ''
+    if runtime_state.get('reason'):
+        runtime_notice = f'<div class="notice warn">{html_escape(runtime_state.get("reason") or "")}</div>'
+    body = f"""
+{runtime_notice}
+<div class="meta">Signed in as {username}</div>
+<div class="panel">
+  <p>Enter the 6-digit code from your authenticator app, or enter one of your backup codes in the format <code>XXXX-XXXX</code>.</p>
+  <form onsubmit="return verifyTwoFactor(event)">
+    <div class="form-group">
+      <label for="code">Authenticator or backup code</label>
+      <input id="code" autocomplete="one-time-code" inputmode="numeric" maxlength="16" placeholder="123456 or ABCD-EFGH" required>
+    </div>
+    <button class="btn full" type="submit">Verify and Continue</button>
+    <div class="error" id="verifyError"></div>
+  </form>
+</div>
+<div class="panel"><p class="muted">This extra step appears only for users who have already completed optional 2FA enrollment.</p></div>
+<div class="top-links" style="margin-top:0"><a href="/logout">Logout</a></div>
+<script>
+async function verifyTwoFactor(e){{
+  e.preventDefault();
+  const errorEl=document.getElementById('verifyError');
+  errorEl.style.display='none';
+  const code=(document.getElementById('code').value||'').trim();
+  try{{
+    const r=await fetch('/api/auth/2fa/verify',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{code}})}});
+    const d=await r.json();
+    if(!r.ok||!d.success)throw new Error(d.error||'Invalid code. Please try again.');
+    window.location=d.redirect_url||'/admin/dashboard';
+  }}catch(err){{
+    errorEl.textContent=String((err&&err.message)||err||'Invalid code. Please try again.');
+    errorEl.style.display='block';
+  }}
+  return false;
+}}
+</script>
+"""
+    return _totp_shell_html('Two-Factor Verification', 'Complete sign-in to continue.', body)
 
 LOGIN_PAGE = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">

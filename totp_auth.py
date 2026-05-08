@@ -83,6 +83,15 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
+def _row_username(row) -> str:
+    if not row:
+        return ''
+    try:
+        return row['username'] or ''
+    except Exception:
+        return ''
+
+
 def is_enabled() -> bool:
     """Master kill-switch — returns False if any required dep is missing."""
     if str(os.environ.get('TOTP_ENABLED', '1')).strip().lower() in ('0', 'false', 'no', 'off'):
@@ -360,9 +369,8 @@ def enroll_confirm(db, user_id: int, code: str) -> dict:
             [user_id, hash_backup_code(user_id, code_plain), _utcnow_iso()],
         )
     db.commit()
-    username = (db.execute("SELECT username FROM users WHERE id = ?", [user_id]).fetchone() or {}).get('username') or ''
+    username = _row_username(db.execute("SELECT username FROM users WHERE id = ?", [user_id]).fetchone())
     audit(db, username, 'enroll.confirm', {'user_id': user_id})
-    audit(db, username, 'backup_codes.generated', {'user_id': user_id, 'count': len(plain_codes)})
     return {'ok': True, 'backup_codes': plain_codes}
 
 
@@ -383,7 +391,7 @@ def verify_for_login(db, user_id, code: str, ip: str) -> bool:
         record_attempt(db, user_id, ip, False)
         return False
 
-    username = (db.execute("SELECT username FROM users WHERE id = ?", [user_id]).fetchone() or {}).get('username') or ''
+    username = _row_username(db.execute("SELECT username FROM users WHERE id = ?", [user_id]).fetchone())
 
     if is_backup:
         ok = consume_backup_code(db, user_id, cleaned)
@@ -425,7 +433,7 @@ def admin_reset(db, target_user_id: int, actor_username: str) -> bool:
         )
     db.execute("DELETE FROM user_backup_codes WHERE user_id = ?", [target_user_id])
     db.commit()
-    target_username = (db.execute("SELECT username FROM users WHERE id = ?", [target_user_id]).fetchone() or {}).get('username') or ''
+    target_username = _row_username(db.execute("SELECT username FROM users WHERE id = ?", [target_user_id]).fetchone())
     audit(db, actor_username, 'admin_reset',
           {'target_user_id': target_user_id, 'target_username': target_username})
     return True
@@ -441,7 +449,7 @@ def regenerate_backup_codes(db, user_id: int) -> list:
             [user_id, hash_backup_code(user_id, code_plain), _utcnow_iso()],
         )
     db.commit()
-    username = (db.execute("SELECT username FROM users WHERE id = ?", [user_id]).fetchone() or {}).get('username') or ''
+    username = _row_username(db.execute("SELECT username FROM users WHERE id = ?", [user_id]).fetchone())
     audit(db, username, 'backup_codes.regenerated', {'user_id': user_id})
     return plain_codes
 
