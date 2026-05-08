@@ -24,9 +24,12 @@
         <p>Assigned cases only. You can view and update cases assigned to your user account.</p>
         <div class="muted">Signed in as __USER_NAME__ (__USER_ROLE__)</div>
       </div>
-      <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/logout">Logout</a>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a class="cwa-btn cwa-btn--navy cwa-btn--sm" href="/admin/security">Two-Factor Security</a>
+        <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/logout">Logout</a>
+      </div>
     </div>
-    <div class="notice">This page does not provide access to full admin modules, unassigned records, user management, statistics, or system settings.</div>
+    <div class="notice">Protect your staff account with Google Authenticator from <a href="/admin/security" style="font-weight:700;color:#15324a">Two-Factor Security</a>. This page still does not provide access to full admin modules, unassigned records, user management, statistics, or system settings.</div>
     <section class="kpis" id="kpis"></section>
     <div class="tools" id="filters"></div>
     <section class="card table-wrap">

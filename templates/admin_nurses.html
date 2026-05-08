@@ -20,6 +20,7 @@
       </div>
     </div>
     <div class="cwa-admin-header__actions">
+      <a class="cwa-admin-header__logout" href="/admin/security">Two-Factor Security</a>
       <a class="cwa-admin-header__logout" href="/admin/dashboard" data-community-hide>Main Dashboard</a>
       <a class="cwa-admin-header__logout" href="/logout">Logout</a>
     </div>
@@ -45,6 +46,7 @@
       <div class="cwa-admin-sidebar__group">
         <div class="cwa-admin-sidebar__section-title">Quick Access</div>
         <a href="/admin/dashboard" data-community-hide><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
+        <a href="/admin/security"><span class="cwa-admin-sidebar__icon">2F</span><span>Two-Factor Security</span></a>
         <a href="/admin/nurses/my-complaints"><span class="cwa-admin-sidebar__icon">★</span><span>My Assigned</span></a>
       </div>
     </aside>
@@ -56,6 +58,7 @@
           <p id="totalLine">Loading…</p>
         </div>
         <div style="display:flex;gap:10px">
+          <a class="cwa-btn cwa-btn--navy cwa-btn--sm" href="/admin/security">Two-Factor Security</a>
           <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/nurses/accommodation">Accommodation / Hostel Roster</a>
           <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="exportCsv()" data-community-hide>⤓ Export</button>
         </div>
