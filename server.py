@@ -5189,7 +5189,8 @@ TOTP_SELF_SERVICE_ROLES = (
     FULL_SYSTEM_ROLES
     | COMMUNITY_DESK_ROLES
     | LIMITED_ASSIGNED_CASE_ROLES
-    | {'fee_collector', 'nurses_desk', 'nurse_desk', 'nurses_welfare_desk', 'nurse_welfare_desk'}
+    | {'fee_collector', 'nurses_desk', 'nurse_desk', 'nurses_welfare_desk', 'nurse_welfare_desk',
+       'viewer'}
 )
 TOTP_SELF_SERVICE_PAGE_PATHS = {
     '/admin/security',
@@ -5290,6 +5291,11 @@ def _default_redirect_for_role(role):
         return '/fee-collection'
     if role == 'iraq_cwa':
         return '/dashboard'
+    if role == 'viewer':
+        # Viewer has no operational dashboard — land on the 2FA self-service
+        # page (always reachable for viewer per TOTP_SELF_SERVICE_ROLES) so
+        # login does not bounce into /staff/my-cases (which rejects viewer).
+        return '/admin/security'
     return '/staff/my-cases'
 
 
@@ -32555,6 +32561,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         role = user.get('role') or ''
         allowed = can_access_api_route(role, path) if path.startswith('/api/') else can_access_admin_route(role, path)
         if not allowed:
+            # Optional safe diagnostic — username/role/path only. No secrets.
+            # Off by default; flip TOTP_DEBUG_DENIAL=1 in Render to enable.
+            if str(os.environ.get('TOTP_DEBUG_DENIAL', '')).strip().lower() in ('1', 'true', 'yes', 'on'):
+                try:
+                    print(
+                        f"[auth.deny] user={user.get('user') or ''!r} role={role!r} path={path!r} reason=route_not_allowed",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
             if path.startswith('/api/'):
                 self.send_json({'success': False, 'error': 'Access denied'}, 403)
             else:
