@@ -5191,6 +5191,16 @@ TOTP_SELF_SERVICE_ROLES = (
     | LIMITED_ASSIGNED_CASE_ROLES
     | {'fee_collector', 'nurses_desk', 'nurse_desk', 'nurses_welfare_desk', 'nurse_welfare_desk'}
 )
+TOTP_SELF_SERVICE_PAGE_PATHS = {
+    '/admin/security',
+    '/auth/2fa/setup',
+    '/auth/2fa/verify',
+}
+TOTP_SELF_SERVICE_API_PATHS = {
+    '/api/auth/2fa/setup',
+    '/api/auth/2fa/verify',
+    '/api/auth/2fa/backup-codes/regenerate',
+}
 AJA_RECONCILIATION_PAGE_ROLES = {
     *FULL_SYSTEM_ROLES, 'community_desk', 'welfare_officer', 'inspector_field',
     'field_staff', 'staff_opf'
@@ -5313,7 +5323,7 @@ def can_access_admin_route(role, path):
         return True
     if is_full_admin_role(role):
         return True
-    if path == '/admin/security' and _totp_self_service_role_allowed(role):
+    if path in TOTP_SELF_SERVICE_PAGE_PATHS and _totp_self_service_role_allowed(role):
         return True
     if role == 'fee_collector':
         return (
@@ -5366,6 +5376,8 @@ def can_access_api_route(role, path):
     if not path.startswith('/api/'):
         return can_access_admin_route(role, path)
     if is_full_admin_role(role):
+        return True
+    if path in TOTP_SELF_SERVICE_API_PATHS and _totp_self_service_role_allowed(role):
         return True
     if role == 'fee_collector':
         return (
