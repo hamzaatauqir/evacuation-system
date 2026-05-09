@@ -1,0 +1,133 @@
+# Tests — Phase 0C Modularization Safety Baseline
+
+This directory holds the **pre-modularization safety net** for the Embassy /
+Community Welfare Portal. Nothing here changes runtime behavior. Everything
+here is additive and stdlib-only.
+
+## What lives here
+
+| Path | Purpose |
+|---|---|
+| `smoke/routes.py` | Stdlib HTTP smoke test that hits the most important public, protected, and 2FA routes. Fails on **any 5xx** or on unexpected status codes. No pytest, no requests, no real OTP submission. |
+| `route_inventory.txt` | Frozen baseline of every route literal/prefix/regex referenced inside `do_GET` / `do_POST` / `do_HEAD` / `do_PUT` / `do_OPTIONS`. Used as a checklist during modularization — no route in this file should disappear from the running portal after a refactor. |
+| `README.md` | This file. |
+
+## Critical preconditions before modularization
+
+- **2FA is in production.** TOTP-based two-factor authentication is wired into
+  the login flow, the session model, and the auth guard (`require_auth`). Do
+  not reorder, rewrite, or "tidy" any of the following while modularizing:
+  - `/api/login` (the password verify + pending-2FA branch)
+  - `/auth/2fa/setup`, `/auth/2fa/verify`, `/admin/security`
+  - `/api/auth/2fa/setup`, `/api/auth/2fa/verify`,
+    `/api/auth/2fa/backup-codes/regenerate`, `/api/admin/users/2fa-reset`
+  - `create_session`, `upgrade_session_after_2fa`, `get_session`
+  - `require_auth` (the early-return for `_pending_2fa` sessions)
+  - `totp_auth.py` and `schema/totp.sql`
+- The smoke test below covers all 7 of these routes against a 5xx regression.
+- **Public applicant workflows** (`/nurses/track`, `/legal-opf/track`,
+  `/death-cases/track`, `/transit`, `/community-feedback`, `/iraq-public-form`,
+  `/track-application`, `/iraq-track-application`) must remain unauthenticated
+  and unaffected.
+
+## Verification commands
+
+Run all four before opening a refactor PR. They are all read-only.
+
+```bash
+# 1. Compile check — must exit 0.
+python3 -m py_compile server.py
+
+# 2. Smoke test — start the portal locally on :8080 first, then:
+python3 tests/smoke/routes.py http://localhost:8080
+
+# 3. Whitespace / merge-marker / line-ending audit.
+git diff --check
+
+# 4. Confirm only additive changes (during Phase 0C the staged set should be:
+#    tests/smoke/routes.py        (modified — additive checks only)
+#    tests/route_inventory.txt    (new)
+#    tests/README.md              (new)
+#    app/__init__.py              (new, empty marker)
+#    app/core/__init__.py         (new, empty marker)
+#    server.py and totp_auth.py:  UNCHANGED in this phase).
+git status
+```
+
+## Reading the smoke-test output
+
+Each line is `PASS` / `FAIL` / `ERROR`:
+
+- `PASS` — status code is in the route's allow-list.
+- `FAIL` — status code is *not* in the allow-list, **or** the response was
+  5xx (always treated as failure even if 5xx is somehow listed).
+- `ERROR` — the request itself raised (timeout, connection refused, bad URL).
+
+A successful Phase 0C run prints `Failed: 0` and `5xx failures: 0`, then exits
+with code 0.
+
+### Status-code expectations baseline
+
+These are the rules the smoke list enforces — please preserve them when adding
+checks for new routes:
+
+- **Public landing pages** (`/`, `/login`, `/nurses`, `/legal-opf`,
+  `/death-cases`, `/transit`, `/community-feedback`, `/iraq-public-form`):
+  `200`. A redirect from `/` is also acceptable on configurations that send
+  the homepage to a backend root.
+- **Protected admin pages** without a session: `302` (redirect to `/login`).
+  We do not submit credentials in the smoke test — we only assert the gate
+  exists and does not 500.
+- **Protected APIs** without a session: `302` is the most common because the
+  handler calls `require_auth()` which redirects unauth GETs; some APIs return
+  `401` or `403` instead. The smoke list reflects whichever status the
+  handler currently returns.
+- **2FA endpoints** without a session:
+  - GET pages → `302` (redirect to `/login`).
+  - POST APIs → `302`, `400`, or `401`. **Never** `500`.
+  - Real OTP submission is never attempted by the smoke test.
+- **Public dummy tracking** (e.g. `/api/public-track?q=ZZTEST123`):
+  `200` is expected because the API returns a JSON-shaped "not found" payload
+  rather than 404. `400` and `404` are also acceptable on configurations that
+  return them. `5xx` is always failure.
+- **Forms webhook** without a key: `401`.
+
+## Route inventory rules
+
+`route_inventory.txt` is the contract. During modularization:
+
+- **Lines must not disappear.** Every entry should still resolve in the live
+  portal after each refactor commit.
+- **New routes are fine.** Append-only changes are normal during evolution;
+  Phase 0C only freezes what already exists.
+- **Format:**
+  - `/exact/path` — handled by `path == "/exact/path"` or `path in (...)`
+  - `/prefix/*`   — handled by `path.startswith("/prefix/")`
+  - `~regex`      — handled by `re.match(r"^regex$")` (with `^/$` stripped)
+- The inventory was generated by a small read-only script that scans only
+  inside the HTTP handler methods of `server.py`. Re-run the same logic to
+  refresh the baseline only with explicit approval; do not silently overwrite.
+
+## Out of scope for Phase 0C
+
+- Moving any function or constant out of `server.py`.
+- Touching `totp_auth.py` or `schema/totp.sql`.
+- Schema migrations.
+- Refactoring the session store, auth guard, or login flow.
+- Changing PDF generation, OCR, Note Verbal, fee, or nurses workflows.
+- Wiring the empty `app/` and `app/core/` package markers — they exist as
+  stubs only so future phases can extract code into a real package without
+  fighting Python's import system.
+
+## Suggested commit message
+
+```
+phase-0c: add post-2fa modularization safety baseline
+
+- tests/smoke/routes.py: extend with 2FA route checks (5xx = failure)
+- tests/route_inventory.txt: freeze current route surface (read-only)
+- tests/README.md: verification commands + status-code expectations
+- app/, app/core/: empty package markers (dormant, not yet wired)
+
+No runtime change. server.py and totp_auth.py untouched.
+```
