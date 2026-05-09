@@ -2968,6 +2968,35 @@ def init_db():
             except Exception:
                 pass
 
+    # ── Nurse profile correction audit (additive, idempotent) ──────
+    # Records every operator/admin correction of a nurse's identity made
+    # before printing the grading letter. Permanent record kept even if
+    # the gl_application is later cancelled.
+    try:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS nurse_profile_correction_audit (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            nurse_id           INTEGER,
+            reference_id       TEXT DEFAULT '',
+            application_id     INTEGER,
+            field_name         TEXT NOT NULL,
+            old_value          TEXT DEFAULT '',
+            new_value          TEXT DEFAULT '',
+            reason             TEXT DEFAULT '',
+            corrected_by       TEXT DEFAULT '',
+            corrected_by_role  TEXT DEFAULT '',
+            correction_source  TEXT DEFAULT 'grading_letter_pre_print_correction',
+            created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_npca_nurse ON nurse_profile_correction_audit(nurse_id);
+        CREATE INDEX IF NOT EXISTS idx_npca_application ON nurse_profile_correction_audit(application_id);
+        CREATE INDEX IF NOT EXISTS idx_npca_created ON nurse_profile_correction_audit(created_at);
+        """)
+        db.commit()
+    except Exception as _npca_exc:
+        # Never let this break startup — the rest of init_db must continue.
+        print(f"[NurseProfileCorrection] schema init skipped: {_npca_exc}", flush=True)
+
     if FEATURE_NURSE_ONBOARDING:
         try:
             _nurse_onboarding_ensure_schema(db)
@@ -13706,6 +13735,196 @@ def api_admin_gl_action(data, user):
         except Exception: pass
         print(f"[GradingLetter] admin action failed: {exc}", flush=True)
         return {'success': False, 'error': 'Action could not be completed.'}
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Pre-print nurse-profile correction (admin/operator/nurses-desk only).
+# Updates BOTH the canonical nurse_registrations row (permanent, feeds
+# every nurse view) and the current gl_applications snapshot fields
+# (so the printed grading letter immediately reflects the corrected
+# values — otherwise the snapshot would override).
+# ──────────────────────────────────────────────────────────────────
+_NURSE_CORRECTION_FIELDS = {
+    # incoming key  -> (nurse_registrations column, gl_applications snapshot column, max_len, label)
+    'full_name':       ('full_name',       'applicant_name_snapshot', 220, 'Full Name'),
+    'father_name':     ('father_name',     'father_name_snapshot',    180, 'Father Name'),
+    'passport_number': ('passport_number', 'passport_number_snapshot', 80, 'Passport Number'),
+    'civil_id':        ('civil_id',        'civil_id_snapshot',        60, 'Civil ID'),
+}
+
+def _npca_write(db, nurse_id, reference_id, application_id, field_name,
+                old_value, new_value, reason, actor_user, actor_role):
+    try:
+        db.execute(
+            """INSERT INTO nurse_profile_correction_audit
+               (nurse_id, reference_id, application_id, field_name,
+                old_value, new_value, reason, corrected_by, corrected_by_role,
+                correction_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                nurse_id or 0,
+                reference_id or '',
+                application_id or 0,
+                field_name or '',
+                '' if old_value is None else str(old_value),
+                '' if new_value is None else str(new_value),
+                reason or '',
+                actor_user or '',
+                actor_role or '',
+                'grading_letter_pre_print_correction',
+            ]
+        )
+    except Exception as _audit_exc:
+        # Never fail the user-facing correction because of an audit hiccup.
+        print(f"[NurseProfileCorrection] audit insert failed: {_audit_exc}", flush=True)
+
+
+def api_admin_gl_correct_nurse_profile(data, user):
+    """
+    Operator/admin correction of nurse identity fields immediately before
+    printing the grading letter. Updates nurse_registrations (canonical) AND
+    gl_applications.<field>_snapshot for THIS application so the preview/PDF
+    reflect the corrected values instantly.
+    """
+    if not _gl_feature_enabled():
+        return {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
+    if not gl_user_can_manage(user):
+        return {'success': False, 'error': 'Unauthorized', 'status_code': 403}
+
+    try:
+        app_id = int(data.get('application_id') or data.get('id') or 0)
+    except (TypeError, ValueError):
+        app_id = 0
+    if not app_id:
+        return {'success': False, 'error': 'Application id is required.', 'status_code': 400}
+
+    reason = _gl_clean_text(data.get('reason'), 240)
+    if not reason:
+        return {'success': False, 'error': 'A correction reason is required.', 'status_code': 400}
+
+    # Collect incoming corrected values for the supported fields. Only
+    # fields explicitly present in the body are considered changes.
+    incoming = {}
+    for key, (_, _, max_len, _) in _NURSE_CORRECTION_FIELDS.items():
+        if key in data:
+            cleaned = _gl_clean_text(data.get(key), max_len)
+            incoming[key] = cleaned
+
+    if not incoming:
+        return {'success': False, 'error': 'No fields submitted for correction.', 'status_code': 400}
+
+    db = get_db()
+    try:
+        row = _gl_fetch_application(db, app_id)
+        if not row:
+            return {'success': False, 'error': 'Application not found.', 'status_code': 404}
+        app = dict(row)
+        nurse_id = app.get('nurse_id')
+        if not nurse_id:
+            return {'success': False, 'error': 'Linked nurse record not found.', 'status_code': 404}
+        nurse_row = db.execute(
+            "SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [nurse_id]
+        ).fetchone()
+        if not nurse_row:
+            return {'success': False, 'error': 'Nurse record not found.', 'status_code': 404}
+        nurse = dict(nurse_row)
+        reference_id = nurse.get('reference_id') or ''
+
+        # Determine which submitted fields are non-empty AND actually changed.
+        # Empty values are rejected — corrections must not blank the canonical
+        # record.
+        gl_app_columns = set(_table_columns(db, 'gl_applications'))
+        nurse_columns = set(_table_columns(db, 'nurse_registrations'))
+
+        nurse_updates = {}        # nurse_registrations column -> new value
+        snapshot_updates = {}     # gl_applications column -> new value
+        change_log = []           # list of (field_name, old, new) for audit
+        rejected = []
+
+        for incoming_key, new_value in incoming.items():
+            mapping = _NURSE_CORRECTION_FIELDS.get(incoming_key)
+            if not mapping:
+                continue
+            nurse_col, snap_col, _max, label = mapping
+            if not new_value:
+                rejected.append(f"{label} cannot be blank.")
+                continue
+            old_nurse_value = str(nurse.get(nurse_col) or '')
+            old_snap_value = str(app.get(snap_col) or '')
+            if new_value == old_nurse_value and new_value == old_snap_value:
+                continue  # no-op; skip silently
+            if nurse_col in nurse_columns:
+                nurse_updates[nurse_col] = new_value
+            if snap_col in gl_app_columns:
+                snapshot_updates[snap_col] = new_value
+            change_log.append((nurse_col, old_nurse_value, new_value, label))
+
+        if rejected:
+            return {'success': False, 'error': ' '.join(rejected), 'status_code': 400}
+        if not change_log:
+            return {'success': False, 'error': 'No fields actually changed.', 'status_code': 400}
+
+        # 1) Update canonical nurse_registrations (permanent).
+        if nurse_updates:
+            sets = ', '.join(f"{k} = ?" for k in nurse_updates)
+            params = list(nurse_updates.values())
+            # Touch updated_at if the column exists.
+            if 'updated_at' in nurse_columns:
+                sets += ", updated_at = CURRENT_TIMESTAMP"
+            db.execute(f"UPDATE nurse_registrations SET {sets} WHERE id = ?",
+                       [*params, nurse_id])
+
+        # 2) Update gl_applications snapshot fields (so the live letter
+        #    preview AND server-side PDF reflect the correction immediately).
+        if snapshot_updates:
+            sets = ', '.join(f"{k} = ?" for k in snapshot_updates)
+            params = list(snapshot_updates.values())
+            db.execute(
+                f"UPDATE gl_applications SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [*params, app_id]
+            )
+
+        # 3) Audit — write to BOTH:
+        #    (a) gl_audit so it shows on the GL detail page's audit log;
+        #    (b) nurse_profile_correction_audit for the permanent per-nurse log.
+        actor_user = (user.get('user') or '').strip()
+        actor_role = (user.get('role') or '').strip()
+        for field_name, old_value, new_value, _label in change_log:
+            try:
+                _gl_write_audit(
+                    db, app_id, actor_role, actor_user,
+                    'pre_print_profile_correction', field_name,
+                    old_value, new_value, reason
+                )
+            except Exception as _gla_exc:
+                print(f"[NurseProfileCorrection] gl_audit insert failed: {_gla_exc}", flush=True)
+            _npca_write(
+                db, nurse_id, reference_id, app_id, field_name,
+                old_value, new_value, reason, actor_user, actor_role
+            )
+
+        db.commit()
+
+        # 4) Return the fresh application dict so the front-end can re-render
+        #    preview + audit log without an extra round-trip.
+        fresh = _gl_fetch_application(db, app_id)
+        return {
+            'success': True,
+            'message': 'Details updated successfully. The grading letter will now use the corrected information.',
+            'application': _gl_admin_app_dict(fresh, user, db=db) if fresh else None,
+            'corrections_applied': [
+                {'field': fn, 'old': ov, 'new': nv} for (fn, ov, nv, _l) in change_log
+            ],
+        }
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[NurseProfileCorrection] correction failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Correction could not be saved.', 'status_code': 500}
     finally:
         db.close()
 
@@ -36631,6 +36850,20 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
             result = api_admin_gl_send_document_visit_notices(data, user)
             self.send_json(result, 200 if result.get('success') else (403 if result.get('error') == 'Unauthorized' else 400))
+            return
+        elif path == '/api/admin/gl/correct-nurse-profile':
+            # Pre-print correction of nurse identity (admin/operator/nurses-desk).
+            # Updates both nurse_registrations (canonical) and the application's
+            # snapshot fields so the live preview + PDF reflect the change.
+            user = self.require_auth()
+            if not user: return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400); return
+            result = api_admin_gl_correct_nurse_profile(data, user)
+            status = 200 if result.get('success') else int(result.get('status_code') or 400)
+            self.send_json(result, status)
             return
         elif path == '/api/admin/facility-occupancy/send-confirmation-campaign':
             user = self.require_auth()

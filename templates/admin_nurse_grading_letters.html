@@ -44,6 +44,20 @@
     .gl-qual-summary-card{border:1px solid var(--cwa-border);border-radius:8px;padding:10px;background:#f8fafc}
     .gl-qual-summary-card b{display:block;margin-bottom:5px;color:var(--cwa-navy)}
     .gl-inline-note{font-size:12px;color:var(--cwa-muted);margin:0 0 10px}
+    /* Pre-print correction modal */
+    .npc-overlay{position:fixed;inset:0;background:rgba(15,23,42,.55);display:none;align-items:flex-start;justify-content:center;z-index:1000;padding:40px 16px;overflow-y:auto}
+    .npc-overlay.is-open{display:flex}
+    .npc-modal{background:#fff;border-radius:12px;max-width:640px;width:100%;box-shadow:0 20px 50px rgba(15,23,42,.25);padding:22px 22px 16px}
+    .npc-modal h3{margin:0 0 4px;color:var(--cwa-navy)}
+    .npc-modal p.npc-lede{margin:0 0 14px;color:var(--cwa-muted);font-size:13px}
+    .npc-row{display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:12px}
+    .npc-row label{font-size:12px;font-weight:700;color:var(--cwa-navy);text-transform:uppercase;letter-spacing:.03em}
+    .npc-current{font-size:12px;color:var(--cwa-muted);background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;padding:6px 8px}
+    .npc-error{color:#991b1b;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:13px;display:none}
+    .npc-error.is-open{display:block}
+    .npc-success{color:#166534;background:#ecfdf3;border:1px solid #86efac;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:13px;display:none}
+    .npc-success.is-open{display:block}
+    .npc-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
     @media(max-width:1024px){.gl-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
     @media(max-width:640px){
       .gl-kpis{grid-template-columns:1fr}
@@ -349,6 +363,9 @@ function actionButtons(a, canManage, blockers){
     +'<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reopen()">Reopen</button>';
   if(a.status==='LETTER_GENERATED') html+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'mark-issued\')">Mark Issued</button>';
   if(a.can_print_clean) html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/api/admin/gl/letter?id='+Number(a.id)+'" target="_blank" rel="noopener">Print Clean A4 PDF</a>';
+  // Pre-print correction: visible while the letter is still actionable.
+  // Hidden once the request is rejected/cancelled (no point correcting then).
+  if(!['REJECTED','CANCELLED'].includes(a.status)) html+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="openCorrectionModal()" title="Correct nurse identity fields before printing the official letter">Correct Name / Father Name Before Print</button>';
   if(!['ISSUED','REJECTED','CANCELLED'].includes(a.status)) html+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reject()">Reject</button>';
   if(['SUBMITTED','CORRECTION_REQUIRED'].includes(a.status)) html+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="cancelReq()">Cancel</button>';
   return html;
@@ -553,7 +570,97 @@ async function sendDocumentVisitNotices(){
 }
 ['status','qualification','date_from','date_to'].forEach(id=>document.getElementById(id).addEventListener('change',()=>loadList(1)));
 searchEl.addEventListener('keydown',e=>{if(e.key==='Enter')loadList(1);});
+// ── Pre-print nurse-profile correction modal ──────────────────────
+function openCorrectionModal(){
+  const a=state.selected||{};
+  if(!a||!a.id){alert('Please open a grading-letter request first.');return;}
+  const n=a.nurse||{};
+  const identity=a.letter_identity||{};
+  // Pre-fill corrected fields with the values that the letter currently
+  // uses (snapshot wins over canonical), so a "no-op" submission is rejected
+  // by the server and the operator sees only real corrections.
+  document.getElementById('npc_full_name_current').textContent=(n.full_name||'—');
+  document.getElementById('npc_full_name').value=identity.full_name||n.full_name||'';
+  document.getElementById('npc_father_name_current').textContent=(identity.father_name||n.father_name||'—');
+  document.getElementById('npc_father_name').value=identity.father_name||n.father_name||'';
+  document.getElementById('npc_passport_current').textContent=(n.passport_number||identity.passport_number||'—');
+  document.getElementById('npc_passport').value=identity.passport_number||n.passport_number||'';
+  document.getElementById('npc_civil_id_current').textContent=(n.civil_id||identity.civil_id||'—');
+  document.getElementById('npc_civil_id').value=identity.civil_id||n.civil_id||'';
+  document.getElementById('npc_reason').value='';
+  document.getElementById('npc_error').classList.remove('is-open');
+  document.getElementById('npc_success').classList.remove('is-open');
+  document.getElementById('npc_overlay').classList.add('is-open');
+}
+function closeCorrectionModal(){document.getElementById('npc_overlay').classList.remove('is-open');}
+function npcShowError(msg){const e=document.getElementById('npc_error');e.textContent=msg;e.classList.add('is-open');document.getElementById('npc_success').classList.remove('is-open');}
+async function submitCorrection(){
+  const a=state.selected||{};
+  if(!a||!a.id) return;
+  const reason=(document.getElementById('npc_reason').value||'').trim();
+  if(!reason){npcShowError('Please enter a correction reason before saving.');return;}
+  const payload={
+    application_id:a.id,
+    full_name:(document.getElementById('npc_full_name').value||'').trim(),
+    father_name:(document.getElementById('npc_father_name').value||'').trim(),
+    passport_number:(document.getElementById('npc_passport').value||'').trim(),
+    civil_id:(document.getElementById('npc_civil_id').value||'').trim(),
+    reason
+  };
+  try{
+    const r=await fetch('/api/admin/gl/correct-nurse-profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json();
+    if(!r.ok||!d||d.success===false){
+      npcShowError((d&&d.error)||('Could not save correction (HTTP '+r.status+').'));
+      return;
+    }
+    const ok=document.getElementById('npc_success');
+    ok.textContent=d.message||'Details updated successfully. The grading letter will now use the corrected information.';
+    ok.classList.add('is-open');
+    document.getElementById('npc_error').classList.remove('is-open');
+    // Reload the detail so preview, identity panels, and audit log update.
+    await loadDetail(a.id);
+    await loadList(state.page);
+    setTimeout(closeCorrectionModal, 1200);
+  }catch(e){npcShowError(e&&e.message?e.message:'Network error.');}
+}
 loadList(1);
 </script>
+<div id="npc_overlay" class="npc-overlay" role="dialog" aria-modal="true" aria-labelledby="npc_title">
+  <div class="npc-modal">
+    <h3 id="npc_title">Correct Nurse Identity Before Printing</h3>
+    <p class="npc-lede">Updates the canonical nurse record AND this grading-letter snapshot. The corrected values will appear immediately in the preview and the printed PDF, and persist for future letters and admin views.</p>
+    <div id="npc_error" class="npc-error" role="alert"></div>
+    <div id="npc_success" class="npc-success" role="status"></div>
+    <div class="npc-row">
+      <label for="npc_full_name">Full Name (corrected)</label>
+      <input id="npc_full_name" class="cwa-input" maxlength="220" placeholder="Full name as per passport">
+      <div class="npc-current">Current nurse-record value: <span id="npc_full_name_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_father_name">Father Name (corrected)</label>
+      <input id="npc_father_name" class="cwa-input" maxlength="180" placeholder="Father's name as per official document">
+      <div class="npc-current">Current letter value: <span id="npc_father_name_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_passport">Passport Number (corrected)</label>
+      <input id="npc_passport" class="cwa-input" maxlength="80" placeholder="Passport number">
+      <div class="npc-current">Current nurse-record value: <span id="npc_passport_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_civil_id">Civil ID (corrected, optional)</label>
+      <input id="npc_civil_id" class="cwa-input" maxlength="60" placeholder="Civil ID (Kuwait)">
+      <div class="npc-current">Current nurse-record value: <span id="npc_civil_id_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_reason">Correction Reason (required)</label>
+      <input id="npc_reason" class="cwa-input" maxlength="240" placeholder="e.g. Spelling correction as per passport / Father name corrected as per official document / Typing error during registration">
+    </div>
+    <div class="npc-actions">
+      <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="closeCorrectionModal()">Cancel</button>
+      <button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="submitCorrection()">Save &amp; Refresh Preview</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
