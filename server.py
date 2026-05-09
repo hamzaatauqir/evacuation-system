@@ -6444,6 +6444,16 @@ def _normalize_arrival_batch_number(value):
     return m.group(0) if m else ""
 
 
+def _normalize_batch_no(value):
+    """Digits-only batch / flight number normalization.
+
+    Tolerates input like '39', ' 39 ', 'Batch 39', '39 batch', 'Flight #39'.
+    Thin alias around _normalize_arrival_batch_number so the helper signature
+    that calls it reads naturally.
+    """
+    return _normalize_arrival_batch_number(value)
+
+
 def _arrival_batch_rank_key(row):
     d = dict(row or {})
     status = str(d.get('status') or '').strip().upper()
@@ -14405,6 +14415,180 @@ def _ncr_apply_field_update(db, nurse_row, field_name, new_value, actor):
     }
 
 
+def _sync_nurse_activation_from_arrival_status(db, nurse_id, reason='correction_approved', actor='admin'):
+    """Re-evaluate arrival-based activation for a single nurse.
+
+    Idempotent. Safe to call after ANY admin path that may have changed the
+    nurse's batch_number (correction approval, direct admin batch edit, etc.).
+    Closes a known edge case: when duplicate `nh_arrival_batch` rows exist
+    for the same digits-only code (one PLANNED, one later marked ARRIVED),
+    the existing nh_get_or_create_arrival_batch picks the OLDEST row by id,
+    which can hide an ARRIVED status. This helper explicitly resolves the
+    canonical batch row PREFERRING `status=ARRIVED`, then re-runs the same
+    activation logic used at registration time.
+
+    Returns a dict with:
+        changed (bool)            — account row's status was modified by this call
+        activated (bool)          — final account_status == ACTIVE
+        previous_status (str)
+        new_status (str)
+        batch_code (str)          — digits-only code resolved
+        batch_status (str)        — '' / PLANNED / ARRIVED
+        reason_skipped (str)      — '' on activation; otherwise why no-op:
+                                    'nurse_housing_feature_disabled' /
+                                    'nurse_id_missing' / 'nurse_not_found' /
+                                    'batch_number_missing' / 'batch_unresolved' /
+                                    'batch_not_arrived' / 'already_active' /
+                                    'missing_required_fields:<csv>'
+        missing_fields (list[str]) — labels of fields blocking activation, if any
+    """
+    out = {
+        'changed': False,
+        'activated': False,
+        'previous_status': '',
+        'new_status': '',
+        'batch_code': '',
+        'batch_status': '',
+        'reason_skipped': '',
+        'missing_fields': [],
+    }
+    if not nh_feature_enabled():
+        out['reason_skipped'] = 'nurse_housing_feature_disabled'
+        return out
+    try:
+        nurse_id = int(nurse_id or 0)
+    except Exception:
+        nurse_id = 0
+    if not nurse_id:
+        out['reason_skipped'] = 'nurse_id_missing'
+        return out
+    nurse_row = db.execute(
+        "SELECT * FROM nurse_registrations WHERE id = ? LIMIT 1", [nurse_id]
+    ).fetchone()
+    if not nurse_row:
+        out['reason_skipped'] = 'nurse_not_found'
+        return out
+    nurse_d = dict(nurse_row)
+    batch_code = _normalize_batch_no(nurse_d.get('batch_number') or '')
+    out['batch_code'] = batch_code
+    if not batch_code:
+        out['reason_skipped'] = 'batch_number_missing'
+        return out
+    # CRITICAL: resolve duplicates preferring ARRIVED. nh_get_or_create_arrival_batch
+    # picks ORDER BY id ASC LIMIT 1 which returns the oldest row regardless of
+    # status — that's the bug class that left nurses pending when batch 39
+    # had both a PLANNED row and a later ARRIVED row.
+    candidate = db.execute(
+        "SELECT * FROM nh_arrival_batch "
+        "WHERE TRIM(COALESCE(batch_code, '')) = ? "
+        "ORDER BY CASE WHEN UPPER(COALESCE(status, '')) = ? THEN 0 ELSE 1 END, id ASC "
+        "LIMIT 1",
+        [batch_code, NH_BATCH_STATUS_ARRIVED]
+    ).fetchone()
+    if candidate:
+        batch = dict(candidate)
+    else:
+        # No row at all yet — fall back to the existing get-or-create so a
+        # PLANNED placeholder is created and behavior matches registration.
+        batch = nh_get_or_create_arrival_batch(
+            db, batch_code, nurse_d.get('arrival_date') or '', actor=actor
+        )
+    if not batch:
+        out['reason_skipped'] = 'batch_unresolved'
+        return out
+    batch_status = ((batch or {}).get('status') or '').strip().upper()
+    out['batch_status'] = batch_status
+    out['missing_fields'] = _ncr_missing_activation_fields(nurse_d)
+    account_before = nh_get_account(db, nurse_d)
+    out['previous_status'] = (account_before.get('account_status') or '').strip().upper()
+    if batch_status != NH_BATCH_STATUS_ARRIVED:
+        out['reason_skipped'] = 'batch_not_arrived'
+        out['new_status'] = out['previous_status']
+        return out
+    if out['previous_status'] == NH_ACCOUNT_STATUS_ACTIVE:
+        # Already activated — idempotent no-op, no audit, no double activation.
+        out['activated'] = True
+        out['new_status'] = out['previous_status']
+        out['reason_skipped'] = 'already_active'
+        return out
+    if out['missing_fields']:
+        out['reason_skipped'] = 'missing_required_fields:' + ','.join(out['missing_fields'])
+        out['new_status'] = out['previous_status']
+        return out
+    # Activate inline using the SPECIFIC batch row we resolved above. We
+    # cannot call nh_create_registration_account here — it re-runs
+    # nh_get_or_create_arrival_batch, which picks ORDER BY id ASC LIMIT 1
+    # and would re-fetch the older PLANNED duplicate, undoing the resolution.
+    resolved_batch_id = int((batch or {}).get('id') or 0) or None
+    try:
+        existing_account = db.execute(
+            "SELECT id FROM nh_nurse_account WHERE nurse_registration_id = ? LIMIT 1",
+            [nurse_id]
+        ).fetchone()
+        if existing_account:
+            db.execute(
+                """UPDATE nh_nurse_account
+                   SET account_status = ?,
+                       arrival_batch_id = COALESCE(?, arrival_batch_id),
+                       batch_code = CASE WHEN ? != '' THEN ? ELSE batch_code END,
+                       activated_at = COALESCE(activated_at, CURRENT_TIMESTAMP),
+                       activated_by = CASE WHEN COALESCE(activated_by, '') = '' THEN ? ELSE activated_by END,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE nurse_registration_id = ?""",
+                [
+                    NH_ACCOUNT_STATUS_ACTIVE,
+                    resolved_batch_id,
+                    batch_code,
+                    batch_code,
+                    _nh_actor_text(actor),
+                    nurse_id,
+                ]
+            )
+        else:
+            db.execute(
+                """INSERT INTO nh_nurse_account
+                   (nurse_registration_id, account_status, arrival_batch_id, batch_code,
+                    activated_at, activated_by, notes)
+                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, '')""",
+                [
+                    nurse_id,
+                    NH_ACCOUNT_STATUS_ACTIVE,
+                    resolved_batch_id,
+                    batch_code,
+                    _nh_actor_text(actor),
+                ]
+            )
+    except Exception as exc:
+        print(f"[NurseActivation] activation refresh failed: {exc}", flush=True)
+        out['reason_skipped'] = f'activation_refresh_error:{exc.__class__.__name__}'
+        out['new_status'] = out['previous_status']
+        return out
+    account_after = nh_get_account(db, nurse_d)
+    out['new_status'] = (account_after.get('account_status') or '').strip().upper()
+    out['changed'] = out['new_status'] != out['previous_status']
+    out['activated'] = out['new_status'] == NH_ACCOUNT_STATUS_ACTIVE
+    if out['changed'] and out['activated']:
+        try:
+            _nh_write_audit(
+                db,
+                'nurse_account',
+                int(account_after.get('id') or 0),
+                f'activated_via_{reason}',
+                nurse_registration_id=nurse_id,
+                old_value=out['previous_status'] or NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+                new_value=NH_ACCOUNT_STATUS_ACTIVE,
+                note=(
+                    f'Re-evaluated after {reason}; batch {batch_code} '
+                    f'({(batch or {}).get("batch_code") or batch_code}) is ARRIVED.'
+                ),
+                actor=actor,
+            )
+        except Exception as exc:
+            # Never fail the activation because of an audit hiccup.
+            print(f"[NurseActivation] audit write failed: {exc}", flush=True)
+    return out
+
+
 def _ncr_audit(db, request_row, event_type, actor, note=''):
     """Mirror correction events into nh_audit + nurse_activity_log for the
     admin timeline. nh_audit is append-only; we never delete entries."""
@@ -14737,17 +14921,68 @@ def api_admin_nurse_correction_approve(data, user=None):
                 actor,
                 note=update_summary.get('activation_deferred_reason') or '',
             )
+        # Second-line activation guarantee. Idempotent: returns 'already_active'
+        # if _ncr_apply_field_update above already activated. Closes the
+        # duplicate-batch-row gap where the older PLANNED row hides a later
+        # ARRIVED row with the same digits-only code.
+        sync_result = None
+        sync_changed_via_helper = False
+        if request_d['field_name'] == 'batch_number':
+            sync_result = _sync_nurse_activation_from_arrival_status(
+                db,
+                int(request_d.get('nurse_id') or 0),
+                reason='correction_approved',
+                actor=actor,
+            )
+            sync_changed_via_helper = bool(
+                sync_result.get('changed') and sync_result.get('activated')
+            )
+            if sync_changed_via_helper and not update_summary.get('auto_activated'):
+                # The first-line activation in _ncr_apply_field_update missed
+                # (almost always due to a duplicate stale PLANNED batch row);
+                # surface this in the correction's audit timeline so admins see
+                # exactly when and why the account flipped to Active.
+                _ncr_audit(
+                    db,
+                    request_d,
+                    'account_auto_activated_via_sync',
+                    actor,
+                    note=(
+                        f"Batch / Flight No. {sync_result.get('batch_code') or '—'} resolved as "
+                        f"{sync_result.get('batch_status') or '—'}; account moved "
+                        f"{sync_result.get('previous_status') or 'PENDING_ARRIVAL'} → "
+                        f"{sync_result.get('new_status') or NH_ACCOUNT_STATUS_ACTIVE} "
+                        f"after correction approval."
+                    ),
+                )
         db.commit()
         fresh = db.execute(
             "SELECT * FROM nurse_correction_requests WHERE id = ? LIMIT 1", [request_id]
         ).fetchone()
+        # The correction is "auto-activated" if either the in-line update OR
+        # the second-line helper landed the nurse on ACTIVE.
+        effective_auto_activated = bool(
+            update_summary.get('auto_activated')
+            or (sync_result and sync_result.get('activated') and sync_result.get('changed'))
+        )
+        effective_account_status = (
+            (sync_result or {}).get('new_status')
+            or update_summary.get('account_status')
+        )
+        message = 'Correction request approved and applied.'
+        if effective_auto_activated and request_d['field_name'] == 'batch_number':
+            message = (
+                'Correction request approved. Nurse portal/login services are now ACTIVE '
+                f"because batch {(sync_result or {}).get('batch_code') or request_d.get('requested_value') or ''} is marked ARRIVED."
+            )
         return {
             'success': True,
-            'message': 'Correction request approved and applied.',
+            'message': message,
             'request': _ncr_serialize(fresh, nurse_d),
-            'auto_activated': bool(update_summary.get('auto_activated')),
-            'account_status': update_summary.get('account_status'),
+            'auto_activated': effective_auto_activated,
+            'account_status': effective_account_status,
             'missing_activation_fields': update_summary.get('missing_activation_fields') or [],
+            'activation_sync': sync_result,
         }
     except ValueError as exc:
         try:
