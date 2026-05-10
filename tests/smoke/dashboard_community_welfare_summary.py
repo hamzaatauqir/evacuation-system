@@ -265,8 +265,14 @@ def main():
     expect("summary payload helper includes staff_accountability", 'staff_accountability' in payload_src)
     expect("summary payload helper includes recent_activity", 'recent_activity' in payload_src)
     expect("summary payload helper includes avg_resolution_days", 'avg_resolution_days' in payload_src)
+    expect("summary payload helper includes priority_level", 'priority_level' in payload_src)
+    expect("summary payload helper includes priority_reason", 'priority_reason' in payload_src)
     expect("main dashboard prioritises Community Welfare title", 'Community Welfare Command Dashboard' in server.MAIN_APP)
-    expect("main dashboard keeps visa section lower", 'Visa / Transit Processing &mdash; Lower Priority' in server.MAIN_APP)
+    expect("main dashboard includes priority activity title", 'Recent &amp; Priority Community Welfare Activity' in server.MAIN_APP)
+    expect("main dashboard keeps visa standby section lower", 'Visa / Transit Processing &mdash; Standby / Historical' in server.MAIN_APP)
+    expect("removed visa analytics label Processing Trend absent", 'Processing Trend' not in server.MAIN_APP)
+    expect("removed visa analytics label Top Professions Helped absent", 'Top Professions Helped' not in server.MAIN_APP)
+    expect("removed visa analytics label Pending Age Buckets absent", 'Pending Age Buckets' not in server.MAIN_APP)
 
     original_get_db = server.get_db
     try:
@@ -296,6 +302,12 @@ def main():
         expect("avg_resolution_days available", summary.get('avg_resolution_days') is not None)
         expect("staff_accountability populated", len(staff) >= 2)
         expect("recent_activity populated", len(recent) >= 1)
+        expect("recent_activity includes priority fields",
+               all('priority_level' in item and 'priority_reason' in item for item in recent))
+        expect("recent_activity prioritises no-action delayed case first",
+               recent[0].get('reference') == 'NUR-3001')
+        expect("recent_activity top item explains missing staff action",
+               'No staff action recorded' in (recent[0].get('priority_reason') or ''))
         expect("status breakdown includes open/in_progress/resolved/closed",
                [x.get('status') for x in payload.get('by_status', [])] == ['open', 'in_progress', 'resolved', 'closed'])
 
@@ -317,6 +329,9 @@ def main():
         expect("route payload has summary", isinstance((captured.get('data') or {}).get('summary'), dict))
         expect("route payload has staff_accountability", isinstance((captured.get('data') or {}).get('staff_accountability'), list))
         expect("route payload has recent_activity", isinstance((captured.get('data') or {}).get('recent_activity'), list))
+        route_recent = (captured.get('data') or {}).get('recent_activity') or []
+        expect("route recent_activity retains priority fields when populated",
+               (not route_recent) or ('priority_level' in route_recent[0] and 'priority_reason' in route_recent[0]))
 
     finally:
         server.get_db = original_get_db

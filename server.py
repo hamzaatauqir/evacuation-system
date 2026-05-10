@@ -21554,12 +21554,13 @@ def _community_welfare_dashboard_payload(db, user):
             bucket = _community_welfare_status_bucket(status)
             assigned_to = _clean_text(data.get('assigned_to'), 120)
             assigned_anchor = _clean_text(data.get('assigned_at'), 80) or _clean_text(data.get('created_at'), 80)
+            staff_action_at = _clean_text(latest.get('created_at'), 80)
             latest_action_at = _clean_text(
-                latest.get('created_at') or data.get('updated_at') or data.get('created_at'),
+                staff_action_at or data.get('updated_at') or data.get('created_at'),
                 80
             )
-            latest_action_summary = _clean_text(
-                latest.get('note') or latest.get('action_type') or data.get('subject') or data.get('category'),
+            staff_action_summary = _clean_text(
+                latest.get('note') or latest.get('action_type'),
                 600
             )
             is_resolved = bucket in ('resolved', 'closed')
@@ -21601,8 +21602,9 @@ def _community_welfare_dashboard_payload(db, user):
                 'updated_at': _clean_text(data.get('updated_at'), 80),
                 'resolved_at': _clean_text(data.get('resolved_at'), 80),
                 'resolved_anchor': resolved_anchor,
+                'staff_action_at': staff_action_at,
                 'latest_action_at': latest_action_at,
-                'latest_action_summary': latest_action_summary or '',
+                'latest_action_summary': staff_action_summary or '',
                 'last_action_actor': _clean_text(latest.get('actor_username'), 120),
                 'days_pending': days_pending,
                 'is_overdue': bool(is_overdue),
@@ -21625,11 +21627,74 @@ def _community_welfare_dashboard_payload(db, user):
         complaints_received_map[day] = 0
         resolved_map[day] = 0
 
+    def _activity_source_label(module_key):
+        module = _clean_text(module_key, 40).lower()
+        if module == 'nurse':
+            return 'Nurse Complaints'
+        if module == 'legal':
+            return 'Legal Assistance / OPF'
+        if module == 'death':
+            return 'Death Cases'
+        return 'Community Welfare'
+
+    def _activity_priority(item):
+        bucket = item.get('status_bucket') or 'open'
+        unresolved = bucket in ('open', 'in_progress')
+        assigned = bool(item.get('assigned_to'))
+        days_pending = int(item.get('days_pending') or 0)
+        overdue = bool(item.get('is_overdue'))
+        pending_staff_action = bool(item.get('pending_staff_action'))
+        staff_action_exists = bool(item.get('staff_action_exists'))
+
+        if unresolved and overdue and pending_staff_action:
+            return {
+                'priority_rank': 0,
+                'priority_level': 'high',
+                'priority_flag': 'Overdue / No action',
+                'priority_reason': f'No staff action recorded for {days_pending} days',
+            }
+        if unresolved and days_pending >= threshold_days:
+            reason = (
+                f'No staff action recorded for {days_pending} days'
+                if pending_staff_action else
+                f'Pending {days_pending} days without closure'
+            )
+            return {
+                'priority_rank': 1,
+                'priority_level': 'high' if overdue else 'medium',
+                'priority_flag': 'Overdue' if overdue else 'Pending 5+ days',
+                'priority_reason': reason,
+            }
+        if unresolved and assigned and not staff_action_exists:
+            return {
+                'priority_rank': 2,
+                'priority_level': 'high',
+                'priority_flag': 'Awaiting staff remarks',
+                'priority_reason': 'Assigned to staff but no remarks or action have been recorded yet',
+            }
+        if unresolved:
+            return {
+                'priority_rank': 3,
+                'priority_level': 'normal',
+                'priority_flag': 'Recently received',
+                'priority_reason': 'Recently received unresolved complaint',
+            }
+        return {
+            'priority_rank': 4,
+            'priority_level': 'resolved',
+            'priority_flag': 'Resolved',
+            'priority_reason': 'Recently resolved complaint',
+        }
+
     def _activity_sort_key(item):
-        latest_dt = _parse_datetime_safe(item.get('latest_action_at')) or _parse_datetime_safe(item.get('created_at')) or datetime.min
-        unresolved_rank = 0 if item.get('status_bucket') in ('open', 'in_progress') else 1
-        latest_score = int(latest_dt.strftime('%Y%m%d%H%M%S')) if latest_dt != datetime.min else 0
-        return (unresolved_rank, -latest_score, -(item.get('days_pending') or 0), item.get('reference') or '')
+        latest_dt = _parse_datetime_safe(item.get('latest_action_at')) or datetime.min
+        created_dt = _parse_datetime_safe(item.get('created_at')) or datetime.min
+        rank = int(item.get('priority_rank') or 0)
+        anchor_dt = created_dt if item.get('status_bucket') in ('open', 'in_progress') else latest_dt
+        if anchor_dt == datetime.min:
+            anchor_dt = latest_dt if latest_dt != datetime.min else created_dt
+        anchor_score = int(anchor_dt.strftime('%Y%m%d%H%M%S')) if anchor_dt != datetime.min else 0
+        return (rank, -(item.get('days_pending') or 0), -anchor_score, item.get('reference') or '')
 
     for item in case_rows:
         bucket = item.get('status_bucket') or 'open'
@@ -21677,11 +21742,13 @@ def _community_welfare_dashboard_payload(db, user):
             if item.get('is_overdue') or (item.get('days_pending') or 0) > threshold_days:
                 row['escalation_required'] = True
             current_dt = _parse_datetime_safe(row.get('last_action_at'))
-            item_dt = _parse_datetime_safe(item.get('latest_action_at'))
+            item_dt = _parse_datetime_safe(item.get('staff_action_at'))
             if item_dt and (current_dt is None or item_dt >= current_dt):
-                row['last_action_at'] = item.get('latest_action_at') or ''
+                row['last_action_at'] = item.get('staff_action_at') or ''
                 row['latest_action_summary'] = item.get('latest_action_summary') or ''
 
+        item.update(_activity_priority(item))
+        item['source'] = _activity_source_label(item.get('module_key'))
         recent_sorted.append(item)
 
     recent_sorted.sort(key=_activity_sort_key)
@@ -21749,13 +21816,21 @@ def _community_welfare_dashboard_payload(db, user):
         'staff_accountability': staff_rows,
         'recent_activity': [
             {
-                'date': item.get('latest_action_at') or item.get('created_at') or '',
+                'date': item.get('created_at') or '',
+                'date_received': item.get('created_at') or '',
                 'reference': item.get('reference') or '',
                 'category': item.get('category') or '',
+                'source': item.get('source') or '',
+                'applicant_name': item.get('requester_name') or '',
                 'assigned_to': item.get('assigned_to') or 'Unassigned',
                 'status': item.get('status') or '',
+                'last_action_at': item.get('staff_action_at') or None,
+                'latest_action': item.get('latest_action_summary') or '',
                 'last_action': item.get('latest_action_summary') or '',
                 'days_pending': item.get('days_pending') or 0,
+                'priority_level': item.get('priority_level') or 'normal',
+                'priority_flag': item.get('priority_flag') or '',
+                'priority_reason': item.get('priority_reason') or '',
                 'overdue': bool(item.get('is_overdue')),
             }
             for item in recent_sorted[:12]
@@ -46182,13 +46257,20 @@ body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,
 .cwa-command-card .value{display:block;margin-top:10px;font-size:2em;line-height:1;font-weight:850;color:#10253f}
 .cwa-command-card .detail{display:block;margin-top:8px;font-size:.82em;line-height:1.45;color:#526173;min-height:2.4em}
 .cwa-command-card.info{--tone:#145da0}.cwa-command-card.good{--tone:#0f766e}.cwa-command-card.warn{--tone:#d97706}.cwa-command-card.danger{--tone:#c2410c}.cwa-command-card.neutral{--tone:#475569}
+.cwa-filter-bar{display:flex;flex-wrap:wrap;gap:8px;padding:0 16px 12px}
+.cwa-filter-btn{display:inline-flex;align-items:center;gap:8px;border:1px solid #d6e1ec;background:#f8fbfd;color:#23415f;border-radius:999px;padding:7px 12px;font-size:.78em;font-weight:800;cursor:pointer;transition:all .15s ease}
+.cwa-filter-btn:hover{background:#eef5fb}
+.cwa-filter-btn.active{background:#145da0;color:#fff;border-color:#145da0;box-shadow:0 8px 16px rgba(20,93,160,.18)}
+.cwa-filter-btn .count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 7px;border-radius:999px;background:rgba(15,23,42,.08);font-size:.9em}
+.cwa-filter-btn.active .count{background:rgba(255,255,255,.18)}
 .cwa-status-pill,.cwa-flag-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:.72em;font-weight:700;line-height:1.3;white-space:nowrap}
 .cwa-status-pill.open{background:#e0f2fe;color:#075985}.cwa-status-pill.in-progress{background:#fff7ed;color:#9a3412}.cwa-status-pill.resolved{background:#dcfce7;color:#166534}.cwa-status-pill.closed{background:#e2e8f0;color:#334155}
-.cwa-flag-pill.overdue{background:#fee2e2;color:#991b1b}.cwa-flag-pill.pending{background:#fef3c7;color:#92400e}.cwa-flag-pill.clear{background:#ecfccb;color:#3f6212}
+.cwa-flag-pill.overdue{background:#fee2e2;color:#991b1b}.cwa-flag-pill.pending{background:#fef3c7;color:#92400e}.cwa-flag-pill.clear{background:#ecfccb;color:#3f6212}.cwa-flag-pill.info{background:#e0f2fe;color:#075985}.cwa-flag-pill.resolved{background:#dcfce7;color:#166534}
 .cwa-staff-name{font-weight:700;color:#132238}
 .cwa-muted{color:#6b7280}
 .cwa-table-note{display:block;margin-top:3px;font-size:.72em;color:#7b8794;line-height:1.4}
 .cwa-activity-ref{font-weight:700;color:#10253f}
+.cwa-activity-name{font-weight:700;color:#132238}
 .cwa-summary-inline{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .cwa-summary-inline span{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#eef2f7;color:#526173;font-size:.7em;font-weight:700}
 .cwa-empty-cell{padding:20px 14px!important;text-align:center;color:#7b8794}
@@ -46349,6 +46431,18 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <div class="portal-sidebar-brand"><span class="portal-sidebar-emblem" aria-hidden="true"><img src="https://upload.wikimedia.org/wikipedia/commons/e/ef/State_emblem_of_Pakistan.svg" alt=""></span><span class="portal-sidebar-copy"><strong>Embassy of Pakistan Kuwait</strong><small>Community Welfare Wing Operations</small></span></div>
 <div class="portal-sidebar-scroll">
 <button class="active" onclick="go('dash',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Dashboard</span></button>
+<div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Community Welfare Command</div>
+<button data-cwa-nav onclick="window.location.href='/admin/community-welfare'"><span class="side-nav-icon" aria-hidden="true"></span><span>Community Welfare</span><span class="badge-count hidden" data-badge="community_welfare"></span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/welfare-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Community Welfare Complaints / Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/my-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Staff Accountability / Case Movement</span><span class="badge-count hidden" data-badge="my_cases"></span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/legal-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Legal Assistance / OPF Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/death-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/nurses'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/nurses/my-complaints'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurse Complaints</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/nurses/accommodation'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurse Accommodation</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/gl'"><span class="side-nav-icon" aria-hidden="true"></span><span>Grading Letters</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/ambassador-review'"><span class="side-nav-icon" aria-hidden="true"></span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></button>
+<div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Emergency Visa / Transit Tools &mdash; Standby</div>
 <button onclick="go('reg',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>New Registration</span></button>
 <button onclick="go('recs',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>All Records</span></button>
 <button onclick="go('returnees',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Returnees</span></button>
@@ -46358,19 +46452,10 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <button onclick="go('csv',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>CSV Import</span></button>
 <button onclick="go('report',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>SITREP Report</span></button>
 <button onclick="go('sitrep',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>SITREP Editor</span></button>
-<button onclick="go('iraq',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Iraq Transit Visas</span></button>
-<button onclick="go('iraq-public',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Iraq Public (MOFA KW)</span></button>
 <button onclick="go('fee-report',this)" data-fee-report-nav><span class="side-nav-icon" aria-hidden="true"></span><span>Fee Reporting</span></button>
+<div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Security &amp; Admin</div>
 <button type="button" onclick="window.location.href='/admin/security'"><span class="side-nav-icon" aria-hidden="true"></span><span>Two-Factor Security</span></button>
 <button onclick="go('admin',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Admin</span></button>
-<div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Community Welfare</div>
-<button data-cwa-nav onclick="window.location.href='/admin/community-welfare'"><span class="side-nav-icon" aria-hidden="true"></span><span>Overview</span><span class="badge-count hidden" data-badge="community_welfare"></span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/nurses'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/legal-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/death-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/welfare-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>Welfare Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/my-cases'"><span class="side-nav-icon" aria-hidden="true"></span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span></button>
-<button data-cwa-nav onclick="window.location.href='/admin/ambassador-review'"><span class="side-nav-icon" aria-hidden="true"></span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></button>
 <button data-cwa-nav onclick="window.open('/','_blank')"><span class="side-nav-icon" aria-hidden="true"></span><span>Public Portal ↗</span></button>
 </div>
 <div class="portal-sidebar-user"><div class="portal-avatar" aria-hidden="true"></div><div><strong>__USER_NAME__</strong><span>__USER_ROLE__</span></div></div>
@@ -46383,8 +46468,14 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <div class="dash-section-head"><div><h3>Community Welfare Command Dashboard</h3><p>Complaints, resolution tracking, case movement, and staff accountability across Community Welfare desks.</p></div></div>
 <div class="cwa-command-grid" id="cwaCommandCards"></div>
 <div class="dash-card table-card" style="margin-bottom:18px">
-<div class="dash-card-head" style="padding:16px 16px 0"><h3>Recent Community Welfare Activity</h3><span>Prioritised unresolved and recently updated complaints</span></div>
-<div class="table-meta" style="padding:0 16px">Live movement feed showing who holds the case, the latest action, and how long it has been pending.</div>
+<div class="dash-card-head" style="padding:16px 16px 0"><h3>Staff Accountability &amp; Response Monitoring</h3><span>Assigned load, delayed action, escalation risk, and latest officer movement</span></div>
+<div class="table-meta" style="padding:0 16px">Use the filter buttons to focus on assigned workload, pending responses, resolved throughput, or overdue follow-up.</div>
+<div class="cwa-filter-bar" id="cwaStaffMovementFilters"></div>
+<div class="data-mini-table-wrap"><table class="data-mini-table" id="cwaStaffMovementTable"></table></div>
+</div>
+<div class="dash-card table-card">
+<div class="dash-card-head" style="padding:16px 16px 0"><h3>Recent &amp; Priority Community Welfare Activity</h3><span>Overdue, delayed, and no-action complaints surface before ordinary recent movement</span></div>
+<div class="table-meta" style="padding:0 16px">The feed highlights pressure by complaint type, missing staff response, delayed follow-up, and newly received unresolved cases.</div>
 <div class="data-mini-table-wrap"><table class="data-mini-table" id="cwaRecentActivityTable"></table></div>
 </div>
 <div class="dash-chart-grid story">
@@ -46394,16 +46485,11 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <div class="dash-card wide"><div class="dash-card-head"><h3>Resolution Trend</h3><span>Resolved or closed cases by day</span></div><div class="chart-wrap compact" id="cwaResolutionTrendChartWrap" data-canvas-id="cwaResolutionTrendChart"><canvas id="cwaResolutionTrendChart"></canvas></div></div>
 <div class="dash-card"><div class="dash-card-head"><h3>Staff Accountability Breakdown</h3><span>Pending, resolved, and overdue load by officer</span></div><div class="chart-wrap compact" id="cwaStaffChartWrap" data-canvas-id="cwaStaffChart"><canvas id="cwaStaffChart"></canvas></div></div>
 </div>
-<div class="dash-card table-card">
-<div class="dash-card-head" style="padding:16px 16px 0"><h3>Staff Accountability &amp; Case Movement</h3><span>Assigned volume, pending action, escalation risk, and latest officer movement</span></div>
-<div class="table-meta" style="padding:0 16px">Cases pending beyond 5 days are flagged for escalation review.</div>
-<div class="data-mini-table-wrap"><table class="data-mini-table" id="cwaStaffMovementTable"></table></div>
-</div>
 </div>
 <div class="dash-top-shell">
 <div class="dash-summary-panel">
 <div class="dash-summary-section">
-<div class="dash-summary-section-head"><h3>Visa / Transit Processing &mdash; Legacy / Lower Priority</h3><span>Kept available below the Community Welfare command view</span></div>
+<div class="dash-summary-section-head"><h3>Emergency Visa / Transit Tools &mdash; Standby</h3><span>Retained for emergency activation and historical follow-up</span></div>
 <div id="kpiGrid"></div>
 </div>
 <div class="dash-summary-section">
@@ -46413,14 +46499,8 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 </div>
 <div class="dash-top-main">
 <div class="dash-section featured">
-<div class="dash-section-head"><div><h3>Visa / Transit Processing &mdash; Lower Priority</h3><p>Operational timing, queue age, and movement visibility for the legacy Kuwait to Pakistan transit workflow.</p></div></div>
-<div class="dash-overview-grid">
-<div class="dash-card processing-trend-card"><div class="dash-card-head"><h3>Processing Trend</h3><span>Daily requests and outcomes by request date</span></div><div class="chart-wrap processing-trend-chart" id="processingTrendChartWrap" data-canvas-id="processingTrendChart"><canvas id="processingTrendChart"></canvas></div><div class="embedded-actionable-cases"><div class="embedded-actionable-head"><div><h4>Actionable Cases</h4><p>Longest-pending evacuee records that may need escalation or direct follow-up.</p></div></div><div class="table-meta">Top 10 longest-pending clear records in the main KW&rarr;PK flow.</div><div class="scroll-t actionable-cases-scroll"><table class="actionable-cases-table" id="longestPendingTable"></table></div></div></div>
-<div class="dash-overview-side">
-<div class="dash-card"><div class="dash-card-head"><h3>Top Professions Helped</h3><span>Identified profession groups</span></div><div class="chart-wrap compact" id="topProfessionsChartWrap" data-canvas-id="topProfessionsChart"><canvas id="topProfessionsChart"></canvas></div></div>
-<div class="dash-card"><div class="dash-card-head"><h3>Pending Age Buckets</h3><span>Cases still awaiting movement</span></div><div class="chart-wrap compact" id="pendingAgeChartWrap" data-canvas-id="pendingAgeChart"><canvas id="pendingAgeChart"></canvas></div></div>
-</div>
-</div>
+<div class="dash-section-head"><div><h3>Visa / Transit Processing &mdash; Standby / Historical</h3><p>Historical evacuation and transit tools remain available below the Community Welfare command view for emergency reactivation when required.</p></div></div>
+<div class="dash-card table-card"><div class="dash-card-head" style="padding:16px 16px 0"><h3>Standby Queue Snapshot</h3><span>Compact review of legacy transit records that may still need attention</span></div><div class="table-meta" style="padding:0 16px">Large visa analytics have been removed from the main dashboard so Community Welfare operations stay front and center.</div><div class="scroll-t actionable-cases-scroll"><table class="actionable-cases-table" id="longestPendingTable"></table></div></div>
 </div>
 </div>
 </div></div></div>
@@ -47563,6 +47643,8 @@ h+='</tbody>';el.innerHTML=h;
 }
 
 // DASHBOARD
+let cwaStaffMovementRows=[];
+let cwaStaffMovementFilter='pending';
 function cwaStatusTone(status){
 const s=String(status||'').trim().toLowerCase();
 if(s==='resolved')return 'resolved';
@@ -47576,6 +47658,45 @@ return '<span class="cwa-status-pill '+cwaStatusTone(status)+'">'+escHtml(label)
 }
 function cwaFlagPill(tone,text){
 return '<span class="cwa-flag-pill '+tone+'">'+escHtml(text)+'</span>';
+}
+function cwaPriorityTone(item){
+const level=String((item&&item.priority_level)||'').trim().toLowerCase();
+if(level==='high')return 'overdue';
+if(level==='medium')return 'pending';
+if(level==='resolved')return 'resolved';
+return 'info';
+}
+function cwaPriorityPill(item){
+const flag=safeLabel(item&&item.priority_flag,'Recently received');
+return cwaFlagPill(cwaPriorityTone(item),flag);
+}
+function cwaStaffRowMatches(item,filter){
+if(filter==='resolved')return safeValue(item.resolved)>0;
+if(filter==='overdue')return safeValue(item.overdue)>0;
+if(filter==='pending')return safeValue(item.pending)>0||safeValue(item.pending_action)>0;
+return safeValue(item.assigned)>0;
+}
+function cwaStaffFilterCount(rows,filter){
+return asArray(rows).filter(item=>cwaStaffRowMatches(item,filter)).length;
+}
+function renderCwaStaffMovementFilters(rows){
+const el=document.getElementById('cwaStaffMovementFilters');if(!el)return;
+rows=asArray(rows);
+const filters=[
+{key:'assigned',label:'Assigned'},
+{key:'pending',label:'Pending'},
+{key:'resolved',label:'Resolved'},
+{key:'overdue',label:'Overdue'}
+];
+el.innerHTML=filters.map(filter=>{
+const active=filter.key===cwaStaffMovementFilter?' active':'';
+const count=cwaStaffFilterCount(rows,filter.key);
+return '<button type="button" class="cwa-filter-btn'+active+'" onclick="setCwaStaffMovementFilter(\''+filter.key+'\')"><span>'+escHtml(filter.label)+'</span><span class="count">'+count+'</span></button>';
+}).join('');
+}
+function setCwaStaffMovementFilter(filter){
+cwaStaffMovementFilter=filter||'pending';
+renderCwaStaffMovement(cwaStaffMovementRows);
 }
 function renderCwaCommandCards(summary){
 const el=document.getElementById('cwaCommandCards');if(!el)return;
@@ -47593,20 +47714,24 @@ el.innerHTML=cards.map(card=>'<div class="cwa-command-card '+card.tone+'"><span 
 function renderCwaRecentActivity(rows){
 const el=document.getElementById('cwaRecentActivityTable');if(!el)return;
 rows=asArray(rows);
-if(!rows.length){el.innerHTML='<tbody><tr><td class="cwa-empty-cell" colspan="7">No recent Community Welfare activity available.</td></tr></tbody>';return}
-let h='<thead><tr><th>Date</th><th>Case / Complaint Reference</th><th>Category</th><th>Assigned To</th><th>Status</th><th>Last Action</th><th>Days Pending</th></tr></thead><tbody>';
+if(!rows.length){el.innerHTML='<tbody><tr><td class="cwa-empty-cell" colspan="10">No recent Community Welfare activity available.</td></tr></tbody>';return}
+let h='<thead><tr><th>Date Received</th><th>Case Reference</th><th>Category / Source</th><th>Applicant / Name</th><th>Assigned Staff</th><th>Status</th><th>Days Pending</th><th>Last Action Date</th><th>Latest Staff Remarks / Action</th><th>Priority Flag</th></tr></thead><tbody>';
 rows.forEach(item=>{
 const pending=safeValue(item.days_pending);
-const overdue=!!item.overdue;
-const pendingHtml=overdue?cwaFlagPill('overdue',pending+' days'):pending>0?cwaFlagPill('pending',pending+' days'):cwaFlagPill('clear','0 days');
+const pendingHtml=item.overdue?cwaFlagPill('overdue',pending+' days'):pending>=5?cwaFlagPill('pending',pending+' days'):pending>0?cwaFlagPill('info',pending+' days'):cwaFlagPill('clear','0 days');
+const latestAction=safeLabel(item.latest_action||item.last_action,'No staff remarks recorded');
+const lastActionDate=item.last_action_at?formatShortDate(item.last_action_at):'—';
 h+='<tr>'
-+'<td data-label="Date">'+escHtml(formatShortDate(item.date||''))+'</td>'
-+'<td data-label="Case / Complaint Reference"><span class="cwa-activity-ref">'+escHtml(item.reference||'-')+'</span></td>'
-+'<td data-label="Category">'+escHtml(item.category||'-')+'</td>'
-+'<td data-label="Assigned To">'+escHtml(item.assigned_to||'Unassigned')+'</td>'
++'<td data-label="Date Received">'+escHtml(formatShortDate(item.date_received||item.date||''))+'</td>'
++'<td data-label="Case Reference"><span class="cwa-activity-ref">'+escHtml(item.reference||'-')+'</span></td>'
++'<td data-label="Category / Source"><strong>'+escHtml(item.category||'-')+'</strong>'+(item.source?'<span class="cwa-table-note">'+escHtml(item.source)+'</span>':'')+'</td>'
++'<td data-label="Applicant / Name"><span class="cwa-activity-name">'+escHtml(item.applicant_name||'-')+'</span></td>'
++'<td data-label="Assigned Staff">'+escHtml(item.assigned_to||'Unassigned')+'</td>'
 +'<td data-label="Status">'+cwaStatusPill(item.status)+'</td>'
-+'<td data-label="Last Action">'+escHtml(item.last_action||'No recent action summary')+'</td>'
 +'<td data-label="Days Pending">'+pendingHtml+'</td>'
++'<td data-label="Last Action Date">'+escHtml(lastActionDate)+'</td>'
++'<td data-label="Latest Staff Remarks / Action">'+escHtml(latestAction)+'</td>'
++'<td data-label="Priority Flag">'+cwaPriorityPill(item)+'<span class="cwa-table-note">'+escHtml(item.priority_reason||'Recently received unresolved complaint')+'</span></td>'
 +'</tr>';
 });
 h+='</tbody>';
@@ -47614,8 +47739,10 @@ el.innerHTML=h;
 }
 function renderCwaStaffMovement(rows){
 const el=document.getElementById('cwaStaffMovementTable');if(!el)return;
-rows=asArray(rows);
-if(!rows.length){el.innerHTML='<tbody><tr><td class="cwa-empty-cell" colspan="8">No staff accountability data available.</td></tr></tbody>';return}
+cwaStaffMovementRows=asArray(rows);
+renderCwaStaffMovementFilters(cwaStaffMovementRows);
+rows=cwaStaffMovementRows.filter(item=>cwaStaffRowMatches(item,cwaStaffMovementFilter));
+if(!rows.length){el.innerHTML='<tbody><tr><td class="cwa-empty-cell" colspan="8">No staff accountability data matches this filter.</td></tr></tbody>';return}
 let h='<thead><tr><th>Staff Member</th><th>Assigned Cases</th><th>Pending Action</th><th>Resolved Cases</th><th>Overdue Cases</th><th>Last Action Date</th><th>Latest Remarks / Action Summary</th><th>Escalation</th></tr></thead><tbody>';
 rows.forEach(item=>{
 const escalation=item.escalation_required?cwaFlagPill('overdue','Escalate'):cwaFlagPill('clear','On track');
@@ -47650,8 +47777,8 @@ const byStatus=asArray(payload.by_status);
 const byCategory=asArray(payload.by_category);
 const staff=asArray(payload.staff_accountability);
 renderCwaCommandCards(summary);
-renderCwaRecentActivity(payload.recent_activity);
 renderCwaStaffMovement(staff);
+renderCwaRecentActivity(payload.recent_activity);
 
 mkChart('cwaComplaintsTrendChart','line',{labels:complaintsTrend.map(x=>formatShortDate(x.date)),datasets:[
 {label:'Complaints received',data:complaintsTrend.map(x=>safeValue(x.count)),borderColor:'#145da0',backgroundColor:'rgba(20,93,160,.12)',tension:.25,fill:true,borderWidth:2}
@@ -47673,7 +47800,8 @@ mkChart('cwaStaffChart','bar',{labels:staffTop.map(x=>safeLabel(x.staff_name||x.
 ]},{scales:{x:{stacked:false,grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
 }
 function renderVisaDashboard(d){
-const k=d.kpi||{};
+const payload=d||{};
+const k=payload.kpi||{};
 const totalDeparted=safeValue(k.departed)+safeValue(k.jazeera_departed);
 const evacRows=[
 {label:'Total Registered',valueDisplay:safeValue(k.total),detail:'Clean records ('+safeValue(k.duplicates)+' duplicates excluded)',tone:'info'},
@@ -47687,17 +47815,7 @@ const evacRows=[
 if(safeValue(k.returned)>0)evacRows.splice(6,0,{label:'Returned',valueDisplay:safeValue(k.returned),detail:safeValue(k.returned_today)+' today',tone:'danger'});
 if(safeValue(k.mismatch_total)>0)evacRows.push({label:'Route Mismatches',valueDisplay:safeValue(k.mismatch_total),detail:safeValue(k.corrected_to_pk)+' corrected to PK→KW | '+safeValue(k.mismatch_pending_review)+' pending review',tone:'warn'});
 renderCompactSummary('kpiGrid',evacRows,'No visa / transit summary available');
-
-const trend=asArray(d.processing_trend),pendingAges=asArray(d.pending_age_buckets);
-const professionStats=d.profession_stats||{};
-const topProfessions=asArray(professionStats.top_professions);
-mkChart('pendingAgeChart','bar',{labels:pendingAges.map(x=>safeLabel(x.label,'')),datasets:[{label:'Pending cases',data:pendingAges.map(x=>safeValue(x.count)),backgroundColor:'#607d8b',borderRadius:6,maxBarThickness:48}]},{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
-mkChart('processingTrendChart','line',{labels:trend.map(x=>formatShortDate(x.date)),datasets:[
-{label:'New Requests',data:trend.map(x=>safeValue(x.new_requests)),borderColor:'#1565c0',backgroundColor:'rgba(21,101,192,.12)',tension:.25,fill:false,borderWidth:2},
-{label:'Visa Obtained',data:trend.map(x=>safeValue(x.visa_obtained)),borderColor:'#0f766e',backgroundColor:'rgba(15,118,110,.12)',tension:.25,fill:false,borderWidth:2}
-]},{scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
-mkChart('topProfessionsChart','bar',{labels:topProfessions.map(x=>safeLabel(x.profession,'')),datasets:[{label:'Cases',data:topProfessions.map(x=>safeValue(x.count||x.total)),backgroundColor:'#546e7a',borderRadius:6}]},{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,ticks:{precision:0}},y:{grid:{display:false}}}});
-renderLongestPendingTable(asArray(d.longest_pending_cases));
+renderLongestPendingTable(asArray(payload.longest_pending_cases));
 }
 async function loadDash(){
 try{
@@ -47705,17 +47823,14 @@ const results=await Promise.all([
 api('/api/admin/dashboard/community-welfare-summary'),
 api('/api/stats')
 ]);
-const cw=results[0];
-const d=results[1];
-if(!d)return;
-renderCommunityWelfareDashboard(cw);
-renderVisaDashboard(d);
+renderCommunityWelfareDashboard(results[0]);
+renderVisaDashboard(results[1]||{});
 }catch(err){
 console.error(err);
 toast('Dashboard refresh failed');
 renderCommunityWelfareDashboard(null);
 renderCompactSummary('kpiGrid',[],'Visa / transit dashboard data unavailable');
-['pendingAgeChart','processingTrendChart','topProfessionsChart','cwaComplaintsTrendChart','cwaResolutionTrendChart','cwaStatusChart','cwaCategoryChart','cwaStaffChart'].forEach(id=>renderNoData(id,'Dashboard data unavailable'));
+['cwaComplaintsTrendChart','cwaResolutionTrendChart','cwaStatusChart','cwaCategoryChart','cwaStaffChart'].forEach(id=>renderNoData(id,'Dashboard data unavailable'));
 renderLongestPendingTable([]);
 }
 }
