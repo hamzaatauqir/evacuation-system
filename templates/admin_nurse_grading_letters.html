@@ -362,7 +362,11 @@ function actionButtons(a, canManage, blockers){
     : '<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'generate\')">Generate PDF</button>')
     +'<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reopen()">Reopen</button>';
   if(a.status==='LETTER_GENERATED') html+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'mark-issued\')">Mark Issued</button>';
-  if(a.can_print_clean) html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/api/admin/gl/letter?id='+Number(a.id)+'" target="_blank" rel="noopener">Print Clean A4 PDF</a>';
+  if(a.can_print_clean){
+    const letterUrl='/api/admin/gl/letter?id='+Number(a.id);
+    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="'+letterUrl+'&disposition=inline&force=1" target="_blank" rel="noopener">Print Final Letter</a>';
+    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="'+letterUrl+'" target="_blank" rel="noopener">Download Final PDF</a>';
+  }
   // Pre-print correction: visible while the letter is still actionable.
   // Hidden once the request is rejected/cancelled (no point correcting then).
   if(!['REJECTED','CANCELLED'].includes(a.status)) html+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="openCorrectionModal()" title="Correct nurse identity fields before printing the official letter">Correct Name / Father Name Before Print</button>';

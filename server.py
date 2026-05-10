@@ -13216,13 +13216,11 @@ def _gl_preview_html(letter, include_watermark=False, preview_title='', pdf_safe
     look of existing letters is preserved exactly.
     """
     emblem = _gop_emblem_data_url()
-    # PDF-safe identifier values (hyphens become non-breaking).
+    render_letter = dict(letter)
     if pdf_safe:
-        for k in ('identifier_value', 'passport_number'):
-            if k in letter and letter.get(k):
-                letter = dict(letter)
-                letter[k] = _gl_pdf_safe_text(letter[k])
-                # only need to dict-copy once; subsequent writes are local
+        for key in ('identifier_value', 'passport_number'):
+            if render_letter.get(key):
+                render_letter[key] = _gl_pdf_safe_text(render_letter[key])
     watermark_html = ''
     notice_html = ''
     if include_watermark:
@@ -13245,183 +13243,146 @@ def _gl_preview_html(letter, include_watermark=False, preview_title='', pdf_safe
     preview_class = ' gl-official-letter--preview' if include_watermark else ''
     if pdf_safe:
         preview_class += ' gl-pdf-safe'
-    subtitle_html = (
-        f'<div class="gl-official-letter__cell-line">({esc(letter.get("qualification_subtitle") or "")})</div>'
-        if letter.get('qualification_subtitle') else ''
-    )
-    qualifications = letter.get('qualifications') or []
-    if len(qualifications) > 1:
-        # Multi-qualification block: stacked narrative two-column layout to
-        # match the MOH-Kuwait accepted sample (no borders, no table).  Each
-        # qualification renders as one row with a left (degree + identifier)
-        # column and a right (institute / university / grade) column.
-        def _missing(value):
-            text = (value or '').strip()
-            return not text or text == '—'
+    def _missing(value):
+        text = str(value or '').strip()
+        return not text or text == '—'
 
-        rows_html = []
+    def _result_text(q):
+        final_result_text = str(q.get('final_result_text') or '').strip()
+        if final_result_text and final_result_text != '—':
+            return final_result_text
+        percentage = str(q.get('final_percentage') or '').strip()
+        grade = str(q.get('final_grade_label') or '').strip()
+        if percentage and percentage != '—' and grade and grade != '—':
+            return f'{percentage}% "{grade}"'
+        if percentage and percentage != '—':
+            return f'{percentage}%'
+        if grade and grade != '—':
+            return f'"{grade}"'
+        return ''
+
+    qualifications = [dict(q) for q in (render_letter.get('qualifications') or [])]
+    if not qualifications:
+        qualifications = [{
+            'qualification_label': render_letter.get('degree_title') or '—',
+            'degree_title_secondary': render_letter.get('qualification_subtitle') or '',
+            'identifier_type_label': render_letter.get('identifier_label') or '',
+            'identifier_value': render_letter.get('identifier_value') or '',
+            'institute': render_letter.get('institute') or '',
+            'university': render_letter.get('university') or '',
+            'year_of_passing': render_letter.get('year_of_passing') or '',
+            'final_result_text': render_letter.get('final_result_text') or '',
+            'final_percentage': render_letter.get('final_percentage') or '',
+            'final_grade_label': render_letter.get('final_grade_label') or '',
+        }]
+    if pdf_safe:
         for q in qualifications:
-            left_lines = [
-                f'<div class="gl-degree">{esc(q["qualification_label"])}</div>'
-            ]
-            if q.get('degree_title_secondary'):
-                left_lines.append(f'<div>{esc(q["degree_title_secondary"])}</div>')
-            ident_label = (q.get('identifier_type_label') or '').strip()
-            ident_value = (q.get('identifier_value') or '').strip()
-            if ident_value and ident_value != '—':
-                ident_line = f'{ident_label} {ident_value}'.strip()
-                left_lines.append(f'<div>{esc(ident_line)}</div>')
+            if q.get('identifier_value'):
+                q['identifier_value'] = _gl_pdf_safe_text(q['identifier_value'])
 
-            right_lines = []
-            institute = (q.get('institute') or '').strip()
-            year = (q.get('year_of_passing') or '').strip()
-            if not _missing(institute) and not _missing(year):
-                right_lines.append(f'<div>{esc(institute)}-{esc(year)}</div>')
-            elif not _missing(institute):
-                right_lines.append(f'<div>{esc(institute)}</div>')
-            elif not _missing(year):
-                right_lines.append(f'<div>{esc(year)}</div>')
-            university = (q.get('university') or '').strip()
-            if not _missing(university):
-                right_lines.append(f'<div>Affiliated with {esc(university)}</div>')
-            percentage = (q.get('final_percentage') or '').strip()
-            grade = (q.get('final_grade_label') or '').strip()
-            if not _missing(percentage) and not _missing(grade):
-                right_lines.append(f'<div>({esc(percentage)}% &ldquo;{esc(grade)}&rdquo;)</div>')
-            elif not _missing(percentage):
-                right_lines.append(f'<div>({esc(percentage)}%)</div>')
-            elif not _missing(grade):
-                right_lines.append(f'<div>(&ldquo;{esc(grade)}&rdquo;)</div>')
+    qual_rows = []
+    for q in qualifications:
+        left_lines = [
+            f'<div class="gl-qualification-table__line gl-qualification-table__qual">{esc(q.get("qualification_label") or "—")}</div>'
+        ]
+        secondary = str(q.get('degree_title_secondary') or '').strip()
+        if secondary:
+            left_lines.append(
+                f'<div class="gl-qualification-table__line">{esc(secondary)}</div>'
+            )
+        ident_label = str(q.get('identifier_type_label') or '').strip()
+        ident_value = str(q.get('identifier_value') or '').strip()
+        if ident_label or ident_value:
+            ident_text = ' '.join(part for part in (ident_label, ident_value) if part).strip()
+            left_lines.append(
+                f'<div class="gl-qualification-table__line gl-qualification-table__nowrap">{esc(ident_text)}</div>'
+            )
 
-            if pdf_safe:
-                # PDF-safe: real <tr><td> instead of display:table-row divs.
-                # MuPDF Story silently mis-renders display:table on non-<table>
-                # elements, which is why the previous PDFs had cramped /
-                # mis-aligned qualification cells.
-                rows_html.append(
-                    '<tr class="gl-multi-qualification-row">'
-                    f'<td class="gl-multi-qualification-left">{"".join(left_lines)}</td>'
-                    f'<td class="gl-multi-qualification-right">{"".join(right_lines)}</td>'
-                    '</tr>'
-                )
-            else:
-                rows_html.append(
-                    '<div class="gl-multi-qualification-row">'
-                    f'<div class="gl-multi-qualification-left">{"".join(left_lines)}</div>'
-                    f'<div class="gl-multi-qualification-right">{"".join(right_lines)}</div>'
-                    '</div>'
-                )
-        if pdf_safe:
-            qualifications_block_html = (
-                f'<!-- gl multi-qualification block (pdf-safe): {len(qualifications)} qualifications rendered -->'
-                '<table class="gl-multi-qualification-list" '
-                f'data-qualification-count="{len(qualifications)}" '
-                'cellspacing="0" cellpadding="0">'
-                f'<tbody>{"".join(rows_html)}</tbody>'
-                '</table>'
+        right_lines = []
+        institute = str(q.get('institute') or '').strip()
+        if institute and institute != '—':
+            right_lines.append(
+                f'<div class="gl-qualification-table__line">{esc(institute)}</div>'
             )
-        else:
-            qualifications_block_html = (
-                f'<!-- gl multi-qualification block: {len(qualifications)} qualifications rendered -->'
-                f'<div class="gl-multi-qualification-list" data-qualification-count="{len(qualifications)}">'
-                f'{"".join(rows_html)}'
-                '</div>'
+        university = str(q.get('university') or '').strip()
+        if university and university != '—':
+            right_lines.append(
+                f'<div class="gl-qualification-table__line">Affiliated with {esc(university)}</div>'
             )
-    else:
-        # Single-qualification: keep the legacy 2-cell grid so the look of
-        # existing letters is preserved character-for-character.
-        qualifications_block_html = (
-            '<table class="gl-official-letter__grid">'
-            '<tr>'
-            '<td>'
-            f'<span class="gl-official-letter__cell-line">{esc(letter["degree_title"])}</span>'
-            f'{subtitle_html}'
-            f'<span class="gl-official-letter__cell-line">{esc(letter["identifier_label"])} {esc(letter["identifier_value"])}</span>'
-            '</td>'
-            '<td>'
-            f'<span class="gl-official-letter__cell-line">{esc(letter["institute"])}</span>'
-            f'<span class="gl-official-letter__cell-line">Affiliated with {esc(letter["university"])}</span>'
-            f'<span class="gl-official-letter__cell-line">{esc(letter["year_of_passing"])}</span>'
-            f'<span class="gl-official-letter__cell-line">{esc(letter["final_result_text"])}</span>'
-            '</td>'
+        year = str(q.get('year_of_passing') or '').strip()
+        if year and year != '—':
+            right_lines.append(
+                f'<div class="gl-qualification-table__line">{esc(year)}</div>'
+            )
+        result_text = _result_text(q)
+        if result_text:
+            right_lines.append(
+                f'<div class="gl-qualification-table__line">{esc(result_text)}</div>'
+            )
+
+        qual_rows.append(
+            '<tr class="gl-qualification-table__row">'
+            f'<td class="gl-qualification-table__left">{"".join(left_lines)}</td>'
+            f'<td class="gl-qualification-table__right">{"".join(right_lines)}</td>'
             '</tr>'
-            '</table>'
         )
+    qualifications_block_html = (
+        '<table class="gl-qualification-table gl-multi-qualification-list" '
+        f'data-qualification-count="{len(qualifications)}" cellspacing="0" cellpadding="0">'
+        f'<tbody>{"".join(qual_rows)}</tbody>'
+        '</table>'
+    )
     return f"""
 <style>
-@page {{ size: A4; margin: 12mm 14mm 12mm 14mm; }}
-.gl-official-letter__preview-title{{font-family:Georgia,"Times New Roman",serif;font-size:18px;font-weight:700;color:#102a43;margin:0 0 10px;text-align:left}}
-.gl-official-letter__notice{{font-family:Georgia,"Times New Roman",serif;font-size:13px;line-height:1.55;color:#7c2d12;background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:10px 12px;margin:0 auto 12px;max-width:794px}}
-.gl-official-letter{{position:relative;background:#fff;color:#000;border:1px solid #d9dee4;border-radius:6px;box-shadow:0 10px 30px rgba(15,23,42,.06);padding:28px 40px 24px;font-family:"Times New Roman",Georgia,serif;line-height:1.36;width:100%;max-width:794px;min-height:297mm;margin:0 auto;box-sizing:border-box;overflow:hidden}}
-.gl-official-letter--preview{{width:min(210mm,100%);min-height:297mm;padding:12mm 14mm 12mm}}
+@page {{ size: A4; margin: 0; }}
+.gl-official-letter__preview-title{{font-family:"Times New Roman",Times,serif;font-size:18px;font-weight:700;color:#102a43;margin:0 0 10px;text-align:left}}
+.gl-official-letter__notice{{font-family:"Times New Roman",Times,serif;font-size:13px;line-height:1.5;color:#7c2d12;background:#fef3c7;border:1px solid #fde68a;padding:10px 12px;margin:0 auto 12px;max-width:210mm;box-sizing:border-box}}
+.gl-official-letter{{position:relative;background:#fff;color:#111;border:1px solid #d7dadd;padding:16mm 18mm 18mm;font-family:"Times New Roman",Times,serif;font-size:14px;line-height:1.5;width:100%;box-sizing:border-box;overflow:hidden}}
+.gl-official-letter--preview{{width:min(210mm,100%);min-height:297mm;margin:0 auto}}
 .gl-official-letter__watermark{{position:absolute;inset:0;pointer-events:none;z-index:0}}
-.gl-official-letter__watermark-text{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-28deg);font-size:34pt;line-height:1.2;text-align:center;font-weight:800;letter-spacing:.04em;color:rgba(160,30,30,.13);text-shadow:none;white-space:pre-line}}
-.gl-official-letter__content{{position:relative;z-index:1;min-height:283.25mm;padding-bottom:18mm;box-sizing:border-box}}
-.gl-official-letter--preview .gl-official-letter__content{{min-height:273mm}}
-.gl-official-letter__body,.gl-official-letter__footer{{position:relative;z-index:1}}
-.gl-official-letter table{{width:100%;border-collapse:collapse}}
-.gl-official-letter__header{{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;margin:0 0 4px}}
-.gl-official-letter__crest{{flex:0 0 110px;text-align:left}}
-.gl-official-letter__crest img{{width:84px;height:auto;display:block;object-fit:contain}}
-.gl-official-letter__heading{{flex:0 1 auto;margin-left:auto;text-align:center;padding-right:2px}}
-.gl-official-letter__heading-en{{font-size:19px;font-weight:700;line-height:1.25}}
-.gl-official-letter__heading-ar{{margin-top:5px;font-size:17px;font-weight:700;line-height:1.4;direction:rtl}}
-.gl-official-letter__ref{{margin-top:10px;font-size:15px;max-width:680px;margin-left:auto;margin-right:auto;width:100%}}
-.gl-official-letter__title{{margin:12px 0 10px;text-align:center;font-size:20px;font-weight:700;text-decoration:underline}}
-.gl-official-letter__para{{font-size:15.5pt;font-size:15.5px;line-height:1.65;text-align:justify;text-justify:inter-word;hyphens:auto;margin:0 auto 12px;max-width:680px;width:100%}}
-.gl-official-letter__para--last-center{{text-align:justify}}
-.gl-official-letter__grid{{margin:12px auto 18px;max-width:680px}}
-.gl-official-letter__grid td{{width:50%;padding:0 14px;text-align:center;vertical-align:top;font-size:15.5px;line-height:1.4}}
-.gl-official-letter__cell-line{{display:block}}
-.gl-pdf-safe .gl-official-letter__cell-line{{white-space:nowrap}}
-.gl-pdf-safe .gl-official-letter__grid td{{white-space:nowrap}}
-.gl-official-letter__qualifications{{margin:10px auto 16px;max-width:740px;font-size:11.5px;line-height:1.32;table-layout:fixed}}
-.gl-official-letter__qualifications th,.gl-official-letter__qualifications td{{border:1px solid #222;padding:4px 6px;vertical-align:top;text-align:left;word-break:break-word}}
-.gl-official-letter__qualifications th{{background:#f3f4f6;font-weight:700;text-align:center}}
-.gl-official-letter__qualifications .gl-official-letter__qual-num{{text-align:center;white-space:nowrap}}
-.gl-official-letter__qual-name{{font-weight:700}}
-.gl-official-letter__qual-degree{{font-size:11px;color:#1f2937}}
-.gl-multi-qualification-list{{display:table;width:100%;max-width:680px;margin:7mm auto 7mm;border-collapse:separate;border-spacing:0 4mm;table-layout:fixed}}
-table.gl-multi-qualification-list{{display:table;width:100%;max-width:680px;margin:7mm auto 7mm;border-collapse:separate;border-spacing:0 4mm;table-layout:fixed}}
-table.gl-multi-qualification-list tr.gl-multi-qualification-row{{display:table-row}}
-table.gl-multi-qualification-list td.gl-multi-qualification-left,
-table.gl-multi-qualification-list td.gl-multi-qualification-right{{display:table-cell;text-align:center;vertical-align:top;font-size:11pt;line-height:1.28;padding:0 4mm}}
-table.gl-multi-qualification-list td.gl-multi-qualification-left{{width:42%}}
-table.gl-multi-qualification-list td.gl-multi-qualification-right{{width:58%}}
-.gl-multi-qualification-row{{display:table-row;break-inside:avoid;page-break-inside:avoid}}
-.gl-multi-qualification-left,.gl-multi-qualification-right{{display:table-cell;text-align:center;vertical-align:top;font-size:11pt;line-height:1.28;padding:0 4mm}}
-.gl-multi-qualification-left{{width:42%}}
-.gl-multi-qualification-right{{width:58%}}
-.gl-multi-qualification-left>div,.gl-multi-qualification-right>div{{display:block}}
-.gl-multi-qualification-list .gl-degree{{font-weight:600}}
-.gl-official-letter__liability{{margin-top:10px;max-width:680px}}
-.gl-official-letter__body{{display:block}}
-.gl-official-letter__footer{{position:absolute;left:0;right:0;bottom:0;margin-top:0;padding-top:8px;border-top:1px solid #111}}
-.gl-official-letter__footer td{{font-size:13.5px;padding-top:6px;vertical-align:top}}
+.gl-official-letter__watermark-text{{position:absolute;top:51%;left:50%;transform:translate(-50%,-50%) rotate(-28deg);font-size:31pt;line-height:1.18;text-align:center;font-weight:700;letter-spacing:.04em;color:rgba(160,30,30,.12);white-space:pre-line}}
+.gl-official-letter__content{{position:relative;z-index:1;min-height:240mm;padding-bottom:18mm;box-sizing:border-box}}
+.gl-official-letter--preview .gl-official-letter__content{{min-height:248mm}}
+.gl-official-letter__header{{width:100%;border-collapse:collapse;table-layout:fixed;margin:0 0 5mm}}
+.gl-official-letter__header td{{padding:0;vertical-align:top}}
+.gl-official-letter__crest{{width:28%;text-align:left}}
+.gl-official-letter__crest img{{width:26mm;height:auto;display:block}}
+.gl-official-letter__heading{{text-align:right}}
+.gl-official-letter__heading-en{{font-size:20px;font-weight:700;line-height:1.16}}
+.gl-official-letter__heading-ar{{margin-top:3mm;font-size:15px;font-weight:700;line-height:1.32;direction:rtl}}
+.gl-official-letter__ref{{margin:1mm 0 0;font-size:14px;line-height:1.4}}
+.gl-official-letter__title{{margin:6mm 0 5mm;text-align:center;font-size:18px;font-weight:700;text-decoration:underline;letter-spacing:.02em}}
+.gl-official-letter__para{{font-size:14px;line-height:1.52;text-align:justify;margin:0 0 4mm}}
+.gl-qualification-table{{width:100%;border-collapse:collapse;table-layout:fixed;margin:6mm 0 6mm}}
+.gl-qualification-table__row{{break-inside:avoid;page-break-inside:avoid}}
+.gl-qualification-table__left,.gl-qualification-table__right{{width:50%;padding:0;vertical-align:top;text-align:center;font-size:14px;line-height:1.46}}
+.gl-qualification-table__left{{padding-right:5mm}}
+.gl-qualification-table__right{{padding-left:5mm}}
+.gl-qualification-table__line{{display:block;margin:0 0 1.3mm}}
+.gl-qualification-table__qual{{font-weight:700}}
+.gl-pdf-safe .gl-qualification-table__nowrap{{white-space:nowrap}}
+.gl-official-letter__liability{{margin-top:4mm}}
+.gl-official-letter__footer-wrap{{position:absolute;left:0;right:0;bottom:0;padding-top:3mm;border-top:1px solid #9aa0a6}}
+.gl-official-letter__footer{{width:100%;border-collapse:collapse}}
+.gl-official-letter__footer td{{font-size:12px;line-height:1.35;padding:0;vertical-align:top}}
 .gl-official-letter__footer-mid{{text-align:center}}
 .gl-official-letter__footer-right{{text-align:right}}
-@media print {{
-  .gl-official-letter{{border:none;box-shadow:none;border-radius:0;padding:0;max-width:none}}
-}}
 @media (max-width: 820px) {{
-  .gl-official-letter{{padding:24px 18px 18px;min-height:auto}}
-  .gl-official-letter--preview{{width:100%;min-height:297mm;padding:24px 18px 18px}}
-  .gl-official-letter--preview .gl-official-letter__content{{min-height:285.9mm}}
-  .gl-official-letter__header{{gap:12px}}
-  .gl-official-letter__crest{{flex:0 0 88px}}
-  .gl-official-letter__crest img{{width:64px}}
-  .gl-official-letter__heading{{padding-right:0}}
-  .gl-official-letter__heading-en{{font-size:17px}}
-  .gl-official-letter__heading-ar{{font-size:15px}}
-  .gl-official-letter__ref{{font-size:14px}}
-  .gl-official-letter__title{{font-size:18px}}
-  .gl-official-letter__para{{font-size:14.5px;line-height:1.6;text-align:justify}}
-  .gl-official-letter__grid td{{display:block;width:100%;padding:0 0 14px}}
-  .gl-official-letter__qualifications{{font-size:11px}}
-  .gl-multi-qualification-list{{display:block;border-spacing:0}}
-  .gl-multi-qualification-row{{display:block;margin:0 0 4mm}}
-  .gl-multi-qualification-left,.gl-multi-qualification-right{{display:block;width:100%;padding:0 0 2mm;font-size:14.5px}}
-  .gl-official-letter__footer td{{display:block;text-align:left!important;padding-top:4px}}
+  .gl-official-letter{{padding:14mm 14mm 16mm}}
+  .gl-official-letter--preview{{width:100%;min-height:297mm}}
+  .gl-official-letter__content{{min-height:245mm}}
+  .gl-official-letter__header,.gl-official-letter__footer{{display:block}}
+  .gl-official-letter__header td,.gl-official-letter__footer td{{display:block;width:100%;text-align:left}}
+  .gl-official-letter__crest{{width:100%;padding-bottom:4mm}}
+  .gl-official-letter__crest img{{width:22mm}}
+  .gl-official-letter__heading{{text-align:left}}
+  .gl-official-letter__heading-en{{font-size:18px}}
+  .gl-official-letter__heading-ar{{font-size:14px}}
+  .gl-qualification-table,.gl-qualification-table tbody,.gl-qualification-table tr,
+  .gl-qualification-table td{{display:block;width:100%}}
+  .gl-qualification-table__left,.gl-qualification-table__right{{padding:0 0 3mm;text-align:left}}
+  .gl-pdf-safe .gl-qualification-table__nowrap{{white-space:normal}}
+  .gl-official-letter__footer td{{padding-top:2mm}}
   .gl-official-letter__footer-mid,.gl-official-letter__footer-right{{text-align:left}}
 }}
 </style>
@@ -13431,30 +13392,34 @@ table.gl-multi-qualification-list td.gl-multi-qualification-right{{width:58%}}
   {watermark_html}
   <div class="gl-official-letter__content">
     <div class="gl-official-letter__body gl-official-letter__main">
-      <div class="gl-official-letter__header">
-        <div class="gl-official-letter__crest">{f'<img src="{emblem}" alt="Government of Pakistan emblem">' if emblem else ''}</div>
-        <div class="gl-official-letter__heading">
-          <div class="gl-official-letter__heading-en">Embassy of Islamic Republic of Pakistan<br>Kuwait</div>
-          <div class="gl-official-letter__heading-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
-        </div>
-      </div>
-      <div class="gl-official-letter__ref">{esc(letter['reference_line'])}</div>
+      <table class="gl-official-letter__header" role="presentation">
+        <tr>
+          <td class="gl-official-letter__crest">{f'<img src="{emblem}" alt="Government of Pakistan emblem">' if emblem else ''}</td>
+          <td class="gl-official-letter__heading">
+            <div class="gl-official-letter__heading-en">Embassy of Islamic Republic of Pakistan<br>Kuwait</div>
+            <div class="gl-official-letter__heading-ar">سفارة جمهورية باكستان الإسلامية<br>الكويت</div>
+          </td>
+        </tr>
+      </table>
+      <div class="gl-official-letter__ref">{esc(render_letter['reference_line'])}</div>
       <div class="gl-official-letter__title">TO WHOM IT MAY CONCERN</div>
       <p class="gl-official-letter__para">
-        {esc(letter['certificate_line_1'])} {esc(letter['applicant_name'])} {esc(letter['certificate_line_2'])} {esc(letter['certificate_line_3'])}
+        {esc(render_letter['certificate_line_1'])} {esc(render_letter['applicant_name'])} {esc(render_letter['certificate_line_2'])} {esc(render_letter['certificate_line_3'])}
       </p>
       {qualifications_block_html}
       <p class="gl-official-letter__para gl-official-letter__liability">
         This certificate is issued on the request of the applicant without any liability on the part of this Embassy whatsoever.
       </p>
     </div>
-    <table class="gl-official-letter__footer">
-      <tr>
-        <td>Telephone: {esc(letter['footer_telephone'])}</td>
-        <td class="gl-official-letter__footer-mid">Fax: {esc(letter['footer_fax'])}</td>
-        <td class="gl-official-letter__footer-right">Email: {esc(letter['footer_email'])}</td>
-      </tr>
-    </table>
+    <div class="gl-official-letter__footer-wrap">
+      <table class="gl-official-letter__footer" role="presentation">
+        <tr>
+          <td>Telephone: {esc(render_letter['footer_telephone'])}</td>
+          <td class="gl-official-letter__footer-mid">Fax: {esc(render_letter['footer_fax'])}</td>
+          <td class="gl-official-letter__footer-right">Email: {esc(render_letter['footer_email'])}</td>
+        </tr>
+      </table>
+    </div>
   </div>
 </div>
 """.strip()
@@ -13551,11 +13516,15 @@ def _gl_build_pdf_bytes(app):
             # PDF-safe markup variant (real <table> for multi-qualification,
             # non-breaking hyphens in identifier values, white-space:nowrap on
             # cell lines) so MuPDF/insert_htmlbox renders the same layout the
-            # browser preview shows. Browser preview keeps the watermark and
-            # the original div-based layout — both flow through the SAME
+            # browser preview shows. Browser preview keeps the watermark, but
+            # both preview and final now flow through the SAME canonical
             # _gl_preview_html function with mode flags.
             html = _gl_preview_html(letter, include_watermark=False, pdf_safe=True)
-            page.insert_htmlbox(fitz.Rect(20, 18, 575, 824), html)
+            # Keep the story box nearly full-page and let the canonical letter
+            # CSS control the visible margins. This avoids the cramped /
+            # over-scaled print layout that appeared when both the box and the
+            # HTML padding were competing to create the A4 margins.
+            page.insert_htmlbox(fitz.Rect(12, 10, 583, 832), html)
             return doc.tobytes(garbage=3, deflate=True)
         finally:
             doc.close()
@@ -14165,7 +14134,7 @@ def api_admin_gl_correct_nurse_profile(data, user):
         db.close()
 
 
-def api_admin_gl_letter(app_id, user):
+def api_admin_gl_letter(app_id, user, force_regenerate=False):
     if not _gl_feature_enabled():
         return None, None, {'success': False, 'error': 'Grading Letter service is temporarily unavailable.'}
     if not gl_user_can_view(user):
@@ -14193,14 +14162,14 @@ def api_admin_gl_letter(app_id, user):
             path = (root / rel).resolve()
             if root in path.parents:
                 old_exists = os.path.exists(path)
-                if old_exists:
+                if old_exists and not force_regenerate:
                     return path.read_bytes(), f"{app.get('ref_no') or 'grading-letter'}.pdf", None
             else:
                 print(f"[GL] Stored letter path escaped project root for app {app_id}: rel={rel!r} resolved={path}", flush=True)
 
         print(
             f"[GL] Download fallback app_id={app_id} ref={app.get('ref_no')} "
-            f"status={status} old_rel={rel!r} old_exists={old_exists}",
+            f"status={status} old_rel={rel!r} old_exists={old_exists} force={bool(force_regenerate)}",
             flush=True,
         )
         generated_rel = None
@@ -34564,7 +34533,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 app_id = path.strip('/').split('/')[2]
             else:
                 app_id = params.get('id')
-            body_pdf, fname, err = api_admin_gl_letter(app_id, user)
+            disposition = 'inline' if (params.get('disposition') or '').strip().lower() == 'inline' else 'attachment'
+            force_regenerate = (params.get('force') or '').strip().lower() in {'1', 'true', 'yes', 'y'}
+            body_pdf, fname, err = api_admin_gl_letter(app_id, user, force_regenerate=force_regenerate)
             if err:
                 # Helper may return an explicit HTTP status hint (e.g. 403 for
                 # the clean-print authorization gate); fall back to the legacy
@@ -34579,7 +34550,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json(err, status); return
             self.send_response(200)
             self.send_header('Content-Type', 'application/pdf')
-            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Disposition', f'{disposition}; filename="{fname}"')
             self.send_header('Content-Length', str(len(body_pdf)))
             self._security_headers()
             self.end_headers()
