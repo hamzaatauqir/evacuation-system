@@ -13177,13 +13177,36 @@ def _gl_letter_text(app):
     )
 
 
-def _gl_preview_html(letter, include_watermark=False, preview_title=''):
-    """Render the grading letter HTML.
+def _gl_pdf_safe_text(value):
+    """For the FINAL PDF rendering path only — replace ASCII hyphens with
+    non-breaking hyphens (‑) inside identifier-style strings. MuPDF's
+    insert_htmlbox treats '-' as a word-break opportunity, which causes
+    '2009-SWC-0043-UHS' to wrap to a second line. Non-breaking hyphens are
+    visually identical and keep the registration number on one line.
+    """
+    if value is None:
+        return ''
+    return str(value).replace('-', '‑')
 
-    The same HTML is reused for: nurse-side preview (include_watermark=True),
-    admin-side preview before generation (include_watermark=True), and the
-    PyMuPDF-rendered official PDF (include_watermark=False) — see
-    _gl_build_pdf_bytes.
+
+def _gl_preview_html(letter, include_watermark=False, preview_title='', pdf_safe=False):
+    """Render the grading letter HTML — single canonical renderer.
+
+    The same renderer drives:
+      - nurse-side preview (include_watermark=True)
+      - admin-side preview (include_watermark=True)
+      - the PyMuPDF-rendered official PDF
+        (include_watermark=False, pdf_safe=True) — see _gl_build_pdf_bytes
+
+    pdf_safe=True activates layout that survives MuPDF/insert_htmlbox:
+      - real <table> markup for the multi-qualification block (not
+        `display:table` divs — MuPDF Story silently mis-renders those)
+      - non-breaking hyphens inside identifier values so registration /
+        passport numbers do not wrap at '-' inside narrow grid cells
+      - white-space:nowrap on the cell-line spans so identifier lines
+        always sit on a single line
+      - no browser-only @media/print rules (kept separate so they do not
+        confuse the PDF layout engine)
 
     Phase-3: the page is rendered at A4 portrait (~794px x ~1123px at 96dpi)
     using natural block flow rather than a flex column with min-height, so
@@ -13193,6 +13216,13 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
     look of existing letters is preserved exactly.
     """
     emblem = _gop_emblem_data_url()
+    # PDF-safe identifier values (hyphens become non-breaking).
+    if pdf_safe:
+        for k in ('identifier_value', 'passport_number'):
+            if k in letter and letter.get(k):
+                letter = dict(letter)
+                letter[k] = _gl_pdf_safe_text(letter[k])
+                # only need to dict-copy once; subsequent writes are local
     watermark_html = ''
     notice_html = ''
     if include_watermark:
@@ -13213,6 +13243,8 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
         f'<div class="gl-official-letter__preview-title">{esc(preview_title)}</div>' if preview_title else ''
     )
     preview_class = ' gl-official-letter--preview' if include_watermark else ''
+    if pdf_safe:
+        preview_class += ' gl-pdf-safe'
     subtitle_html = (
         f'<div class="gl-official-letter__cell-line">({esc(letter.get("qualification_subtitle") or "")})</div>'
         if letter.get('qualification_subtitle') else ''
@@ -13261,18 +13293,40 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
             elif not _missing(grade):
                 right_lines.append(f'<div>(&ldquo;{esc(grade)}&rdquo;)</div>')
 
-            rows_html.append(
-                '<div class="gl-multi-qualification-row">'
-                f'<div class="gl-multi-qualification-left">{"".join(left_lines)}</div>'
-                f'<div class="gl-multi-qualification-right">{"".join(right_lines)}</div>'
+            if pdf_safe:
+                # PDF-safe: real <tr><td> instead of display:table-row divs.
+                # MuPDF Story silently mis-renders display:table on non-<table>
+                # elements, which is why the previous PDFs had cramped /
+                # mis-aligned qualification cells.
+                rows_html.append(
+                    '<tr class="gl-multi-qualification-row">'
+                    f'<td class="gl-multi-qualification-left">{"".join(left_lines)}</td>'
+                    f'<td class="gl-multi-qualification-right">{"".join(right_lines)}</td>'
+                    '</tr>'
+                )
+            else:
+                rows_html.append(
+                    '<div class="gl-multi-qualification-row">'
+                    f'<div class="gl-multi-qualification-left">{"".join(left_lines)}</div>'
+                    f'<div class="gl-multi-qualification-right">{"".join(right_lines)}</div>'
+                    '</div>'
+                )
+        if pdf_safe:
+            qualifications_block_html = (
+                f'<!-- gl multi-qualification block (pdf-safe): {len(qualifications)} qualifications rendered -->'
+                '<table class="gl-multi-qualification-list" '
+                f'data-qualification-count="{len(qualifications)}" '
+                'cellspacing="0" cellpadding="0">'
+                f'<tbody>{"".join(rows_html)}</tbody>'
+                '</table>'
+            )
+        else:
+            qualifications_block_html = (
+                f'<!-- gl multi-qualification block: {len(qualifications)} qualifications rendered -->'
+                f'<div class="gl-multi-qualification-list" data-qualification-count="{len(qualifications)}">'
+                f'{"".join(rows_html)}'
                 '</div>'
             )
-        qualifications_block_html = (
-            f'<!-- gl multi-qualification block: {len(qualifications)} qualifications rendered -->'
-            f'<div class="gl-multi-qualification-list" data-qualification-count="{len(qualifications)}">'
-            f'{"".join(rows_html)}'
-            '</div>'
-        )
     else:
         # Single-qualification: keep the legacy 2-cell grid so the look of
         # existing letters is preserved character-for-character.
@@ -13319,6 +13373,8 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 .gl-official-letter__grid{{margin:12px auto 18px;max-width:680px}}
 .gl-official-letter__grid td{{width:50%;padding:0 14px;text-align:center;vertical-align:top;font-size:15.5px;line-height:1.4}}
 .gl-official-letter__cell-line{{display:block}}
+.gl-pdf-safe .gl-official-letter__cell-line{{white-space:nowrap}}
+.gl-pdf-safe .gl-official-letter__grid td{{white-space:nowrap}}
 .gl-official-letter__qualifications{{margin:10px auto 16px;max-width:740px;font-size:11.5px;line-height:1.32;table-layout:fixed}}
 .gl-official-letter__qualifications th,.gl-official-letter__qualifications td{{border:1px solid #222;padding:4px 6px;vertical-align:top;text-align:left;word-break:break-word}}
 .gl-official-letter__qualifications th{{background:#f3f4f6;font-weight:700;text-align:center}}
@@ -13326,6 +13382,12 @@ def _gl_preview_html(letter, include_watermark=False, preview_title=''):
 .gl-official-letter__qual-name{{font-weight:700}}
 .gl-official-letter__qual-degree{{font-size:11px;color:#1f2937}}
 .gl-multi-qualification-list{{display:table;width:100%;max-width:680px;margin:7mm auto 7mm;border-collapse:separate;border-spacing:0 4mm;table-layout:fixed}}
+table.gl-multi-qualification-list{{display:table;width:100%;max-width:680px;margin:7mm auto 7mm;border-collapse:separate;border-spacing:0 4mm;table-layout:fixed}}
+table.gl-multi-qualification-list tr.gl-multi-qualification-row{{display:table-row}}
+table.gl-multi-qualification-list td.gl-multi-qualification-left,
+table.gl-multi-qualification-list td.gl-multi-qualification-right{{display:table-cell;text-align:center;vertical-align:top;font-size:11pt;line-height:1.28;padding:0 4mm}}
+table.gl-multi-qualification-list td.gl-multi-qualification-left{{width:42%}}
+table.gl-multi-qualification-list td.gl-multi-qualification-right{{width:58%}}
 .gl-multi-qualification-row{{display:table-row;break-inside:avoid;page-break-inside:avoid}}
 .gl-multi-qualification-left,.gl-multi-qualification-right{{display:table-cell;text-align:center;vertical-align:top;font-size:11pt;line-height:1.28;padding:0 4mm}}
 .gl-multi-qualification-left{{width:42%}}
@@ -13485,7 +13547,14 @@ def _gl_build_pdf_bytes(app):
         doc = fitz.open()
         try:
             page = doc.new_page(width=595, height=842)
-            html = _gl_preview_html(letter, include_watermark=False)
+            # Final PDF: never includes the preview watermark, and uses the
+            # PDF-safe markup variant (real <table> for multi-qualification,
+            # non-breaking hyphens in identifier values, white-space:nowrap on
+            # cell lines) so MuPDF/insert_htmlbox renders the same layout the
+            # browser preview shows. Browser preview keeps the watermark and
+            # the original div-based layout — both flow through the SAME
+            # _gl_preview_html function with mode flags.
+            html = _gl_preview_html(letter, include_watermark=False, pdf_safe=True)
             page.insert_htmlbox(fitz.Rect(20, 18, 575, 824), html)
             return doc.tobytes(garbage=3, deflate=True)
         finally:
