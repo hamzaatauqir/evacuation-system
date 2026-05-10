@@ -268,6 +268,9 @@ def main():
     expect("summary payload helper includes priority_level", 'priority_level' in payload_src)
     expect("summary payload helper includes priority_reason", 'priority_reason' in payload_src)
     expect("main dashboard prioritises Community Welfare title", 'Community Welfare Command Dashboard' in server.MAIN_APP)
+    expect("staff dashboard has inline drill-down action bar", 'cwaStaffActionButtons' in server.MAIN_APP)
+    expect("staff dashboard keeps modal on same page", 'cwaAcctOverlay' in server.MAIN_APP and 'openCwaAccountabilityDrilldown' in server.MAIN_APP)
+    expect("staff dashboard modal offers Open Case action", 'Open Case' in server.MAIN_APP)
     expect("main dashboard includes priority activity title", 'Recent &amp; Priority Community Welfare Activity' in server.MAIN_APP)
     expect("main dashboard keeps visa standby section lower", 'Visa / Transit Processing &mdash; Standby / Historical' in server.MAIN_APP)
     expect("removed visa analytics label Processing Trend absent", 'Processing Trend' not in server.MAIN_APP)
@@ -310,6 +313,9 @@ def main():
                'No staff action recorded' in (recent[0].get('priority_reason') or ''))
         expect("status breakdown includes open/in_progress/resolved/closed",
                [x.get('status') for x in payload.get('by_status', [])] == ['open', 'in_progress', 'resolved', 'closed'])
+        drill = server.api_admin_staff_accountability_cases({'officer_key': '__all__', 'metric': 'pending'}, admin)
+        expect("dashboard drill-down supports all-staff pending metric", drill.get('success') is True)
+        expect("dashboard drill-down returns case rows", len(drill.get('cases') or []) >= 1)
 
         print()
         print("Test 4: dashboard alias route returns HTTP 200 for admin")

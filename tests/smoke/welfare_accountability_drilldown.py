@@ -224,7 +224,7 @@ def main():
     expect('invalid metric → 400', r.get('status_code'), 400)
     expect('invalid metric error', r.get('error'), 'Invalid metric')
     expect('allowlist returned', sorted(r.get('allowed_metrics') or []),
-           ['assigned_open', 'no_action', 'overdue_5_days', 'resolved_this_week'])
+           ['assigned_open', 'assigned_total', 'no_action', 'open_now', 'overdue', 'overdue_5_days', 'pending', 'resolved_this_week', 'resolved_total'])
 
     # 3. Missing officer_key → 400.
     print()
@@ -277,6 +277,17 @@ def main():
     expect("remarks present", bool(case.get('resolution_remarks')), True)
     expect("remarks is the latest action note", case.get('resolution_remarks'),
            'Resolved: contacted employer')
+
+    # 9. Dashboard aggregate sentinel and new dashboard metrics work.
+    print()
+    print("Test 9: dashboard-wide modal metrics are supported")
+    r = api({'officer_key': '__all__', 'metric': 'pending'}, admin)
+    expect("__all__ pending success", r.get('success'), True)
+    expect("__all__ pending returns cases", len(r.get('cases') or []) > 0, True)
+    refs = {c.get('reference_no') for c in (r.get('cases') or [])}
+    expect("__all__ pending includes Zahid open case", 'CW-1' in refs, True)
+    r = api({'officer_key': 'Zahid', 'metric': 'resolved_total'}, admin)
+    expect("resolved_total returns Zahid's resolved case", {c.get('reference_no') for c in (r.get('cases') or [])}, {'CW-4'})
 
     print()
     print(f'FAIL count: {fail}')
