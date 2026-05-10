@@ -6877,6 +6877,161 @@ def nh_block_if_pending_arrival(db, nurse_row_or_dict, feature_label):
     return None
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Service-level access matrix for the nurse portal.
+#
+# Replaces the old "account inactive = block everything" gate. A nurse
+# whose batch has not yet been marked ARRIVED can still engage with the
+# Embassy through basic services (profile, complaints, accommodation
+# requests, onboarding tracker) but is blocked from arrival-required
+# services (grading letter, post-arrival movement, facility confirmation).
+#
+# Service codes are deliberately verbose so future readers can audit the
+# matrix at a glance. Add new codes here when wiring new endpoints —
+# the default tier for an unregistered code is 'arrival_required' (fail
+# closed for safety).
+# ──────────────────────────────────────────────────────────────────────
+NURSE_SERVICE_TIER_BASIC = 'basic_pre_arrival'
+NURSE_SERVICE_TIER_ARRIVAL_REQUIRED = 'arrival_required'
+
+NURSE_SERVICE_TIERS = {
+    # ── basic — available in PENDING_ARRIVAL ──────────────────────
+    'profile_view':            NURSE_SERVICE_TIER_BASIC,
+    'profile_correction':      NURSE_SERVICE_TIER_BASIC,
+    'complaint_create':        NURSE_SERVICE_TIER_BASIC,
+    'complaint_view':          NURSE_SERVICE_TIER_BASIC,
+    'accommodation_request':   NURSE_SERVICE_TIER_BASIC,
+    'accommodation_update':    NURSE_SERVICE_TIER_BASIC,
+    'onboarding_view':         NURSE_SERVICE_TIER_BASIC,
+    'onboarding_update':       NURSE_SERVICE_TIER_BASIC,
+    'guidance_view':           NURSE_SERVICE_TIER_BASIC,
+    # ── arrival-required — locked until batch is ARRIVED ──────────
+    'grading_letter_request':  NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+    'grading_letter_resubmit': NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+    'grading_letter_cancel':   NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+    'facility_confirmation':   NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+    'leaving_notice':          NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+    'hostel_roster':           NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+    'final_documents':         NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+    'post_arrival_movement':   NURSE_SERVICE_TIER_ARRIVAL_REQUIRED,
+}
+
+NURSE_SERVICE_LABELS = {
+    'grading_letter_request':  'Grading letter requests',
+    'grading_letter_resubmit': 'Grading letter resubmission',
+    'grading_letter_cancel':   'Grading letter cancellation',
+    'facility_confirmation':   'Facility confirmation',
+    'leaving_notice':          'Leaving / transfer notices',
+    'hostel_roster':           'Hostel roster',
+    'final_documents':         'Post-arrival document collection',
+    'post_arrival_movement':   'Post-arrival movement',
+}
+
+# Forward-compat sentinel statuses. No live code path sets these today,
+# but the matrix recognises them so when an admin adds suspension support
+# downstream the gates do the right thing without further refactoring.
+NH_ACCOUNT_STATUS_SUSPENDED = 'SUSPENDED'
+NH_ACCOUNT_STATUS_BLOCKED = 'BLOCKED'
+
+
+def _nurse_service_access(account, service_code):
+    """Decide whether a nurse account may use a given service.
+
+    Returns a dict {'allowed', 'error', 'message', 'service_tier',
+                    'account_status'}.
+
+    Behaviour:
+      ACTIVE              → all services allowed.
+      PENDING_ARRIVAL     → basic_pre_arrival allowed; arrival_required
+                            denied with 'arrival_required' error.
+      SUSPENDED / BLOCKED → all services denied with 'account_suspended'
+                            (forward compat — no live setter today).
+      legacy/unknown      → treated as ACTIVE (matches the safety
+                            fallback at line 6630).
+
+    Unrecognised service codes default to NURSE_SERVICE_TIER_ARRIVAL_REQUIRED
+    so a forgotten matrix entry fails closed.
+    """
+    tier = NURSE_SERVICE_TIERS.get(
+        str(service_code or '').strip(), NURSE_SERVICE_TIER_ARRIVAL_REQUIRED
+    )
+    raw_status = ((account or {}).get('account_status') or '').strip().upper()
+    if raw_status not in {
+        NH_ACCOUNT_STATUS_PENDING_ARRIVAL,
+        NH_ACCOUNT_STATUS_ACTIVE,
+        NH_ACCOUNT_STATUS_SUSPENDED,
+        NH_ACCOUNT_STATUS_BLOCKED,
+    }:
+        raw_status = NH_ACCOUNT_STATUS_ACTIVE  # legacy / unknown → safe-default ACTIVE
+
+    if raw_status in {NH_ACCOUNT_STATUS_SUSPENDED, NH_ACCOUNT_STATUS_BLOCKED}:
+        return {
+            'allowed': False,
+            'error': 'account_suspended',
+            'message': (
+                'Your nurse portal account is currently suspended. Please contact '
+                'the Community Welfare Wing for assistance.'
+            ),
+            'service_tier': tier,
+            'account_status': raw_status,
+        }
+
+    if tier == NURSE_SERVICE_TIER_BASIC or raw_status == NH_ACCOUNT_STATUS_ACTIVE:
+        return {
+            'allowed': True,
+            'error': '',
+            'message': '',
+            'service_tier': tier,
+            'account_status': raw_status,
+        }
+
+    # arrival_required + PENDING_ARRIVAL → blocked with structured error
+    label = NURSE_SERVICE_LABELS.get(service_code) or 'This service'
+    banner = (
+        (account or {}).get('portal_banner')
+        or 'Your nurse portal account is pending arrival activation.'
+    )
+    return {
+        'allowed': False,
+        'error': 'arrival_required',
+        'message': (
+            f"{label} will unlock after your batch/flight is marked as arrived. "
+            f"{banner}"
+        ),
+        'service_tier': tier,
+        'account_status': raw_status,
+    }
+
+
+def nh_check_service_access(db, nurse_row_or_dict, service_code):
+    """Service-level gate replacing nh_block_if_pending_arrival in handlers
+    that need basic pre-arrival access (complaints, accommodation, onboarding).
+
+    Returns None when the service is allowed, or a JSON-friendly block dict
+    that the handler can return verbatim:
+        {success: false, error: 'arrival_required'|'account_suspended',
+         message: str, service_code: str, service_tier: str,
+         housing_account: {...}}
+    """
+    account = nh_get_account(db, nurse_row_or_dict)
+    decision = _nurse_service_access(account, service_code)
+    if decision['allowed']:
+        return None
+    return {
+        'success': False,
+        'error': decision['error'],
+        'message': decision['message'],
+        'service_code': service_code,
+        'service_tier': decision['service_tier'],
+        'housing_account': account,
+    }
+
+
+def _can_nurse_use_service(account, service_code):
+    """Convenience boolean accessor for the matrix (no DB read)."""
+    return bool(_nurse_service_access(account, service_code).get('allowed'))
+
+
 def nh_mark_batch_arrived(db, batch_id, actor='system'):
     _nh_ensure_schema(db)
     _, canonical_by_batch = _normalize_existing_arrival_batch_data(db)
@@ -8161,7 +8316,7 @@ def api_nurse_stay_confirmation(data):
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
         nurse_d = dict(nurse)
-        blocked = nh_block_if_pending_arrival(db, nurse_d, 'Stay-arrangement services')
+        blocked = nh_check_service_access(db, nurse_d, 'facility_confirmation')
         if blocked:
             return blocked
         roster = _facility_find_linked_roster(db, nurse_d)
@@ -9302,7 +9457,7 @@ def api_nurse_accommodation_submit(data):
     try:
         nurse = _nurse_verify_for_portal_request(db, ref, passport, data.get('verifier') or '')
         if nurse:
-            blocked = nh_block_if_pending_arrival(db, nurse, 'Stay-arrangement services')
+            blocked = nh_check_service_access(db, nurse, 'accommodation_request')
             if blocked:
                 return blocked
         db.execute("""INSERT INTO nurse_accommodation_requests
@@ -9361,7 +9516,7 @@ def api_nurse_facility_assistance(data):
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
         n = dict(nurse)
-        blocked = nh_block_if_pending_arrival(db, n, 'Stay-arrangement services')
+        blocked = nh_check_service_access(db, n, 'leaving_notice')
         if blocked:
             return blocked
         roster = _facility_find_linked_roster(db, n)
@@ -9465,7 +9620,7 @@ def api_nurse_complaint_submit(data):
         if not nurse:
             return {'success': False, 'error': 'No matching registration found. Please check your details.'}
         n = dict(nurse)
-        blocked = nh_block_if_pending_arrival(db, n, 'Complaints')
+        blocked = nh_check_service_access(db, n, 'complaint_create')
         if blocked:
             return blocked
         complaint_id = _next_nurse_complaint_id(db)
@@ -9513,7 +9668,7 @@ def api_nurse_leave_notice_submit(data):
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
         nurse_d = dict(nurse)
-        blocked = nh_block_if_pending_arrival(db, nurse_d, 'Stay-arrangement services')
+        blocked = nh_check_service_access(db, nurse_d, 'accommodation_update')
         if blocked:
             return blocked
         current_facility = (data.get('current_facility') or data.get('facility_name') or '').strip()
@@ -10689,7 +10844,7 @@ def api_gl_nurse_summary(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
-        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        blocked = nh_check_service_access(db, nurse, 'grading_letter_request')
         if blocked:
             return blocked
         active = _gl_active_application(db, nurse.get('id'))
@@ -10725,7 +10880,7 @@ def api_gl_nurse_submit(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
-        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        blocked = nh_check_service_access(db, nurse, 'grading_letter_request')
         if blocked:
             return blocked
         if not _valid_mton_number(_normalize_mton_number(nurse.get('mton_number') or '')):
@@ -10841,7 +10996,7 @@ def api_gl_nurse_resubmit(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
-        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        blocked = nh_check_service_access(db, nurse, 'grading_letter_resubmit')
         if blocked:
             return blocked
         if not _valid_mton_number(_normalize_mton_number(nurse.get('mton_number') or '')):
@@ -10923,7 +11078,7 @@ def api_gl_nurse_cancel(data):
         nurse = _gl_resolve_nurse_from_payload(db, data)
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
-        blocked = nh_block_if_pending_arrival(db, nurse, 'Grading letter requests')
+        blocked = nh_check_service_access(db, nurse, 'grading_letter_cancel')
         if blocked:
             return blocked
         app_id = int(data.get('id') or data.get('application_id') or 0)
@@ -11258,7 +11413,7 @@ def api_nurse_onboarding_summary(data):
         nurse = _gl_resolve_nurse_from_payload(db, data or {})
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
-        blocked = nh_block_if_pending_arrival(db, nurse, 'MOH onboarding tracker')
+        blocked = nh_check_service_access(db, nurse, 'onboarding_view')
         if blocked:
             return blocked
         payload = _nurse_onboarding_summary_payload(db, nurse)
@@ -11279,7 +11434,7 @@ def api_nurse_onboarding_update(data):
         nurse = _gl_resolve_nurse_from_payload(db, data or {})
         if not nurse:
             return {'success': False, 'error': 'Unable to verify nurse record.'}
-        blocked = nh_block_if_pending_arrival(db, nurse, 'MOH onboarding tracker')
+        blocked = nh_check_service_access(db, nurse, 'onboarding_update')
         if blocked:
             return blocked
         current_stage_code = _nurse_onboarding_clean_text((data or {}).get('current_stage_code'), 80)
@@ -21068,6 +21223,255 @@ def _staff_action_exists_after_assignment(case_type, case_id, assigned_at):
     finally:
         db.close()
     return False
+
+
+# Drill-down metric allowlist + labels — keep in sync with the dashboard
+# table columns rendered in api_admin_staff_accountability().
+STAFF_ACCOUNTABILITY_METRICS = {
+    'assigned_open':       'Assigned Open Cases',
+    'overdue_5_days':      'Overdue > 5 Days',
+    'no_action':           'No Action After Assignment',
+    'resolved_this_week':  'Resolved This Week',
+}
+
+
+def _accountability_latest_action(db, case_type, case_id):
+    """Latest action across the per-module action table, including
+    public/system actors so the drill-down can show the full timeline.
+    The dashboard's stricter no_action predicate (which excludes
+    public/system) is preserved by _staff_action_exists_after_assignment."""
+    table_map = {
+        'welfare': ('welfare_case_actions',     'case_id',      False),
+        'legal':   ('legal_case_actions',       'reference_id', True),
+        'death':   ('death_case_actions',       'reference_id', True),
+        'nurse':   ('nurse_complaint_actions',  'complaint_id', True),
+    }
+    info = table_map.get((case_type or '').lower())
+    if not info:
+        return {}
+    table, key_col, key_is_text = info
+    try:
+        bind_value = str(case_id) if key_is_text else case_id
+        row = db.execute(
+            f"SELECT note, COALESCE(actor_username, '') AS actor_username, "
+            f"created_at FROM {table} WHERE {key_col} = ? "
+            f"ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            [bind_value]
+        ).fetchone()
+        return dict(row) if row else {}
+    except Exception:
+        return {}
+
+
+def _accountability_module_rows_for_officer(db, officer_key):
+    """Re-runs the same 4-table SELECTs as api_admin_staff_accountability,
+    filtered to a specific officer. Reusing the same column list and the
+    same WHERE clauses (parameter-bound) is what guarantees the drill-down
+    count matches the dashboard count."""
+    rows = []
+    queries = [
+        # welfare
+        ("""SELECT id AS case_id, case_reference AS reference, 'Welfare' AS module,
+                   COALESCE(subject_name, concern_summary, category, '') AS subject,
+                   COALESCE(requester_name, subject_name, '') AS requester,
+                   COALESCE(subject_passport, '') AS passport_no,
+                   COALESCE(requester_phone, subject_phone, '') AS phone,
+                   COALESCE(assigned_to, '') AS assigned_to,
+                   COALESCE(assigned_department, '') AS department,
+                   COALESCE(status, '') AS status,
+                   COALESCE(assigned_at, '') AS assigned_at,
+                   COALESCE(created_at, '') AS created_at,
+                   COALESCE(updated_at, '') AS updated_at,
+                   COALESCE(resolved_at, '') AS resolved_at
+            FROM welfare_cases WHERE COALESCE(assigned_to, '') = ?""",
+         'welfare'),
+        # legal
+        ("""SELECT reference_id AS case_id, reference_id AS reference, 'Legal' AS module,
+                   COALESCE(subject, case_type, '') AS subject,
+                   COALESCE(full_name, '') AS requester,
+                   COALESCE(passport_number, '') AS passport_no,
+                   COALESCE(mobile, '') AS phone,
+                   COALESCE(assigned_to_username, '') AS assigned_to,
+                   COALESCE(assigned_department, '') AS department,
+                   COALESCE(status, '') AS status,
+                   COALESCE(assigned_at, '') AS assigned_at,
+                   COALESCE(created_at, '') AS created_at,
+                   COALESCE(updated_at, '') AS updated_at,
+                   COALESCE(resolved_at, '') AS resolved_at
+            FROM legal_case_requests WHERE COALESCE(assigned_to_username, '') = ?""",
+         'legal'),
+        # death
+        ("""SELECT reference_id AS case_id, reference_id AS reference, 'Death' AS module,
+                   'Death Case' AS subject,
+                   COALESCE(reporter_name, deceased_name, '') AS requester,
+                   COALESCE(deceased_passport, passport_number, '') AS passport_no,
+                   COALESCE(reporter_mobile, '') AS phone,
+                   COALESCE(assigned_to_username, '') AS assigned_to,
+                   COALESCE(assigned_department, '') AS department,
+                   COALESCE(status, '') AS status,
+                   COALESCE(assigned_at, '') AS assigned_at,
+                   COALESCE(created_at, '') AS created_at,
+                   COALESCE(updated_at, '') AS updated_at,
+                   COALESCE(resolved_at, '') AS resolved_at
+            FROM death_case_requests WHERE COALESCE(assigned_to_username, '') = ?""",
+         'death'),
+        # nurse complaints
+        ("""SELECT COALESCE(complaint_id, nurse_reference_id, CAST(id AS TEXT)) AS case_id,
+                   COALESCE(complaint_id, nurse_reference_id, CAST(id AS TEXT)) AS reference,
+                   'Nurse' AS module,
+                   COALESCE(subject, category, complaint_category, '') AS subject,
+                   COALESCE(nurse_full_name, '') AS requester,
+                   COALESCE(passport_number, '') AS passport_no,
+                   '' AS phone,
+                   COALESCE(assigned_to_username, '') AS assigned_to,
+                   COALESCE(assigned_department, '') AS department,
+                   COALESCE(status, complaint_status, '') AS status,
+                   COALESCE(assigned_at, '') AS assigned_at,
+                   COALESCE(created_at, '') AS created_at,
+                   COALESCE(updated_at, '') AS updated_at,
+                   COALESCE(resolved_at, '') AS resolved_at
+            FROM nurse_complaints WHERE COALESCE(assigned_to_username, '') = ?""",
+         'nurse'),
+    ]
+    for sql, ctype in queries:
+        try:
+            for r in db.execute(sql, [officer_key]).fetchall():
+                d = dict(r); d['case_type'] = ctype
+                rows.append(d)
+        except Exception:
+            # Some optional columns (e.g. resolved_at, deceased_passport) may
+            # not exist on older schemas — skip the failing module gracefully.
+            continue
+    return rows
+
+
+def api_admin_staff_accountability_cases(params, user):
+    """Drill-down list for one row × one metric of the staff accountability
+    table. Reuses the exact same source predicates as
+    api_admin_staff_accountability so:
+        len(returned['cases']) == dashboard_count_for_(officer_key, metric)
+    Validates `metric` against an allowlist and binds `officer_key` as a
+    parameter — no SQL injection surface.
+    """
+    role = (user or {}).get('role')
+    if not is_full_admin_role(role):
+        return {'success': False, 'error': 'Unauthorized', 'status_code': 403}
+
+    metric = (params.get('metric') or '').strip()
+    if metric not in STAFF_ACCOUNTABILITY_METRICS:
+        return {
+            'success': False,
+            'error': 'Invalid metric',
+            'allowed_metrics': sorted(STAFF_ACCOUNTABILITY_METRICS.keys()),
+            'status_code': 400,
+        }
+
+    officer_key = _clean_text(params.get('officer_key') or '', 200)
+    if not officer_key:
+        return {'success': False, 'error': 'officer_key is required',
+                'status_code': 400}
+
+    threshold_days = 5
+    db = get_db()
+    try:
+        module_rows = _accountability_module_rows_for_officer(db, officer_key)
+        cases = []
+
+        for row in module_rows:
+            assigned_to = _clean_text(row.get('assigned_to'), 120)
+            status = _clean_text(row.get('status'), 120)
+            assigned_anchor = (
+                _clean_text(row.get('assigned_at'), 80)
+                or _clean_text(row.get('created_at'), 80)
+            )
+            is_resolved = _is_case_resolved_status(status)
+            is_overdue = _is_case_overdue(
+                status, row.get('assigned_at'), row.get('created_at'),
+                threshold_days
+            )
+            staff_action_exists = _staff_action_exists_after_assignment(
+                row.get('case_type'), row.get('case_id'), assigned_anchor
+            )
+
+            # Apply the SAME predicates the dashboard uses.
+            keep = False
+            if metric == 'assigned_open':
+                keep = (not is_resolved)
+            elif metric == 'overdue_5_days':
+                keep = (not is_resolved) and is_overdue
+            elif metric == 'no_action':
+                keep = (not is_resolved) and (not staff_action_exists)
+            elif metric == 'resolved_this_week':
+                if is_resolved:
+                    updated = (
+                        _clean_text(row.get('updated_at'), 80)
+                        or _clean_text(row.get('created_at'), 80)
+                    )
+                    keep = _case_age_days(updated) <= 7
+            if not keep:
+                continue
+
+            latest = _accountability_latest_action(
+                db, row.get('case_type'), row.get('case_id')
+            )
+            days_pending = _case_age_days(assigned_anchor)
+            cases.append({
+                'id': row.get('case_id'),
+                'case_type': row.get('case_type'),
+                'module': row.get('module'),
+                'reference_no': row.get('reference') or '',
+                'reference': row.get('reference') or '',
+                'applicant_name': row.get('requester') or '',
+                'passport_no': row.get('passport_no') or '',
+                'phone': row.get('phone') or '',
+                'subject': row.get('subject') or '',
+                'status': status,
+                'assigned_to': assigned_to,
+                'assigned_to_label': assigned_to,
+                'department': row.get('department') or '',
+                'created_at': _clean_text(row.get('created_at'), 80),
+                'assigned_at': assigned_anchor,
+                'days_pending': days_pending,
+                'last_action_at': (
+                    _clean_text(latest.get('created_at') or '', 80)
+                    or _clean_text(row.get('updated_at'), 80)
+                ),
+                'last_action_summary': _clean_text(latest.get('note') or '', 600),
+                'last_action_actor': _clean_text(latest.get('actor_username') or '', 120),
+                'resolved_at': _clean_text(row.get('resolved_at'), 80),
+                'resolution_remarks': (
+                    _clean_text(latest.get('note') or '', 600) if is_resolved else ''
+                ),
+                'is_resolved': is_resolved,
+                'is_overdue': is_overdue,
+                'staff_action_after_assignment': bool(staff_action_exists),
+            })
+
+        # Sort: oldest pending first for actionable lists; most-recent
+        # resolved first for the resolved metric.
+        if metric == 'resolved_this_week':
+            cases.sort(key=lambda c: (c.get('resolved_at') or c.get('last_action_at') or ''),
+                       reverse=True)
+        else:
+            cases.sort(key=lambda c: (-(c.get('days_pending') or 0),
+                                      c.get('module') or '',
+                                      c.get('reference_no') or ''))
+
+        return {
+            'ok': True,
+            'success': True,
+            'officer_key': officer_key,
+            'metric': metric,
+            'label': STAFF_ACCOUNTABILITY_METRICS[metric],
+            'count': len(cases),
+            'cases': cases,
+        }
+    except Exception as exc:
+        print(f"[StaffAccountability] drill-down failed: {exc}", flush=True)
+        return {'success': False, 'error': 'Drill-down list could not be loaded.',
+                'status_code': 500}
+    finally:
+        db.close()
 
 
 def api_admin_staff_accountability(user):
@@ -33776,6 +34180,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             res = api_admin_staff_accountability(user)
             self.send_json(res, 200 if res.get('success') else 403)
+        elif path == '/api/admin/welfare/accountability-cases':
+            # Drill-down for a single (officer_key, metric) pair from the
+            # staff accountability dashboard. Same auth + same predicates
+            # as /api/admin/staff-accountability so the count matches.
+            user = self.require_auth()
+            if not user: return
+            res = api_admin_staff_accountability_cases(params, user)
+            status = 200 if res.get('success') else int(res.get('status_code') or 400)
+            self.send_json(res, status)
         elif path == '/api/admin/ambassador-pulse-report':
             user = self.require_auth()
             if not user: return
@@ -41620,6 +42033,25 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
   .pulse-table-wrap tr{break-inside:avoid;page-break-inside:avoid}
   #pulseWorkloadTableWrap,#pulseStaffTableWrap{display:block!important}
 }
+/* Staff accountability drill-down — clickable count cells + modal */
+.acct-drilldown{background:transparent;border:1px solid #d1d8e2;color:#0f3a8a;font-weight:700;font:inherit;padding:2px 10px;border-radius:6px;cursor:pointer}
+.acct-drilldown:hover{background:#eef4ff;border-color:#4a6fb5}
+.acct-zero{color:#9ba6b3;font-weight:600;display:inline-block;padding:2px 6px}
+#acctDrillOverlay{position:fixed;inset:0;background:rgba(15,23,42,.55);display:none;align-items:flex-start;justify-content:center;z-index:2000;padding:40px 16px;overflow-y:auto}
+#acctDrillOverlay.is-open{display:flex}
+#acctDrillModal{background:#fff;border-radius:10px;max-width:980px;width:100%;box-shadow:0 20px 60px rgba(15,23,42,.3);padding:18px 22px}
+#acctDrillModal h3{margin:0 0 4px;color:#10253f}
+#acctDrillModal .acct-meta{color:#5b6773;font-size:13px;margin-bottom:12px}
+#acctDrillModal .acct-list{max-height:60vh;overflow:auto;border:1px solid #e3ebf0;border-radius:8px}
+#acctDrillModal table{width:100%;border-collapse:collapse;font-size:13px}
+#acctDrillModal th{background:#f6f8fa;text-align:left;padding:8px 10px;border-bottom:1px solid #e3ebf0;font-weight:700}
+#acctDrillModal td{padding:8px 10px;border-bottom:1px solid #f1f4f7;vertical-align:top}
+#acctDrillModal td.remarks{color:#3a4a5e;font-size:12px;max-width:280px;white-space:pre-wrap}
+#acctDrillModal .acct-state{padding:18px;color:#5b6773;text-align:center}
+#acctDrillModal .acct-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+#acctDrillModal .acct-empty{padding:24px;text-align:center;color:#5b6773}
+.acct-open-btn{background:#0f3a8a;color:#fff;border:0;padding:4px 9px;border-radius:5px;cursor:pointer;font-size:12px}
+.acct-open-btn:hover{background:#10254a}
 </style>
 <div id="pulsePrintHeader" class="pulse-print-header">
   <div><strong>Embassy of Pakistan, Kuwait</strong></div>
@@ -41672,6 +42104,17 @@ ADMIN_AMBASSADOR_PULSE_PAGE = cwa_module_page("Ambassador Pulse Report", """
   <h4 style="margin:12px 0 8px;color:#10253f">B. Operational Evidence Samples</h4>
   <div id="pulseEvidenceOperationalWrap" class="evidence-card-list"><div class="empty">Generate report to view operational evidence samples.</div></div>
 </div>
+<!-- Staff Accountability — drill-down modal -->
+<div id="acctDrillOverlay" role="dialog" aria-modal="true" aria-labelledby="acctDrillTitle" onclick="if(event.target===this)closeAccountabilityDrilldown()">
+  <div id="acctDrillModal">
+    <h3 id="acctDrillTitle">Cases</h3>
+    <div class="acct-meta" id="acctDrillMeta"></div>
+    <div id="acctDrillBody" class="acct-list"><div class="acct-state">Loading cases…</div></div>
+    <div class="acct-actions">
+      <button type="button" class="cwa-btn" onclick="closeAccountabilityDrilldown()">Close</button>
+    </div>
+  </div>
+</div>
 <script>
 let pulseReportData = null;
 function _todayIso(){return new Date().toISOString().slice(0,10)}
@@ -41684,6 +42127,103 @@ function pulseTable(headers, rows){
   h += '</tbody></table></div>';
   return h;
 }
+
+// ── Staff Accountability drill-down ────────────────────────────────
+const ACCT_METRIC_LABEL = {
+  assigned_open:      'Assigned Open Cases',
+  overdue_5_days:     'Overdue > 5 Days',
+  no_action:          'No Action After Assignment',
+  resolved_this_week: 'Resolved This Week',
+};
+
+function _acctCaseDetailUrl(c){
+  // Best-effort link into the existing admin case detail surface. Keep
+  // the modal usable even if the route is unknown — the button just
+  // opens the dashboard search filtered by reference.
+  const ref = encodeURIComponent(c.reference_no || c.reference || c.id || '');
+  switch((c.case_type||'').toLowerCase()){
+    case 'welfare': return '/admin/welfare-cases?ref=' + ref;
+    case 'legal':   return '/admin/legal-cases?ref=' + ref;
+    case 'death':   return '/admin/death-cases?ref=' + ref;
+    case 'nurse':   return '/admin/nurses?complaint=' + ref;
+    default:        return '#';
+  }
+}
+
+function _acctRenderRows(cases){
+  if(!cases || !cases.length){
+    return '<div class="acct-empty">No cases match this filter.</div>';
+  }
+  const head = '<tr><th>Reference</th><th>Applicant</th><th>Subject</th><th>Status</th><th>Assigned</th><th>Last Action</th><th>Resolved</th><th>Remarks</th><th>Open</th></tr>';
+  const body = cases.map(c=>{
+    const ref = esc(c.reference_no || c.reference || '—');
+    const applicant = esc((c.applicant_name||'') + (c.passport_no?(' / '+c.passport_no):''));
+    const subj = esc(c.subject || '—');
+    const status = esc(c.status || '—');
+    const assigned = esc((c.assigned_at||'').slice(0,10) || '—');
+    const lastAction = esc((c.last_action_at||'').slice(0,10) || '—');
+    const resolved = esc((c.resolved_at||'').slice(0,10) || '—');
+    const remarks = esc(c.resolution_remarks || c.last_action_summary || '—');
+    const url = _acctCaseDetailUrl(c);
+    const openBtn = '<a class="acct-open-btn" href="'+url+'" target="_blank" rel="noopener">Open Case</a>';
+    return '<tr><td><strong>'+ref+'</strong><br><small style="color:#5b6773">'+esc(c.module||c.case_type||'')+'</small></td>'+
+           '<td>'+applicant+(c.phone?'<br><small style=\"color:#5b6773\">'+esc(c.phone)+'</small>':'')+'</td>'+
+           '<td>'+subj+'</td>'+
+           '<td>'+status+'</td>'+
+           '<td>'+assigned+(c.days_pending?('<br><small style=\"color:#5b6773\">'+Number(c.days_pending)+'d ago</small>'):'')+'</td>'+
+           '<td>'+lastAction+(c.last_action_actor?('<br><small style=\"color:#5b6773\">'+esc(c.last_action_actor)+'</small>'):'')+'</td>'+
+           '<td>'+resolved+'</td>'+
+           '<td class="remarks">'+remarks+'</td>'+
+           '<td>'+openBtn+'</td></tr>';
+  }).join('');
+  return '<table>'+head+'<tbody>'+body+'</tbody></table>';
+}
+
+async function openAccountabilityDrilldown(officerKey, metric){
+  const overlay = document.getElementById('acctDrillOverlay');
+  const title = document.getElementById('acctDrillTitle');
+  const meta = document.getElementById('acctDrillMeta');
+  const body = document.getElementById('acctDrillBody');
+  if(!overlay || !title || !body) return;
+  const label = ACCT_METRIC_LABEL[metric] || metric;
+  title.textContent = (officerKey||'(unassigned)') + ' — ' + label;
+  meta.textContent = 'Loading…';
+  body.innerHTML = '<div class="acct-state">Loading cases…</div>';
+  overlay.classList.add('is-open');
+  try{
+    const params = new URLSearchParams({ officer_key: officerKey || '', metric: metric || '' });
+    const r = await fetch('/api/admin/welfare/accountability-cases?' + params.toString(), {credentials:'same-origin'});
+    if(!r.ok){
+      body.innerHTML = '<div class="acct-state" style="color:#991b1b">Could not load cases (HTTP '+r.status+'). Please try again.</div>';
+      meta.textContent = 'Error';
+      return;
+    }
+    const data = await r.json();
+    if(!data || data.success === false){
+      body.innerHTML = '<div class="acct-state" style="color:#991b1b">'+esc((data&&data.error)||'Could not load cases.')+'</div>';
+      meta.textContent = 'Error';
+      return;
+    }
+    meta.textContent = 'Total: ' + Number(data.count||0);
+    body.innerHTML = _acctRenderRows(data.cases || []);
+  }catch(e){
+    body.innerHTML = '<div class="acct-state" style="color:#991b1b">Could not load cases. Please try again.</div>';
+    meta.textContent = 'Error';
+  }
+}
+
+function closeAccountabilityDrilldown(){
+  const overlay = document.getElementById('acctDrillOverlay');
+  if(overlay) overlay.classList.remove('is-open');
+}
+
+document.addEventListener('keydown',(e)=>{
+  if(e.key === 'Escape'){
+    const overlay = document.getElementById('acctDrillOverlay');
+    if(overlay && overlay.classList.contains('is-open')) closeAccountabilityDrilldown();
+  }
+});
+
 function setPulseError(msg){
   const el=document.getElementById('pulseError');
   if(!el) return;
@@ -41748,15 +42288,32 @@ function renderPulseSummary(rep){
   const workloadWrap=document.getElementById('pulseWorkloadTableWrap');
   if(workloadWrap){workloadWrap.innerHTML=pulseTable(['Theme','Count','Responsible Section','Sample References','Note'], workload);}
   const byOfficer=((rep&&rep.staff_accountability)||{}).by_officer||[];
-  const staffRows=byOfficer.map(o=>[
-    esc(o.officer_name||o.assigned_to||'—'),
-    esc(o.assigned_open||0),
-    esc(o.overdue_5_days||0),
-    esc(o.no_action_after_assignment||0),
-    esc(o.resolved_this_week||0)
-  ]);
+  // Drill-down: every count cell renders as a button. Zero = disabled.
+  // Officer key is whatever the dashboard already uses (may be a username
+  // or an external_branch:* synthetic key — the API handles both).
+  const drillBtn=(officerKey, metric, value)=>{
+    const n=Number(value||0);
+    const officer=String(officerKey||'').replace(/"/g,'&quot;');
+    const m=String(metric||'').replace(/"/g,'&quot;');
+    if(!n) return '<span class="acct-zero">0</span>';
+    return '<button type="button" class="acct-drilldown" data-officer-key="'+officer+'" data-metric="'+m+'" data-count="'+n+'">'+esc(n)+'</button>';
+  };
+  const staffRows=byOfficer.map(o=>{
+    const key=o.assigned_to||o.officer_name||'';
+    return [
+      esc(o.officer_name||o.assigned_to||'—'),
+      drillBtn(key,'assigned_open',     o.assigned_open||0),
+      drillBtn(key,'overdue_5_days',    o.overdue_5_days||0),
+      drillBtn(key,'no_action',         o.no_action_after_assignment||0),
+      drillBtn(key,'resolved_this_week',o.resolved_this_week||0),
+    ];
+  });
   const staffWrap=document.getElementById('pulseStaffTableWrap');
-  if(staffWrap){staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'], staffRows);}
+  if(staffWrap){staffWrap.innerHTML=pulseTable(['Officer','Open Assigned','Overdue','No Action','Resolved This Week'], staffRows);
+    staffWrap.querySelectorAll('.acct-drilldown').forEach(btn=>{
+      btn.addEventListener('click',()=>openAccountabilityDrilldown(btn.dataset.officerKey,btn.dataset.metric));
+    });
+  }
   const annex=(rep&&rep.evidence_annex)||{};
   const seniorEvidence=annex.senior_attention||[];
   const opsEvidence=annex.operational_samples||[];
