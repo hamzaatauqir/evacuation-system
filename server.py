@@ -13562,19 +13562,21 @@ def _gl_build_pdf_bytes(app):
     return _gl_build_plain_pdf_bytes(_gl_letter_text(app))
 
 
-def _gl_generate_letter_file(app):
+def _gl_generate_letter_file(app, allow_issued=False):
     letter = _gl_letter_context(app)
     d = letter.get('application') or {}
-    if d.get('status') == 'ISSUED':
+    status = (d.get('status') or '').strip().upper()
+    if status == 'ISSUED' and not allow_issued:
         raise ValueError('Issued letters cannot be regenerated.')
     if letter.get('generation_blockers'):
         raise ValueError('Official letter cannot be generated until the required fields are completed.')
     ref = d.get('ref_no') or f"GL-{d.get('id')}"
     safe_ref = re.sub(r'[^A-Za-z0-9_.-]', '_', ref)
     rel_path = f'generated_letters/{safe_ref}.pdf'
-    target = Path(__file__).resolve().parent / rel_path
-    target.parent.mkdir(exist_ok=True)
-    target.write_bytes(_gl_build_pdf_bytes(app))
+    target = (PROJECT_ROOT / rel_path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pdf_bytes = _gl_build_pdf_bytes(app)
+    target.write_bytes(pdf_bytes)
     return rel_path
 
 
@@ -14174,32 +14176,45 @@ def api_admin_gl_letter(app_id, user):
         if not row:
             return None, None, {'success': False, 'error': 'Application not found.'}
         app = dict(row)
-        # Strict gate for the clean (no-watermark) final PDF: must pass the
-        # role + status + file-exists check. Pending/under-review/approved
-        # rows and viewer-only roles are blocked here even though they may
-        # be allowed to read the row's metadata via gl_user_can_view.
-        if not _can_print_clean_grading_letter(user, app):
+        # Final clean-letter download remains restricted to manager roles on
+        # already-generated / issued rows, but the fallback regeneration path
+        # must still run when the stored letter path is blank or stale.
+        status = (app.get('status') or '').strip().upper()
+        if not gl_user_can_manage(user) or status not in {'LETTER_GENERATED', 'ISSUED'}:
             return None, None, {
                 'success': False,
                 'error': 'Not authorized to print the clean letter for this application.',
                 'status': 403,
             }
-        root = Path(__file__).resolve().parent
+        root = PROJECT_ROOT
         rel = (app.get('letter_pdf_path') or '').strip()
+        old_exists = False
         if rel:
             path = (root / rel).resolve()
-            if root not in path.parents:
-                return None, None, {'success': False, 'error': 'Invalid letter path.'}
-            if os.path.exists(path):
-                return path.read_bytes(), f"{app.get('ref_no') or 'grading-letter'}.pdf", None
+            if root in path.parents:
+                old_exists = os.path.exists(path)
+                if old_exists:
+                    return path.read_bytes(), f"{app.get('ref_no') or 'grading-letter'}.pdf", None
+            else:
+                print(f"[GL] Stored letter path escaped project root for app {app_id}: rel={rel!r} resolved={path}", flush=True)
 
-        print(f"[GL] Missing letter file for app {app_id}; regenerating final PDF", flush=True)
+        print(
+            f"[GL] Download fallback app_id={app_id} ref={app.get('ref_no')} "
+            f"status={status} old_rel={rel!r} old_exists={old_exists}",
+            flush=True,
+        )
+        generated_rel = None
         try:
-            rel = _gl_generate_letter_file(app)
-            if rel:
+            generate_row = _gl_fetch_application(db, app_id)
+            if not generate_row:
+                return None, None, {'success': False, 'error': 'Application not found.'}
+            print(f"[GL] Missing letter file for app {app_id}; regenerating final PDF", flush=True)
+            generated_rel = _gl_generate_letter_file(generate_row, allow_issued=True)
+            print(f"[GL] Regeneration returned rel={generated_rel!r}", flush=True)
+            if generated_rel:
                 db.execute(
                     "UPDATE gl_applications SET letter_pdf_path = ?, letter_path = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    [rel, app_id]
+                    [generated_rel, app_id]
                 )
                 db.commit()
         except Exception as exc:
@@ -14207,7 +14222,8 @@ def api_admin_gl_letter(app_id, user):
                 db.rollback()
             except Exception:
                 pass
-            print(f"[GL] Final PDF regeneration failed for app {app_id}: {exc}", flush=True)
+            print(f"[GL] Final PDF regeneration failed for app {app_id}: {exc!r}", flush=True)
+            traceback.print_exc()
 
         fresh = _gl_fetch_application(db, app_id)
         if not fresh:
@@ -14216,10 +14232,22 @@ def api_admin_gl_letter(app_id, user):
         rel = (fresh_app.get('letter_pdf_path') or '').strip()
         if rel:
             path = (root / rel).resolve()
-            if root not in path.parents:
-                return None, None, {'success': False, 'error': 'Invalid letter path.'}
-            if os.path.exists(path):
-                return path.read_bytes(), f"{fresh_app.get('ref_no') or app.get('ref_no') or 'grading-letter'}.pdf", None
+            if root in path.parents:
+                regenerated_exists = os.path.exists(path)
+                size = path.stat().st_size if regenerated_exists else 'NA'
+                print(
+                    f"[GL] Resolved regenerated path={path} exists={regenerated_exists} size={size}",
+                    flush=True,
+                )
+                if regenerated_exists:
+                    return path.read_bytes(), f"{fresh_app.get('ref_no') or app.get('ref_no') or 'grading-letter'}.pdf", None
+            else:
+                print(f"[GL] Regenerated letter path escaped project root for app {app_id}: rel={rel!r} resolved={path}", flush=True)
+        print(
+            f"[GL] Regeneration fallback unresolved for app {app_id}: "
+            f"final_rel={rel!r} generated_rel={generated_rel!r}",
+            flush=True,
+        )
         return None, None, {
             'success': False,
             'error': 'Letter could not be regenerated. Please try Generate PDF first.'
