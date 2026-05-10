@@ -170,6 +170,114 @@ def main():
     expect("None handled",
            server._gl_pdf_safe_text(None) == '')
 
+    # -- 8. api_admin_gl_letter source has regeneration fallback ------------
+    print()
+    print("Test 8: api_admin_gl_letter source has regeneration fallback")
+    letter_src = inspect.getsource(server.api_admin_gl_letter)
+    expect("calls _gl_generate_letter_file",
+           '_gl_generate_letter_file' in letter_src)
+    expect("does not keep legacy missing-file error return",
+           'Letter file not found.' not in letter_src)
+    expect("has regeneration fallback error",
+           'Letter could not be regenerated. Please try Generate PDF first.' in letter_src)
+    expect("checks os.path.exists before serving",
+           'os.path.exists' in letter_src)
+
+    # -- 9. api_admin_gl_letter regenerates when path is missing ------------
+    print()
+    print("Test 9: api_admin_gl_letter regenerates when stored path is missing")
+    generated_rel = 'generated_letters/smoke-regenerated-letter.pdf'
+    generated_abs = os.path.join(REPO_ROOT, generated_rel)
+    generated_bytes = b'%PDF-1.4 smoke regeneration test'
+    os.makedirs(os.path.dirname(generated_abs), exist_ok=True)
+    if os.path.exists(generated_abs):
+        os.remove(generated_abs)
+
+    class DummyDB:
+        def __init__(self):
+            self.executed = []
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = 0
+
+        def execute(self, query, params):
+            self.executed.append((query, list(params)))
+            return self
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def close(self):
+            self.closed += 1
+
+    dummy_db = DummyDB()
+    fetch_calls = {'count': 0}
+    generate_calls = {'count': 0}
+    original_feature_enabled = server._gl_feature_enabled
+    original_can_view = server.gl_user_can_view
+    original_get_db = server.get_db
+    original_fetch = server._gl_fetch_application
+    original_can_print = server._can_print_clean_grading_letter
+    original_generate = server._gl_generate_letter_file
+
+    def fake_fetch(_db, _app_id):
+        fetch_calls['count'] += 1
+        if fetch_calls['count'] == 1:
+            return {
+                'id': 111,
+                'status': 'LETTER_GENERATED',
+                'ref_no': 'GL-2026-000111',
+                'letter_pdf_path': '',
+            }
+        return {
+            'id': 111,
+            'status': 'LETTER_GENERATED',
+            'ref_no': 'GL-2026-000111',
+            'letter_pdf_path': generated_rel,
+        }
+
+    def fake_generate(_app):
+        generate_calls['count'] += 1
+        with open(generated_abs, 'wb') as fh:
+            fh.write(generated_bytes)
+        return generated_rel
+
+    try:
+        server._gl_feature_enabled = lambda: True
+        server.gl_user_can_view = lambda _user: True
+        server.get_db = lambda: dummy_db
+        server._gl_fetch_application = fake_fetch
+        server._can_print_clean_grading_letter = lambda _user, _app: True
+        server._gl_generate_letter_file = fake_generate
+
+        body_pdf, fname, err = server.api_admin_gl_letter('111', {'role': 'admin', 'user': 'smoke'})
+        expect("regeneration helper called once",
+               generate_calls['count'] == 1)
+        expect("application row reloaded after regeneration",
+               fetch_calls['count'] >= 2)
+        expect("returns regenerated PDF bytes",
+               body_pdf == generated_bytes)
+        expect("returns no error on regenerated PDF",
+               err is None)
+        expect("persists regenerated letter path",
+               any('letter_pdf_path' in query for query, _params in dummy_db.executed))
+        expect("commits regenerated letter path update",
+               dummy_db.commits == 1)
+        expect("returns expected filename",
+               fname == 'GL-2026-000111.pdf')
+    finally:
+        server._gl_feature_enabled = original_feature_enabled
+        server.gl_user_can_view = original_can_view
+        server.get_db = original_get_db
+        server._gl_fetch_application = original_fetch
+        server._can_print_clean_grading_letter = original_can_print
+        server._gl_generate_letter_file = original_generate
+        if os.path.exists(generated_abs):
+            os.remove(generated_abs)
+
     print()
     print(f'FAIL count: {fail}')
     return 0 if fail == 0 else 1

@@ -14184,16 +14184,46 @@ def api_admin_gl_letter(app_id, user):
                 'error': 'Not authorized to print the clean letter for this application.',
                 'status': 403,
             }
-        rel = (app.get('letter_pdf_path') or '').strip()
-        if not rel:
-            return None, None, {'success': False, 'error': 'PDF letter has not been generated yet.'}
-        path = (Path(__file__).resolve().parent / rel).resolve()
         root = Path(__file__).resolve().parent
-        if root not in path.parents:
-            return None, None, {'success': False, 'error': 'Invalid letter path.'}
-        if not path.exists():
-            return None, None, {'success': False, 'error': 'Letter file not found.'}
-        return path.read_bytes(), f"{app.get('ref_no') or 'grading-letter'}.pdf", None
+        rel = (app.get('letter_pdf_path') or '').strip()
+        if rel:
+            path = (root / rel).resolve()
+            if root not in path.parents:
+                return None, None, {'success': False, 'error': 'Invalid letter path.'}
+            if os.path.exists(path):
+                return path.read_bytes(), f"{app.get('ref_no') or 'grading-letter'}.pdf", None
+
+        print(f"[GL] Missing letter file for app {app_id}; regenerating final PDF", flush=True)
+        try:
+            rel = _gl_generate_letter_file(app)
+            if rel:
+                db.execute(
+                    "UPDATE gl_applications SET letter_pdf_path = ?, letter_path = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    [rel, app_id]
+                )
+                db.commit()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[GL] Final PDF regeneration failed for app {app_id}: {exc}", flush=True)
+
+        fresh = _gl_fetch_application(db, app_id)
+        if not fresh:
+            return None, None, {'success': False, 'error': 'Application not found.'}
+        fresh_app = dict(fresh)
+        rel = (fresh_app.get('letter_pdf_path') or '').strip()
+        if rel:
+            path = (root / rel).resolve()
+            if root not in path.parents:
+                return None, None, {'success': False, 'error': 'Invalid letter path.'}
+            if os.path.exists(path):
+                return path.read_bytes(), f"{fresh_app.get('ref_no') or app.get('ref_no') or 'grading-letter'}.pdf", None
+        return None, None, {
+            'success': False,
+            'error': 'Letter could not be regenerated. Please try Generate PDF first.'
+        }
     finally:
         db.close()
 
