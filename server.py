@@ -21191,6 +21191,7 @@ def api_admin_community_welfare_summary(user):
                     d = dict(r); d['module'] = 'death'; urgent_list.append(d)
             except Exception:
                 pass
+        dashboard_payload = _community_welfare_dashboard_payload(db, user)
         return {
             'success': True,
             'user_display': (user or {}).get('user', 'Officer'),
@@ -21212,6 +21213,7 @@ def api_admin_community_welfare_summary(user):
                 'death_pending': death_pending,
             },
             'urgent_list': urgent_list[:6],
+            **dashboard_payload,
         }
     finally:
         db.close()
@@ -21293,8 +21295,7 @@ def _is_case_overdue(status, assigned_at, created_at, threshold_days=5):
     return _case_age_days(anchor) > int(threshold_days or 5)
 
 
-def _staff_action_exists_after_assignment(case_type, case_id, assigned_at):
-    db = get_db()
+def _staff_action_exists_after_assignment_with_db(db, case_type, case_id, assigned_at):
     try:
         ctype = _clean_text(case_type, 40).lower()
         if ctype == 'welfare':
@@ -21347,9 +21348,15 @@ def _staff_action_exists_after_assignment(case_type, case_id, assigned_at):
             return bool(row)
     except Exception:
         return False
+    return False
+
+
+def _staff_action_exists_after_assignment(case_type, case_id, assigned_at):
+    db = get_db()
+    try:
+        return _staff_action_exists_after_assignment_with_db(db, case_type, case_id, assigned_at)
     finally:
         db.close()
-    return False
 
 
 # Drill-down metric allowlist + labels — keep in sync with the dashboard
@@ -21388,6 +21395,403 @@ def _accountability_latest_action(db, case_type, case_id):
         return dict(row) if row else {}
     except Exception:
         return {}
+
+
+def _parse_datetime_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    s = str(value).strip()
+    if not s:
+        return None
+    s = s.replace('T', ' ').replace('Z', '')
+    if '.' in s:
+        s = s.split('.', 1)[0]
+    for fmt in (
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d %H:%M',
+        '%Y/%m/%d %H:%M:%S',
+        '%Y/%m/%d %H:%M',
+        '%d/%m/%Y %H:%M:%S',
+        '%d/%m/%Y %H:%M',
+        '%Y-%m-%d',
+        '%Y/%m/%d',
+        '%d/%m/%Y',
+        '%d-%m-%Y',
+    ):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _community_welfare_status_bucket(status):
+    normalized = _clean_text(status, 120).lower()
+    if normalized in ('resolved',):
+        return 'resolved'
+    if normalized in ('closed', 'cancelled', 'canceled'):
+        return 'closed'
+    if normalized in (
+        'assigned', 'in progress', 'processing', 'under review',
+        'pending review', 'seen by admin', 'awaiting applicant response',
+        'awaiting family response', 'awaiting requester response',
+        'field verification required', 'contacted', 'verified',
+        'confirmed', 'allocated', 'travel completed'
+    ):
+        return 'in_progress'
+    return 'open'
+
+
+def _community_welfare_category_label(module_key, row):
+    if module_key == 'welfare':
+        return _ambassador_service_label('welfare', row)
+    if module_key == 'legal':
+        return _ambassador_service_label('legal', row)
+    if module_key == 'death':
+        return _ambassador_service_label('death', row)
+    category = _clean_text(_first_value(row.get('category'), row.get('complaint_category')), 200)
+    if category:
+        return category
+    return _ambassador_service_label('nurse_complaint', row)
+
+
+def _community_welfare_dashboard_payload(db, user):
+    username = (user or {}).get('user', '') or ''
+    community_scope = is_community_desk_role((user or {}).get('role', ''))
+    threshold_days = 5
+    today = datetime.now().date()
+    window_start = today - timedelta(days=13)
+
+    users_map = {}
+    try:
+        for row in db.execute(
+            "SELECT username, COALESCE(full_name, username) AS full_name, COALESCE(department, '') AS department FROM users"
+        ).fetchall():
+            users_map[row['username']] = {
+                'full_name': row['full_name'],
+                'department': row['department'],
+            }
+    except Exception:
+        users_map = {}
+
+    case_specs = [
+        {
+            'module_key': 'welfare',
+            'case_type': 'welfare',
+            'sql': """SELECT id AS case_id,
+                             COALESCE(case_reference, CAST(id AS TEXT)) AS reference,
+                             COALESCE(case_type, 'general_welfare') AS case_type,
+                             COALESCE(category, '') AS category,
+                             COALESCE(requester_name, '') AS requester_name,
+                             COALESCE(subject_name, concern_summary, category, '') AS subject,
+                             COALESCE(subject_passport, '') AS passport_no,
+                             COALESCE(requester_phone, subject_phone, '') AS phone,
+                             COALESCE(priority, 'Normal') AS priority,
+                             COALESCE(status, 'New') AS status,
+                             COALESCE(assigned_to, '') AS assigned_to,
+                             COALESCE(assigned_department, '') AS assigned_department,
+                             COALESCE(assigned_at, '') AS assigned_at,
+                             COALESCE(created_at, '') AS created_at,
+                             COALESCE(updated_at, '') AS updated_at,
+                             COALESCE(resolved_at, '') AS resolved_at
+                      FROM welfare_cases"""
+        },
+        {
+            'module_key': 'nurse',
+            'case_type': 'nurse',
+            'sql': """SELECT COALESCE(complaint_id, nurse_reference_id, CAST(id AS TEXT)) AS case_id,
+                             COALESCE(complaint_id, nurse_reference_id, CAST(id AS TEXT)) AS reference,
+                             'nurse' AS case_type,
+                             COALESCE(category, complaint_category, '') AS category,
+                             COALESCE(nurse_full_name, '') AS requester_name,
+                             COALESCE(subject, category, complaint_category, '') AS subject,
+                             COALESCE(passport_number, '') AS passport_no,
+                             '' AS phone,
+                             COALESCE(priority, 'Normal') AS priority,
+                             COALESCE(status, complaint_status, 'Seen') AS status,
+                             COALESCE(assigned_to_username, '') AS assigned_to,
+                             COALESCE(assigned_department, '') AS assigned_department,
+                             COALESCE(assigned_at, '') AS assigned_at,
+                             COALESCE(created_at, '') AS created_at,
+                             COALESCE(updated_at, '') AS updated_at,
+                             COALESCE(resolved_at, '') AS resolved_at,
+                             COALESCE(complaint_category, '') AS complaint_category
+                      FROM nurse_complaints"""
+        },
+    ]
+    if not community_scope:
+        case_specs.extend([
+            {
+                'module_key': 'legal',
+                'case_type': 'legal',
+                'sql': """SELECT reference_id AS case_id,
+                                 reference_id AS reference,
+                                 'legal' AS case_type,
+                                 COALESCE(case_type, '') AS category,
+                                 COALESCE(full_name, '') AS requester_name,
+                                 COALESCE(subject, case_type, '') AS subject,
+                                 COALESCE(passport_number, '') AS passport_no,
+                                 COALESCE(mobile, '') AS phone,
+                                 COALESCE(priority, 'Normal') AS priority,
+                                 COALESCE(status, 'Submitted') AS status,
+                                 COALESCE(assigned_to_username, '') AS assigned_to,
+                                 COALESCE(assigned_department, '') AS assigned_department,
+                                 COALESCE(assigned_at, '') AS assigned_at,
+                                 COALESCE(created_at, '') AS created_at,
+                                 COALESCE(last_action_at, updated_at, created_at) AS updated_at,
+                                 COALESCE(resolved_at, '') AS resolved_at
+                          FROM legal_case_requests"""
+            },
+            {
+                'module_key': 'death',
+                'case_type': 'death',
+                'sql': """SELECT reference_id AS case_id,
+                                 reference_id AS reference,
+                                 'death' AS case_type,
+                                 'Death Case' AS category,
+                                 COALESCE(reporter_name, deceased_name, '') AS requester_name,
+                                 'Death Case' AS subject,
+                                 COALESCE(deceased_passport, '') AS passport_no,
+                                 COALESCE(reporter_mobile, '') AS phone,
+                                 COALESCE(priority, 'Normal') AS priority,
+                                 COALESCE(status, 'Submitted') AS status,
+                                 COALESCE(assigned_to_username, '') AS assigned_to,
+                                 COALESCE(assigned_department, '') AS assigned_department,
+                                 COALESCE(assigned_at, '') AS assigned_at,
+                                 COALESCE(created_at, '') AS created_at,
+                                 COALESCE(last_action_at, updated_at, created_at) AS updated_at,
+                                 COALESCE(resolved_at, '') AS resolved_at
+                          FROM death_case_requests"""
+            },
+        ])
+
+    case_rows = []
+    for spec in case_specs:
+        try:
+            rows = db.execute(spec['sql']).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            data = dict(row)
+            latest = _accountability_latest_action(db, spec['case_type'], data.get('case_id'))
+            status = _clean_text(_first_value(data.get('status'), data.get('complaint_status'), 'Submitted'), 120)
+            bucket = _community_welfare_status_bucket(status)
+            assigned_to = _clean_text(data.get('assigned_to'), 120)
+            assigned_anchor = _clean_text(data.get('assigned_at'), 80) or _clean_text(data.get('created_at'), 80)
+            latest_action_at = _clean_text(
+                latest.get('created_at') or data.get('updated_at') or data.get('created_at'),
+                80
+            )
+            latest_action_summary = _clean_text(
+                latest.get('note') or latest.get('action_type') or data.get('subject') or data.get('category'),
+                600
+            )
+            is_resolved = bucket in ('resolved', 'closed')
+            is_overdue = _is_case_overdue(status, data.get('assigned_at'), data.get('created_at'), threshold_days)
+            staff_action_exists = bool(
+                assigned_to and _staff_action_exists_after_assignment_with_db(
+                    db, spec['case_type'], data.get('case_id'), assigned_anchor
+                )
+            )
+            pending_staff_action = bool(assigned_to and (not is_resolved) and (not staff_action_exists))
+            days_pending = _case_age_days(assigned_anchor or data.get('created_at')) if not is_resolved else 0
+            category_label = _community_welfare_category_label(spec['module_key'], data)
+            resolved_anchor = _clean_text(
+                data.get('resolved_at') or latest_action_at or data.get('updated_at') or data.get('created_at'),
+                80
+            )
+            resolution_days = None
+            created_date = _parse_date_safe(data.get('created_at'))
+            resolved_date = _parse_date_safe(resolved_anchor) if is_resolved else None
+            if created_date and resolved_date:
+                resolution_days = _days_between(created_date, resolved_date)
+
+            case_rows.append({
+                'module_key': spec['module_key'],
+                'case_type': spec['case_type'],
+                'reference': _clean_text(data.get('reference'), 120),
+                'category': category_label or 'Community Welfare',
+                'requester_name': _clean_text(data.get('requester_name'), 200),
+                'subject': _clean_text(data.get('subject'), 300),
+                'passport_no': _clean_text(data.get('passport_no'), 80),
+                'phone': _clean_text(data.get('phone'), 80),
+                'priority': _clean_text(data.get('priority'), 80) or 'Normal',
+                'status': status or 'Submitted',
+                'status_bucket': bucket,
+                'assigned_to': assigned_to or '',
+                'assigned_department': _clean_text(data.get('assigned_department'), 200),
+                'assigned_at': _clean_text(data.get('assigned_at'), 80),
+                'created_at': _clean_text(data.get('created_at'), 80),
+                'updated_at': _clean_text(data.get('updated_at'), 80),
+                'resolved_at': _clean_text(data.get('resolved_at'), 80),
+                'resolved_anchor': resolved_anchor,
+                'latest_action_at': latest_action_at,
+                'latest_action_summary': latest_action_summary or '',
+                'last_action_actor': _clean_text(latest.get('actor_username'), 120),
+                'days_pending': days_pending,
+                'is_overdue': bool(is_overdue),
+                'pending_staff_action': pending_staff_action,
+                'staff_action_exists': bool(staff_action_exists),
+                'resolution_days': resolution_days,
+                'assigned_to_me': bool(username and assigned_to == username and not is_resolved),
+            })
+
+    complaints_received_map = {}
+    resolved_map = {}
+    by_status_map = {'open': 0, 'in_progress': 0, 'resolved': 0, 'closed': 0}
+    by_category_map = {}
+    resolution_values = []
+    recent_sorted = []
+    staff_map = {}
+
+    for offset in range(14):
+        day = (window_start + timedelta(days=offset)).isoformat()
+        complaints_received_map[day] = 0
+        resolved_map[day] = 0
+
+    def _activity_sort_key(item):
+        latest_dt = _parse_datetime_safe(item.get('latest_action_at')) or _parse_datetime_safe(item.get('created_at')) or datetime.min
+        unresolved_rank = 0 if item.get('status_bucket') in ('open', 'in_progress') else 1
+        latest_score = int(latest_dt.strftime('%Y%m%d%H%M%S')) if latest_dt != datetime.min else 0
+        return (unresolved_rank, -latest_score, -(item.get('days_pending') or 0), item.get('reference') or '')
+
+    for item in case_rows:
+        bucket = item.get('status_bucket') or 'open'
+        by_status_map[bucket] = by_status_map.get(bucket, 0) + 1
+        category_key = item.get('category') or 'Community Welfare'
+        by_category_map[category_key] = by_category_map.get(category_key, 0) + 1
+
+        created_date = _parse_date_safe(item.get('created_at'))
+        if created_date and created_date >= window_start:
+            complaints_received_map[created_date.isoformat()] = complaints_received_map.get(created_date.isoformat(), 0) + 1
+
+        if bucket in ('resolved', 'closed'):
+            resolved_date = _parse_date_safe(item.get('resolved_anchor'))
+            if resolved_date and resolved_date >= window_start:
+                resolved_map[resolved_date.isoformat()] = resolved_map.get(resolved_date.isoformat(), 0) + 1
+            if item.get('resolution_days') is not None:
+                resolution_values.append(item['resolution_days'])
+
+        if item.get('assigned_to'):
+            officer_key = item['assigned_to']
+            meta = users_map.get(officer_key, {})
+            row = staff_map.setdefault(officer_key, {
+                'officer_key': officer_key,
+                'staff_name': meta.get('full_name') or officer_key,
+                'assigned_to': officer_key,
+                'department': item.get('assigned_department') or meta.get('department') or '',
+                'assigned': 0,
+                'pending': 0,
+                'resolved': 0,
+                'overdue': 0,
+                'pending_action': 0,
+                'last_action_at': '',
+                'latest_action_summary': '',
+                'escalation_required': False,
+            })
+            row['assigned'] += 1
+            if bucket in ('open', 'in_progress'):
+                row['pending'] += 1
+            else:
+                row['resolved'] += 1
+            if item.get('is_overdue'):
+                row['overdue'] += 1
+            if item.get('pending_staff_action'):
+                row['pending_action'] += 1
+            if item.get('is_overdue') or (item.get('days_pending') or 0) > threshold_days:
+                row['escalation_required'] = True
+            current_dt = _parse_datetime_safe(row.get('last_action_at'))
+            item_dt = _parse_datetime_safe(item.get('latest_action_at'))
+            if item_dt and (current_dt is None or item_dt >= current_dt):
+                row['last_action_at'] = item.get('latest_action_at') or ''
+                row['latest_action_summary'] = item.get('latest_action_summary') or ''
+
+        recent_sorted.append(item)
+
+    recent_sorted.sort(key=_activity_sort_key)
+
+    staff_rows = []
+    for officer_key, row in staff_map.items():
+        staff_rows.append({
+            'officer_key': officer_key,
+            'staff_name': row['staff_name'],
+            'assigned': row['assigned'],
+            'pending': row['pending'],
+            'resolved': row['resolved'],
+            'overdue': row['overdue'],
+            'pending_action': row['pending_action'],
+            'last_action_at': row['last_action_at'] or None,
+            'latest_action_summary': row['latest_action_summary'] or '',
+            'department': row.get('department') or '',
+            'escalation_required': bool(row['escalation_required']),
+        })
+    staff_rows.sort(
+        key=lambda item: (
+            -(item.get('overdue') or 0),
+            -(item.get('pending_action') or 0),
+            -(item.get('pending') or 0),
+            item.get('staff_name') or '',
+        )
+    )
+
+    avg_resolution_days = None
+    if resolution_values:
+        avg_resolution_days = round(sum(resolution_values) / len(resolution_values), 1)
+
+    return {
+        'summary': {
+            'total_complaints': len(case_rows),
+            'open_complaints': sum(1 for item in case_rows if item.get('status_bucket') in ('open', 'in_progress')),
+            'in_progress': by_status_map.get('in_progress', 0),
+            'resolved': by_status_map.get('resolved', 0),
+            'closed': by_status_map.get('closed', 0),
+            'overdue': sum(1 for item in case_rows if item.get('is_overdue')),
+            'pending_staff_action': sum(1 for item in case_rows if item.get('pending_staff_action')),
+            'assigned_to_me': sum(1 for item in case_rows if item.get('assigned_to_me')),
+            'avg_resolution_days': avg_resolution_days,
+        },
+        'trends': {
+            'complaints_received': [
+                {'date': day, 'count': complaints_received_map.get(day, 0)}
+                for day in sorted(complaints_received_map.keys())
+            ],
+            'resolved': [
+                {'date': day, 'count': resolved_map.get(day, 0)}
+                for day in sorted(resolved_map.keys())
+            ],
+        },
+        'by_status': [
+            {'status': 'open', 'count': by_status_map.get('open', 0)},
+            {'status': 'in_progress', 'count': by_status_map.get('in_progress', 0)},
+            {'status': 'resolved', 'count': by_status_map.get('resolved', 0)},
+            {'status': 'closed', 'count': by_status_map.get('closed', 0)},
+        ],
+        'by_category': [
+            {'category': category, 'count': count}
+            for category, count in sorted(by_category_map.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        'staff_accountability': staff_rows,
+        'recent_activity': [
+            {
+                'date': item.get('latest_action_at') or item.get('created_at') or '',
+                'reference': item.get('reference') or '',
+                'category': item.get('category') or '',
+                'assigned_to': item.get('assigned_to') or 'Unassigned',
+                'status': item.get('status') or '',
+                'last_action': item.get('latest_action_summary') or '',
+                'days_pending': item.get('days_pending') or 0,
+                'overdue': bool(item.get('is_overdue')),
+            }
+            for item in recent_sorted[:12]
+        ],
+    }
 
 
 def _accountability_module_rows_for_officer(db, officer_key):
@@ -34286,7 +34690,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] == 'fee_collector':
                 self.send_json({'error': 'Unauthorized'}, 403); return
             self.send_json(api_records(params, user))
-        elif path == '/api/admin/community-welfare/summary':
+        elif path in ('/api/admin/community-welfare/summary', '/api/admin/dashboard/community-welfare-summary'):
             user = self.require_auth()
             if not user: return
             if not (is_full_admin_role(user['role']) or is_community_desk_role(user['role'])):
@@ -45800,6 +46204,23 @@ body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,
 .data-mini-table td{padding:9px 10px}
 .data-mini-table tbody tr:hover{background:#f8fafc}
 .data-mini-table .sub{display:block;margin-top:3px;font-size:.72em;color:#7b8794}
+.cwa-command-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:0 0 18px}
+.cwa-command-card{position:relative;padding:15px 16px;border-radius:16px;border:1px solid #dbe6f1;background:linear-gradient(180deg,#ffffff 0%,#f7fbfd 100%);box-shadow:0 10px 24px rgba(15,23,42,.05);overflow:hidden}
+.cwa-command-card::after{content:'';position:absolute;inset:auto 0 0 0;height:4px;background:var(--tone,#0f766e)}
+.cwa-command-card .eyebrow{display:block;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#64748b}
+.cwa-command-card .value{display:block;margin-top:10px;font-size:2em;line-height:1;font-weight:850;color:#10253f}
+.cwa-command-card .detail{display:block;margin-top:8px;font-size:.82em;line-height:1.45;color:#526173;min-height:2.4em}
+.cwa-command-card.info{--tone:#145da0}.cwa-command-card.good{--tone:#0f766e}.cwa-command-card.warn{--tone:#d97706}.cwa-command-card.danger{--tone:#c2410c}.cwa-command-card.neutral{--tone:#475569}
+.cwa-status-pill,.cwa-flag-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:.72em;font-weight:700;line-height:1.3;white-space:nowrap}
+.cwa-status-pill.open{background:#e0f2fe;color:#075985}.cwa-status-pill.in-progress{background:#fff7ed;color:#9a3412}.cwa-status-pill.resolved{background:#dcfce7;color:#166534}.cwa-status-pill.closed{background:#e2e8f0;color:#334155}
+.cwa-flag-pill.overdue{background:#fee2e2;color:#991b1b}.cwa-flag-pill.pending{background:#fef3c7;color:#92400e}.cwa-flag-pill.clear{background:#ecfccb;color:#3f6212}
+.cwa-staff-name{font-weight:700;color:#132238}
+.cwa-muted{color:#6b7280}
+.cwa-table-note{display:block;margin-top:3px;font-size:.72em;color:#7b8794;line-height:1.4}
+.cwa-activity-ref{font-weight:700;color:#10253f}
+.cwa-summary-inline{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.cwa-summary-inline span{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#eef2f7;color:#526173;font-size:.7em;font-weight:700}
+.cwa-empty-cell{padding:20px 14px!important;text-align:center;color:#7b8794}
 .table-meta{font-size:.8em;color:var(--tl);margin:-2px 0 10px}
 .processing-trend-card{display:flex;flex-direction:column}
 .processing-trend-card .dash-card-head{margin-bottom:10px!important}
@@ -45987,10 +46408,31 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 
 <!-- DASHBOARD -->
 <div id="tab-dash" class="tab active"><div class="ctr">
+<div class="dash-section featured">
+<div class="dash-section-head"><div><h3>Community Welfare Command Dashboard</h3><p>Complaints, resolution tracking, case movement, and staff accountability across Community Welfare desks.</p></div></div>
+<div class="cwa-command-grid" id="cwaCommandCards"></div>
+<div class="dash-card table-card" style="margin-bottom:18px">
+<div class="dash-card-head" style="padding:16px 16px 0"><h3>Recent Community Welfare Activity</h3><span>Prioritised unresolved and recently updated complaints</span></div>
+<div class="table-meta" style="padding:0 16px">Live movement feed showing who holds the case, the latest action, and how long it has been pending.</div>
+<div class="data-mini-table-wrap"><table class="data-mini-table" id="cwaRecentActivityTable"></table></div>
+</div>
+<div class="dash-chart-grid story">
+<div class="dash-card wide"><div class="dash-card-head"><h3>Complaints & Resolution Overview</h3><span>Daily intake and case-closure trend for the last two weeks</span></div><div class="chart-wrap" id="cwaComplaintsTrendChartWrap" data-canvas-id="cwaComplaintsTrendChart"><canvas id="cwaComplaintsTrendChart"></canvas></div></div>
+<div class="dash-card"><div class="dash-card-head"><h3>Status Breakdown</h3><span>Open, in progress, resolved, and closed case mix</span></div><div class="chart-wrap compact" id="cwaStatusChartWrap" data-canvas-id="cwaStatusChart"><canvas id="cwaStatusChart"></canvas></div></div>
+<div class="dash-card"><div class="dash-card-head"><h3>Complaint Categories</h3><span>Case-type distribution across welfare modules</span></div><div class="chart-wrap compact" id="cwaCategoryChartWrap" data-canvas-id="cwaCategoryChart"><canvas id="cwaCategoryChart"></canvas></div></div>
+<div class="dash-card wide"><div class="dash-card-head"><h3>Resolution Trend</h3><span>Resolved or closed cases by day</span></div><div class="chart-wrap compact" id="cwaResolutionTrendChartWrap" data-canvas-id="cwaResolutionTrendChart"><canvas id="cwaResolutionTrendChart"></canvas></div></div>
+<div class="dash-card"><div class="dash-card-head"><h3>Staff Accountability Breakdown</h3><span>Pending, resolved, and overdue load by officer</span></div><div class="chart-wrap compact" id="cwaStaffChartWrap" data-canvas-id="cwaStaffChart"><canvas id="cwaStaffChart"></canvas></div></div>
+</div>
+<div class="dash-card table-card">
+<div class="dash-card-head" style="padding:16px 16px 0"><h3>Staff Accountability &amp; Case Movement</h3><span>Assigned volume, pending action, escalation risk, and latest officer movement</span></div>
+<div class="table-meta" style="padding:0 16px">Cases pending beyond 5 days are flagged for escalation review.</div>
+<div class="data-mini-table-wrap"><table class="data-mini-table" id="cwaStaffMovementTable"></table></div>
+</div>
+</div>
 <div class="dash-top-shell">
 <div class="dash-summary-panel">
 <div class="dash-summary-section">
-<div class="dash-summary-section-head"><h3>Assisted Travellers (Kuwait &rarr; Pakistan)</h3><span>Main movement summary</span></div>
+<div class="dash-summary-section-head"><h3>Visa / Transit Processing &mdash; Legacy / Lower Priority</h3><span>Kept available below the Community Welfare command view</span></div>
 <div id="kpiGrid"></div>
 </div>
 <div class="dash-summary-section">
@@ -46000,7 +46442,7 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 </div>
 <div class="dash-top-main">
 <div class="dash-section featured">
-<div class="dash-section-head"><div><h3>Visa Processing</h3><p>Operational timing, queue age, and immediate profile visibility across the main KW&rarr;PK evacuee flow.</p></div></div>
+<div class="dash-section-head"><div><h3>Visa / Transit Processing &mdash; Lower Priority</h3><p>Operational timing, queue age, and movement visibility for the legacy Kuwait to Pakistan transit workflow.</p></div></div>
 <div class="dash-overview-grid">
 <div class="dash-card processing-trend-card"><div class="dash-card-head"><h3>Processing Trend</h3><span>Daily requests and outcomes by request date</span></div><div class="chart-wrap processing-trend-chart" id="processingTrendChartWrap" data-canvas-id="processingTrendChart"><canvas id="processingTrendChart"></canvas></div><div class="embedded-actionable-cases"><div class="embedded-actionable-head"><div><h4>Actionable Cases</h4><p>Longest-pending evacuee records that may need escalation or direct follow-up.</p></div></div><div class="table-meta">Top 10 longest-pending clear records in the main KW&rarr;PK flow.</div><div class="scroll-t actionable-cases-scroll"><table class="actionable-cases-table" id="longestPendingTable"></table></div></div></div>
 <div class="dash-overview-side">
@@ -47150,9 +47592,116 @@ h+='</tbody>';el.innerHTML=h;
 }
 
 // DASHBOARD
-async function loadDash(){
-try{
-const d=await api('/api/stats');if(!d)return;
+function cwaStatusTone(status){
+const s=String(status||'').trim().toLowerCase();
+if(s==='resolved')return 'resolved';
+if(s==='closed')return 'closed';
+if(s==='in_progress'||s==='in progress')return 'in-progress';
+return 'open';
+}
+function cwaStatusPill(status){
+const label=safeLabel(status,'Open').replace(/_/g,' ');
+return '<span class="cwa-status-pill '+cwaStatusTone(status)+'">'+escHtml(label)+'</span>';
+}
+function cwaFlagPill(tone,text){
+return '<span class="cwa-flag-pill '+tone+'">'+escHtml(text)+'</span>';
+}
+function renderCwaCommandCards(summary){
+const el=document.getElementById('cwaCommandCards');if(!el)return;
+const s=summary||{};
+const cards=[
+{label:'Complaints Received',value:safeValue(s.total_complaints),detail:'All tracked welfare complaints and cases',tone:'info'},
+{label:'Open / Pending',value:safeValue(s.open_complaints),detail:'In progress: '+safeValue(s.in_progress),tone:'danger'},
+{label:'Resolved Cases',value:safeValue(s.resolved)+safeValue(s.closed),detail:'Resolved: '+safeValue(s.resolved)+' | Closed: '+safeValue(s.closed),tone:'good'},
+{label:'Pending Staff Action',value:safeValue(s.pending_staff_action),detail:'Assigned cases with no staff action after assignment',tone:'warn'},
+{label:'Overdue / Delayed',value:safeValue(s.overdue),detail:'Cases pending more than 5 days',tone:'danger'},
+{label:'Avg Resolution',value:s.avg_resolution_days==null?'--':formatMetric(s.avg_resolution_days,' d'),detail:'Based on cases already resolved or closed',tone:'neutral'}
+];
+el.innerHTML=cards.map(card=>'<div class="cwa-command-card '+card.tone+'"><span class="eyebrow">'+escHtml(card.label)+'</span><span class="value">'+escHtml(String(card.value))+'</span><span class="detail">'+escHtml(card.detail)+'</span></div>').join('');
+}
+function renderCwaRecentActivity(rows){
+const el=document.getElementById('cwaRecentActivityTable');if(!el)return;
+rows=asArray(rows);
+if(!rows.length){el.innerHTML='<tbody><tr><td class="cwa-empty-cell" colspan="7">No recent Community Welfare activity available.</td></tr></tbody>';return}
+let h='<thead><tr><th>Date</th><th>Case / Complaint Reference</th><th>Category</th><th>Assigned To</th><th>Status</th><th>Last Action</th><th>Days Pending</th></tr></thead><tbody>';
+rows.forEach(item=>{
+const pending=safeValue(item.days_pending);
+const overdue=!!item.overdue;
+const pendingHtml=overdue?cwaFlagPill('overdue',pending+' days'):pending>0?cwaFlagPill('pending',pending+' days'):cwaFlagPill('clear','0 days');
+h+='<tr>'
++'<td data-label="Date">'+escHtml(formatShortDate(item.date||''))+'</td>'
++'<td data-label="Case / Complaint Reference"><span class="cwa-activity-ref">'+escHtml(item.reference||'-')+'</span></td>'
++'<td data-label="Category">'+escHtml(item.category||'-')+'</td>'
++'<td data-label="Assigned To">'+escHtml(item.assigned_to||'Unassigned')+'</td>'
++'<td data-label="Status">'+cwaStatusPill(item.status)+'</td>'
++'<td data-label="Last Action">'+escHtml(item.last_action||'No recent action summary')+'</td>'
++'<td data-label="Days Pending">'+pendingHtml+'</td>'
++'</tr>';
+});
+h+='</tbody>';
+el.innerHTML=h;
+}
+function renderCwaStaffMovement(rows){
+const el=document.getElementById('cwaStaffMovementTable');if(!el)return;
+rows=asArray(rows);
+if(!rows.length){el.innerHTML='<tbody><tr><td class="cwa-empty-cell" colspan="8">No staff accountability data available.</td></tr></tbody>';return}
+let h='<thead><tr><th>Staff Member</th><th>Assigned Cases</th><th>Pending Action</th><th>Resolved Cases</th><th>Overdue Cases</th><th>Last Action Date</th><th>Latest Remarks / Action Summary</th><th>Escalation</th></tr></thead><tbody>';
+rows.forEach(item=>{
+const escalation=item.escalation_required?cwaFlagPill('overdue','Escalate'):cwaFlagPill('clear','On track');
+const pendingDetail='<div class="cwa-summary-inline"><span>No action: '+safeValue(item.pending_action)+'</span><span>Open now: '+safeValue(item.pending)+'</span></div>';
+h+='<tr>'
++'<td data-label="Staff Member"><span class="cwa-staff-name">'+escHtml(item.staff_name||item.assigned_to||'-')+'</span>'+(item.department?'<span class="cwa-table-note">'+escHtml(item.department)+'</span>':'')+'</td>'
++'<td data-label="Assigned Cases">'+safeValue(item.assigned)+'</td>'
++'<td data-label="Pending Action">'+pendingDetail+'</td>'
++'<td data-label="Resolved Cases">'+safeValue(item.resolved)+'</td>'
++'<td data-label="Overdue Cases">'+safeValue(item.overdue)+'</td>'
++'<td data-label="Last Action Date">'+escHtml(item.last_action_at?formatShortDate(item.last_action_at):'—')+'</td>'
++'<td data-label="Latest Remarks / Action Summary">'+escHtml(item.latest_action_summary||'No recent remarks recorded')+'</td>'
++'<td data-label="Escalation">'+escalation+'</td>'
++'</tr>';
+});
+h+='</tbody>';
+el.innerHTML=h;
+}
+function renderCommunityWelfareDashboard(payload){
+const emptyMessage=payload&&payload.error?'Community Welfare dashboard unavailable for this account.':'No Community Welfare activity available.';
+if(!payload||payload.success===false||!payload.summary){
+renderCwaCommandCards({});
+renderCwaRecentActivity([]);
+renderCwaStaffMovement([]);
+['cwaComplaintsTrendChart','cwaResolutionTrendChart','cwaStatusChart','cwaCategoryChart','cwaStaffChart'].forEach(id=>renderNoData(id,emptyMessage));
+return;
+}
+const summary=payload.summary||{};
+const complaintsTrend=asArray((payload.trends||{}).complaints_received);
+const resolvedTrend=asArray((payload.trends||{}).resolved);
+const byStatus=asArray(payload.by_status);
+const byCategory=asArray(payload.by_category);
+const staff=asArray(payload.staff_accountability);
+renderCwaCommandCards(summary);
+renderCwaRecentActivity(payload.recent_activity);
+renderCwaStaffMovement(staff);
+
+mkChart('cwaComplaintsTrendChart','line',{labels:complaintsTrend.map(x=>formatShortDate(x.date)),datasets:[
+{label:'Complaints received',data:complaintsTrend.map(x=>safeValue(x.count)),borderColor:'#145da0',backgroundColor:'rgba(20,93,160,.12)',tension:.25,fill:true,borderWidth:2}
+]},{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
+
+mkChart('cwaResolutionTrendChart','line',{labels:resolvedTrend.map(x=>formatShortDate(x.date)),datasets:[
+{label:'Resolved / closed',data:resolvedTrend.map(x=>safeValue(x.count)),borderColor:'#0f766e',backgroundColor:'rgba(15,118,110,.14)',tension:.25,fill:true,borderWidth:2}
+]},{plugins:{legend:{display:false}},scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
+
+mkChart('cwaStatusChart','doughnut',{labels:byStatus.map(x=>safeLabel(String(x.status||'').replace(/_/g,' '),'')),datasets:[{data:byStatus.map(x=>safeValue(x.count)),backgroundColor:['#145da0','#d97706','#0f766e','#475569'],borderWidth:0}]},{plugins:{legend:{display:true}},scales:{}});
+
+mkChart('cwaCategoryChart','bar',{labels:byCategory.slice(0,8).map(x=>safeLabel(x.category,'')),datasets:[{label:'Cases',data:byCategory.slice(0,8).map(x=>safeValue(x.count)),backgroundColor:'#5b7fa3',borderRadius:6}]},{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,ticks:{precision:0}},y:{grid:{display:false}}}});
+
+const staffTop=staff.slice(0,6);
+mkChart('cwaStaffChart','bar',{labels:staffTop.map(x=>safeLabel(x.staff_name||x.assigned_to,'')),datasets:[
+{label:'Pending',data:staffTop.map(x=>safeValue(x.pending)),backgroundColor:'#145da0',borderRadius:6},
+{label:'Resolved',data:staffTop.map(x=>safeValue(x.resolved)),backgroundColor:'#0f766e',borderRadius:6},
+{label:'Overdue',data:staffTop.map(x=>safeValue(x.overdue)),backgroundColor:'#c2410c',borderRadius:6}
+]},{scales:{x:{stacked:false,grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
+}
+function renderVisaDashboard(d){
 const k=d.kpi||{};
 const totalDeparted=safeValue(k.departed)+safeValue(k.jazeera_departed);
 const evacRows=[
@@ -47166,7 +47715,7 @@ const evacRows=[
 ];
 if(safeValue(k.returned)>0)evacRows.splice(6,0,{label:'Returned',valueDisplay:safeValue(k.returned),detail:safeValue(k.returned_today)+' today',tone:'danger'});
 if(safeValue(k.mismatch_total)>0)evacRows.push({label:'Route Mismatches',valueDisplay:safeValue(k.mismatch_total),detail:safeValue(k.corrected_to_pk)+' corrected to PK→KW | '+safeValue(k.mismatch_pending_review)+' pending review',tone:'warn'});
-renderCompactSummary('kpiGrid',evacRows,'No summary available');
+renderCompactSummary('kpiGrid',evacRows,'No visa / transit summary available');
 
 const trend=asArray(d.processing_trend),pendingAges=asArray(d.pending_age_buckets);
 const professionStats=d.profession_stats||{};
@@ -47176,15 +47725,26 @@ mkChart('processingTrendChart','line',{labels:trend.map(x=>formatShortDate(x.dat
 {label:'New Requests',data:trend.map(x=>safeValue(x.new_requests)),borderColor:'#1565c0',backgroundColor:'rgba(21,101,192,.12)',tension:.25,fill:false,borderWidth:2},
 {label:'Visa Obtained',data:trend.map(x=>safeValue(x.visa_obtained)),borderColor:'#0f766e',backgroundColor:'rgba(15,118,110,.12)',tension:.25,fill:false,borderWidth:2}
 ]},{scales:{x:{grid:{display:false}},y:{beginAtZero:true,ticks:{precision:0}}}});
-
 mkChart('topProfessionsChart','bar',{labels:topProfessions.map(x=>safeLabel(x.profession,'')),datasets:[{label:'Cases',data:topProfessions.map(x=>safeValue(x.count||x.total)),backgroundColor:'#546e7a',borderRadius:6}]},{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,ticks:{precision:0}},y:{grid:{display:false}}}});
-
 renderLongestPendingTable(asArray(d.longest_pending_cases));
+}
+async function loadDash(){
+try{
+const results=await Promise.all([
+api('/api/admin/dashboard/community-welfare-summary'),
+api('/api/stats')
+]);
+const cw=results[0];
+const d=results[1];
+if(!d)return;
+renderCommunityWelfareDashboard(cw);
+renderVisaDashboard(d);
 }catch(err){
 console.error(err);
 toast('Dashboard refresh failed');
-renderCompactSummary('kpiGrid',[],'Dashboard data unavailable');
-['pendingAgeChart','processingTrendChart','topProfessionsChart'].forEach(id=>renderNoData(id,'Dashboard data unavailable'));
+renderCommunityWelfareDashboard(null);
+renderCompactSummary('kpiGrid',[],'Visa / transit dashboard data unavailable');
+['pendingAgeChart','processingTrendChart','topProfessionsChart','cwaComplaintsTrendChart','cwaResolutionTrendChart','cwaStatusChart','cwaCategoryChart','cwaStaffChart'].forEach(id=>renderNoData(id,'Dashboard data unavailable'));
 renderLongestPendingTable([]);
 }
 }
