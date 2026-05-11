@@ -101,6 +101,12 @@ PUBLIC_KSA_SUCCESS_ROUTES = (
     '/embassy-registration/success',
     '/register/success',
 )
+KSA_TRANSIT_REGISTRATION_SETTING_KEY = 'ksa_transit_registration_open'
+KSA_TRANSIT_REGISTRATION_CLOSED_MESSAGE = (
+    'KSA Transit Visa registration is currently closed. New applications are not being accepted at this time. '
+    'However, applicants who have already registered may continue to track their application status and submit '
+    'or update flight details where required.'
+)
 LOCAL_BACKUP_KEEP_COUNT = 5
 SESSIONS = {}  # token -> {user, role, expires}
 SESSIONS_LOCK = threading.Lock()  # guards SESSIONS under ThreadingHTTPServer
@@ -1013,6 +1019,10 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_ev_email ON evacuees(email);
     CREATE INDEX IF NOT EXISTS idx_name ON evacuees(name);
     """)
+    db.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+        [KSA_TRANSIT_REGISTRATION_SETTING_KEY, '1']
+    )
 
     # ── Iraq Mission – Kuwait Transit Visa Request tables ──────────
     db.executescript("""
@@ -3379,6 +3389,134 @@ def _enqueue_email_job(job):
 def _get_setting(db, key, default=''):
     row = db.execute("SELECT value FROM settings WHERE key = ?", [key]).fetchone()
     return row['value'] if row and row['value'] is not None else default
+
+def get_portal_setting(key, default=''):
+    db = get_db()
+    try:
+        return _get_setting(db, key, default)
+    finally:
+        db.close()
+
+def set_portal_setting(key, value):
+    db = get_db()
+    try:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, str(value)])
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+def _portal_setting_enabled(value, default=True):
+    raw = str(value if value is not None else ('1' if default else '0')).strip().lower()
+    if raw in ('0', 'false', 'no', 'off', 'closed', 'close', 'paused', 'pause', 'disabled', 'disable'):
+        return False
+    if raw in ('1', 'true', 'yes', 'on', 'open', 'opened', 'enabled', 'enable'):
+        return True
+    return bool(default)
+
+def is_ksa_transit_registration_open():
+    return _portal_setting_enabled(
+        get_portal_setting(KSA_TRANSIT_REGISTRATION_SETTING_KEY, '1'),
+        default=True
+    )
+
+def ksa_transit_registration_block_response_if_closed():
+    if is_ksa_transit_registration_open():
+        return None
+    return {
+        'success': False,
+        'registration_closed': True,
+        'error': KSA_TRANSIT_REGISTRATION_CLOSED_MESSAGE,
+        'message': KSA_TRANSIT_REGISTRATION_CLOSED_MESSAGE,
+    }
+
+def _normalize_ksa_transit_registration_value(data):
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        if 'open' in data:
+            raw = data.get('open')
+        elif 'value' in data:
+            raw = data.get('value')
+        elif 'enabled' in data:
+            raw = data.get('enabled')
+        else:
+            return None
+    else:
+        raw = data
+    if isinstance(raw, bool):
+        return '1' if raw else '0'
+    text = str(raw or '').strip().lower()
+    if text in ('1', 'true', 'yes', 'on', 'open', 'opened', 'enabled', 'enable'):
+        return '1'
+    if text in ('0', 'false', 'no', 'off', 'closed', 'close', 'paused', 'pause', 'disabled', 'disable'):
+        return '0'
+    return None
+
+def api_admin_ksa_transit_registration_setting():
+    value = get_portal_setting(KSA_TRANSIT_REGISTRATION_SETTING_KEY, '1')
+    open_now = _portal_setting_enabled(value, default=True)
+    return {
+        'success': True,
+        'key': KSA_TRANSIT_REGISTRATION_SETTING_KEY,
+        'value': '1' if open_now else '0',
+        'open': open_now,
+        'status': 'open' if open_now else 'paused',
+        'status_label': 'Open Registration' if open_now else 'Paused',
+        'warning': 'This will not affect tracking, flight-number submission, or already registered applicants.',
+    }
+
+def api_admin_update_ksa_transit_registration_setting(data, user):
+    new_value = _normalize_ksa_transit_registration_value(data)
+    if new_value is None:
+        return {'success': False, 'error': 'Registration status must be open or paused.'}
+    reason = str((data or {}).get('reason') or '').strip()[:1000]
+    actor = (user or {}).get('user') or 'admin'
+    user_id = (user or {}).get('user_id')
+    try:
+        audit_record_id = int(user_id or 0)
+    except Exception:
+        audit_record_id = 0
+    timestamp = datetime.now().isoformat(timespec='seconds')
+    db = get_db()
+    try:
+        old_value = _get_setting(db, KSA_TRANSIT_REGISTRATION_SETTING_KEY, '1')
+        old_value = '1' if _portal_setting_enabled(old_value, default=True) else '0'
+        db.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            [KSA_TRANSIT_REGISTRATION_SETTING_KEY, new_value]
+        )
+        db.execute(
+            "INSERT INTO audit_log (action, record_id, user, details) VALUES (?, ?, ?, ?)",
+            [
+                'ksa_transit_registration_setting_update',
+                audit_record_id,
+                actor,
+                json.dumps({
+                    'setting_key': KSA_TRANSIT_REGISTRATION_SETTING_KEY,
+                    'admin_username': actor,
+                    'admin_user_id': user_id,
+                    'old_value': old_value,
+                    'new_value': new_value,
+                    'old_open': old_value == '1',
+                    'new_open': new_value == '1',
+                    'reason': reason,
+                    'timestamp': timestamp,
+                })
+            ]
+        )
+        db.commit()
+        return {
+            'success': True,
+            'key': KSA_TRANSIT_REGISTRATION_SETTING_KEY,
+            'value': new_value,
+            'open': new_value == '1',
+            'status': 'open' if new_value == '1' else 'paused',
+            'status_label': 'Open Registration' if new_value == '1' else 'Paused',
+            'warning': 'This will not affect tracking, flight-number submission, or already registered applicants.',
+        }
+    finally:
+        db.close()
 
 def _is_valid_email(addr):
     if not addr: return False
@@ -34590,6 +34728,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             html = html.replace(f'__{key}__', str(value or ''))
         return html
 
+    def render_public_ksa_registration_page(self):
+        html = self.inject_public_route_context(PUBLIC_REGISTER_PAGE)
+        open_now = is_ksa_transit_registration_open()
+        replacements = {
+            '__KSA_REGISTRATION_OPEN_BOOL__': 'true' if open_now else 'false',
+            '__KSA_REG_CLOSED_DISPLAY__': 'none' if open_now else 'block',
+            '__KSA_REG_SUBMIT_DISABLED_ATTR__': '' if open_now else 'disabled aria-disabled="true" title="KSA Transit Visa registration is currently closed."',
+            '__KSA_REGISTRATION_CLOSED_MESSAGE__': KSA_TRANSIT_REGISTRATION_CLOSED_MESSAGE,
+            '__KSA_REGISTRATION_CLOSED_MESSAGE_JSON__': json.dumps(KSA_TRANSIT_REGISTRATION_CLOSED_MESSAGE),
+        }
+        for key, value in replacements.items():
+            html = html.replace(key, value)
+        return html
+
     def should_render_local_public_home(self):
         host = (self.request_host().split(':')[0] or '').strip().lower()
         if host in ('localhost', '127.0.0.1', '0.0.0.0'):
@@ -34854,6 +35006,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
             return
 
+        if path == '/api/admin/settings/ksa-transit-registration':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'success': False, 'error': 'Unauthorized'}, 403)
+                return
+            self.send_json(api_admin_ksa_transit_registration_setting())
+            return
+
         if path == '/verify-email':
             result = api_verify_email_token(params.get('token', ''))
             self.send_html(email_verification_result_html(bool(result.get('success'))), 200 if result.get('success') else 400)
@@ -35073,7 +35234,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if enabled and enabled['value'] == 'disabled':
                 self.send_html('<html><body style="font-family:Arial;text-align:center;padding:60px"><h1>Registration Closed</h1><p>Public registration is currently closed. Please contact the Embassy directly.</p></body></html>')
             else:
-                self.send_html(self.inject_public_route_context(PUBLIC_REGISTER_PAGE))
+                self.send_html(self.render_public_ksa_registration_page())
         elif path in PUBLIC_KSA_SUCCESS_ROUTES:
             self.send_html(self.inject_public_route_context(REGISTER_SUCCESS_PAGE))
         elif path == '/iraq-public-form':
@@ -38323,6 +38484,21 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             self.send_json(res, 200 if res.get('success') else 400)
             return
 
+        if path == '/api/admin/settings/ksa-transit-registration':
+            user = self.require_auth()
+            if not user: return
+            if user['role'] != 'admin':
+                self.send_json({'success': False, 'error': 'Unauthorized'}, 403)
+                return
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({'success': False, 'error': 'Invalid request'}, 400)
+                return
+            res = api_admin_update_ksa_transit_registration_setting(data, user)
+            self.send_json(res, 200 if res.get('success') else 400)
+            return
+
         if path.startswith('/api/admin/welfare-cases/'):
             user = self.require_auth()
             if not user: return
@@ -38377,6 +38553,11 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             if enabled and enabled['value'] == 'disabled':
                 db.close()
                 self.send_json({'success': False, 'error': 'Registration is currently closed'}, 403)
+                return
+            closed_response = ksa_transit_registration_block_response_if_closed()
+            if closed_response:
+                db.close()
+                self.send_json(closed_response, 403)
                 return
 
             # Rate limiting: max 10 submissions per IP per hour
@@ -44417,6 +44598,9 @@ a{color:inherit}
 .track-btn:hover{background:var(--blue-700)}
 .track-btn:hover .icon{transform:translateX(2px)}
 .notice-card{background:var(--emerald-50);border:1px solid var(--emerald-100);border-radius:16px;padding:24px;margin-bottom:24px;display:flex;gap:16px}
+.registration-closed-card{background:#fef2f2;border:1px solid #fecaca;border-left:6px solid #dc2626;border-radius:16px;padding:20px 24px;margin-bottom:24px;color:#7f1d1d;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+.registration-closed-card strong{display:block;font-size:1rem;font-weight:900;margin-bottom:6px;color:#991b1b}
+.registration-closed-card p{margin:0;font-size:.95rem;line-height:1.65;font-weight:600}
 .notice-icon{color:var(--emerald-600);flex:0 0 auto}
 .notice-icon .icon{width:24px;height:24px}
 .notice-copy{display:flex;flex-direction:column;gap:16px}
@@ -44594,6 +44778,10 @@ body{padding-bottom:28px}
 </div>
 <a class="track-btn" href="__KSA_TRACK_URL__">Check Status <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
 </section>
+<section id="ksaRegistrationClosedNotice" class="registration-closed-card" style="display:__KSA_REG_CLOSED_DISPLAY__">
+<strong>KSA Transit Visa registration is currently closed.</strong>
+<p>New applications are not being accepted at this time. However, applicants who have already registered may continue to track their application status and submit or update flight details where required.</p>
+</section>
 <section class="notice-card">
 <div class="notice-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg></div>
 <div class="notice-copy">
@@ -44633,7 +44821,7 @@ body{padding-bottom:28px}
 <div class="fgp"><label>Will You Exit Saudi Arabia Within Three Days? <span class="req">*</span></label><select name="confirm_ksa_3days" required><option value="">Confirm three-day exit requirement</option><option value="Yes">Yes, I confirm</option></select></div>
 </div></section>
 <div class="submit-wrap">
-<button type="submit" class="btn btn-p" id="submitBtn"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 12l2 2 4-4"></path><circle cx="12" cy="12" r="10"></circle></svg><span>Submit Registration</span></button>
+<button type="submit" class="btn btn-p" id="submitBtn" __KSA_REG_SUBMIT_DISABLED_ATTR__><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 12l2 2 4-4"></path><circle cx="12" cy="12" r="10"></circle></svg><span>Submit Registration</span></button>
 <div class="error" id="errorMsg"></div>
 <div class="dup-warning" id="dupWarning"></div>
 </div>
@@ -44707,10 +44895,13 @@ Or email: <a href="mailto:parepkuwaitcwa37@gmail.com" style="color:#283593;font-
 </div>
 
 <script>
+const KSA_REGISTRATION_OPEN=__KSA_REGISTRATION_OPEN_BOOL__;
+const KSA_REGISTRATION_CLOSED_MESSAGE=__KSA_REGISTRATION_CLOSED_MESSAGE_JSON__;
 const submitBtnHtml='<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 12l2 2 4-4"></path><circle cx="12" cy="12" r="10"></circle></svg><span>Submit Registration</span>';
 function resetSubmitButton(){
 const btn=document.getElementById('submitBtn');
 if(btn){btn.disabled=false;btn.innerHTML=submitBtnHtml;}
+if(btn&&!KSA_REGISTRATION_OPEN){btn.disabled=true;btn.setAttribute('aria-disabled','true');}
 }
 function closeDupOverlay(){
 document.getElementById('dupOverlay').classList.remove('show');
@@ -44762,9 +44953,15 @@ else{pkF.style.display='none';kwF.style.display='none';pkI.required=false;kwI.re
 }
 async function submitForm(e){
 e.preventDefault();
+const errorMsg=document.getElementById('errorMsg');
+if(!KSA_REGISTRATION_OPEN){
+errorMsg.textContent=KSA_REGISTRATION_CLOSED_MESSAGE;
+errorMsg.style.display='block';
+return false;
+}
 const btn=document.getElementById('submitBtn');
 btn.disabled=true;btn.textContent='Submitting...';
-document.getElementById('errorMsg').style.display='none';
+errorMsg.style.display='none';
 document.getElementById('dupWarning').style.display='none';
 const fd=new FormData(e.target);const data={};
 fd.forEach((v,k)=>data[k]=v);
@@ -44777,13 +44974,13 @@ if(d.success){
 }else if(d.duplicate){
   showDupOverlay(d);
 }else{
-	  document.getElementById('errorMsg').textContent=d.error||'Submission failed. Please try again.';
-	  document.getElementById('errorMsg').style.display='block';
+	  errorMsg.textContent=d.error||'Submission failed. Please try again.';
+	  errorMsg.style.display='block';
 	  resetSubmitButton();
 	}
 	}catch(err){
-	document.getElementById('errorMsg').textContent='Network error. Please check your connection and try again.';
-	document.getElementById('errorMsg').style.display='block';
+	errorMsg.textContent='Network error. Please check your connection and try again.';
+	errorMsg.style.display='block';
 	resetSubmitButton();
 	}return false}
 </script></body></html>"""
@@ -48021,6 +48218,17 @@ No deterioration in ground security situation so far.</textarea>
 </select>
 </div>
 </div>
+<div class="fs" style="border-left:3px solid #dc2626" data-admin-only>
+<h3>Accept New KSA Transit Visa Registrations</h3>
+<p style="margin-bottom:10px;font-size:.88em;color:var(--tl)">Controls only new public KSA Transit Visa registration submissions.</p>
+<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 12px;margin-bottom:12px;color:#7c2d12;font-size:.86em;font-weight:600">This will not affect tracking, flight-number submission, or already registered applicants.</div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<span id="ksaTransitRegistrationStatus" style="font-weight:800;padding:8px 12px;border-radius:999px;background:#f1f5f9;color:#475569">Loading...</span>
+<button class="btn btn-p" id="ksaTransitOpenBtn" style="width:auto;min-height:auto;padding:9px 14px;font-size:.86em" onclick="setKsaTransitRegistration(true)">Open Registration</button>
+<button class="btn btn-d" id="ksaTransitPauseBtn" style="width:auto;min-height:auto;padding:9px 14px;font-size:.86em" onclick="setKsaTransitRegistration(false)">Pause Registration</button>
+</div>
+<div id="ksaTransitRegistrationMsg" style="margin-top:10px;font-size:.84em;color:var(--tl)"></div>
+</div>
 <div class="fs" style="border-left:3px solid #006600;background:linear-gradient(135deg,#f1f8e9,#fff)" data-admin-only>
 <h3>🖨️ Printable QR Code Poster</h3>
 <p style="margin-bottom:12px;font-size:.88em;color:var(--tl)">Print an A4 poster with QR codes for all public services (Registration, Tracking, Travel Interest, Iraq Form). Paste it outside the office so citizens can scan and access services from their phones.</p>
@@ -49899,7 +50107,7 @@ const a=await api('/api/audit');
 if(a&&!a.error){let h='<thead><tr><th>Time</th><th>Action</th><th>User</th><th>Record</th></tr></thead><tbody>';
 a.slice(0,50).forEach(x=>{h+=`<tr><td>${x.created_at}</td><td>${x.action}</td><td>${x.user||'-'}</td><td>${x.record_id||'-'}</td></tr>`});
 h+='</tbody>';document.getElementById('auditTbl').innerHTML=h}
-loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount();loadApprovalBatches();loadFeeReport();loadNvUploads();loadNvLinks()}
+loadKsaTransitRegistrationSetting();loadBackups();loadEmailConfig();loadEmailTemplates();loadAdvisoryCount();loadApprovalBatches();loadFeeReport();loadNvUploads();loadNvLinks()}
 async function uploadNoteVerbalPdf(){
 const f=document.getElementById('nvFile')?.files?.[0];
 if(!f){toast('Select PDF file');return;}
@@ -50369,6 +50577,36 @@ document.getElementById('publicLink').textContent=window.location.origin+'/embas
 async function togglePublicReg(){const val=document.getElementById('regToggle').value;
 await api('/api/setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'public_registration',value:val})});
 toast('Public registration '+(val==='enabled'?'OPENED':'CLOSED'))}
+function renderKsaTransitRegistrationSetting(d){
+const status=document.getElementById('ksaTransitRegistrationStatus');
+const msg=document.getElementById('ksaTransitRegistrationMsg');
+const openBtn=document.getElementById('ksaTransitOpenBtn');
+const pauseBtn=document.getElementById('ksaTransitPauseBtn');
+if(!status)return;
+const isOpen=!!(d&&d.open);
+status.textContent=isOpen?'Open: accepting new KSA registrations':'Paused: new KSA registrations closed';
+status.style.background=isOpen?'#ecfdf5':'#fef2f2';
+status.style.color=isOpen?'#047857':'#991b1b';
+if(openBtn)openBtn.disabled=isOpen;
+if(pauseBtn)pauseBtn.disabled=!isOpen;
+if(msg)msg.textContent=(d&&d.warning)||'This will not affect tracking, flight-number submission, or already registered applicants.';
+}
+async function loadKsaTransitRegistrationSetting(){
+const status=document.getElementById('ksaTransitRegistrationStatus');
+if(!status)return;
+try{
+const d=await api('/api/admin/settings/ksa-transit-registration');
+renderKsaTransitRegistrationSetting(d);
+}catch(e){
+status.textContent='Unable to load KSA registration status';
+status.style.background='#fef2f2';status.style.color='#991b1b';
+}}
+async function setKsaTransitRegistration(openState){
+const reason=prompt(openState?'Reason for opening registration (optional)':'Reason for pausing registration (optional)')||'';
+const d=await api('/api/admin/settings/ksa-transit-registration',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({open:!!openState,reason})});
+if(d&&d.success){renderKsaTransitRegistrationSetting(d);toast('KSA Transit Visa registration '+(d.open?'OPENED':'PAUSED'))}
+else toast('Error: '+((d&&d.error)||'Unable to update setting'));
+}
 async function changeMyPw(){
 const pw=document.getElementById('myNewPw').value;
 const conf=document.getElementById('myConfPw').value;
