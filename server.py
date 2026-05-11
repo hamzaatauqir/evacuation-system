@@ -3331,6 +3331,10 @@ def _verify_user_password(db, username, password):
         return False
     return (row['password_hash'] or '') == hash_pw(str(password))
 
+OFFICE_EXPENSE_LEDGER_TAB = 'office-expense-ledger'
+OFFICE_EXPENSE_LEDGER_URL = f'/fee-collection?tab={OFFICE_EXPENSE_LEDGER_TAB}'
+
+
 def _office_expense_access_granted(session_user):
     if not session_user:
         return False
@@ -3342,10 +3346,18 @@ def _office_expense_access_granted(session_user):
         unlocked_until = 0
     return unlocked_until > time.time()
 
-def _grant_office_expense_access(session_user, minutes=15):
+def _grant_office_expense_access(session_user, minutes=15, cookie_str=''):
     if not session_user:
-        return
-    session_user['office_expense_unlock_until'] = time.time() + max(1, int(minutes)) * 60
+        return 0
+    unlock_until = time.time() + max(1, int(minutes)) * 60
+    session_user['office_expense_unlock_until'] = unlock_until
+    token = get_session_token(cookie_str) if cookie_str else ''
+    if token:
+        with SESSIONS_LOCK:
+            stored = SESSIONS.get(token)
+            if stored and stored.get('expires', 0) > time.time():
+                stored['office_expense_unlock_until'] = unlock_until
+    return unlock_until
 
 # ═══════════════════════════════════════════════════════════════
 # EMAIL NOTIFICATIONS (SAFE BACKGROUND WORKER)
@@ -5367,7 +5379,7 @@ def can_access_admin_route(role, path):
             or path.startswith('/print/fee-')
             or path == '/print/office-expense-record'
             or path.startswith('/api/fee-')
-            or path.startswith('/api/office-expense')
+            or path in ('/api/office-expenses', '/api/office-expense-access')
         )
     if role == 'iraq_cwa':
         return path == '/dashboard' or path.startswith('/api/iraq')
@@ -5418,7 +5430,7 @@ def can_access_api_route(role, path):
     if role == 'fee_collector':
         return (
             path.startswith('/api/fee-')
-            or path.startswith('/api/office-expense')
+            or path in ('/api/office-expenses', '/api/office-expense-access')
             or path.startswith('/api/admin/cwa-advance-ledger')
         )
     if role == 'iraq_cwa':
@@ -9757,6 +9769,9 @@ GL_STATUSES = {
 GL_ACTIVE_STATUSES = {'SUBMITTED', 'UNDER_REVIEW', 'CORRECTION_REQUIRED', 'APPROVED', 'LETTER_GENERATED'}
 GL_TERMINAL_STATUSES = {'ISSUED', 'REJECTED', 'CANCELLED'}
 GL_GRADE_LABELS = {'Excellent', 'Very Good', 'Good', 'Pass', 'Fail'}
+GL_QUALIFICATION_EDIT_LOCKED_STATUSES = {'ISSUED', 'REJECTED', 'CANCELLED'}
+GL_QUALIFICATION_VERIFY_ALLOWED_STATUSES = {'UNDER_REVIEW', 'APPROVED', 'LETTER_GENERATED'}
+GL_FINAL_RESULT_OVERRIDE_ALLOWED_STATUSES = {'UNDER_REVIEW', 'APPROVED', 'LETTER_GENERATED'}
 GL_QUALIFICATION_VERIFICATION_STATUSES = {
     'PENDING': 'Pending Review',
     'VERIFIED': 'Verified',
@@ -10325,6 +10340,164 @@ def _gl_validate_application_payload(data, db):
     qualification helper and returns the first qualification's flat dict so
     every existing UPDATE statement keeps working unchanged."""
     return _gl_validate_qualifications_payload(data, db)[0]
+
+
+def _gl_payload_first(data, keys, default=None):
+    """Return the first supplied payload value, accepting legacy aliases.
+
+    Empty strings still count as supplied when no later alias has a value; this
+    lets the admin UI intentionally clear optional text fields while allowing
+    old clients that send `percentage`/`gpa` to keep working.
+    """
+    seen_empty = False
+    empty_value = None
+    for key in keys:
+        if key in data:
+            value = data.get(key)
+            if value not in (None, ''):
+                return value
+            if not seen_empty:
+                seen_empty = True
+                empty_value = value
+    return empty_value if seen_empty else default
+
+
+def _gl_normalize_marks_mode(value):
+    mode = _gl_clean_text(value, 20).upper().replace('-', '_')
+    aliases = {
+        'PERCENTAGE': 'PERCENT',
+        'PERCENT_MARKS': 'PERCENT',
+        'MARK': 'MARKS',
+        'CGPA': 'GPA',
+    }
+    return aliases.get(mode, mode)
+
+
+def _gl_validate_optional_year(value):
+    raw = _gl_clean_text(value, 20)
+    if not raw:
+        return ''
+    return _gl_validate_year(raw)
+
+
+def _gl_validate_qualification_edit_payload(data, qualification, db):
+    """Validate an operator/admin edit for one qualification row.
+
+    This path is deliberately narrower than the public submission validator:
+    operators often need to correct only marks/percentage/GPA while unrelated
+    descriptive fields are still being reviewed. Missing descriptive fields
+    remain visible as generation blockers, but no longer prevent marks from
+    being saved.
+    """
+    qualification = qualification or {}
+    code = _gl_normalize_qualification_code(
+        _gl_payload_first(
+            data,
+            ('qualification_code', 'qualification_type'),
+            qualification.get('qualification_code') or '',
+        )
+    )
+    if code and code not in GL_QUALIFICATIONS:
+        raise ValueError(
+            'Please select BSN Nursing 4 Years, Post RN BSN, General Nursing Diploma, Specialization / Midwifery, or Masters in Nursing (MSN).'
+        )
+
+    identifier_type = _gl_student_identifier_type(
+        _gl_payload_first(
+            data,
+            ('student_identifier_type', 'student_no_label', 'identifier_type'),
+            qualification.get('identifier_type') or qualification.get('student_identifier_type') or GL_DEFAULT_STUDENT_IDENTIFIER_TYPE,
+        )
+    )
+    student_no = _gl_clean_text(
+        _gl_payload_first(
+            data,
+            ('student_no', 'roll_no', 'identifier_value'),
+            qualification.get('student_no') or qualification.get('identifier_value') or '',
+        ),
+        120,
+    )
+    mode = _gl_normalize_marks_mode(
+        _gl_payload_first(
+            data,
+            ('mode', 'marks_mode', 'score_type', 'result_type'),
+            qualification.get('mode') or 'MARKS',
+        )
+    )
+    if mode not in {'MARKS', 'PERCENT', 'GPA'}:
+        raise ValueError('Please select a grading mode.')
+
+    total_marks = obtained_marks = entered_percentage = entered_gpa = None
+    if mode == 'MARKS':
+        total_marks = _gl_to_float(
+            _gl_payload_first(data, ('total_marks', 'marks_total'), qualification.get('total_marks')),
+            'Total marks',
+        )
+        obtained_marks = _gl_to_float(
+            _gl_payload_first(data, ('obtained_marks', 'marks_obtained'), qualification.get('obtained_marks')),
+            'Obtained marks',
+        )
+    elif mode == 'PERCENT':
+        entered_percentage = _gl_to_float(
+            _gl_payload_first(data, ('entered_percentage', 'percentage', 'percent'), qualification.get('entered_percentage')),
+            'Percentage',
+        )
+    elif mode == 'GPA':
+        entered_gpa = _gl_to_float(
+            _gl_payload_first(data, ('entered_gpa', 'gpa', 'cgpa'), qualification.get('entered_gpa')),
+            'GPA obtained',
+        )
+
+    rounding_dp = _gl_rounding_dp(db)
+    computed_percentage = gl_compute_percentage(
+        mode,
+        total_marks=total_marks,
+        obtained_marks=obtained_marks,
+        entered_percentage=entered_percentage,
+        entered_gpa=entered_gpa,
+        rounding_dp=rounding_dp,
+    )
+    scale_id = _gl_active_scale_id(db)
+    grade = gl_lookup_grade(computed_percentage, db=db, scale_id=scale_id)
+    if grade not in GL_GRADE_LABELS:
+        raise ValueError('Invalid grading scale: highest grade must be Excellent.')
+
+    year_value = _gl_payload_first(data, ('year_of_passing', 'passing_year'), qualification.get('year_of_passing') or '')
+    return {
+        'qualification_code': code,
+        'qualification_other': _gl_clean_text(
+            _gl_payload_first(data, ('qualification_other',), qualification.get('qualification_other') or ''),
+            220,
+        ),
+        'degree_title': _gl_clean_text(
+            _gl_payload_first(data, ('degree_title', 'qualification_title'), qualification.get('degree_title') or ''),
+            220,
+        ),
+        'student_no': student_no,
+        'student_identifier_type': identifier_type,
+        'institute': _gl_clean_text(
+            _gl_payload_first(data, ('institute', 'college'), qualification.get('institute') or ''),
+            220,
+        ),
+        'university': _gl_clean_text(
+            _gl_payload_first(data, ('university', 'affiliating_body'), qualification.get('university') or ''),
+            220,
+        ),
+        'year_of_passing': _gl_validate_optional_year(year_value),
+        'mode': mode,
+        'total_marks': total_marks,
+        'obtained_marks': obtained_marks,
+        'entered_percentage': entered_percentage,
+        'entered_gpa': entered_gpa,
+        'computed_percentage': computed_percentage,
+        'final_percentage': computed_percentage,
+        'final_grade_label': grade,
+        'scale_version_id': scale_id,
+        'remarks': _gl_clean_text(
+            _gl_payload_first(data, ('remarks', 'qualification_remarks'), qualification.get('remarks') or ''),
+            1000,
+        ),
+    }
 
 
 def _gl_qualification_text_value(value):
@@ -14210,7 +14383,7 @@ def api_admin_gl_action(data, user):
             sync_payload['remarks'] = qualification_remarks
             _gl_sync_first_qualification_from_flat(db, app_id, sync_payload)
         elif action == 'edit-qualification':
-            if status in {'APPROVED', 'LETTER_GENERATED', 'ISSUED', 'REJECTED', 'CANCELLED'}:
+            if status in GL_QUALIFICATION_EDIT_LOCKED_STATUSES:
                 return {'success': False, 'error': 'This request cannot be edited in its current status.'}
             qualification = _gl_fetch_target_qualification(
                 db,
@@ -14221,7 +14394,7 @@ def api_admin_gl_action(data, user):
             if not qualification:
                 return {'success': False, 'error': 'Qualification not found.'}
             _gl_update_application_shared_fields(db, app_id, app, data, user)
-            payload = _gl_validate_application_payload(data, db)
+            payload = _gl_validate_qualification_edit_payload(data, qualification, db)
             qualification_number = max(1, int(qualification.get('sort_order') or 0) + 1)
             code = payload.get('qualification_code') or ''
             other = payload.get('qualification_other') or ''
@@ -14245,7 +14418,7 @@ def api_admin_gl_action(data, user):
                 'final_percentage': _gl_qualification_text_value(payload.get('final_percentage')),
                 'final_grade_label': payload.get('final_grade_label') or '',
                 'scale_version_id': payload.get('scale_version_id'),
-                'remarks': _gl_clean_text(data.get('remarks'), 1000),
+                'remarks': payload.get('remarks') or '',
             }
             changed_keys = [
                 key for key, new_value in fields.items()
@@ -14282,12 +14455,22 @@ def api_admin_gl_action(data, user):
             _gl_sync_parent_from_first_qualification(db, app_id)
             if qualification_number == 1 and changed_keys:
                 db.execute(
-                    "UPDATE gl_applications SET override_reason = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    """UPDATE gl_applications
+                       SET override_reason = '',
+                           letter_pdf_path = CASE WHEN status = 'LETTER_GENERATED' THEN '' ELSE letter_pdf_path END,
+                           letter_path = CASE WHEN status = 'LETTER_GENERATED' THEN '' ELSE letter_path END,
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    [app_id]
+                )
+            elif changed_keys and status == 'LETTER_GENERATED':
+                db.execute(
+                    "UPDATE gl_applications SET letter_pdf_path = '', letter_path = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     [app_id]
                 )
         elif action == 'verify-qualification':
-            if status not in {'UNDER_REVIEW', 'APPROVED'}:
-                return {'success': False, 'error': 'Qualifications can only be verified while a request is under review or approved.'}
+            if status not in GL_QUALIFICATION_VERIFY_ALLOWED_STATUSES:
+                return {'success': False, 'error': 'Qualifications can only be verified before the request is issued.'}
             qualification = _gl_fetch_target_qualification(
                 db,
                 app_id,
@@ -14318,16 +14501,25 @@ def api_admin_gl_action(data, user):
         elif action == 'override-qualification':
             return {'success': False, 'error': 'Per-qualification verification override is not enabled in this phase.'}
         elif action == 'override':
-            if status != 'UNDER_REVIEW':
-                return {'success': False, 'error': 'Start review before applying an override.'}
-            reason = _gl_clean_text(data.get('override_reason') or data.get('reason'), 1000)
+            if status not in GL_FINAL_RESULT_OVERRIDE_ALLOWED_STATUSES:
+                return {'success': False, 'error': 'Final result can only be overridden before the request is issued.'}
+            reason = _gl_clean_text(
+                _gl_payload_first(data, ('override_reason', 'reason', 'result_override_reason'), ''),
+                1000,
+            )
             if not reason:
                 return {'success': False, 'error': 'Override reason is required.'}
-            final_pct = _gl_to_float(data.get('final_percentage'), 'Final percentage')
+            final_pct = _gl_to_float(
+                _gl_payload_first(data, ('final_percentage', 'percentage', 'percent', 'final_result'), None),
+                'Final percentage',
+            )
             if final_pct is None or final_pct < 0 or final_pct > 100:
                 return {'success': False, 'error': 'Final percentage must be between 0 and 100.'}
             final_pct = _gl_round(final_pct, _gl_rounding_dp(db))
-            final_grade = _gl_clean_text(data.get('final_grade_label'), 80)
+            final_grade = _gl_clean_text(
+                _gl_payload_first(data, ('final_grade_label', 'final_grade', 'result_grade', 'grade'), ''),
+                80,
+            )
             if not final_grade:
                 final_grade = gl_lookup_grade(final_pct, db=db, scale_id=app.get('scale_version_id'))
             if final_grade not in GL_GRADE_LABELS:
@@ -14335,6 +14527,8 @@ def api_admin_gl_action(data, user):
             db.execute(
                 """UPDATE gl_applications
                    SET final_percentage = ?, final_grade_label = ?, override_reason = ?,
+                       letter_pdf_path = CASE WHEN status = 'LETTER_GENERATED' THEN '' ELSE letter_pdf_path END,
+                       letter_path = CASE WHEN status = 'LETTER_GENERATED' THEN '' ELSE letter_path END,
                        updated_at = CURRENT_TIMESTAMP
                    WHERE id = ?""",
                 [final_pct, final_grade, reason, app_id]
@@ -35061,7 +35255,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 app_html = IRAQ_CWA_V2_PAGE.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
                 self.send_html(app_html)
             elif user['role'] == 'fee_collector':
-                self.send_html(FEE_COLLECTION_PAGE.replace('__USER_NAME__', user['user']).replace('__USER_ROLE__', user['role']))
+                self.send_html(fee_collection_page_html(user))
             else:
                 # Inject user role into the page
                 app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
@@ -35268,13 +35462,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] not in ('fee_collector', 'admin'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(FEE_COLLECTION_PAGE.replace('__USER_NAME__', user['user']).replace('__USER_ROLE__', user['role']))
+            self.send_html(fee_collection_page_html(user))
         elif path == '/fee-collector':
             user = self.require_auth()
             if not user: return
             if user['role'] not in ('fee_collector', 'admin', 'operator', 'operator_special'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            self.send_html(FEE_COLLECTION_PAGE.replace('__USER_NAME__', user['user']).replace('__USER_ROLE__', user['role']))
+            self.send_html(fee_collection_page_html(user))
         elif path == '/iraq-embassy-admin':
             user = self.require_auth()
             if not user: return
@@ -40063,8 +40257,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             if user['role'] not in ('admin', 'fee_collector'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             if user['role'] == 'admin':
-                _grant_office_expense_access(user)
-                self.send_json({'success': True})
+                _grant_office_expense_access(user, cookie_str=self.headers.get('Cookie'))
+                self.send_json({'success': True, 'ok': True, 'redirect': OFFICE_EXPENSE_LEDGER_URL, 'tab': OFFICE_EXPENSE_LEDGER_TAB})
                 return
             try:
                 data = json.loads(body) if body else {}
@@ -40077,8 +40271,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                     self.send_json({'success': False, 'error': 'Current password is incorrect'}, 403); return
             finally:
                 db.close()
-            _grant_office_expense_access(user)
-            self.send_json({'success': True})
+            _grant_office_expense_access(user, cookie_str=self.headers.get('Cookie'))
+            self.send_json({'success': True, 'ok': True, 'redirect': OFFICE_EXPENSE_LEDGER_URL, 'tab': OFFICE_EXPENSE_LEDGER_TAB})
         elif path == '/api/office-expense-decision':
             user = self.require_auth()
             if not user: return
@@ -41482,19 +41676,41 @@ function cwaTypeLabel(v){
 }
 let settlementSummary={};
 let officeTabLoaded=false;
-let officeTabUnlocked=USER_ROLE==='admin';
+let officeTabUnlocked=USER_ROLE==='admin'||__OFFICE_EXPENSE_UNLOCKED__;
 let cwaAdvanceRows=[];
-async function showPortalTab(tab){
-  if(tab==='office' && USER_ROLE==='fee_collector' && !officeTabUnlocked){
-    openOfficeAccessModal();
-    return;
-  }
+function activatePortalTabUi(tab){
   ['fees','office'].forEach(name=>{
     const section=document.getElementById('portal-'+name);
     const btn=document.getElementById('tab-'+name);
     if(section) section.classList.toggle('active', name===tab);
     if(btn) btn.classList.toggle('active', name===tab);
   });
+}
+function syncPortalTabUrl(tab){
+  if(!window.history||!window.history.replaceState) return;
+  const url=new URL(window.location.href);
+  if(tab==='office') url.searchParams.set('tab','office-expense-ledger');
+  else url.searchParams.delete('tab');
+  url.hash='';
+  window.history.replaceState(null,'',url.pathname+url.search+url.hash);
+}
+function requestedPortalTab(){
+  const keys=['office','office-expense','office-expense-ledger','expense-ledger','expense_ledger','ledger'];
+  const params=new URLSearchParams(window.location.search||'');
+  const tab=String(params.get('tab')||'').trim().toLowerCase();
+  const hash=decodeURIComponent(String(window.location.hash||'').replace(/^#/,'')).trim().toLowerCase();
+  return (keys.includes(tab)||keys.includes(hash))?'office':'fees';
+}
+async function showPortalTab(tab){
+  if(tab==='office' && USER_ROLE==='fee_collector' && !officeTabUnlocked){
+    activatePortalTabUi('office');
+    syncPortalTabUrl('office');
+    renderOfficeAccessState();
+    openOfficeAccessModal();
+    return;
+  }
+  activatePortalTabUi(tab);
+  syncPortalTabUrl(tab);
   if(tab==='office'){
     officeTabLoaded=true;
     renderOfficeAccessState();
@@ -41653,10 +41869,11 @@ async function confirmOfficeAccess(){
   const password=(document.getElementById('officeAccessPassword').value||'').trim();
   if(!password){alert('Enter your current password to continue.');return;}
   const d=await api('/api/office-expense-access',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:password})});
-  if(d&&d.success){
+  if(d&&(d.success||d.ok)){
     officeTabUnlocked=true;
     closeOfficeAccessModal();
-    showPortalTab('office');
+    syncPortalTabUrl('office');
+    await showPortalTab('office');
   }else alert((d&&d.error)||'Access denied');
 }
 function openFeeCollectorPwModal(){
@@ -41965,7 +42182,9 @@ async function loadOfficeExpenses(){
     if(d&&String(d.error||'').toLowerCase().includes('re-authentication')){
       officeTabUnlocked=false;
       renderOfficeAccessState();
-      showPortalTab('fees');
+      activatePortalTabUi('office');
+      syncPortalTabUrl('office');
+      openOfficeAccessModal();
     }
     return;
   }
@@ -41994,8 +42213,12 @@ async function loadOfficeExpenses(){
 
 document.getElementById('oeDate').value=new Date().toISOString().slice(0,10);
 const cwaDateInput=document.getElementById('cwaDate'); if(cwaDateInput)cwaDateInput.value=new Date().toISOString().slice(0,10);
-renderOfficeAccessState();
-loadSettlement();
+async function bootFeeCollectionPortal(){
+  renderOfficeAccessState();
+  await loadSettlement();
+  if(requestedPortalTab()==='office') await showPortalTab('office');
+}
+bootFeeCollectionPortal();
 async function refreshAdminNotificationBadges(){
   try{
     const r=await fetch('/api/admin/notification-counts',{credentials:'include'});
@@ -42014,6 +42237,18 @@ refreshAdminNotificationBadges();
 setInterval(refreshAdminNotificationBadges,60000);
 window.addEventListener('focus',refreshAdminNotificationBadges);
 </script></body></html>"""
+
+def fee_collection_page_html(user):
+    user = user or {}
+    role = str(user.get('role') or '')
+    office_unlocked = role == 'admin' or (role == 'fee_collector' and _office_expense_access_granted(user))
+    return (
+        FEE_COLLECTION_PAGE
+        .replace('__USER_NAME__', str(user.get('user') or ''))
+        .replace('__USER_ROLE__', role)
+        .replace('__OFFICE_EXPENSE_UNLOCKED__', 'true' if office_unlocked else 'false')
+    )
+
 
 LOCATING_ASSISTANCE_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Request for Welfare Assistance in Locating / Contacting a Pakistani National in Kuwait</title>

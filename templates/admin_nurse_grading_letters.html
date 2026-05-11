@@ -365,7 +365,8 @@ function actionButtons(a, canManage, blockers){
   if(a.can_print_clean){
     const letterUrl='/api/admin/gl/letter?id='+Number(a.id);
     html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="'+letterUrl+'&disposition=inline&force=1" target="_blank" rel="noopener">Print Final Letter</a>';
-    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="'+letterUrl+'" target="_blank" rel="noopener">Download Final PDF</a>';
+    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="'+letterUrl+'&force=1" target="_blank" rel="noopener">Download Final PDF</a>';
+    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/api/admin/gl/letter-docx?id='+Number(a.id)+'" target="_blank" rel="noopener">Download Word Copy</a>';
   }
   // Pre-print correction: visible while the letter is still actionable.
   // Hidden once the request is rejected/cancelled (no point correcting then).
@@ -385,8 +386,9 @@ function renderDetail(d){
   const selection=getSelectedQualification(a);
   const q=selection.qualification;
   const verification=verificationSummary(a);
-  const canEditQualification=canManage&&!['APPROVED','LETTER_GENERATED','ISSUED','REJECTED','CANCELLED'].includes(a.status);
-  const canVerifyQualification=canManage&&['UNDER_REVIEW','APPROVED'].includes(a.status);
+  const canEditQualification=canManage&&!['ISSUED','REJECTED','CANCELLED'].includes(a.status);
+  const canVerifyQualification=canManage&&['UNDER_REVIEW','APPROVED','LETTER_GENERATED'].includes(a.status);
+  const canOverrideFinal=canManage&&['UNDER_REVIEW','APPROVED','LETTER_GENERATED'].includes(a.status);
   const noticeSummary=a.document_visit_email_sent_at
     ? `Notice sent: ${a.document_visit_email_sent_at}${a.document_visit_email_sent_by ? ' by '+a.document_visit_email_sent_by : ''}`
     : (a.document_visit_email_error ? `Last notice issue: ${a.document_visit_email_error}` : 'Notice not sent yet');
@@ -455,7 +457,7 @@ function renderDetail(d){
       <input id="o_final_percentage" class="cwa-input" type="number" min="0" max="100" step="0.01" value="${esc(a.final_percentage||'')}">
       <select id="o_final_grade_label" class="cwa-select">${['Excellent','Very Good','Good','Pass','Fail'].map(g=>`<option ${a.final_grade_label===g?'selected':''}>${g}</option>`).join('')}</select>
       <input id="o_override_reason" class="cwa-input" placeholder="Required override reason" value="${esc(a.override_reason||'')}">
-      <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="overrideFinal()" ${(!canManage||a.status!=='UNDER_REVIEW')?'disabled':''}>Apply Override</button>
+      <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="overrideFinal()" ${canOverrideFinal?'':'disabled'}>Apply Override</button>
     </div>
   `:'';
   detailEl.innerHTML=`
@@ -502,6 +504,8 @@ function qualificationEditPayload(){
   const selection=selectedQualificationContext();
   const q=selection.qualification||{};
   const mode=(document.querySelector('input[name="q_mode"]:checked')||{}).value||'MARKS';
+  const enteredPercentage=(document.getElementById('q_entered_percentage')||{}).value||'';
+  const enteredGpa=(document.getElementById('q_entered_gpa')||{}).value||'';
   return {
     id:state.selected.id,
     action:'edit_qualification',
@@ -520,10 +524,14 @@ function qualificationEditPayload(){
     year_of_passing:(document.getElementById('q_year_of_passing')||{}).value||'',
     remarks:(document.getElementById('q_remarks')||{}).value||'',
     mode,
+    marks_mode:mode,
     total_marks:(document.getElementById('q_total_marks')||{}).value||'',
     obtained_marks:(document.getElementById('q_obtained_marks')||{}).value||'',
-    entered_percentage:(document.getElementById('q_entered_percentage')||{}).value||'',
-    entered_gpa:(document.getElementById('q_entered_gpa')||{}).value||''
+    entered_percentage:enteredPercentage,
+    percentage:enteredPercentage,
+    percent:enteredPercentage,
+    entered_gpa:enteredGpa,
+    gpa:enteredGpa
   };
 }
 async function doAction(action, extra){
