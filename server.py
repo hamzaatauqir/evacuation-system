@@ -5365,6 +5365,7 @@ def can_access_admin_route(role, path):
             path in ('/fee-collection', '/fee-collector', '/dashboard')
             or path.startswith('/fee-collector/')
             or path.startswith('/print/fee-')
+            or path == '/print/office-expense-record'
             or path.startswith('/api/fee-')
             or path.startswith('/api/office-expense')
         )
