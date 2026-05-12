@@ -4,8 +4,10 @@ import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { NoticeCard } from "../components/NoticeCard";
+import { InternationalNursesDayCampaignCard } from "../components/InternationalNursesDayCampaignCard";
 import { API_BASE, api } from "../lib/api";
 import { buildPortalContextFromApiData, setNursePortal } from "../lib/nursePortal";
+import { isInternationalNursesDayCampaignActive } from "../lib/seasonalCampaigns";
 
 export function NursesLoginPage() {
   const navigate = useNavigate();
@@ -15,6 +17,7 @@ export function NursesLoginPage() {
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const showInternationalNursesDayCampaign = isInternationalNursesDayCampaignActive();
 
   const next = params.get("next") || "portal";
 
@@ -61,80 +64,91 @@ export function NursesLoginPage() {
       <main style={{ flex: 1, padding: "clamp(16px, 4vw, 24px)", display: "grid", placeItems: "center", width: "100%" }}>
         <div
           style={{
-            maxWidth: 460,
+            maxWidth: showInternationalNursesDayCampaign ? 760 : 460,
             width: "100%",
-            background: "#fff",
-            border: "1px solid #E3EBF0",
-            borderRadius: 14,
-            padding: "clamp(18px, 5vw, 28px)",
-            boxShadow: "0 8px 32px rgba(45,74,107,.08)",
+            display: "grid",
+            gap: 16,
           }}
         >
-          <h1 style={{ color: "#2D4A6B", marginBottom: 6, fontSize: "clamp(20px, 4.5vw, 22px)", lineHeight: 1.25 }}>
-            Nurse Portal Login
-          </h1>
-          <p style={{ color: "#5B6773", marginBottom: 20, fontSize: 14, lineHeight: 1.6 }}>
-            Sign in with the email or passport number you used at registration (or your Civil ID if you have one on
-            file), and your password.
-          </p>
-          <label style={{ display: "block", marginBottom: 12, fontSize: 13, color: "#334155" }}>
-            Email or passport (Civil ID if issued)
-            <input
-              className="f-input"
-              value={identity}
-              onChange={(e) => setIdentity(e.target.value)}
-              autoComplete="username"
-              placeholder="Email or passport (Civil ID if issued)"
-            />
-          </label>
-          <label style={{ display: "block", marginBottom: 8, fontSize: 13, color: "#334155" }}>
-            Password
-            <div style={{ display: "flex", gap: 8, alignItems: "stretch", flexWrap: "wrap" }}>
+          {showInternationalNursesDayCampaign ? <InternationalNursesDayCampaignCard variant="welcome" /> : null}
+          <div
+            style={{
+              maxWidth: 460,
+              width: "100%",
+              justifySelf: "center",
+              background: "#fff",
+              border: "1px solid #E3EBF0",
+              borderRadius: 14,
+              padding: "clamp(18px, 5vw, 28px)",
+              boxShadow: "0 8px 32px rgba(45,74,107,.08)",
+            }}
+          >
+            <h1 style={{ color: "#2D4A6B", marginBottom: 6, fontSize: "clamp(20px, 4.5vw, 22px)", lineHeight: 1.25 }}>
+              Nurse Portal Login
+            </h1>
+            <p style={{ color: "#5B6773", marginBottom: 20, fontSize: 14, lineHeight: 1.6 }}>
+              Sign in with the email or passport number you used at registration (or your Civil ID if you have one on
+              file), and your password.
+            </p>
+            <label style={{ display: "block", marginBottom: 12, fontSize: 13, color: "#334155" }}>
+              Email or passport (Civil ID if issued)
               <input
                 className="f-input"
-                style={{ flex: "1 1 240px", minWidth: 0 }}
-                type={showPw ? "text" : "password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                placeholder="Your password"
+                value={identity}
+                onChange={(e) => setIdentity(e.target.value)}
+                autoComplete="username"
+                placeholder="Email or passport (Civil ID if issued)"
               />
-              <button
-                type="button"
-                className="f-input"
-                style={{
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                  padding: "10px 14px",
-                  flex: "1 0 120px",
-                  width: "100%",
-                }}
-                onClick={() => setShowPw((s) => !s)}
-              >
-                {showPw ? "Hide" : "Show"}
-              </button>
-            </div>
-          </label>
-          <div style={{ marginTop: 18, display: "flex", flexDirection: "column", gap: 12 }}>
-            <Btn variant="primary" onClick={login} disabled={loading} fullWidth>
-              {loading ? "Signing in…" : "Login"}
-            </Btn>
-            <Link to="/nurses/forgot-password" style={{ fontSize: 13, color: "#2563eb", textAlign: "center" }}>
-              Forgot password?
-            </Link>
-            <Link to="/nurses/register">
-              <Btn variant="light" style={{ width: "100%" }}>
-                New nurse registration
+            </label>
+            <label style={{ display: "block", marginBottom: 8, fontSize: 13, color: "#334155" }}>
+              Password
+              <div style={{ display: "flex", gap: 8, alignItems: "stretch", flexWrap: "wrap" }}>
+                <input
+                  className="f-input"
+                  style={{ flex: "1 1 240px", minWidth: 0 }}
+                  type={showPw ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                  placeholder="Your password"
+                />
+                <button
+                  type="button"
+                  className="f-input"
+                  style={{
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    padding: "10px 14px",
+                    flex: "1 0 120px",
+                    width: "100%",
+                  }}
+                  onClick={() => setShowPw((s) => !s)}
+                >
+                  {showPw ? "Hide" : "Show"}
+                </button>
+              </div>
+            </label>
+            <div style={{ marginTop: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+              <Btn variant="primary" onClick={login} disabled={loading} fullWidth>
+                {loading ? "Signing in…" : "Login"}
               </Btn>
-            </Link>
-          </div>
-          {error ? (
-            <div style={{ marginTop: 16 }}>
-              <NoticeCard type="warning" title="Unable to sign in">
-                {error}
-              </NoticeCard>
+              <Link to="/nurses/forgot-password" style={{ fontSize: 13, color: "#2563eb", textAlign: "center" }}>
+                Forgot password?
+              </Link>
+              <Link to="/nurses/register">
+                <Btn variant="light" style={{ width: "100%" }}>
+                  New nurse registration
+                </Btn>
+              </Link>
             </div>
-          ) : null}
+            {error ? (
+              <div style={{ marginTop: 16 }}>
+                <NoticeCard type="warning" title="Unable to sign in">
+                  {error}
+                </NoticeCard>
+              </div>
+            ) : null}
+          </div>
         </div>
       </main>
       <PageFooter />

@@ -118,12 +118,126 @@ textarea.f-input { resize: vertical; min-height: 90px; }
 @keyframes fdi { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 .fade-in { animation: fdi .28s ease; }
 
+.cwa-campaign-card {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top right, rgba(47, 125, 78, 0.12), transparent 38%),
+    linear-gradient(140deg, #ffffff 0%, #f4fbff 52%, #eef8f2 100%);
+  border: 1px solid rgba(45, 74, 107, 0.12);
+  border-radius: 20px;
+  box-shadow: 0 18px 40px rgba(45, 74, 107, 0.09);
+  padding: clamp(18px, 3vw, 28px);
+}
+.cwa-campaign-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 6px;
+  background: linear-gradient(180deg, var(--navy) 0%, var(--green) 100%);
+}
+.cwa-campaign-card--homepage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: center;
+}
+.cwa-campaign-card--welcome {
+  display: block;
+}
+.cwa-campaign-card__content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 12px;
+}
+.cwa-campaign-card__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(47, 125, 78, 0.10);
+  border: 1px solid rgba(47, 125, 78, 0.18);
+  color: #1f633d;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cwa-campaign-card__title {
+  color: var(--navy);
+  font-size: clamp(24px, 3vw, 32px);
+  line-height: 1.18;
+}
+.cwa-campaign-card__body {
+  display: grid;
+  gap: 10px;
+  color: #365067;
+  font-size: 14px;
+  line-height: 1.75;
+}
+.cwa-campaign-card__theme {
+  display: grid;
+  gap: 4px;
+  padding-top: 2px;
+}
+.cwa-campaign-card__theme strong {
+  color: var(--navy);
+  font-size: 18px;
+}
+.cwa-campaign-card__theme span {
+  color: #1f6f7f;
+  font-size: 14px;
+  font-weight: 700;
+}
+.cwa-campaign-card__actions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.cwa-campaign-card__cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  min-width: 220px;
+  padding: 12px 20px;
+  border-radius: 10px;
+  background: var(--green);
+  border: 1px solid var(--green);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  transition: background .15s ease, transform .15s ease, box-shadow .15s ease;
+  box-shadow: 0 10px 24px rgba(47, 125, 78, 0.18);
+}
+.cwa-campaign-card__cta:hover {
+  background: #25663f;
+  transform: translateY(-1px);
+}
+.cwa-campaign-card__signature {
+  color: var(--navy);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.7;
+  padding-top: 2px;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .hide-mobile { display: none !important; }
   .show-mobile { display: flex !important; }
   .stack-mobile { flex-direction: column !important; }
   .full-mobile { width: 100% !important; }
+  .cwa-campaign-card--homepage { grid-template-columns: 1fr; }
+  .cwa-campaign-card__actions { justify-content: flex-start; }
+  .cwa-campaign-card__cta { width: 100%; min-width: 0; }
 }
 @media (min-width: 769px) {
   .show-mobile { display: none !important; }

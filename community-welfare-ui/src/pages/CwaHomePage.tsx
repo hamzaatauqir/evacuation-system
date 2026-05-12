@@ -7,8 +7,10 @@ import { ContactCard } from "../components/ContactCard";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { Icon, type IconName } from "../components/Icon";
+import { InternationalNursesDayCampaignCard } from "../components/InternationalNursesDayCampaignCard";
 import { T } from "../lib/tokens";
 import { PUBLIC_PORTAL_PATHS, navigateToPublicPortal } from "../lib/publicRoutes";
+import { isInternationalNursesDayCampaignActive } from "../lib/seasonalCampaigns";
 
 type Variant = "primary" | "navy" | "secondary" | "ghost" | "danger" | "light";
 
@@ -24,6 +26,7 @@ interface Service {
 
 export function CwaHomePage() {
   const navigate = useNavigate();
+  const showInternationalNursesDayCampaign = isInternationalNursesDayCampaignActive();
   const services: Service[] = [
     {
       icon: "transit",
@@ -191,6 +194,11 @@ export function CwaHomePage() {
 
       <main style={{ flex: 1 }}>
         <Section bg={T.bg} style={{ paddingTop: 64, paddingBottom: 64 }} id="cw-services">
+          {showInternationalNursesDayCampaign ? (
+            <div style={{ marginBottom: 28 }}>
+              <InternationalNursesDayCampaignCard variant="homepage" portalHref="/nurses/login" />
+            </div>
+          ) : null}
           <SecTitle
             title="Community Welfare Services"
             sub="Select the relevant service to access forms, submit requests, or track existing applications."
