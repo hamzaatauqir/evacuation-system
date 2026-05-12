@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Community Welfare Wing Digital Services</title>
-  <link rel="stylesheet" href="__BASE_PATH__/static/css/cwa-ui.css">
+  <link rel="stylesheet" href="__BASE_PATH__/static/css/cwa-ui.css?v=20260512-nurses-day">
+  <script src="__BASE_PATH__/static/js/seasonal-campaigns.js?v=20260512-nurses-day"></script>
 </head>
 <body class="cwa-ui">
   <header class="cwa-topbar">
@@ -67,6 +68,27 @@
 
   <section class="cwa-section">
     <div class="cwa-shell">
+      <article id="internationalNursesDayBanner" class="cwa-campaign-card cwa-campaign-banner" hidden>
+        <div class="cwa-campaign-copy">
+          <span class="cwa-campaign-badge">International Nurses Day 2026</span>
+          <h2>Happy International Nurses Day</h2>
+          <p>
+            The Community Welfare Wing, Embassy of Pakistan in Kuwait, extends warm greetings and sincere
+            appreciation to all nurses serving with dedication, compassion, and professionalism.
+          </p>
+          <p>
+            On this special occasion, we especially recognize the valuable contribution of Pakistani nurses in Kuwait,
+            whose service reflects the best values of care, humanity, and commitment.
+          </p>
+          <div class="cwa-campaign-theme">
+            <strong>Our Nurses. Our Future.</strong>
+            <span>Empowered Nurses Save Lives.</span>
+          </div>
+        </div>
+        <div class="cwa-campaign-actions">
+          <a class="cwa-btn primary" href="__NURSES_URL__/login">Open Nurses Portal</a>
+        </div>
+      </article>
       <div class="cwa-section-head">
         <div>
           <h2>Available Services</h2>
@@ -129,6 +151,17 @@
       const body = document.body;
       const menuToggle = document.querySelector('[data-cwa-menu-toggle]');
       const mobileNav = document.getElementById('cwaMobileNav');
+      const nursesDayBanner = document.getElementById('internationalNursesDayBanner');
+      const seasonalCampaigns = window.CwaSeasonalCampaigns;
+
+      if (
+        nursesDayBanner &&
+        seasonalCampaigns &&
+        typeof seasonalCampaigns.isInternationalNursesDayCampaignActive === 'function' &&
+        seasonalCampaigns.isInternationalNursesDayCampaignActive()
+      ) {
+        nursesDayBanner.hidden = false;
+      }
 
       function closeMenu() {
         if (!menuToggle || !mobileNav) return;

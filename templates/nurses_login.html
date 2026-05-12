@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Nurses Login / Track</title>
-  <link rel="stylesheet" href="/static/css/cwa-ui.css?v=20260508-corrections-ui">
+  <link rel="stylesheet" href="/static/css/cwa-ui.css?v=20260512-nurses-day">
+  <script src="/static/js/seasonal-campaigns.js?v=20260512-nurses-day"></script>
   <style>
     .nurse-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px}
     .nurse-tabs .tab{background:#fff;border:1px solid #cbd5e1;color:var(--cwa-navy);font-weight:700}
@@ -52,6 +53,7 @@
   </header>
   <section class="nurses-register-wrap">
     <div class="cwa-shell">
+      <section id="nursesDayLoginGreeting" hidden></section>
       <div class="panel">
         <h2 style="margin-top:0">Existing Nurse Login / Track Registration</h2>
         <form id="trackForm" class="nurses-grid">
@@ -74,6 +76,7 @@
   let glLoaded=false;
   let latestGlSummary=null;
   let latestCorrectionSummary=null;
+  const seasonalCampaigns=window.CwaSeasonalCampaigns||null;
   function esc(v){return String(v||'').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
   function friendlyError(msg,fallback){
     const text=String(msg||'');
@@ -81,6 +84,43 @@
       return fallback || 'Request could not be completed. Please check your connection and try again.';
     }
     return text;
+  }
+  function isInternationalNursesDayCampaignActive(){
+    return !!(seasonalCampaigns && typeof seasonalCampaigns.isInternationalNursesDayCampaignActive==='function' && seasonalCampaigns.isInternationalNursesDayCampaignActive());
+  }
+  function internationalNursesDaySalutation(name){
+    if(seasonalCampaigns && typeof seasonalCampaigns.getInternationalNursesDayGreetingSalutation==='function'){
+      return seasonalCampaigns.getInternationalNursesDayGreetingSalutation(name);
+    }
+    const trimmed=String(name||'').trim();
+    return trimmed?'Dear '+trimmed+',':'Dear Nurse,';
+  }
+  function renderInternationalNursesDayGreeting(name){
+    if(!isInternationalNursesDayCampaignActive()) return '';
+    return '<section class="cwa-campaign-card cwa-campaign-message">'
+      +'<div class="cwa-campaign-badge">International Nurses Day 2026</div>'
+      +'<div class="cwa-campaign-message__body">'
+      +'<h3>Happy International Nurses Day</h3>'
+      +'<p>'+esc(internationalNursesDaySalutation(name))+'</p>'
+      +'<p>The Community Welfare Wing, Embassy of Pakistan in Kuwait, extends heartfelt greetings and sincere appreciation to you on International Nurses Day.</p>'
+      +'<p>Your dedication, compassion, discipline, and professional commitment are a source of pride for Pakistan and a valuable contribution to the healthcare sector of Kuwait.</p>'
+      +'<p>We wish you continued success, good health, professional growth, and happiness in your noble service to humanity.</p>'
+      +'<p class="cwa-campaign-signature">With best wishes,<br>Community Welfare Wing<br>Embassy of Pakistan, Kuwait</p>'
+      +'</div>'
+      +'</section>';
+  }
+  function mountInternationalNursesDayLoginGreeting(){
+    const target=document.getElementById('nursesDayLoginGreeting');
+    if(!target) return;
+    const path=String(location.pathname||'').toLowerCase();
+    const isLoginSurface=/(?:^|\/)nurses\/(?:login|track)\/?$/.test(path);
+    if(!isLoginSurface || !isInternationalNursesDayCampaignActive()){
+      target.hidden=true;
+      target.innerHTML='';
+      return;
+    }
+    target.innerHTML=renderInternationalNursesDayGreeting('');
+    target.hidden=!target.innerHTML;
   }
   async function postJson(url,payload,networkMessage){
     try{
@@ -706,8 +746,12 @@
     if(tab==='corrections') loadCorrections(false);
   }
   function renderPortal(x){
+    const loginGreeting=document.getElementById('nursesDayLoginGreeting');
+    if(loginGreeting) loginGreeting.hidden=true;
+    const campaignGreeting=renderInternationalNursesDayGreeting(x.full_name||'');
     out.className='panel';
-    out.innerHTML='<div><h3 style="margin-top:0">Nurse Dashboard</h3><p class="muted">Reference: '+esc(x.reference_id)+' | '+esc(x.full_name)+' | Passport: '+esc(x.passport_number)+'</p></div>'
+    out.innerHTML=(campaignGreeting||'')
+      +'<div><h3 style="margin-top:0">Nurse Dashboard</h3><p class="muted">Reference: '+esc(x.reference_id)+' | '+esc(x.full_name)+' | Passport: '+esc(x.passport_number)+'</p></div>'
       +'<div class="nurse-tabs">'
       +'<button type="button" class="tab" data-tab="overview" onclick="switchNurseTab(\'overview\')">Overview</button>'
       +'<button type="button" class="tab is-active" data-tab="corrections" onclick="switchNurseTab(\'corrections\')">Correction Requests</button>'
@@ -752,6 +796,7 @@
     renderPortal(x);
     return false;
   });
+  mountInternationalNursesDayLoginGreeting();
   </script>
 </body>
 </html>
