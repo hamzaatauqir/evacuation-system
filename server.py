@@ -594,6 +594,72 @@ def _init_grading_letter_db(db):
     db.commit()
 
 
+def _nh_table_columns(db, table_name):
+    try:
+        return {
+            c['name'] if isinstance(c, sqlite3.Row) else c[1]
+            for c in db.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+    except Exception:
+        return set()
+
+
+def _nh_heal_legacy_columns(db):
+    """Idempotent column healing for older nurse-housing SQLite schemas."""
+    def _ensure_columns(table_name, col_defs):
+        existing = _nh_table_columns(db, table_name)
+        if not existing:
+            return
+        for col, coltype in col_defs:
+            if col not in existing:
+                try:
+                    db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {coltype}")
+                except sqlite3.OperationalError:
+                    pass
+
+    _ensure_columns('nh_arrival_batch', [
+        ('arrival_date', "TEXT DEFAULT ''"),
+        ('status', "TEXT DEFAULT 'PLANNED'"),
+        ('remarks', "TEXT DEFAULT ''"),
+        ('arrived_at', 'TEXT'),
+        ('arrived_by', "TEXT DEFAULT ''"),
+        ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+        ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+    ])
+    _ensure_columns('nh_nurse_account', [
+        ('nurse_registration_id', 'INTEGER'),
+        ('account_status', "TEXT DEFAULT 'PENDING_ARRIVAL'"),
+        ('arrival_batch_id', 'INTEGER'),
+        ('batch_code', "TEXT DEFAULT ''"),
+        ('activated_at', 'TEXT'),
+        ('activated_by', "TEXT DEFAULT ''"),
+        ('notes', "TEXT DEFAULT ''"),
+        ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+        ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+    ])
+    _ensure_columns('nh_audit', [
+        ('entity_type', "TEXT DEFAULT ''"),
+        ('entity_id', 'INTEGER DEFAULT 0'),
+        ('nurse_registration_id', 'INTEGER DEFAULT 0'),
+        ('event_type', "TEXT DEFAULT ''"),
+        ('old_value', "TEXT DEFAULT ''"),
+        ('new_value', "TEXT DEFAULT ''"),
+        ('note', "TEXT DEFAULT ''"),
+        ('actor', "TEXT DEFAULT ''"),
+        ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+    ])
+    existing_settings = _nh_table_columns(db, 'nh_settings')
+    if existing_settings and 'value' not in existing_settings:
+        try:
+            db.execute("ALTER TABLE nh_settings ADD COLUMN value TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+
 def _nh_ensure_schema(db):
     global _NH_SCHEMA_READY
     if _NH_SCHEMA_READY:
@@ -653,6 +719,7 @@ def _nh_ensure_schema(db):
             db.commit()
         except Exception:
             pass
+        _nh_heal_legacy_columns(db)
         _NH_SCHEMA_READY = True
     for table_name, cols in {
         'gl_applications': [
@@ -6615,7 +6682,35 @@ def _arrival_batch_rank_key(row):
     )
 
 
+def _read_arrival_batch_canonical_map(db):
+    """Read-only canonical arrival-batch map (no writes). Used when normalization cannot write."""
+    batch_rows = [dict(r) for r in db.execute("SELECT * FROM nh_arrival_batch ORDER BY id ASC").fetchall()]
+    groups = {}
+    for row in batch_rows:
+        normalized = _normalize_arrival_batch_number(row.get('batch_code'))
+        if normalized:
+            groups.setdefault(normalized, []).append(row)
+    canonical_by_batch = {}
+    for batch_number, rows in groups.items():
+        rows_sorted = sorted(rows, key=_arrival_batch_rank_key)
+        canonical = next(
+            (dict(r) for r in rows_sorted if str(r.get('batch_code') or '').strip() == batch_number),
+            dict(rows_sorted[0])
+        )
+        canonical_by_batch[batch_number] = canonical
+    return canonical_by_batch
+
+
 def _normalize_existing_arrival_batch_data(db):
+    try:
+        return _normalize_existing_arrival_batch_data_writes(db)
+    except sqlite3.OperationalError as exc:
+        print(f"[NH normalize] OperationalError — returning read-only snapshot: {exc}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        return False, _read_arrival_batch_canonical_map(db)
+
+
+def _normalize_existing_arrival_batch_data_writes(db):
     changed = False
     nurse_rows = [dict(r) for r in db.execute(
         "SELECT id, batch_number, arrival_date FROM nurse_registrations WHERE COALESCE(batch_number, '') != ''"
@@ -16321,6 +16416,13 @@ def api_admin_nurse_pending_accounts(params, user=None):
             'total': total,
             'items': items,
         }
+    except Exception:
+        print('[api_admin_nurse_pending_accounts] failed:', flush=True)
+        print(traceback.format_exc(), flush=True)
+        return {
+            'success': False,
+            'error': 'Could not load pending nurse accounts. Please try again or contact admin.',
+        }
     finally:
         db.close()
 
@@ -16424,6 +16526,13 @@ def api_admin_nurse_arrival_batches(params, user=None):
         if normalized_changed:
             db.commit()
         return {'success': True, 'feature_enabled': True, 'total': len(items), 'items': items}
+    except Exception:
+        print('[api_admin_nurse_arrival_batches] failed:', flush=True)
+        print(traceback.format_exc(), flush=True)
+        return {
+            'success': False,
+            'error': 'Could not load arrival batches. Please try again or contact admin.',
+        }
     finally:
         db.close()
 
