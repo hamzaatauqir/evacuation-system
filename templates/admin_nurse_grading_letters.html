@@ -58,6 +58,14 @@
     .npc-success{color:#166534;background:#ecfdf3;border:1px solid #86efac;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:13px;display:none}
     .npc-success.is-open{display:block}
     .npc-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
+    .gl-ym-section{border:1px solid var(--cwa-border);border-radius:8px;padding:10px;margin:10px 0;background:#f8fafc}
+    .gl-ym-section b{display:block;margin-bottom:6px;color:var(--cwa-navy);font-size:13px}
+    .gl-ym-table{width:100%;border-collapse:collapse;margin:6px 0;font-size:13px}
+    .gl-ym-table th{font-weight:700;color:var(--cwa-navy);text-align:left;padding:4px 8px;border-bottom:1px solid var(--cwa-border)}
+    .gl-ym-table td{padding:4px 8px;border-bottom:1px solid #f0f4f8}
+    .gl-ym-sums{font-size:12px;color:var(--cwa-muted);margin-top:4px}
+    .gl-ym-mismatch{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:6px;padding:6px 10px;font-size:12px;margin-top:6px}
+    .gl-ym-editor-row{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:6px;align-items:end;margin-bottom:6px}
     @media(max-width:1024px){.gl-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
     @media(max-width:640px){
       .gl-kpis{grid-template-columns:1fr}
@@ -272,6 +280,47 @@ function identifierOptions(selected){
 function modeRadios(mode){
   return ['MARKS','PERCENT','GPA'].map(m=>`<label style="display:inline-block;margin-right:12px"><input type="radio" name="q_mode" value="${m}" ${mode===m?'checked':''}> ${m}</label>`).join('');
 }
+function parseYearlyMarks(q){
+  try{
+    const raw=q&&q.yearly_marks;
+    if(!raw) return [];
+    const parsed=typeof raw==='string'?JSON.parse(raw):raw;
+    return Array.isArray(parsed)?parsed.filter(r=>r&&(r.obtained||r.total)):[];
+  }catch(e){return [];}
+}
+function yearlyMarksMismatch(q,rows){
+  if(!rows||!rows.length) return false;
+  const fo=parseFloat(q.obtained_marks), ft=parseFloat(q.total_marks);
+  if(!Number.isFinite(fo)||!Number.isFinite(ft)) return false;
+  let so=0,st=0;
+  for(const r of rows){const o=parseFloat(r.obtained),t=parseFloat(r.total);if(!Number.isFinite(o)||!Number.isFinite(t)) return false;so+=o;st+=t;}
+  return Math.abs(so-fo)>0.001||Math.abs(st-ft)>0.001;
+}
+function renderYearRows(rows){
+  const c=document.getElementById('q_yearly_rows');
+  if(!c) return;
+  if(!rows||!rows.length){c.innerHTML='';return;}
+  c.innerHTML=rows.map((r,i)=>`<div class="gl-ym-editor-row" data-year-index="${i}">
+    <input class="cwa-input" placeholder="Year ${i+1} label" value="${esc(r.label||('Year '+(i+1)))}" data-ym="label" style="font-size:13px">
+    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Obtained" value="${esc(r.obtained||'')}" data-ym="obtained" style="font-size:13px">
+    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Total" value="${esc(r.total||'')}" data-ym="total" style="font-size:13px">
+    ${i>0?`<button type="button" class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="removeYearRow(${i})" title="Remove year" style="padding:4px 8px;font-size:12px">✕</button>`:'<div></div>'}
+  </div>`).join('');
+}
+function addYearRow(){
+  const rows=collectYearRows();
+  renderYearRows([...rows,{label:'Year '+(rows.length+1),obtained:'',total:''}]);
+}
+function removeYearRow(i){renderYearRows(collectYearRows().filter((_,j)=>j!==i));}
+function collectYearRows(){
+  const c=document.getElementById('q_yearly_rows');
+  if(!c) return [];
+  const rows=[];
+  c.querySelectorAll('[data-year-index]').forEach(row=>{
+    rows.push({label:(row.querySelector('[data-ym="label"]')||{}).value||'',obtained:(row.querySelector('[data-ym="obtained"]')||{}).value||'',total:(row.querySelector('[data-ym="total"]')||{}).value||''});
+  });
+  return rows;
+}
 async function api(url, opts){
   try{
     const r=await fetch(url,opts||{});
@@ -404,6 +453,17 @@ function renderDetail(d){
   const sharedNote=qualifications.length>1
     ? '<p class="gl-inline-note">Father name, relation text, and internal notes below apply to the full grading-letter request. The qualification form only updates the selected qualification chip.</p>'
     : '';
+  const _ymRows=parseYearlyMarks(q);
+  const _ymMismatch=yearlyMarksMismatch(q,_ymRows);
+  const _ymSumO=_ymRows.reduce((s,r)=>s+Number(r.obtained||0),0);
+  const _ymSumT=_ymRows.reduce((s,r)=>s+Number(r.total||0),0);
+  const yearlySection=_ymRows.length?`<div class="gl-ym-section">
+    <b>Year-wise Marks (Certificate Cross-check — Internal Only)</b>
+    <table class="gl-ym-table"><thead><tr><th>Year</th><th>Obtained</th><th>Total</th></tr></thead>
+    <tbody>${_ymRows.map(r=>`<tr><td>${esc(r.label||'—')}</td><td>${esc(r.obtained||'—')}</td><td>${esc(r.total||'—')}</td></tr>`).join('')}</tbody></table>
+    <div class="gl-ym-sums">Year-wise totals: <strong>${_ymSumO.toFixed(2)}</strong> obtained / <strong>${_ymSumT.toFixed(2)}</strong> total</div>
+    ${_ymMismatch?'<div class="gl-ym-mismatch">&#9888; Year-wise total does not match the main marks entered by the nurse. Please cross-check with certificates.</div>':''}
+  </div>`:'';
   const qualificationPanel=q?`
     <div class="gl-qual-panel">
       <div class="gl-qual-panel__head">
@@ -420,6 +480,7 @@ function renderDetail(d){
         <div class="gl-qual-summary-card"><b>Verification</b>Status: ${esc(qualificationStatusLabel(q))}<br>Verified By: ${esc(q.verified_by||'—')}<br>Verified At: ${esc(q.verified_at||'—')}</div>
         <div class="gl-qual-summary-card"><b>Remarks</b>${esc(q.remarks||'—')}</div>
       </div>
+      ${yearlySection}
       ${sharedNote}
       <div class="cwa-form-row">
         <input id="q_father_name" class="cwa-input" placeholder="Father name for official letter" value="${esc(identity.father_name||'')}">
@@ -444,6 +505,12 @@ function renderDetail(d){
         <input id="q_obtained_marks" class="cwa-input" placeholder="Obtained marks" value="${esc(q.obtained_marks||'')}">
         <input id="q_entered_percentage" class="cwa-input" placeholder="Percentage" value="${esc(q.entered_percentage||'')}">
         <input id="q_entered_gpa" class="cwa-input" placeholder="GPA obtained (max 4.00)" value="${esc(q.entered_gpa||'')}">
+      </div>
+      <div class="gl-ym-section">
+        <b>Year-wise Marks (Optional — Internal Cross-check Only)</b>
+        <p style="margin:0 0 8px;font-size:12px;color:var(--cwa-muted)">For staff certificate verification only. Not shown on the official grading letter.</p>
+        <div id="q_yearly_rows"></div>
+        <button type="button" class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="addYearRow()" style="margin-top:6px;font-size:12px">+ Add Year</button>
       </div>
       <div class="gl-actions">
         <button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="saveSelectedQualification()" ${canEditQualification?'':'disabled'}>Save Qualification</button>
@@ -492,6 +559,7 @@ function renderDetail(d){
       </table>
     </div>
   `;
+  renderYearRows(_ymRows);
 }
 function selectQualification(key){
   state.selectedQualificationKey=String(key||'');
@@ -531,7 +599,8 @@ function qualificationEditPayload(){
     percentage:enteredPercentage,
     percent:enteredPercentage,
     entered_gpa:enteredGpa,
-    gpa:enteredGpa
+    gpa:enteredGpa,
+    yearly_marks:collectYearRows().filter(r=>(r.obtained||'').trim()!==''||(r.total||'').trim()!=='')
   };
 }
 async function doAction(action, extra){

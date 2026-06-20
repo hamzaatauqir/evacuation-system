@@ -500,6 +500,7 @@ def _init_grading_letter_db(db):
             ('verified_by', "TEXT DEFAULT ''"),
             ('verified_at', "TEXT DEFAULT ''"),
             ('sort_order', 'INTEGER DEFAULT 0'),
+            ('yearly_marks', 'TEXT DEFAULT NULL'),
             ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
             ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
         ],
@@ -793,6 +794,7 @@ def _nh_ensure_schema(db):
             ('verified_by', "TEXT DEFAULT ''"),
             ('verified_at', "TEXT DEFAULT ''"),
             ('sort_order', 'INTEGER DEFAULT 0'),
+            ('yearly_marks', 'TEXT DEFAULT NULL'),
             ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
             ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
         ],
@@ -10470,6 +10472,54 @@ def _gl_normalize_qualifications_payload(data):
     return [legacy] if legacy else [{}]
 
 
+def _gl_validate_yearly_marks(raw):
+    """Validate the optional year-wise marks list from a qualification payload.
+
+    Returns a JSON string ready for storage, or None when the list is absent,
+    empty, or contains only blank rows.  Raises ValueError for clearly invalid
+    rows (negative values, obtained > total, non-numeric strings).  Never
+    raises for missing/null input — the field is always optional."""
+    if raw is None or raw == '':
+        return None
+    if not isinstance(raw, list):
+        return None
+    cleaned = []
+    for i, row in enumerate(raw):
+        if not isinstance(row, dict):
+            continue
+        obtained_raw = row.get('obtained')
+        total_raw = row.get('total')
+        # Skip completely empty rows silently.
+        if (obtained_raw is None or str(obtained_raw).strip() == '') and \
+                (total_raw is None or str(total_raw).strip() == ''):
+            continue
+        if obtained_raw is None or str(obtained_raw).strip() == '':
+            raise ValueError(f'Year-wise marks row {i + 1}: obtained marks is required when total marks is provided.')
+        if total_raw is None or str(total_raw).strip() == '':
+            raise ValueError(f'Year-wise marks row {i + 1}: total marks is required when obtained marks is provided.')
+        try:
+            obtained = float(str(obtained_raw).strip())
+            total = float(str(total_raw).strip())
+        except (ValueError, TypeError):
+            raise ValueError(f'Year-wise marks row {i + 1}: obtained and total marks must be numeric.')
+        if obtained < 0 or total < 0:
+            raise ValueError(f'Year-wise marks row {i + 1}: marks cannot be negative.')
+        if total == 0:
+            raise ValueError(f'Year-wise marks row {i + 1}: total marks cannot be zero.')
+        if obtained > total:
+            raise ValueError(
+                f'Year-wise marks row {i + 1}: obtained marks ({obtained}) cannot exceed total marks ({total}).'
+            )
+        label_raw = row.get('label')
+        label = str(label_raw).strip()[:80] if label_raw else f'Year {i + 1}'
+        if not label:
+            label = f'Year {i + 1}'
+        cleaned.append({'label': label, 'obtained': str(obtained), 'total': str(total)})
+    if not cleaned:
+        return None
+    return json.dumps(cleaned, separators=(',', ':'))
+
+
 def _gl_validate_single_qualification_payload(payload, db=None):
     """Validate one qualification's worth of fields and compute its grade.
 
@@ -10520,6 +10570,7 @@ def _gl_validate_single_qualification_payload(payload, db=None):
     grade = gl_lookup_grade(computed_percentage, db=db, scale_id=scale_id)
     if grade not in GL_GRADE_LABELS:
         raise ValueError('Invalid grading scale: highest grade must be Excellent.')
+    yearly_marks_json = _gl_validate_yearly_marks(payload.get('yearly_marks'))
     return {
         'qualification_code': qualification_code,
         'qualification_other': '',
@@ -10539,6 +10590,7 @@ def _gl_validate_single_qualification_payload(payload, db=None):
         'final_grade_label': grade,
         'scale_version_id': scale_id,
         'remarks': _gl_clean_text(payload.get('remarks'), 1000),
+        'yearly_marks': yearly_marks_json,
     }
 
 
@@ -10764,7 +10816,7 @@ def _gl_replace_application_qualifications(db, application_id, qualifications):
         'entered_percentage', 'entered_gpa',
         'computed_percentage', 'final_percentage',
         'final_grade_label', 'scale_version_id',
-        'remarks', 'verification_status', 'sort_order',
+        'remarks', 'yearly_marks', 'verification_status', 'sort_order',
     ]
     placeholders = ', '.join(['?'] * len(cols))
     insert_sql = (
@@ -10799,6 +10851,7 @@ def _gl_replace_application_qualifications(db, application_id, qualifications):
             q.get('final_grade_label') or '',
             q.get('scale_version_id'),
             _gl_clean_text(q.get('remarks'), 1000),
+            q.get('yearly_marks'),  # JSON string or None
             'PENDING',
             idx,
         ])
@@ -14652,6 +14705,7 @@ def api_admin_gl_action(data, user):
                 'final_grade_label': payload.get('final_grade_label') or '',
                 'scale_version_id': payload.get('scale_version_id'),
                 'remarks': payload.get('remarks') or '',
+                'yearly_marks': _gl_validate_yearly_marks(data.get('yearly_marks')),
             }
             changed_keys = [
                 key for key, new_value in fields.items()

@@ -4,6 +4,7 @@ import { PublicHeader } from "../components/PublicHeader";
 import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { StatusBadge } from "../components/StatusBadge";
+import { InternationalNursesDayCampaignCard } from "../components/InternationalNursesDayCampaignCard";
 import { api, BACKEND_PORTAL } from "../lib/api";
 import {
   addLocalPortalRequest,
@@ -14,6 +15,7 @@ import {
   setNursePortal,
   type NursePortalContext,
 } from "../lib/nursePortal";
+import { isInternationalNursesDayCampaignActive } from "../lib/seasonalCampaigns";
 
 type PortalTab =
   | "overview"
@@ -137,6 +139,12 @@ type GradingSummaryResponse = {
   error?: string;
 };
 
+type YearlyMarkRow = {
+  label: string;
+  obtained: string;
+  total: string;
+};
+
 type GradingQualificationFormState = {
   qualification_code: string;
   qualification_other: string;
@@ -152,6 +160,7 @@ type GradingQualificationFormState = {
   entered_percentage: string;
   entered_gpa: string;
   remarks: string;
+  yearly_marks: YearlyMarkRow[];
 };
 
 type GradingFormState = {
@@ -419,6 +428,7 @@ function createGradingQualificationForm(
     entered_percentage: qualification?.entered_percentage == null ? "" : String(qualification.entered_percentage),
     entered_gpa: qualification?.entered_gpa == null ? "" : String(qualification.entered_gpa),
     remarks: qualification?.remarks || "",
+    yearly_marks: [],
   };
 }
 
@@ -1210,10 +1220,16 @@ export function NursesPortalPage() {
   const pendingArrivalBanner =
     (ctx.pendingArrivalBanner || housingAccount?.portalBanner || "").trim() ||
     "Your nurse portal account is pending arrival activation.";
-  const stayAccessBlocked = pendingArrival;
-  const complaintAccessBlocked = pendingArrival;
-  const gradingAccessBlocked = pendingArrival;
-  const leavingAccessBlocked = pendingArrival;
+  const showInternationalNursesDayCampaign = isInternationalNursesDayCampaignActive();
+  // Service-level access matrix (mirrors server.py NURSE_SERVICE_TIERS).
+  // Pre-arrival nurses still get to use the basic services so they can
+  // engage with the Embassy before their batch is marked ARRIVED.
+  // Arrival-required services (grading letter, leaving notice, hostel
+  // movement) stay locked until the batch is ARRIVED.
+  const stayAccessBlocked = false;          // accommodation request/update — basic
+  const complaintAccessBlocked = false;     // complaint create/view       — basic
+  const gradingAccessBlocked = pendingArrival;   // arrival-required
+  const leavingAccessBlocked = pendingArrival;   // arrival-required
   const stayBlockedMessage = buildPendingArrivalFeatureMessage(
     pendingArrivalBanner,
     "Stay-arrangement services"
@@ -1281,6 +1297,63 @@ export function NursesPortalPage() {
         qualifications: current.qualifications.filter((_, qualificationIndex) => qualificationIndex !== index),
       };
     });
+  }
+
+  function applyYearlyMarksSums(
+    rows: YearlyMarkRow[],
+    patch: Partial<GradingQualificationFormState>
+  ): Partial<GradingQualificationFormState> {
+    // Auto-sum yearly obtained and total into the main marks fields when
+    // every non-empty row has valid numeric values.
+    if (rows.length === 0) return patch;
+    let sumObtained = 0;
+    let sumTotal = 0;
+    for (const row of rows) {
+      const o = parseFloat(row.obtained);
+      const t = parseFloat(row.total);
+      if (row.obtained.trim() === "" || row.total.trim() === "" || isNaN(o) || isNaN(t)) {
+        return patch; // at least one incomplete row — leave marks fields alone
+      }
+      sumObtained += o;
+      sumTotal += t;
+    }
+    return { ...patch, obtained_marks: String(sumObtained), total_marks: String(sumTotal) };
+  }
+
+  function updateYearlyRow(qualificationIndex: number, rowIndex: number, rowPatch: Partial<YearlyMarkRow>) {
+    setGradingForm((current) => ({
+      ...current,
+      qualifications: current.qualifications.map((qualification, qi) => {
+        if (qi !== qualificationIndex) return qualification;
+        const updatedRows = qualification.yearly_marks.map((row, ri) =>
+          ri === rowIndex ? { ...row, ...rowPatch } : row
+        );
+        return { ...qualification, ...applyYearlyMarksSums(updatedRows, { yearly_marks: updatedRows }) };
+      }),
+    }));
+  }
+
+  function addYearlyRow(qualificationIndex: number) {
+    setGradingForm((current) => ({
+      ...current,
+      qualifications: current.qualifications.map((qualification, qi) => {
+        if (qi !== qualificationIndex) return qualification;
+        const n = qualification.yearly_marks.length + 1;
+        const newRows = [...qualification.yearly_marks, { label: `Year ${n}`, obtained: "", total: "" }];
+        return { ...qualification, yearly_marks: newRows };
+      }),
+    }));
+  }
+
+  function removeYearlyRow(qualificationIndex: number, rowIndex: number) {
+    setGradingForm((current) => ({
+      ...current,
+      qualifications: current.qualifications.map((qualification, qi) => {
+        if (qi !== qualificationIndex) return qualification;
+        const updatedRows = qualification.yearly_marks.filter((_, ri) => ri !== rowIndex);
+        return { ...qualification, ...applyYearlyMarksSums(updatedRows, { yearly_marks: updatedRows }) };
+      }),
+    }));
   }
 
   const refreshGradingSummary = useEffectEvent(async (showLoading = true) => {
@@ -1442,7 +1515,8 @@ export function NursesPortalPage() {
 
   useEffect(() => {
     if (activeTab !== "onboarding") return;
-    if (pendingArrival) return;
+    // Onboarding is a basic_pre_arrival service — pre-arrival nurses can
+    // record their MOH stage so the Welfare Desk can guide them.
     void refreshOnboardingSummary();
   }, [activeTab, pendingArrival]);
 
@@ -1655,6 +1729,9 @@ export function NursesPortalPage() {
         entered_percentage: qualification.mode === "PERCENT" ? qualification.entered_percentage.trim() : "",
         entered_gpa: qualification.mode === "GPA" ? qualification.entered_gpa.trim() : "",
         remarks: qualification.remarks.trim(),
+        yearly_marks: qualification.mode === "MARKS" && qualification.yearly_marks.length > 0
+          ? qualification.yearly_marks.filter((r) => r.obtained.trim() !== "" || r.total.trim() !== "")
+          : undefined,
       })),
       declaration_accepted: gradingForm.declaration_accepted,
       preview_confirmed: gradingForm.preview_confirmed,
@@ -1886,6 +1963,12 @@ export function NursesPortalPage() {
         {(msg || err) ? (
           <div style={{ marginBottom: 14, background: err ? "#fff4f4" : "#f3fff4", color: err ? "#991b1b" : "#166534", border: `1px solid ${err ? "#fecaca" : "#bbf7d0"}`, borderRadius: 10, padding: 10 }}>
             {err || msg}
+          </div>
+        ) : null}
+
+        {showInternationalNursesDayCampaign ? (
+          <div style={{ marginBottom: 14 }}>
+            <InternationalNursesDayCampaignCard variant="welcome" recipientName={ctx.fullName} />
           </div>
         ) : null}
 
@@ -2480,6 +2563,7 @@ export function NursesPortalPage() {
                                     obtained_marks: e.target.value === "MARKS" ? qualification.obtained_marks : "",
                                     entered_percentage: e.target.value === "PERCENT" ? qualification.entered_percentage : "",
                                     entered_gpa: e.target.value === "GPA" ? qualification.entered_gpa : "",
+                                    yearly_marks: e.target.value === "MARKS" ? qualification.yearly_marks : [],
                                   })
                                 }
                               >
@@ -2491,30 +2575,116 @@ export function NursesPortalPage() {
                           </div>
 
                           {qualification.mode === "MARKS" ? (
-                            <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
-                              <label>
-                                Total Marks / CGPA Scale
-                                <input
-                                  className="f-input"
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={qualification.total_marks}
-                                  onChange={(e) => updateGradingQualification(index, { total_marks: e.target.value })}
-                                />
-                              </label>
-                              <label>
-                                Obtained Marks / CGPA
-                                <input
-                                  className="f-input"
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={qualification.obtained_marks}
-                                  onChange={(e) => updateGradingQualification(index, { obtained_marks: e.target.value })}
-                                />
-                              </label>
-                            </div>
+                            <>
+                              <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
+                                <label>
+                                  Total Marks / CGPA Scale
+                                  <input
+                                    className="f-input"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={qualification.total_marks}
+                                    onChange={(e) => updateGradingQualification(index, { total_marks: e.target.value })}
+                                  />
+                                </label>
+                                <label>
+                                  Obtained Marks / CGPA
+                                  <input
+                                    className="f-input"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={qualification.obtained_marks}
+                                    onChange={(e) => updateGradingQualification(index, { obtained_marks: e.target.value })}
+                                  />
+                                </label>
+                              </div>
+
+                              <div
+                                style={{
+                                  border: "1px solid #D9E2EC",
+                                  borderRadius: 8,
+                                  padding: 12,
+                                  background: "#F7FAFC",
+                                  display: "grid",
+                                  gap: 8,
+                                }}
+                              >
+                                <div style={{ fontWeight: 700, color: "#2D4A6B", fontSize: 14 }}>
+                                  Year-wise Marks (Optional)
+                                </div>
+                                <p style={{ margin: 0, color: "#5B6773", fontSize: 12 }}>
+                                  Year-wise marks are used for staff certificate cross-checking. Total marks and obtained marks will be calculated from the rows above.
+                                </p>
+
+                                {qualification.yearly_marks.map((row, rowIndex) => (
+                                  <div
+                                    key={rowIndex}
+                                    style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}
+                                  >
+                                    <label style={{ fontSize: 12 }}>
+                                      Year Label
+                                      <input
+                                        className="f-input"
+                                        placeholder={`Year ${rowIndex + 1}`}
+                                        value={row.label}
+                                        onChange={(e) => updateYearlyRow(index, rowIndex, { label: e.target.value })}
+                                      />
+                                    </label>
+                                    <label style={{ fontSize: 12 }}>
+                                      Obtained
+                                      <input
+                                        className="f-input"
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        placeholder="Obtained"
+                                        value={row.obtained}
+                                        onChange={(e) => updateYearlyRow(index, rowIndex, { obtained: e.target.value })}
+                                      />
+                                    </label>
+                                    <label style={{ fontSize: 12 }}>
+                                      Total
+                                      <input
+                                        className="f-input"
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        placeholder="Total"
+                                        value={row.total}
+                                        onChange={(e) => updateYearlyRow(index, rowIndex, { total: e.target.value })}
+                                      />
+                                    </label>
+                                    <div>
+                                      {rowIndex > 0 ? (
+                                        <button
+                                          type="button"
+                                          className="f-btn f-btn--light"
+                                          style={{ fontSize: 12, padding: "4px 10px" }}
+                                          onClick={() => removeYearlyRow(index, rowIndex)}
+                                        >
+                                          Remove
+                                        </button>
+                                      ) : (
+                                        <div style={{ width: 60 }} />
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+
+                                <div>
+                                  <button
+                                    type="button"
+                                    className="f-btn f-btn--light"
+                                    style={{ fontSize: 12, padding: "4px 12px" }}
+                                    onClick={() => addYearlyRow(index)}
+                                  >
+                                    + Add Year
+                                  </button>
+                                </div>
+                              </div>
+                            </>
                           ) : null}
 
                           {qualification.mode === "PERCENT" ? (
@@ -2688,9 +2858,9 @@ export function NursesPortalPage() {
         ) : null}
 
         {activeTab === "onboarding" ? (
-          pendingArrival ? (
-            <PendingArrivalPanel title="MOH Onboarding Tracker" message={complaintBlockedMessage} />
-          ) : (
+          /* Onboarding is a basic_pre_arrival service. The dashboard banner
+             already informs the nurse when batch is pending. */
+          (
             <div style={{ display: "grid", gap: 14 }}>
               <FormCard title="MOH Onboarding Tracker">
                 <p style={{ color: "#5B6773", fontSize: 13, lineHeight: 1.6, marginTop: 0 }}>
