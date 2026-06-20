@@ -301,9 +301,9 @@ function renderYearRows(rows){
   if(!c) return;
   if(!rows||!rows.length){c.innerHTML='';return;}
   c.innerHTML=rows.map((r,i)=>`<div class="gl-ym-editor-row" data-year-index="${i}">
-    <input class="cwa-input" placeholder="Year ${i+1} label" value="${esc(r.label||('Year '+(i+1)))}" data-ym="label" style="font-size:13px">
-    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Obtained" value="${esc(r.obtained||'')}" data-ym="obtained" style="font-size:13px">
-    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Total" value="${esc(r.total||'')}" data-ym="total" style="font-size:13px">
+    <input class="cwa-input" placeholder="Year ${i+1} / period label" value="${esc(r.label||('Year '+(i+1)))}" data-ym="label" style="font-size:13px">
+    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Obtained / Result" value="${esc(r.obtained||'')}" data-ym="obtained" style="font-size:13px">
+    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Total / Scale" value="${esc(r.total||'')}" data-ym="total" style="font-size:13px">
     ${i>0?`<button type="button" class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="removeYearRow(${i})" title="Remove year" style="padding:4px 8px;font-size:12px">✕</button>`:'<div></div>'}
   </div>`).join('');
 }
@@ -458,8 +458,8 @@ function renderDetail(d){
   const _ymSumO=_ymRows.reduce((s,r)=>s+Number(r.obtained||0),0);
   const _ymSumT=_ymRows.reduce((s,r)=>s+Number(r.total||0),0);
   const yearlySection=_ymRows.length?`<div class="gl-ym-section">
-    <b>Year-wise Marks (Certificate Cross-check — Internal Only)</b>
-    <table class="gl-ym-table"><thead><tr><th>Year</th><th>Obtained</th><th>Total</th></tr></thead>
+    <b>Year-wise Result Breakdown (Internal Staff Cross-check Only)</b>
+    <table class="gl-ym-table"><thead><tr><th>Year / Period</th><th>Obtained / Result</th><th>Total / Scale</th></tr></thead>
     <tbody>${_ymRows.map(r=>`<tr><td>${esc(r.label||'—')}</td><td>${esc(r.obtained||'—')}</td><td>${esc(r.total||'—')}</td></tr>`).join('')}</tbody></table>
     <div class="gl-ym-sums">Year-wise totals: <strong>${_ymSumO.toFixed(2)}</strong> obtained / <strong>${_ymSumT.toFixed(2)}</strong> total</div>
     ${_ymMismatch?'<div class="gl-ym-mismatch">&#9888; Year-wise total does not match the main marks entered by the nurse. Please cross-check with certificates.</div>':''}
@@ -507,7 +507,7 @@ function renderDetail(d){
         <input id="q_entered_gpa" class="cwa-input" placeholder="GPA obtained (max 4.00)" value="${esc(q.entered_gpa||'')}">
       </div>
       <div class="gl-ym-section">
-        <b>Year-wise Marks (Optional — Internal Cross-check Only)</b>
+        <b>Year-wise Result Breakdown (Internal Staff Cross-check Only)</b>
         <p style="margin:0 0 8px;font-size:12px;color:var(--cwa-muted)">For staff certificate verification only. Not shown on the official grading letter.</p>
         <div id="q_yearly_rows"></div>
         <button type="button" class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="addYearRow()" style="margin-top:6px;font-size:12px">+ Add Year</button>

@@ -115,6 +115,7 @@ type GradingQualificationRecord = {
   final_percentage?: number | null;
   final_grade_label?: string;
   remarks?: string;
+  yearly_marks?: string | null;
 };
 
 type GradingApplication = GradingQualificationRecord & {
@@ -144,6 +145,23 @@ type YearlyMarkRow = {
   obtained: string;
   total: string;
 };
+
+function parseYearlyMarksFromApi(raw?: string | null): YearlyMarkRow[] {
+  if (!raw) return [];
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((r: unknown) => r && typeof r === "object")
+      .map((r: Record<string, unknown>, i: number) => ({
+        label: String(r.label ?? `Year ${i + 1}`),
+        obtained: String(r.obtained ?? ""),
+        total: String(r.total ?? ""),
+      }));
+  } catch {
+    return [];
+  }
+}
 
 type GradingQualificationFormState = {
   qualification_code: string;
@@ -428,7 +446,10 @@ function createGradingQualificationForm(
     entered_percentage: qualification?.entered_percentage == null ? "" : String(qualification.entered_percentage),
     entered_gpa: qualification?.entered_gpa == null ? "" : String(qualification.entered_gpa),
     remarks: qualification?.remarks || "",
-    yearly_marks: [],
+    yearly_marks: (() => {
+      const restored = parseYearlyMarksFromApi(qualification?.yearly_marks);
+      return restored.length > 0 ? restored : [{ label: "Year 1", obtained: "", total: "" }];
+    })(),
   };
 }
 
@@ -1301,10 +1322,12 @@ export function NursesPortalPage() {
 
   function applyYearlyMarksSums(
     rows: YearlyMarkRow[],
-    patch: Partial<GradingQualificationFormState>
+    patch: Partial<GradingQualificationFormState>,
+    mode: string
   ): Partial<GradingQualificationFormState> {
-    // Auto-sum yearly obtained and total into the main marks fields when
-    // every non-empty row has valid numeric values.
+    // Auto-sum yearly obtained and total into the main marks fields, but only
+    // for MARKS mode — for PERCENT/GPA the official fields are independent.
+    if (mode !== "MARKS") return patch;
     if (rows.length === 0) return patch;
     let sumObtained = 0;
     let sumTotal = 0;
@@ -1328,7 +1351,7 @@ export function NursesPortalPage() {
         const updatedRows = qualification.yearly_marks.map((row, ri) =>
           ri === rowIndex ? { ...row, ...rowPatch } : row
         );
-        return { ...qualification, ...applyYearlyMarksSums(updatedRows, { yearly_marks: updatedRows }) };
+        return { ...qualification, ...applyYearlyMarksSums(updatedRows, { yearly_marks: updatedRows }, qualification.mode) };
       }),
     }));
   }
@@ -1351,7 +1374,7 @@ export function NursesPortalPage() {
       qualifications: current.qualifications.map((qualification, qi) => {
         if (qi !== qualificationIndex) return qualification;
         const updatedRows = qualification.yearly_marks.filter((_, ri) => ri !== rowIndex);
-        return { ...qualification, ...applyYearlyMarksSums(updatedRows, { yearly_marks: updatedRows }) };
+        return { ...qualification, ...applyYearlyMarksSums(updatedRows, { yearly_marks: updatedRows }, qualification.mode) };
       }),
     }));
   }
@@ -1694,6 +1717,58 @@ export function NursesPortalPage() {
       return;
     }
 
+    for (let qi = 0; qi < gradingForm.qualifications.length; qi++) {
+      const q = gradingForm.qualifications[qi];
+      const qPrefix = gradingForm.qualifications.length > 1 ? `Qualification ${qi + 1}: ` : "";
+      const completeRows = q.yearly_marks.filter(
+        (r) => r.label.trim() !== "" && r.obtained.trim() !== "" && r.total.trim() !== ""
+      );
+      if (completeRows.length === 0) {
+        setGradingError(
+          `${qPrefix}Year-wise result breakdown is required. Please add at least one complete year row (label, obtained/result, and total/scale).`
+        );
+        setGradingSubmitBusy(false);
+        return;
+      }
+      for (let ri = 0; ri < q.yearly_marks.length; ri++) {
+        const r = q.yearly_marks[ri];
+        if (r.label.trim() === "" && r.obtained.trim() === "" && r.total.trim() === "") continue;
+        const rPrefix = `${qPrefix}Year row ${ri + 1}: `;
+        if (r.label.trim() === "") {
+          setGradingError(`${rPrefix}Year / period label is required.`);
+          setGradingSubmitBusy(false);
+          return;
+        }
+        const obtained = parseFloat(r.obtained);
+        const total = parseFloat(r.total);
+        if (r.obtained.trim() === "" || isNaN(obtained)) {
+          setGradingError(`${rPrefix}Obtained / Result must be a valid number.`);
+          setGradingSubmitBusy(false);
+          return;
+        }
+        if (r.total.trim() === "" || isNaN(total)) {
+          setGradingError(`${rPrefix}Total / Scale must be a valid number.`);
+          setGradingSubmitBusy(false);
+          return;
+        }
+        if (total <= 0) {
+          setGradingError(`${rPrefix}Total / Scale must be greater than 0.`);
+          setGradingSubmitBusy(false);
+          return;
+        }
+        if (obtained < 0) {
+          setGradingError(`${rPrefix}Obtained / Result cannot be negative.`);
+          setGradingSubmitBusy(false);
+          return;
+        }
+        if (obtained > total) {
+          setGradingError(`${rPrefix}Obtained / Result cannot exceed Total / Scale.`);
+          setGradingSubmitBusy(false);
+          return;
+        }
+      }
+    }
+
     const [primaryQualification] = gradingForm.qualifications;
     const payload = {
       nurse_reference_id: ctx.referenceId,
@@ -1729,9 +1804,9 @@ export function NursesPortalPage() {
         entered_percentage: qualification.mode === "PERCENT" ? qualification.entered_percentage.trim() : "",
         entered_gpa: qualification.mode === "GPA" ? qualification.entered_gpa.trim() : "",
         remarks: qualification.remarks.trim(),
-        yearly_marks: qualification.mode === "MARKS" && qualification.yearly_marks.length > 0
-          ? qualification.yearly_marks.filter((r) => r.obtained.trim() !== "" || r.total.trim() !== "")
-          : undefined,
+        yearly_marks: qualification.yearly_marks.filter(
+          (r) => r.label.trim() !== "" || r.obtained.trim() !== "" || r.total.trim() !== ""
+        ),
       })),
       declaration_accepted: gradingForm.declaration_accepted,
       preview_confirmed: gradingForm.preview_confirmed,
@@ -2563,7 +2638,7 @@ export function NursesPortalPage() {
                                     obtained_marks: e.target.value === "MARKS" ? qualification.obtained_marks : "",
                                     entered_percentage: e.target.value === "PERCENT" ? qualification.entered_percentage : "",
                                     entered_gpa: e.target.value === "GPA" ? qualification.entered_gpa : "",
-                                    yearly_marks: e.target.value === "MARKS" ? qualification.yearly_marks : [],
+                                    yearly_marks: qualification.yearly_marks,
                                   })
                                 }
                               >
@@ -2575,116 +2650,30 @@ export function NursesPortalPage() {
                           </div>
 
                           {qualification.mode === "MARKS" ? (
-                            <>
-                              <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
-                                <label>
-                                  Total Marks / CGPA Scale
-                                  <input
-                                    className="f-input"
-                                    type="number"
-                                    min="0"
-                                    step="0.01"
-                                    value={qualification.total_marks}
-                                    onChange={(e) => updateGradingQualification(index, { total_marks: e.target.value })}
-                                  />
-                                </label>
-                                <label>
-                                  Obtained Marks / CGPA
-                                  <input
-                                    className="f-input"
-                                    type="number"
-                                    min="0"
-                                    step="0.01"
-                                    value={qualification.obtained_marks}
-                                    onChange={(e) => updateGradingQualification(index, { obtained_marks: e.target.value })}
-                                  />
-                                </label>
-                              </div>
-
-                              <div
-                                style={{
-                                  border: "1px solid #D9E2EC",
-                                  borderRadius: 8,
-                                  padding: 12,
-                                  background: "#F7FAFC",
-                                  display: "grid",
-                                  gap: 8,
-                                }}
-                              >
-                                <div style={{ fontWeight: 700, color: "#2D4A6B", fontSize: 14 }}>
-                                  Year-wise Marks (Optional)
-                                </div>
-                                <p style={{ margin: 0, color: "#5B6773", fontSize: 12 }}>
-                                  Year-wise marks are used for staff certificate cross-checking. Total marks and obtained marks will be calculated from the rows above.
-                                </p>
-
-                                {qualification.yearly_marks.map((row, rowIndex) => (
-                                  <div
-                                    key={rowIndex}
-                                    style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}
-                                  >
-                                    <label style={{ fontSize: 12 }}>
-                                      Year Label
-                                      <input
-                                        className="f-input"
-                                        placeholder={`Year ${rowIndex + 1}`}
-                                        value={row.label}
-                                        onChange={(e) => updateYearlyRow(index, rowIndex, { label: e.target.value })}
-                                      />
-                                    </label>
-                                    <label style={{ fontSize: 12 }}>
-                                      Obtained
-                                      <input
-                                        className="f-input"
-                                        type="number"
-                                        min="0"
-                                        step="0.01"
-                                        placeholder="Obtained"
-                                        value={row.obtained}
-                                        onChange={(e) => updateYearlyRow(index, rowIndex, { obtained: e.target.value })}
-                                      />
-                                    </label>
-                                    <label style={{ fontSize: 12 }}>
-                                      Total
-                                      <input
-                                        className="f-input"
-                                        type="number"
-                                        min="0"
-                                        step="0.01"
-                                        placeholder="Total"
-                                        value={row.total}
-                                        onChange={(e) => updateYearlyRow(index, rowIndex, { total: e.target.value })}
-                                      />
-                                    </label>
-                                    <div>
-                                      {rowIndex > 0 ? (
-                                        <button
-                                          type="button"
-                                          className="f-btn f-btn--light"
-                                          style={{ fontSize: 12, padding: "4px 10px" }}
-                                          onClick={() => removeYearlyRow(index, rowIndex)}
-                                        >
-                                          Remove
-                                        </button>
-                                      ) : (
-                                        <div style={{ width: 60 }} />
-                                      )}
-                                    </div>
-                                  </div>
-                                ))}
-
-                                <div>
-                                  <button
-                                    type="button"
-                                    className="f-btn f-btn--light"
-                                    style={{ fontSize: 12, padding: "4px 12px" }}
-                                    onClick={() => addYearlyRow(index)}
-                                  >
-                                    + Add Year
-                                  </button>
-                                </div>
-                              </div>
-                            </>
+                            <div style={{ display: "grid", gridTemplateColumns: compactGridColumns, gap: 10 }}>
+                              <label>
+                                Total Marks / CGPA Scale
+                                <input
+                                  className="f-input"
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={qualification.total_marks}
+                                  onChange={(e) => updateGradingQualification(index, { total_marks: e.target.value })}
+                                />
+                              </label>
+                              <label>
+                                Obtained Marks / CGPA
+                                <input
+                                  className="f-input"
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={qualification.obtained_marks}
+                                  onChange={(e) => updateGradingQualification(index, { obtained_marks: e.target.value })}
+                                />
+                              </label>
+                            </div>
                           ) : null}
 
                           {qualification.mode === "PERCENT" ? (
@@ -2719,6 +2708,94 @@ export function NursesPortalPage() {
                               <p style={{ margin: 0, color: "#5B6773", fontSize: 13 }}>Maximum GPA: 4.00</p>
                             </div>
                           ) : null}
+
+                          <div
+                            style={{
+                              border: "1px solid #D9E2EC",
+                              borderRadius: 8,
+                              padding: 12,
+                              background: "#F7FAFC",
+                              display: "grid",
+                              gap: 8,
+                            }}
+                          >
+                            <div style={{ fontWeight: 700, color: "#2D4A6B", fontSize: 14 }}>
+                              Year-wise Result Breakdown{" "}
+                              <span style={{ color: "#C0392B", fontWeight: 800, fontSize: 15 }}>*</span>
+                            </div>
+                            <p style={{ margin: 0, color: "#5B6773", fontSize: 12 }}>
+                              Year-wise breakdown is required for Embassy/Nurses Desk certificate cross-checking. It is used internally only and will not appear on the official grading letter.
+                              {qualification.mode === "MARKS" && (
+                                <span> Obtained and total marks will be auto-calculated from the rows below.</span>
+                              )}
+                            </p>
+
+                            {qualification.yearly_marks.map((row, rowIndex) => (
+                              <div
+                                key={rowIndex}
+                                style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}
+                              >
+                                <label style={{ fontSize: 12 }}>
+                                  Year / Period Label
+                                  <input
+                                    className="f-input"
+                                    placeholder={`Year ${rowIndex + 1}`}
+                                    value={row.label}
+                                    onChange={(e) => updateYearlyRow(index, rowIndex, { label: e.target.value })}
+                                  />
+                                </label>
+                                <label style={{ fontSize: 12 }}>
+                                  Obtained / Result
+                                  <input
+                                    className="f-input"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    placeholder="Obtained / Result"
+                                    value={row.obtained}
+                                    onChange={(e) => updateYearlyRow(index, rowIndex, { obtained: e.target.value })}
+                                  />
+                                </label>
+                                <label style={{ fontSize: 12 }}>
+                                  Total / Scale
+                                  <input
+                                    className="f-input"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    placeholder="Total / Scale"
+                                    value={row.total}
+                                    onChange={(e) => updateYearlyRow(index, rowIndex, { total: e.target.value })}
+                                  />
+                                </label>
+                                <div>
+                                  {rowIndex > 0 ? (
+                                    <button
+                                      type="button"
+                                      className="f-btn f-btn--light"
+                                      style={{ fontSize: 12, padding: "4px 10px" }}
+                                      onClick={() => removeYearlyRow(index, rowIndex)}
+                                    >
+                                      Remove
+                                    </button>
+                                  ) : (
+                                    <div style={{ width: 60 }} />
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+
+                            <div>
+                              <button
+                                type="button"
+                                className="f-btn f-btn--light"
+                                style={{ fontSize: 12, padding: "4px 12px" }}
+                                onClick={() => addYearlyRow(index)}
+                              >
+                                + Add Year
+                              </button>
+                            </div>
+                          </div>
 
                           <div
                             style={{

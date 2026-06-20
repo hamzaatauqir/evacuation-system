@@ -10473,12 +10473,13 @@ def _gl_normalize_qualifications_payload(data):
 
 
 def _gl_validate_yearly_marks(raw):
-    """Validate the optional year-wise marks list from a qualification payload.
+    """Validate the year-wise marks list from a qualification payload.
 
     Returns a JSON string ready for storage, or None when the list is absent,
     empty, or contains only blank rows.  Raises ValueError for clearly invalid
-    rows (negative values, obtained > total, non-numeric strings).  Never
-    raises for missing/null input — the field is always optional."""
+    rows (negative values, obtained > total, non-numeric strings).  Returns
+    None for missing/null input — use _gl_validate_yearly_marks_required when
+    the field is mandatory."""
     if raw is None or raw == '':
         return None
     if not isinstance(raw, list):
@@ -10518,6 +10519,31 @@ def _gl_validate_yearly_marks(raw):
     if not cleaned:
         return None
     return json.dumps(cleaned, separators=(',', ':'))
+
+
+def _gl_resolve_admin_yearly_marks(raw, existing_qualification):
+    """Resolve yearly_marks for an admin edit action.
+
+    If the admin posted a non-empty rows list, validate and store it.
+    If the admin posted nothing (empty list, None) — preserve the existing
+    value from the DB so old records without yearly_marks are not broken."""
+    if isinstance(raw, list) and len(raw) > 0:
+        return _gl_validate_yearly_marks(raw)
+    return existing_qualification.get('yearly_marks') if existing_qualification else None
+
+
+def _gl_validate_yearly_marks_required(raw):
+    """Like _gl_validate_yearly_marks but raises ValueError when the result is empty.
+
+    Used for nurse submit/resubmit where year-wise breakdown is mandatory for
+    every qualification regardless of grading mode."""
+    result = _gl_validate_yearly_marks(raw)
+    if result is None:
+        raise ValueError(
+            'Year-wise result breakdown is required for every qualification. '
+            'Please add at least one complete year row with label, obtained/result, and total/scale values.'
+        )
+    return result
 
 
 def _gl_validate_single_qualification_payload(payload, db=None):
@@ -10570,7 +10596,7 @@ def _gl_validate_single_qualification_payload(payload, db=None):
     grade = gl_lookup_grade(computed_percentage, db=db, scale_id=scale_id)
     if grade not in GL_GRADE_LABELS:
         raise ValueError('Invalid grading scale: highest grade must be Excellent.')
-    yearly_marks_json = _gl_validate_yearly_marks(payload.get('yearly_marks'))
+    yearly_marks_json = _gl_validate_yearly_marks_required(payload.get('yearly_marks'))
     return {
         'qualification_code': qualification_code,
         'qualification_other': '',
@@ -14705,7 +14731,7 @@ def api_admin_gl_action(data, user):
                 'final_grade_label': payload.get('final_grade_label') or '',
                 'scale_version_id': payload.get('scale_version_id'),
                 'remarks': payload.get('remarks') or '',
-                'yearly_marks': _gl_validate_yearly_marks(data.get('yearly_marks')),
+                'yearly_marks': _gl_resolve_admin_yearly_marks(data.get('yearly_marks'), qualification),
             }
             changed_keys = [
                 key for key, new_value in fields.items()
