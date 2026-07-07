@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hostel Partners — AJA Care</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+  <style>
+    .hp-shell{max-width:1440px;margin:0 auto;padding:18px}
+    .hp-top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+    .hp-title h1{margin:0;color:#15324a;font-size:24px}.hp-title p{margin:4px 0 0;color:#607182}
+    .hp-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
+    .kpi{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:12px}.kpi b{display:block;font-size:24px;color:#15324a}.kpi span{font-size:12px;color:#68798a}
+    .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tabs button{border:1px solid #d7e2ea;background:#fff;border-radius:6px;padding:9px 12px;font-weight:700;color:#29445b;cursor:pointer}.tabs button.active{background:#15324a;color:#fff}
+    .card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:16px;margin-bottom:14px}
+    .muted{color:#657789;font-size:12px}
+    .split{display:grid;grid-template-columns:minmax(340px,1fr) 430px;gap:14px;align-items:start}
+    table.hp{width:100%;border-collapse:collapse}table.hp th,table.hp td{border-bottom:1px solid #eef3f7;padding:8px;text-align:left;font-size:12px;vertical-align:top}
+    table.hp tr.rowlink{cursor:pointer}table.hp tr.rowlink:hover{background:#f7fafc}
+    .pill{display:inline-block;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700}
+    .pill.ASSIGNED{background:#e3f2fd;color:#1258a3}.pill.ARRIVED{background:#fff3e0;color:#9a5b00}
+    .pill.ACTIVE_TENANT{background:#e8f5e9;color:#1c7a2f}.pill.LEFT_HOSTEL{background:#eceff1;color:#4a5b66}
+    .pill.CANCELLED{background:#ffebee;color:#a02020}.pill.ACTIVE{background:#e8f5e9;color:#1c7a2f}
+    .pill.REPLACED{background:#ede7f6;color:#5e35a1}.pill.ARCHIVED{background:#eceff1;color:#4a5b66}
+    .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .form-grid label{display:block;font-size:12px;color:#4f6374;font-weight:700}
+    .form-grid input,.form-grid select,.form-grid textarea,.searchbar input,.searchbar select{width:100%;box-sizing:border-box;margin-top:5px;border:1px solid #cfdde7;border-radius:6px;padding:10px;font:inherit}
+    .form-grid .full{grid-column:1/-1}
+    .searchbar{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}.searchbar>div{flex:1;min-width:160px}
+    .btn{border:1px solid #cddce6;background:#f7fafc;border-radius:6px;padding:9px 12px;color:#17344c;font-weight:700;cursor:pointer}
+    .btn.primary{background:#15324a;color:#fff;border-color:#15324a}
+    .btn.danger{background:#fff2f2;color:#9d1d1d;border-color:#f2caca}
+    .btn.sm{padding:5px 9px;font-size:12px}
+    .msg{margin:10px 0;padding:10px;border-radius:6px;font-size:13px;display:none}
+    .msg.ok{background:#e8f5e9;color:#1c7a2f;display:block}.msg.err{background:#ffebee;color:#a02020;display:block}
+    .timeline{list-style:none;margin:0;padding:0}.timeline li{border-left:3px solid #d7e2ea;padding:6px 0 6px 12px;margin-left:6px;font-size:12px}
+    .timeline b{color:#15324a}.timeline .muted{display:block}
+    .checkline{display:flex;gap:8px;align-items:center;font-size:13px;color:#29445b;margin-top:8px}
+    @media(max-width:1080px){.split{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body class="cwa-admin-body">
+  <main class="hp-shell">
+    <div class="hp-top">
+      <div class="hp-title">
+        <h1>Hostel Partners — Nurse Accommodation</h1>
+        <p>Assign nurses to AJA Care, upload signed agreements, and manage what the hostel partner sees.</p>
+        <div class="muted">Signed in as __USER_NAME__ (__USER_ROLE__)</div>
+      </div>
+      <div class="hp-actions">
+        <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/nurses/accommodation">Accommodation Roster</a>
+        <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/aja-reconciliation">AJA Reconciliation</a>
+        <a class="cwa-btn cwa-btn--navy cwa-btn--sm" id="exportLink" href="/api/admin/hostel/export.csv">Export Tenants CSV</a>
+        <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/logout">Logout</a>
+      </div>
+    </div>
+
+    <section class="kpi-grid" id="kpis"></section>
+    <div class="tabs">
+      <button id="tab-assignments" class="active" onclick="showTab('assignments')">Assignments</button>
+      <button id="tab-search" onclick="showTab('search')">Search &amp; Assign</button>
+      <button id="tab-partners" onclick="showTab('partners')">Partners &amp; Access</button>
+      <button id="tab-audit" onclick="showTab('audit')">Audit Timeline</button>
+    </div>
+    <div class="msg" id="msg"></div>
+
+    <!-- ── Assignments ─────────────────────────────────────── -->
+    <section id="pane-assignments">
+      <div class="split">
+        <div class="card">
+          <div class="searchbar">
+            <div><label class="muted">Search</label><input id="aq" placeholder="Name / passport / reference" onkeydown="if(event.key==='Enter')loadAssignments()"></div>
+            <div><label class="muted">Partner</label><select id="apartner"></select></div>
+            <div><label class="muted">Status</label>
+              <select id="astatus">
+                <option value="OPEN">Open (assigned/arrived/tenant)</option>
+                <option value="">All</option><option>ASSIGNED</option><option>ARRIVED</option>
+                <option>ACTIVE_TENANT</option><option>LEFT_HOSTEL</option><option>CANCELLED</option>
+              </select></div>
+            <button class="btn primary" onclick="loadAssignments()">Filter</button>
+          </div>
+          <table class="hp" style="margin-top:12px">
+            <thead><tr><th>Ref</th><th>Nurse</th><th>Passport</th><th>Room/Bed</th><th>Status</th><th>Docs</th></tr></thead>
+            <tbody id="assignRows"><tr><td colspan="6" class="cwa-empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="card" id="detailCard"><div class="cwa-empty">Select an assignment to manage it.</div></div>
+      </div>
+    </section>
+
+    <!-- ── Search & Assign ─────────────────────────────────── -->
+    <section id="pane-search" style="display:none">
+      <div class="card">
+        <h3 style="margin:0 0 8px;color:#15324a">Search Nurse (existing portal records)</h3>
+        <div class="searchbar">
+          <div><input id="nq" placeholder="Passport number, name, CPR/Civil ID, NUR- or GL- reference…" onkeydown="if(event.key==='Enter')searchNurses()"></div>
+          <button class="btn primary" onclick="searchNurses()">Search</button>
+        </div>
+        <div class="muted" style="margin-top:6px">Nurses are pulled from the registration / grading-letter database — no re-entry needed.</div>
+        <table class="hp" style="margin-top:12px">
+          <thead><tr><th></th><th>Reference</th><th>Name</th><th>Passport</th><th>CPR</th><th>Grading Letter</th><th>Current Hostel Assignment</th></tr></thead>
+          <tbody id="nurseRows"><tr><td colspan="7" class="cwa-empty">Search to see results.</td></tr></tbody>
+        </table>
+        <div class="form-grid" style="margin-top:14px">
+          <div><label>Assign to partner</label><select id="assignPartner"></select></div>
+          <div><label>Expected arrival date (optional)</label><input type="date" id="assignArrival"></div>
+          <div><label>Room (optional)</label><input id="assignRoom"></div>
+          <div><label>Bed (optional)</label><input id="assignBed"></div>
+          <div class="full"><label>Note for partner (optional, visible to hostel)</label><input id="assignPartnerNote"></div>
+          <div class="full"><label>Internal notes (Embassy only)</label><input id="assignNotes"></div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn primary" onclick="assignSelected()">Mark Selected as Tenant(s)</button>
+          <span class="muted" id="selCount">0 selected</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Partners & Access ───────────────────────────────── -->
+    <section id="pane-partners" style="display:none">
+      <div class="split">
+        <div class="card">
+          <h3 style="margin:0 0 8px;color:#15324a">Hostel Partners</h3>
+          <table class="hp"><thead><tr><th>Partner</th><th>Status</th><th>Open Assignments</th><th>Logins</th></tr></thead>
+          <tbody id="partnerRows"><tr><td colspan="4" class="cwa-empty">Loading…</td></tr></tbody></table>
+          <div id="partnerUsersBox"></div>
+        </div>
+        <div class="card admin-only-block">
+          <h3 style="margin:0 0 8px;color:#15324a">Create Partner Login <span class="muted">(admin only)</span></h3>
+          <div class="form-grid">
+            <div><label>Partner</label><select id="puPartner"></select></div>
+            <div><label>Username</label><input id="puUsername" autocomplete="off"></div>
+            <div><label>Contact name</label><input id="puFullName"></div>
+            <div><label>Email</label><input id="puEmail"></div>
+            <div class="full"><label>Password (min 8 chars)</label><input id="puPassword" type="text" autocomplete="off"></div>
+          </div>
+          <div style="margin-top:10px"><button class="btn primary" onclick="createPartnerUser()">Create Login</button></div>
+          <p class="muted" style="margin-top:10px">Partner signs in at <b>/hostel/login</b> and sees only nurses assigned to their hostel.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Audit ───────────────────────────────────────────── -->
+    <section id="pane-audit" style="display:none">
+      <div class="card">
+        <h3 style="margin:0 0 8px;color:#15324a">Audit Timeline</h3>
+        <ul class="timeline" id="auditRows"><li class="cwa-empty">Loading…</li></ul>
+      </div>
+    </section>
+  </main>
+
+<script>
+const USER_ROLE='__USER_ROLE__';
+const isAdmin = USER_ROLE==='admin';
+if(!isAdmin) document.querySelectorAll('.admin-only-block').forEach(x=>x.style.display='none');
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function msg(text,ok){const m=document.getElementById('msg');m.className='msg '+(ok?'ok':'err');m.textContent=text;setTimeout(()=>{m.className='msg'},6000)}
+async function api(url,opts){const r=await fetch(url,{credentials:'include',...(opts||{})});let j={};try{j=await r.json()}catch(e){}if(!r.ok||j.success===false)throw new Error(j.error||('Request failed ('+r.status+')'));return j}
+async function post(url,payload){return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})}
+
+let partners=[], currentDetail=null;
+
+function showTab(name){
+  for(const t of ['assignments','search','partners','audit']){
+    document.getElementById('pane-'+t).style.display = t===name?'':'none';
+    document.getElementById('tab-'+t).className = t===name?'active':'';
+  }
+  if(name==='audit') loadAudit();
+  if(name==='partners') loadPartners(true);
+}
+
+// ── Partners ──
+async function loadPartners(withUsers){
+  const j=await api('/api/admin/hostel/partners'+(withUsers&&isAdmin?'?include_users=1':''));
+  partners=j.partners||[];
+  const opts=partners.filter(p=>p.status==='ACTIVE').map(p=>`<option value="${p.id}">${esc(p.display_name||p.partner_name)}</option>`).join('');
+  for(const id of ['apartner','assignPartner','puPartner']){
+    const el=document.getElementById(id);
+    if(el) el.innerHTML = (id==='apartner'?'<option value="">All partners</option>':'')+opts;
+  }
+  document.getElementById('partnerRows').innerHTML = partners.map(p=>
+    `<tr><td><b>${esc(p.display_name||p.partner_name)}</b><div class="muted">${esc(p.partner_code)}</div></td>
+     <td><span class="pill ${esc(p.status)}">${esc(p.status)}</span></td>
+     <td>${Number(p.open_assignments||0)}</td><td>${Number(p.user_count||0)}</td></tr>`).join('')
+    || '<tr><td colspan="4" class="cwa-empty">No partners.</td></tr>';
+  if(withUsers&&isAdmin){
+    document.getElementById('partnerUsersBox').innerHTML = partners.map(p=>{
+      const users=(p.users||[]).map(u=>
+        `<tr><td>${esc(u.username)}</td><td>${esc(u.full_name||'-')}</td>
+         <td><span class="pill ${u.status==='ACTIVE'?'ACTIVE':'CANCELLED'}">${esc(u.status)}</span></td>
+         <td>${esc(u.last_login_at||'never')}</td>
+         <td><button class="btn sm" onclick="resetPartnerPassword(${u.id},'${esc(u.username)}')">Reset PW</button>
+             <button class="btn sm ${u.status==='ACTIVE'?'danger':''}" onclick="togglePartnerUser(${u.id},'${u.status==='ACTIVE'?'DISABLED':'ACTIVE'}')">${u.status==='ACTIVE'?'Disable':'Enable'}</button></td></tr>`).join('');
+      return users?`<h4 style="margin:14px 0 6px;color:#15324a">${esc(p.display_name||p.partner_name)} — logins</h4>
+        <table class="hp"><thead><tr><th>Username</th><th>Name</th><th>Status</th><th>Last Login</th><th></th></tr></thead><tbody>${users}</tbody></table>`:'';
+    }).join('');
+  }
+}
+async function createPartnerUser(){
+  try{
+    await post('/api/admin/hostel/partner-users/save',{action:'create',
+      partner_id:Number(document.getElementById('puPartner').value),
+      username:document.getElementById('puUsername').value,
+      full_name:document.getElementById('puFullName').value,
+      email:document.getElementById('puEmail').value,
+      password:document.getElementById('puPassword').value});
+    msg('Partner login created.',true);
+    for(const id of ['puUsername','puFullName','puEmail','puPassword'])document.getElementById(id).value='';
+    loadPartners(true);
+  }catch(e){msg(e.message)}
+}
+async function resetPartnerPassword(id,username){
+  const pw=prompt('New password for '+username+' (min 8 chars):');
+  if(!pw)return;
+  try{await post('/api/admin/hostel/partner-users/save',{action:'reset_password',partner_user_id:id,password:pw});msg('Password reset.',true)}catch(e){msg(e.message)}
+}
+async function togglePartnerUser(id,status){
+  try{await post('/api/admin/hostel/partner-users/save',{action:'set_status',partner_user_id:id,status});msg('Login '+status.toLowerCase()+'.',true);loadPartners(true)}catch(e){msg(e.message)}
+}
+
+// ── Nurse search & assign ──
+async function searchNurses(){
+  const q=document.getElementById('nq').value.trim();
+  const tbody=document.getElementById('nurseRows');
+  tbody.innerHTML='<tr><td colspan="7" class="cwa-empty">Searching…</td></tr>';
+  try{
+    const j=await api('/api/admin/hostel/nurse-search?q='+encodeURIComponent(q));
+    tbody.innerHTML=(j.results||[]).map(n=>{
+      const cur=n.current_assignment?`<span class="pill ${esc(n.current_assignment.status)}">${esc(n.current_assignment.status)}</span> ${esc(n.current_assignment.display_name||n.current_assignment.partner_name)} (${esc(n.current_assignment.assignment_ref)})`:'—';
+      return `<tr><td><input type="checkbox" class="nsel" value="${Number(n.id)}" onchange="updateSel()" ${n.current_assignment?'disabled':''}></td>
+        <td>${esc(n.reference_id||'-')}</td><td><b>${esc(n.full_name||'-')}</b><div class="muted">${esc(n.mobile||'')}</div></td>
+        <td>${esc(n.passport_number||'-')}</td><td>${esc(n.civil_id||'-')}</td>
+        <td>${n.gl_ref?esc(n.gl_ref)+' <span class="muted">'+esc(n.gl_status)+'</span>':'—'}</td><td>${cur}</td></tr>`;
+    }).join('')||'<tr><td colspan="7" class="cwa-empty">'+esc(j.note||'No matching nurses.')+'</td></tr>';
+  }catch(e){tbody.innerHTML='<tr><td colspan="7" class="cwa-empty">'+esc(e.message)+'</td></tr>'}
+  updateSel();
+}
+function updateSel(){document.getElementById('selCount').textContent=document.querySelectorAll('.nsel:checked').length+' selected'}
+async function assignSelected(){
+  const ids=[...document.querySelectorAll('.nsel:checked')].map(x=>Number(x.value));
+  if(!ids.length)return msg('Select at least one nurse.');
+  try{
+    const j=await post('/api/admin/hostel/assignments/create',{
+      nurse_ids:ids,
+      partner_id:Number(document.getElementById('assignPartner').value),
+      expected_arrival_date:document.getElementById('assignArrival').value,
+      room_number:document.getElementById('assignRoom').value,
+      bed_number:document.getElementById('assignBed').value,
+      note_for_partner:document.getElementById('assignPartnerNote').value,
+      notes:document.getElementById('assignNotes').value});
+    const done=(j.created||[]).length, skip=(j.skipped||[]);
+    msg(done+' nurse(s) assigned.'+(skip.length?' Skipped: '+skip.map(s=>(s.nurse_name||s.nurse_id)+' ('+s.reason+')').join('; '):''),true);
+    searchNurses(); loadAssignments(); loadKpis();
+  }catch(e){msg(e.message)}
+}
+
+// ── Assignments list & detail ──
+async function loadAssignments(){
+  const partner=document.getElementById('apartner').value, status=document.getElementById('astatus').value;
+  document.getElementById('exportLink').href='/api/admin/hostel/export.csv'+(partner?('?partner_id='+partner):'');
+  const q=document.getElementById('aq').value.trim();
+  const tbody=document.getElementById('assignRows');
+  tbody.innerHTML='<tr><td colspan="6" class="cwa-empty">Loading…</td></tr>';
+  try{
+    const j=await api(`/api/admin/hostel/assignments?partner_id=${partner}&status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`);
+    tbody.innerHTML=(j.items||[]).map(a=>
+      `<tr class="rowlink" onclick="openDetail(${Number(a.id)})"><td><b>${esc(a.assignment_ref)}</b><div class="muted">${esc(a.display_name||a.partner_name)}</div></td>
+       <td>${esc(a.nurse_name)}<div class="muted">${esc(a.nurse_reference||'')}</div></td><td>${esc(a.passport_number||'-')}</td>
+       <td>${esc(a.room_number||'-')}/${esc(a.bed_number||'-')}</td>
+       <td><span class="pill ${esc(a.status)}">${esc(a.status)}</span></td><td>${Number(a.active_agreements||0)}</td></tr>`).join('')
+      ||'<tr><td colspan="6" class="cwa-empty">No assignments in this filter.</td></tr>';
+  }catch(e){tbody.innerHTML='<tr><td colspan="6" class="cwa-empty">'+esc(e.message)+'</td></tr>'}
+}
+async function loadKpis(){
+  try{
+    const j=await api('/api/admin/hostel/assignments?status=OPEN&page_size=10');
+    const k=[['Open Assignments',j.total]];
+    for(const s of ['ASSIGNED','ARRIVED','ACTIVE_TENANT','CANCELLED']){
+      const r=await api('/api/admin/hostel/assignments?status='+s+'&page_size=10');
+      k.push([s.replace('_',' '),r.total]);
+    }
+    document.getElementById('kpis').innerHTML=k.map(([l,v])=>`<div class="kpi"><b>${Number(v||0)}</b><span>${l}</span></div>`).join('');
+  }catch(e){}
+}
+function fld(label,value){return `<div style="padding:8px;border:1px solid #edf2f6;border-radius:7px"><span class="muted">${label}</span><div><b>${esc(value||'-')}</b></div></div>`}
+async function openDetail(id){
+  try{
+    const j=await api('/api/admin/hostel/assignments/detail?id='+id);
+    currentDetail=j;
+    renderDetail();
+  }catch(e){msg(e.message)}
+}
+function renderDetail(){
+  const a=currentDetail.assignment, docs=currentDetail.agreements||[], audit=currentDetail.audit||[];
+  const open=['ASSIGNED','ARRIVED','ACTIVE_TENANT'].includes(a.status);
+  const statusButtons=({ASSIGNED:['ARRIVED','ACTIVE_TENANT','CANCELLED'],ARRIVED:['ACTIVE_TENANT','LEFT_HOSTEL','CANCELLED'],ACTIVE_TENANT:['LEFT_HOSTEL']}[a.status]||[])
+    .map(s=>`<button class="btn sm ${s==='CANCELLED'?'danger':''}" onclick="changeStatus(${a.id},'${s}')">${s.replace('_',' ')}</button>`).join(' ');
+  document.getElementById('detailCard').innerHTML=`
+    <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;border-bottom:1px solid #eef3f7;padding-bottom:10px;margin-bottom:10px">
+      <div><h2 style="margin:0;color:#15324a;font-size:20px">${esc(a.nurse_name)}</h2>
+      <div class="muted">${esc(a.assignment_ref)} · ${esc(a.display_name||a.partner_name)}</div></div>
+      <span class="pill ${esc(a.status)}">${esc(a.status)}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${fld('Passport',a.passport_number)}${fld('Nurse Ref',a.nurse_reference)}
+      ${fld('Expected Arrival',a.expected_arrival_date)}${fld('Actual Arrival',a.actual_arrival_date)}
+      ${fld('Room',a.room_number)}${fld('Bed',a.bed_number)}
+      ${fld('Acknowledged by partner',a.acknowledged_at?a.acknowledged_at+' ('+(a.acknowledged_by||'')+')':'Not yet')}
+      ${fld('Assigned by',a.assigned_by+' on '+(a.assigned_date||''))}
+    </div>
+    ${a.status==='CANCELLED'?`<div class="msg err" style="display:block">Cancelled by ${esc(a.cancelled_by)}: ${esc(a.cancellation_reason)}</div>`:''}
+    ${a.partner_note?`<div style="margin-top:8px"><span class="muted">Partner notes</span><div style="white-space:pre-wrap;font-size:12px;border:1px solid #edf2f6;border-radius:7px;padding:8px">${esc(a.partner_note)}</div></div>`:''}
+    ${open?`
+    <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">${statusButtons}</div>
+    <div class="form-grid" style="margin-top:10px">
+      <div><label>Room</label><input id="dRoom" value="${esc(a.room_number||'')}"></div>
+      <div><label>Bed</label><input id="dBed" value="${esc(a.bed_number||'')}"></div>
+      <div><label>Expected arrival</label><input type="date" id="dExp" value="${esc(a.expected_arrival_date||'')}"></div>
+      <div><label>Actual arrival</label><input type="date" id="dAct" value="${esc(a.actual_arrival_date||'')}"></div>
+      <div class="full"><label>Note for partner</label><input id="dPartnerNote" value="${esc(a.note_for_partner||'')}"></div>
+    </div>
+    <div style="margin-top:8px"><button class="btn primary sm" onclick="saveDetail(${a.id})">Save Changes</button></div>
+    <h4 style="margin:14px 0 6px;color:#15324a">Upload Agreement</h4>
+    <div class="form-grid">
+      <div><label>Document type</label>
+        <select id="upType"><option>ACCOMMODATION_AGREEMENT</option><option>REPLACEMENT</option><option>CANCELLATION</option><option>OTHER</option></select></div>
+      <div><label>File (PDF/JPG/PNG, max 10 MB)</label><input type="file" id="upFile" accept=".pdf,.jpg,.jpeg,.png"></div>
+      <div><label>Replaces document (optional)</label>
+        <select id="upReplace"><option value="">— none —</option>${docs.filter(d=>d.status==='ACTIVE').map(d=>`<option value="${d.id}">#${d.id} ${esc(d.file_name)}</option>`).join('')}</select></div>
+      <div class="checkline"><input type="checkbox" id="upVisible" checked><label for="upVisible" style="margin:0">Visible to hostel partner immediately</label></div>
+    </div>
+    <div style="margin-top:8px"><button class="btn primary sm" onclick="uploadAgreement(${a.id})">Upload</button></div>`:''}
+    <h4 style="margin:14px 0 6px;color:#15324a">Agreement History</h4>
+    <table class="hp"><thead><tr><th>#</th><th>File</th><th>Status</th><th>Partner Sees</th><th></th></tr></thead><tbody>
+    ${docs.map(d=>`<tr><td>${d.id}</td>
+      <td>${esc(d.file_name)}<div class="muted">${esc(d.document_type)} · ${esc((d.uploaded_at||'').slice(0,16))} · ${esc(d.uploaded_by)}</div>
+      ${d.status==='CANCELLED'?`<div class="muted">Cancelled by ${esc(d.cancelled_by)}: ${esc(d.cancellation_reason)}</div>`:''}</td>
+      <td><span class="pill ${esc(d.status)}">${esc(d.status)}</span></td>
+      <td>${Number(d.visible_to_partner)&&d.status==='ACTIVE'?'Yes':'No'}
+        ${d.status==='ACTIVE'?`<button class="btn sm" onclick="setDocVisibility(${d.id},${Number(d.visible_to_partner)?0:1})">${Number(d.visible_to_partner)?'Hide':'Show'}</button>`:''}</td>
+      <td><a class="btn sm" href="/api/admin/hostel/agreements/file?id=${d.id}&download=1">Download</a>
+        ${d.status==='ACTIVE'?`<button class="btn sm danger" onclick="cancelDoc(${d.id})">Cancel</button>`:''}
+        ${['CANCELLED','REPLACED'].includes(d.status)?`<button class="btn sm" onclick="archiveDoc(${d.id})">Archive</button>`:''}</td></tr>`).join('')
+      ||'<tr><td colspan="5" class="cwa-empty">No documents uploaded yet.</td></tr>'}
+    </tbody></table>
+    <h4 style="margin:14px 0 6px;color:#15324a">Audit Trail</h4>
+    <ul class="timeline">${audit.slice(0,25).map(x=>`<li><b>${esc(x.event_type)}</b> — ${esc(x.actor)} (${esc(x.actor_type)})
+      <span class="muted">${esc(x.created_at)} ${x.note?'· '+esc(x.note):''} ${x.old_value||x.new_value?'· '+esc(x.old_value)+' → '+esc(x.new_value):''}</span></li>`).join('')||'<li class="cwa-empty">No events.</li>'}</ul>`;
+}
+async function saveDetail(id){
+  try{
+    await post('/api/admin/hostel/assignments/update',{id,
+      room_number:document.getElementById('dRoom').value,bed_number:document.getElementById('dBed').value,
+      expected_arrival_date:document.getElementById('dExp').value,actual_arrival_date:document.getElementById('dAct').value,
+      note_for_partner:document.getElementById('dPartnerNote').value});
+    msg('Assignment updated.',true);openDetail(id);loadAssignments();
+  }catch(e){msg(e.message)}
+}
+async function changeStatus(id,status){
+  let reason='';
+  if(status==='CANCELLED'){reason=prompt('Cancellation reason (required):')||'';if(!reason)return}
+  try{await post('/api/admin/hostel/assignments/update',{id,status,cancellation_reason:reason});
+    msg('Status changed to '+status+'.',true);openDetail(id);loadAssignments();loadKpis();
+  }catch(e){msg(e.message)}
+}
+async function uploadAgreement(id){
+  const f=document.getElementById('upFile').files[0];
+  if(!f)return msg('Choose a file first.');
+  const fd=new FormData();
+  fd.append('file',f);fd.append('assignment_id',id);
+  fd.append('document_type',document.getElementById('upType').value);
+  fd.append('visible_to_partner',document.getElementById('upVisible').checked?'1':'0');
+  fd.append('replace_document_id',document.getElementById('upReplace').value);
+  try{
+    const r=await fetch('/api/admin/hostel/agreements/upload',{method:'POST',credentials:'include',body:fd});
+    const j=await r.json();
+    if(!r.ok||j.success===false)throw new Error(j.error||'Upload failed');
+    msg('Agreement uploaded'+(j.replaced_document_id?' (replaced #'+j.replaced_document_id+')':'')+'. Visible to partner per your setting.',true);
+    openDetail(id);loadAssignments();
+  }catch(e){msg(e.message)}
+}
+async function cancelDoc(id){
+  const reason=prompt('Cancellation reason (required):');if(!reason)return;
+  try{await post('/api/admin/hostel/agreements/update',{id,action:'cancel',reason});msg('Agreement cancelled.',true);openDetail(currentDetail.assignment.id)}catch(e){msg(e.message)}
+}
+async function archiveDoc(id){
+  try{await post('/api/admin/hostel/agreements/update',{id,action:'archive'});msg('Agreement archived.',true);openDetail(currentDetail.assignment.id)}catch(e){msg(e.message)}
+}
+async function setDocVisibility(id,visible){
+  try{await post('/api/admin/hostel/agreements/update',{id,action:'set_visibility',visible_to_partner:visible});
+    msg(visible?'Now visible to partner.':'Hidden from partner.',true);openDetail(currentDetail.assignment.id)}catch(e){msg(e.message)}
+}
+
+// ── Audit tab ──
+async function loadAudit(){
+  try{
+    const j=await api('/api/admin/hostel/audit?limit=200');
+    document.getElementById('auditRows').innerHTML=(j.items||[]).map(x=>
+      `<li><b>${esc(x.event_type)}</b> — ${esc(x.actor)} (${esc(x.actor_type)}) on ${esc(x.entity_type)} #${x.entity_id}
+       <span class="muted">${esc(x.created_at)} ${x.note?'· '+esc(x.note):''} ${x.old_value||x.new_value?'· '+esc(x.old_value)+' → '+esc(x.new_value):''} ${x.ip?'· ip '+esc(x.ip):''}</span></li>`).join('')
+      ||'<li class="cwa-empty">No audit events yet.</li>';
+  }catch(e){document.getElementById('auditRows').innerHTML='<li class="cwa-empty">'+esc(e.message)+'</li>'}
+}
+
+loadPartners().then(()=>{loadAssignments();loadKpis()});
+</script>
+</body>
+</html>

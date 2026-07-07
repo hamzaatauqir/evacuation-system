@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__PARTNER_NAME__ — Hostel Partner Dashboard</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',Arial,sans-serif;background:#f2f5f8;color:#212b33}
+    .hdr{background:linear-gradient(135deg,#0d2b40,#15324a);color:#fff;padding:14px 22px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+    .hdr h1{font-size:18px}.hdr .sub{font-size:12px;opacity:.85}
+    .hdr .who{font-size:13px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .hdr a,.hdr button{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:6px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;text-decoration:none}
+    .shell{max-width:1280px;margin:0 auto;padding:18px}
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+    .kpi{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:12px}.kpi b{display:block;font-size:24px;color:#15324a}.kpi span{font-size:12px;color:#68798a}
+    .card{background:#fff;border:1px solid #e3ebf0;border-radius:8px;padding:16px;margin-bottom:14px}
+    .card h3{color:#15324a;margin-bottom:8px;font-size:16px}
+    .muted{color:#657789;font-size:12px}
+    .split{display:grid;grid-template-columns:minmax(320px,1fr) 400px;gap:14px;align-items:start}
+    table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid #eef3f7;padding:8px;text-align:left;font-size:12px;vertical-align:top}
+    tr.rowlink{cursor:pointer}tr.rowlink:hover{background:#f7fafc}
+    .pill{display:inline-block;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:700}
+    .pill.ASSIGNED{background:#e3f2fd;color:#1258a3}.pill.ARRIVED{background:#fff3e0;color:#9a5b00}
+    .pill.ACTIVE_TENANT{background:#e8f5e9;color:#1c7a2f}.pill.LEFT_HOSTEL{background:#eceff1;color:#4a5b66}
+    .searchbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    .searchbar input,.searchbar select{border:1px solid #cfdde7;border-radius:6px;padding:9px;font:inherit;flex:1;min-width:140px}
+    .btn{border:1px solid #cddce6;background:#f7fafc;border-radius:6px;padding:8px 12px;color:#17344c;font-weight:700;cursor:pointer;font-size:12px;text-decoration:none;display:inline-block}
+    .btn.primary{background:#15324a;color:#fff;border-color:#15324a}
+    .msg{margin:10px 0;padding:10px;border-radius:6px;font-size:13px;display:none}
+    .msg.ok{background:#e8f5e9;color:#1c7a2f;display:block}.msg.err{background:#ffebee;color:#a02020;display:block}
+    .fldgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .fld{padding:8px;border:1px solid #edf2f6;border-radius:7px}.fld span{display:block;color:#6b7b88;font-size:11px}.fld b{display:block;margin-top:2px;color:#172b3a;font-size:13px}
+    textarea{width:100%;border:1px solid #cfdde7;border-radius:6px;padding:9px;font:inherit;margin-top:6px}
+    ul.updates{list-style:none}ul.updates li{border-left:3px solid #d7e2ea;padding:5px 0 5px 10px;margin-left:4px;font-size:12px}
+    @media(max-width:1000px){.split{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header class="hdr">
+    <div><h1>__PARTNER_NAME__ — Accommodation Partner</h1><div class="sub">Embassy of Pakistan Kuwait · Community Welfare Wing</div></div>
+    <div class="who">Signed in as <b>__PARTNER_USER__</b>
+      <a href="/api/hostel/export.csv">Export CSV</a>
+      <button onclick="doLogout()">Logout</button>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="msg" id="msg"></div>
+    <section class="kpi-grid" id="kpis"></section>
+    <div class="split">
+      <div>
+        <div class="card">
+          <h3>Assigned Nurses</h3>
+          <div class="searchbar">
+            <input id="q" placeholder="Search name / passport / reference" onkeydown="if(event.key==='Enter')loadNurses()">
+            <select id="status">
+              <option value="">Current (assigned / arrived / tenant)</option>
+              <option value="ASSIGNED">Assigned</option><option value="ARRIVED">Arrived</option>
+              <option value="ACTIVE_TENANT">Active tenant</option><option value="LEFT_HOSTEL">Left hostel</option>
+            </select>
+            <button class="btn primary" onclick="loadNurses()">Search</button>
+          </div>
+          <table>
+            <thead><tr><th>Ref</th><th>Nurse</th><th>Passport</th><th>Expected</th><th>Room/Bed</th><th>Status</th><th>Docs</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h3>Recent Embassy Updates</h3>
+          <ul class="updates" id="updates"><li class="muted">Loading…</li></ul>
+        </div>
+      </div>
+      <div class="card" id="detail"><div class="muted">Select a nurse to see placement details and agreements.</div></div>
+    </div>
+  </main>
+<script>
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function msg(text,ok){const m=document.getElementById('msg');m.className='msg '+(ok?'ok':'err');m.textContent=text;setTimeout(()=>{m.className='msg'},6000)}
+async function api(url,opts){
+  const r=await fetch(url,{credentials:'include',...(opts||{})});
+  let j={};try{j=await r.json()}catch(e){}
+  if(r.status===401){location.href='/hostel/login';throw new Error('Signed out')}
+  if(!r.ok||j.success===false)throw new Error(j.error||('Request failed ('+r.status+')'));
+  return j;
+}
+async function post(url,payload){return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})}
+let canMarkArrival=false, currentId=null;
+
+async function loadSummary(){
+  const j=await api('/api/hostel/summary');
+  canMarkArrival=!!j.can_mark_arrival;
+  const c=j.counts||{};
+  document.getElementById('kpis').innerHTML=[
+    ['Expected Today',c.expected_today],['Awaiting Arrival',c.assigned],['Arrived',c.arrived],
+    ['Active Tenants',c.active_tenants],['Pending Acknowledgement',c.pending_acknowledgement],
+    ['Agreements Available',c.visible_agreements]
+  ].map(([l,v])=>`<div class="kpi"><b>${Number(v||0)}</b><span>${l}</span></div>`).join('');
+  document.getElementById('updates').innerHTML=(j.recent_updates||[]).map(u=>
+    `<li><b>${esc(u.event_type.replaceAll('_',' '))}</b> ${u.new_value?'· '+esc(u.new_value):''}
+     <span class="muted">${esc(u.created_at)} ${u.note?'· '+esc(u.note):''}</span></li>`).join('')
+    ||'<li class="muted">No updates yet.</li>';
+}
+async function loadNurses(){
+  const q=document.getElementById('q').value.trim(), status=document.getElementById('status').value;
+  const tbody=document.getElementById('rows');
+  tbody.innerHTML='<tr><td colspan="7" class="muted">Loading…</td></tr>';
+  try{
+    const j=await api(`/api/hostel/nurses?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`);
+    tbody.innerHTML=(j.items||[]).map(a=>
+      `<tr class="rowlink" onclick="openDetail(${Number(a.id)})">
+       <td><b>${esc(a.assignment_ref)}</b></td><td>${esc(a.nurse_name)}</td><td>${esc(a.passport_number||'-')}</td>
+       <td>${esc(a.expected_arrival_date||'-')}</td><td>${esc(a.room_number||'-')}/${esc(a.bed_number||'-')}</td>
+       <td><span class="pill ${esc(a.status)}">${esc(a.status.replaceAll('_',' '))}</span>${a.acknowledged_at?'':' <span class="muted">new</span>'}</td>
+       <td>${Number(a.agreements||0)}</td></tr>`).join('')
+      ||'<tr><td colspan="7" class="muted">No nurses assigned in this filter.</td></tr>';
+  }catch(e){tbody.innerHTML='<tr><td colspan="7" class="muted">'+esc(e.message)+'</td></tr>'}
+}
+function fld(l,v){return `<div class="fld"><span>${l}</span><b>${esc(v||'-')}</b></div>`}
+async function openDetail(id){
+  currentId=id;
+  try{
+    const j=await api('/api/hostel/nurses/detail?id='+id);
+    const a=j.assignment, docs=j.agreements||[];
+    document.getElementById('detail').innerHTML=`
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;border-bottom:1px solid #eef3f7;padding-bottom:10px;margin-bottom:10px">
+        <div><h3 style="margin:0">${esc(a.nurse_name)}</h3><div class="muted">${esc(a.assignment_ref)}</div></div>
+        <span class="pill ${esc(a.status)}">${esc(a.status.replaceAll('_',' '))}</span></div>
+      <div class="fldgrid">
+        ${fld('Passport',a.passport_number)}${fld('Assigned on',a.assigned_date)}
+        ${fld('Expected arrival',a.expected_arrival_date)}${fld('Actual arrival',a.actual_arrival_date)}
+        ${fld('Room',a.room_number)}${fld('Bed',a.bed_number)}
+      </div>
+      ${a.note_for_partner?`<div style="margin-top:8px"><span class="muted">Embassy note</span><div style="white-space:pre-wrap;font-size:13px;border:1px solid #edf2f6;border-radius:7px;padding:8px">${esc(a.note_for_partner)}</div></div>`:''}
+      <h4 style="margin:12px 0 6px;color:#15324a">Agreements</h4>
+      ${docs.map(d=>`<div style="display:flex;justify-content:space-between;align-items:center;border:1px solid #edf2f6;border-radius:7px;padding:8px;margin-bottom:6px">
+        <div><b style="font-size:13px">${esc(d.file_name)}</b><div class="muted">${esc(d.document_type.replaceAll('_',' '))} · ${esc((d.uploaded_at||'').slice(0,16))} · ${(d.file_size/1024).toFixed(0)} KB</div></div>
+        <div><a class="btn" href="/api/hostel/agreements/file?id=${d.id}" target="_blank">View</a>
+        <a class="btn primary" href="/api/hostel/agreements/file?id=${d.id}&download=1">Download</a></div></div>`).join('')
+        ||'<div class="muted">No agreements shared yet.</div>'}
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        ${!a.acknowledged_at?`<button class="btn primary" onclick="acknowledge(${a.id})">Acknowledge Assignment</button>`:`<span class="muted">Acknowledged ${esc(a.acknowledged_at)}</span>`}
+        ${canMarkArrival&&a.status==='ASSIGNED'?`<button class="btn" onclick="markArrival(${a.id})">Confirm Arrival Today</button>`:''}
+      </div>
+      <h4 style="margin:12px 0 4px;color:#15324a">Send a note to the Embassy</h4>
+      <textarea id="noteText" rows="3" placeholder="e.g. Nurse checked in, room changed to..."></textarea>
+      <div style="margin-top:6px"><button class="btn primary" onclick="sendNote(${a.id})">Send Note</button></div>
+      ${a.partner_note?`<div style="margin-top:8px"><span class="muted">Previous notes</span><div style="white-space:pre-wrap;font-size:12px;border:1px solid #edf2f6;border-radius:7px;padding:8px">${esc(a.partner_note)}</div></div>`:''}`;
+  }catch(e){msg(e.message)}
+}
+async function acknowledge(id){
+  try{await post('/api/hostel/acknowledge',{id});msg('Assignment acknowledged. The Embassy can see this.',true);openDetail(id);loadNurses();loadSummary()}catch(e){msg(e.message)}
+}
+async function markArrival(id){
+  try{await post('/api/hostel/mark-arrival',{id});msg('Arrival recorded.',true);openDetail(id);loadNurses();loadSummary()}catch(e){msg(e.message)}
+}
+async function sendNote(id){
+  const note=document.getElementById('noteText').value.trim();
+  if(!note)return msg('Write a note first.');
+  try{await post('/api/hostel/note',{id,note});msg('Note sent to the Embassy.',true);openDetail(id)}catch(e){msg(e.message)}
+}
+async function doLogout(){
+  try{await post('/api/hostel/logout',{})}catch(e){}
+  location.href='/hostel/login';
+}
+loadSummary().then(loadNurses).catch(e=>msg(e.message));
+</script>
+</body>
+</html>

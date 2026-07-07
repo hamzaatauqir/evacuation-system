@@ -64,7 +64,14 @@ python3 tests/smoke/routes.py http://localhost:8080
 python3 tests/smoke/fee_collector_expense_ledger_access.py http://localhost:8080
 python3 tests/smoke/grading_letter_pdf_layout.py http://localhost:8080
 python3 tests/smoke/nurse_service_access.py http://localhost:8080
+
+# Hostel partner module (AJA Care)
+python3 tests/smoke/hostel_module.py http://localhost:8080     # read-only gates
+python3 tests/smoke/hostel_workflow.py http://localhost:8080   # E2E, localhost only, MUTATES local DB
 ```
+
+Known issue: `grading_letter_pdf_layout.py` fails with `KeyError: 'relation_text'` — pre-existing
+test-script bug (reproduces on pre-hostel baseline), unrelated to server code.
 
 All smoke tests are read-only stdlib HTTP checks. A successful run prints `Failed: 0` and `5xx failures: 0`.
 
@@ -130,4 +137,6 @@ Set env var to `0`, `false`, `no`, or `off` to disable.
 
 ## Modularization Status
 
-The codebase is at **Phase 0** of a planned modularization. `app/` and `app/core/` exist as empty package stubs only. **Do not move functions out of `server.py`** until Phase 1 is explicitly started. `tests/route_inventory.txt` is the frozen route baseline — every route listed there must continue to exist after any refactor.
+The codebase is at **Phase 0** of a planned modularization. `app/core/` exists as an empty package stub. **Do not move functions out of `server.py`** until Phase 1 is explicitly started. `tests/route_inventory.txt` is the frozen route baseline — every route listed there must continue to exist after any refactor.
+
+**Exception — `app/domains/hostel/` (added 2026-07-07):** the Hostel / Nurse Accommodation Partner module (AJA Care) was built directly as a domain module rather than inside `server.py`. It is additive-only: `server.py` imports it guarded (`HOSTEL_MODULE`), injects helpers via `hostel.configure(...)`, calls `hostel.ensure_schema(db)` from `init_db()`, and forwards `/admin/hostel-accommodation`, `/hostel/*`, `/api/hostel/*`, `/api/admin/hostel/*` to `hostel.handle_get/handle_post` from the tail of the `do_GET`/`do_POST` chains. Partner logins live in `hostel_partner_users` (PBKDF2) with their own `hostel_session` cookie and in-memory session store — deliberately separate from staff `SESSIONS` (staff RBAC gives every `users`-table role a `/staff/my-cases` access floor, so partners must never be staff users). Tables: `hostel_partners`, `hostel_partner_users`, `hostel_assignments`, `hostel_agreements`, `hostel_audit` (append-only), `hostel_ref_counter`. Agreement files: `hostel_agreement_uploads/` (under `/data` on Render). See `docs/hostel_module_audit_and_plan.md`.
