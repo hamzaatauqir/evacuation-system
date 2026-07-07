@@ -1,0 +1,67 @@
+import { Navigate, Route, Routes } from "react-router-dom";
+import { CwaHomePage } from "./pages/CwaHomePage";
+import { NursesHomePage } from "./pages/NursesHomePage";
+import { NursesRegisterPage } from "./pages/NursesRegisterPage";
+import { NursesLoginPage } from "./pages/NursesLoginPage";
+import { NursesForgotPasswordPage } from "./pages/NursesForgotPasswordPage";
+import { NursesResetPasswordPage } from "./pages/NursesResetPasswordPage";
+import { NursesPortalPage } from "./pages/NursesPortalPage";
+import { NursesAccommodationPage } from "./pages/NursesAccommodationPage";
+import { NursesComplaintPage } from "./pages/NursesComplaintPage";
+import { NursesLeavingNoticePage } from "./pages/NursesLeavingNoticePage";
+import { LegalOpfPage } from "./pages/LegalOpfPage";
+import { DeathCasesPage } from "./pages/DeathCasesPage";
+import { LocatingAssistancePage } from "./pages/LocatingAssistancePage";
+import { CommunityFeedbackPage } from "./pages/CommunityFeedbackPage";
+import { TrackRequestPage } from "./pages/TrackRequestPage";
+import { AdminCwaDashboard } from "./pages/AdminCwaDashboard";
+import { AdminNursesPage } from "./pages/AdminNursesPage";
+import { AdminNursePendingAccountsPage } from "./pages/AdminNursePendingAccountsPage";
+import { AdminNurseArrivalBatchesPage } from "./pages/AdminNurseArrivalBatchesPage";
+import { AdminNurseOnboardingPage } from "./pages/AdminNurseOnboardingPage";
+import { AdminNursesAccommodationPage } from "./pages/AdminNursesAccommodationPage";
+import { AdminLegalCasesPage } from "./pages/AdminLegalCasesPage";
+import { AdminDeathCasesPage } from "./pages/AdminDeathCasesPage";
+import { AdminWelfareCasesPage } from "./pages/AdminWelfareCasesPage";
+import { PublicRouteForwarder } from "./components/PublicRouteForwarder";
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<CwaHomePage />} />
+      <Route path="/register" element={<PublicRouteForwarder />} />
+      <Route path="/embassy-registration" element={<PublicRouteForwarder />} />
+      <Route path="/ksa-transit" element={<PublicRouteForwarder />} />
+      <Route path="/transit-visa" element={<PublicRouteForwarder />} />
+      <Route path="/apply" element={<PublicRouteForwarder />} />
+      <Route path="/transit" element={<PublicRouteForwarder />} />
+      <Route path="/nurses" element={<NursesHomePage />} />
+      <Route path="/nurses/register" element={<NursesRegisterPage />} />
+      <Route path="/nurses/login" element={<NursesLoginPage />} />
+      <Route path="/nurses/forgot-password" element={<NursesForgotPasswordPage />} />
+      <Route path="/nurses/reset-password" element={<NursesResetPasswordPage />} />
+      <Route path="/nurses/portal" element={<NursesPortalPage />} />
+      <Route path="/nurses/accommodation" element={<NursesAccommodationPage />} />
+      <Route path="/nurses/complaint" element={<NursesComplaintPage />} />
+      <Route path="/nurses/leaving-notice" element={<NursesLeavingNoticePage />} />
+      <Route path="/legal-opf" element={<LegalOpfPage />} />
+      <Route path="/death-cases" element={<DeathCasesPage />} />
+      <Route path="/locating-assistance" element={<LocatingAssistancePage />} />
+      <Route path="/community-feedback" element={<CommunityFeedbackPage />} />
+      <Route path="/track-request" element={<TrackRequestPage />} />
+      <Route path="/admin" element={<Navigate to="/admin/community-welfare" replace />} />
+      <Route path="/admin/community-welfare" element={<AdminCwaDashboard />} />
+      <Route path="/admin/nurses" element={<AdminNursesPage />} />
+      <Route path="/admin/nurses/pending-accounts" element={<AdminNursePendingAccountsPage />} />
+      <Route path="/admin/nurses/arrival-batches" element={<AdminNurseArrivalBatchesPage />} />
+      <Route path="/admin/nurses/onboarding" element={<AdminNurseOnboardingPage />} />
+      <Route path="/admin/nurses/accommodation" element={<AdminNursesAccommodationPage />} />
+      <Route path="/admin/legal-cases" element={<AdminLegalCasesPage />} />
+      <Route path="/admin/death-cases" element={<AdminDeathCasesPage />} />
+      <Route path="/admin/welfare-cases" element={<AdminWelfareCasesPage />} />
+      <Route path="/admin/my-cases" element={<AdminWelfareCasesPage />} />
+      <Route path="/admin/ambassador-review" element={<AdminWelfareCasesPage />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}

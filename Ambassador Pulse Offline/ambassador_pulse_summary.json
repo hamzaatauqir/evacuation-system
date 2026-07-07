@@ -1,0 +1,1059 @@
+{
+  "generated_at": "2026-05-04T01:14:28",
+  "reporting_window_days": 7,
+  "total_cases": 26,
+  "created_range": {
+    "start": "2026-04-28",
+    "end": "2026-05-03"
+  },
+  "counts_by_theme": {
+    "Family / Dependent Visa Restrictions": 2,
+    "Visit Visa Restrictions": 1,
+    "KOC Gate Pass / GP Validity": 0,
+    "Differential Treatment by Nationality": 0,
+    "Labour / Salary / Employer Dispute": 1,
+    "Legal / Detention / Police Matter": 2,
+    "Passport / NADRA / Consular Services": 1,
+    "Nurses / Health Worker Welfare": 3,
+    "Death / Mortal Remains": 0,
+    "Domestic Worker / Shelter / Abuse": 0,
+    "OPF / Insurance / Compensation": 9,
+    "General Welfare / Guidance": 5,
+    "Other / Unclassified": 2
+  },
+  "counts_by_sensitivity": {
+    "High": 5,
+    "Medium": 13,
+    "Low": 8
+  },
+  "counts_by_module": {
+    "Legal/OPF": 18,
+    "Welfare": 6,
+    "Feedback": 1,
+    "Nurses": 1
+  },
+  "counts_by_status": {
+    "Assigned": 18,
+    "Resolved": 7,
+    "Acknowledged": 1
+  },
+  "counts_by_assigned_to": {
+    "Zahid_New": 9,
+    "Rajab": 6,
+    "Unassigned": 5,
+    "Awais": 4,
+    "Shahid": 1,
+    "Amb": 1
+  },
+  "counts_by_assigned_department": {
+    "Community Welfare Wing Kuwait": 9,
+    "Unspecified": 8,
+    "Legal": 6,
+    "Community Welfare Wing Embassy": 1,
+    "CWA Office / AP": 1,
+    "CWA Office": 1
+  },
+  "status_by_theme": {
+    "Family / Dependent Visa Restrictions": {
+      "Assigned": 1,
+      "Resolved": 1
+    },
+    "General Welfare / Guidance": {
+      "Assigned": 3,
+      "Resolved": 2
+    },
+    "Labour / Salary / Employer Dispute": {
+      "Assigned": 1
+    },
+    "Legal / Detention / Police Matter": {
+      "Assigned": 2
+    },
+    "Nurses / Health Worker Welfare": {
+      "Assigned": 2,
+      "Resolved": 1
+    },
+    "OPF / Insurance / Compensation": {
+      "Assigned": 7,
+      "Resolved": 2
+    },
+    "Other / Unclassified": {
+      "Assigned": 1,
+      "Acknowledged": 1
+    },
+    "Passport / NADRA / Consular Services": {
+      "Assigned": 1
+    },
+    "Visit Visa Restrictions": {
+      "Resolved": 1
+    }
+  },
+  "assigned_to_by_theme": {
+    "Family / Dependent Visa Restrictions": {
+      "Zahid_New": 1,
+      "Amb": 1
+    },
+    "General Welfare / Guidance": {
+      "Unassigned": 2,
+      "Shahid": 1,
+      "Rajab": 1,
+      "Awais": 1
+    },
+    "Labour / Salary / Employer Dispute": {
+      "Rajab": 1
+    },
+    "Legal / Detention / Police Matter": {
+      "Rajab": 2
+    },
+    "Nurses / Health Worker Welfare": {
+      "Awais": 2,
+      "Unassigned": 1
+    },
+    "OPF / Insurance / Compensation": {
+      "Zahid_New": 8,
+      "Unassigned": 1
+    },
+    "Other / Unclassified": {
+      "Rajab": 1,
+      "Unassigned": 1
+    },
+    "Passport / NADRA / Consular Services": {
+      "Awais": 1
+    },
+    "Visit Visa Restrictions": {
+      "Rajab": 1
+    }
+  },
+  "high_sensitivity_issues": [
+    {
+      "reference": "LGL-00026",
+      "theme": "Family / Dependent Visa Restrictions",
+      "module": "Legal/OPF",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "excerpt": "Legal Assistance | Respected Ambassador, I hope this message finds you in good health. I am writing to respectfully seek your guidance and support regarding a family visa for my parents. I was born and raised in Kuwait and am currently employed here under V...",
+      "suggested_action": "Track affected references and prepare consolidated policy note for senior review."
+    },
+    {
+      "reference": "LGL-00022",
+      "theme": "Legal / Detention / Police Matter",
+      "module": "Legal/OPF",
+      "status": "Assigned",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "excerpt": "legal-assist | aslam o alikum sir mera Naam Muhammad Sardar Lal Din ha, Mery Baity ka Naam Muhammad Amir ha woh is waqat Deportation Cell main ha. Hum nay us ki kitab Istarham wakeel Wazara main submitt karwai howi ha, hamara baita baygunnah ha, Shahid sab...",
+      "suggested_action": "Prioritize consular welfare check and legal-status verification through appropriate channels."
+    },
+    {
+      "reference": "LGL-00017",
+      "theme": "Legal / Detention / Police Matter",
+      "module": "Legal/OPF",
+      "status": "Assigned",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "excerpt": "Legal Assistance | After 9 months of his civil ID Kuwait CID text on his number to visit their office for inquiry, he went there office and they arrested him by saying that their sponsor company is fake, it's sir very strange thing to arrest him after 9 mon...",
+      "suggested_action": "Prioritize consular welfare check and legal-status verification through appropriate channels."
+    },
+    {
+      "reference": "LGL-00009",
+      "theme": "Visit Visa Restrictions",
+      "module": "Legal/OPF",
+      "status": "Resolved",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "excerpt": "Legal Assistance | Aoa, I would like to explain my situation and request your kind support. My wife is currently 8 months pregnant. She arrived in Kuwait on a visit visa on 10 December, and her return ticket was confirmed for 8 March. However, due to region...",
+      "suggested_action": "Consolidate cases and monitor whether refusals reflect a wider policy pattern."
+    },
+    {
+      "reference": "CWA-FBK-2026-0009",
+      "theme": "Family / Dependent Visa Restrictions",
+      "module": "Welfare",
+      "status": "Resolved",
+      "assigned_to": "Amb",
+      "assigned_department": "",
+      "excerpt": "Request for Reopening of Visit Visas and Family Visas for Pakistani Families in Kuwait | Dear Sir/Madam, I hope this message finds you well. I would like to respectfully request the Embassy of Pakistan in Kuwait to kindly raise the issue of visit visas and...",
+      "suggested_action": "Track affected references and prepare consolidated policy note for senior review."
+    }
+  ],
+  "top_operational_workload": {
+    "theme": "OPF / Insurance / Compensation",
+    "count": 9
+  },
+  "top_diplomatic_issue": {
+    "theme": "Family / Dependent Visa Restrictions",
+    "count": 2
+  },
+  "sample_case_references_by_theme": {
+    "Family / Dependent Visa Restrictions": [
+      "LGL-00026",
+      "CWA-FBK-2026-0009"
+    ],
+    "Visit Visa Restrictions": [
+      "LGL-00009"
+    ],
+    "KOC Gate Pass / GP Validity": [],
+    "Differential Treatment by Nationality": [],
+    "Labour / Salary / Employer Dispute": [
+      "LGL-00014"
+    ],
+    "Legal / Detention / Police Matter": [
+      "LGL-00022",
+      "LGL-00017"
+    ],
+    "Passport / NADRA / Consular Services": [
+      "CWA-FBK-2026-0002"
+    ],
+    "Nurses / Health Worker Welfare": [
+      "LGL-00023",
+      "LGL-00004",
+      "NCMP-00001"
+    ],
+    "Death / Mortal Remains": [],
+    "Domestic Worker / Shelter / Abuse": [],
+    "OPF / Insurance / Compensation": [
+      "LGL-00029",
+      "LGL-00027",
+      "LGL-00021",
+      "LGL-00013",
+      "LGL-00011"
+    ],
+    "General Welfare / Guidance": [
+      "CWA-FBK-2026-0016",
+      "LGL-00015",
+      "CWA-FBK-2026-0013",
+      "CWA-FBK-2026-0007",
+      "CWA-FBK-2026-0005"
+    ],
+    "Other / Unclassified": [
+      "LGL-00019",
+      "FBK-GEN-2"
+    ]
+  },
+  "report_window": {
+    "start_date": "2026-04-27",
+    "end_date": "2026-05-03",
+    "days": 7
+  },
+  "input_dataset": {
+    "total_rows": 61,
+    "dated_rows": 61,
+    "undated_rows": 0,
+    "historical_rows_before_window": 35,
+    "report_window_rows": 26,
+    "future_rows_after_window": 0,
+    "warnings": []
+  },
+  "historical_recurrence": [
+    {
+      "theme": "OPF / Insurance / Compensation",
+      "issue_title": "OPF / Insurance / Compensation",
+      "issue_type": "Operational / Service",
+      "current_window_count": 9,
+      "historical_count_before_window": 15,
+      "all_time_count": 24,
+      "trend_status": "Increasing / Long-running",
+      "why_it_matters": "Sustained OPF-related queries indicate that public guidance is unclear or insufficient and routine desk-level handling can absorb load.",
+      "authority_or_institution": "OPF / Pakistan-side Institution",
+      "evidence_current_refs": [
+        "LGL-00029",
+        "LGL-00027",
+        "LGL-00021",
+        "LGL-00013",
+        "LGL-00011",
+        "LGL-00007",
+        "LGL-00005",
+        "LGL-00003"
+      ],
+      "evidence_historical_refs": [
+        "H-LGL-00030",
+        "H-LGL-00028",
+        "H-LGL-00020",
+        "H-LGL-00018",
+        "H-DTH-00001",
+        "H-LGL-00012",
+        "H-LGL-00010",
+        "H-LGL-00008"
+      ],
+      "representative_current_excerpt": "Legal Assistance | NEED NEW OPF CARD",
+      "representative_historical_excerpt": "Legal Assistance | Assalamu Alaikum. Hope you are well. My name is Rehman Iftikhar. I had made an OPF card in 2013. The registration number is 3112839. There is no expiry date on it. Do I need to make a new one. And d...",
+      "recommended_action": "Prepare clearer OPF card guidance, FAQ, upload instructions, and standard reply template to reduce repeated queries.",
+      "verification_needed": false
+    },
+    {
+      "theme": "General Welfare / Guidance",
+      "issue_title": "General Welfare / Guidance",
+      "issue_type": "Operational / Service",
+      "current_window_count": 5,
+      "historical_count_before_window": 6,
+      "all_time_count": 11,
+      "trend_status": "Increasing",
+      "why_it_matters": "Recurrent welfare guidance queries suggest a need for clearer public information.",
+      "authority_or_institution": "Community Welfare Wing",
+      "evidence_current_refs": [
+        "CWA-FBK-2026-0016",
+        "LGL-00015",
+        "CWA-FBK-2026-0013",
+        "CWA-FBK-2026-0007",
+        "CWA-FBK-2026-0005"
+      ],
+      "evidence_historical_refs": [
+        "H-CWA-LOC-2026-0001",
+        "H-CWA-FBK-2026-0006",
+        "H-CWA-FBK-2026-0004",
+        "H-CWA-FBK-2026-0003",
+        "H-CWA-FBK-2026-0001",
+        "X-EXTRA-007"
+      ],
+      "representative_current_excerpt": "Deport | کچھ دن پہلے بہت سے پاکستانی شیخ میں پکڑے گئے ہیں جن کے اپنے کاروبار تھے یا کام کر رہے تھے جن کے گھر میں بھی ہیں اور اس کے باوجود ان کو رپورٹ کیا جا رہا ہے کیوں میں بیسک بھی گیا تھا وہاں پر بھی کمپین لکھوائی ل...",
+      "representative_historical_excerpt": "Usman Munir | Usman Munir is a well known person and serving pakistani community since many years in Kuwait. I am requesting embassy to check where is he now a days and support him. | Request for Welfare Assistance in...",
+      "recommended_action": "Continue desk-level handling and identify whether repeated queries need public guidance.",
+      "verification_needed": false
+    },
+    {
+      "theme": "Nurses / Health Worker Welfare",
+      "issue_title": "Nurses / Health Worker Welfare",
+      "issue_type": "Operational / Service",
+      "current_window_count": 3,
+      "historical_count_before_window": 0,
+      "all_time_count": 3,
+      "trend_status": "New",
+      "why_it_matters": "Recurrent welfare complaints from healthcare workers may indicate facility- or accommodation-level issues worth tracking.",
+      "authority_or_institution": "MOH / Employer / Facility",
+      "evidence_current_refs": [
+        "LGL-00023",
+        "LGL-00004",
+        "NCMP-00001"
+      ],
+      "evidence_historical_refs": [],
+      "representative_current_excerpt": "legal-assist | Request for Assistance in Obtaining Good Standing Certificate from Kuwait MOH Dear Sir/Madam, I hope this message finds you well. I am writing to request your kind assistance in obtaining a Good Standin...",
+      "representative_historical_excerpt": "",
+      "recommended_action": "Review cases with CWA/AP desk and identify repeated facility or accommodation concerns.",
+      "verification_needed": false
+    },
+    {
+      "theme": "Family / Dependent Visa Restrictions",
+      "issue_title": "Family / Dependent Visa Restrictions",
+      "issue_type": "Policy / Diplomatic",
+      "current_window_count": 2,
+      "historical_count_before_window": 3,
+      "all_time_count": 5,
+      "trend_status": "Repeated",
+      "why_it_matters": "Repeated reports of family/dependent visa difficulty for Pakistani nationals may indicate a pattern in MOI/Residency Affairs practice that warrants verification. Watch-item context: this theme is high-sensitivity and warrants attention even on a single report.",
+      "authority_or_institution": "MOI Kuwait / Residency Affairs",
+      "evidence_current_refs": [
+        "LGL-00026",
+        "CWA-FBK-2026-0009"
+      ],
+      "evidence_historical_refs": [
+        "H-CWA-FBK-2026-0015",
+        "H-CWA-FBK-2026-0014",
+        "X-EXTRA-005"
+      ],
+      "representative_current_excerpt": "Legal Assistance | Respected Ambassador, I hope this message finds you in good health. I am writing to respectfully seek your guidance and support regarding a family visa for my parents. I was born and raised in Kuwai...",
+      "representative_historical_excerpt": "Family / visit visa | Asslam O Alikum Sir I am living here in Kuwait but I can't bring my family here it's a request to Pakistani embassy please talk to the Kuwaiti government for family visa and visit visa for the fe...",
+      "recommended_action": "Compile current case references and seek official clarification on current family/dependent visa policy for Pakistani nationals if reports are verified.",
+      "verification_needed": true
+    },
+    {
+      "theme": "Legal / Detention / Police Matter",
+      "issue_title": "Legal / Detention / Police Matter",
+      "issue_type": "Legal / Protection",
+      "current_window_count": 2,
+      "historical_count_before_window": 3,
+      "all_time_count": 5,
+      "trend_status": "Repeated",
+      "why_it_matters": "Detention, deportation, CID, or court-related cases involve liberty risk and require legal desk follow-up with senior visibility. Watch-item context: this theme is high-sensitivity and warrants attention even on a single report.",
+      "authority_or_institution": "Police / Courts / Deportation Centre / Legal Authorities",
+      "evidence_current_refs": [
+        "LGL-00022",
+        "LGL-00017"
+      ],
+      "evidence_historical_refs": [
+        "H-LGL-00025",
+        "H-LGL-00016",
+        "X-EXTRA-006"
+      ],
+      "representative_current_excerpt": "legal-assist | aslam o alikum sir mera Naam Muhammad Sardar Lal Din ha, Mery Baity ka Naam Muhammad Amir ha woh is waqat Deportation Cell main ha. Hum nay us ki kitab Istarham wakeel Wazara main submitt karwai howi ha...",
+      "representative_historical_excerpt": "legal-assist | aslam o aliakum shakeel hussain mery husband hain, un ki malaf ki problem ki waja say un ko deportation center main lay gay hain. Thank you sir",
+      "recommended_action": "Ensure legal desk follow-up and senior visibility for cases involving detention, deportation, CID, or court proceedings.",
+      "verification_needed": false
+    },
+    {
+      "theme": "Other / Unclassified",
+      "issue_title": "Other / Unclassified",
+      "issue_type": "Watch Item",
+      "current_window_count": 2,
+      "historical_count_before_window": 1,
+      "all_time_count": 3,
+      "trend_status": "Repeated",
+      "why_it_matters": "Unclassified items should be reviewed manually if repeated or linked to a sensitive authority.",
+      "authority_or_institution": "Unclear / To be reviewed",
+      "evidence_current_refs": [
+        "LGL-00019",
+        "FBK-GEN-2"
+      ],
+      "evidence_historical_refs": [
+        "H-FBK-GEN-1"
+      ],
+      "representative_current_excerpt": "legal-assist | One man he mack fack dacomint and sabmint in franc embasi",
+      "representative_historical_excerpt": "Good | Hello sir This is very good service. Thank you for all guys. | Other",
+      "recommended_action": "Review manually if repeated or linked to a sensitive authority.",
+      "verification_needed": true
+    },
+    {
+      "theme": "Passport / NADRA / Consular Services",
+      "issue_title": "Passport / NADRA / Consular Services",
+      "issue_type": "Operational / Service",
+      "current_window_count": 1,
+      "historical_count_before_window": 4,
+      "all_time_count": 5,
+      "trend_status": "Repeated",
+      "why_it_matters": "Recurrent consular documentation questions suggest public guidance can be improved.",
+      "authority_or_institution": "Embassy Consular Section",
+      "evidence_current_refs": [
+        "CWA-FBK-2026-0002"
+      ],
+      "evidence_historical_refs": [
+        "H-CWA-FBK-2026-0017",
+        "H-FBK-GEN-3",
+        "H-CWA-FBK-2026-0008",
+        "X-EXTRA-004"
+      ],
+      "representative_current_excerpt": "Dual citizen child first passport | I am a dual citizen (UK/ Pakistani). I visited Kuwait embassy to apply for my daughter’s first Pakistani passport. Officer asked me to get it made from UK or Pakistan. I am currentl...",
+      "representative_historical_excerpt": "Passport fee issue | My passport is expiring within few months I want to redeem my sohni dharti points to pay the fee But when I approached the embassy staff, they told me I can use this facility, if I am applying for...",
+      "recommended_action": "Review whether public guidance and branch contact information are sufficiently clear.",
+      "verification_needed": false
+    },
+    {
+      "theme": "Labour / Salary / Employer Dispute",
+      "issue_title": "Labour / Salary / Employer Dispute",
+      "issue_type": "Operational / Service",
+      "current_window_count": 1,
+      "historical_count_before_window": 2,
+      "all_time_count": 3,
+      "trend_status": "Repeated",
+      "why_it_matters": "Recurrent labour and salary disputes may indicate employers worth monitoring through the labour desk.",
+      "authority_or_institution": "PAM / Labour Department / Employer",
+      "evidence_current_refs": [
+        "LGL-00014"
+      ],
+      "evidence_historical_refs": [
+        "H-LGL-00024",
+        "H-LGL-00001"
+      ],
+      "representative_current_excerpt": "legal-assist | Hi sir/madam i have a problem to take release from my company due to company file closures or suspended for temporary i need advice my visa expires in 20days hope I'll get advice as soon as possible tha...",
+      "representative_historical_excerpt": "Legal Assistance | Subject - Visa Transfer I have been trying to transfer my mother's visa under my sponsorship. My mother's currant sponsor is my brother Mohsin Ali (***1483). The reason for this transfer is that my...",
+      "recommended_action": "Monitor employers and ensure legal/labour desk follow-up where needed.",
+      "verification_needed": false
+    },
+    {
+      "theme": "Visit Visa Restrictions",
+      "issue_title": "Visit Visa Restrictions",
+      "issue_type": "Policy / Diplomatic",
+      "current_window_count": 1,
+      "historical_count_before_window": 0,
+      "all_time_count": 1,
+      "trend_status": "New",
+      "why_it_matters": "Repeated visit visa refusal or extension issues may indicate a wider host-government pattern needing verification before external representation. Watch-item context: this theme is high-sensitivity and warrants attention even on a single report.",
+      "authority_or_institution": "MOI Kuwait / Residency Affairs",
+      "evidence_current_refs": [
+        "LGL-00009"
+      ],
+      "evidence_historical_refs": [],
+      "representative_current_excerpt": "Legal Assistance | Aoa, I would like to explain my situation and request your kind support. My wife is currently 8 months pregnant. She arrived in Kuwait on a visit visa on 10 December, and her return ticket was confi...",
+      "representative_historical_excerpt": "",
+      "recommended_action": "Compile current reports and verify visit visa policy or extension practice before external representation.",
+      "verification_needed": true
+    }
+  ],
+  "historical_entities": [
+    {
+      "entity": "CID",
+      "current_window_count": 1,
+      "historical_count_before_window": 0,
+      "all_time_count": 1,
+      "current_refs": [
+        "LGL-00017"
+      ],
+      "historical_refs": [],
+      "trend_status": "New"
+    },
+    {
+      "entity": "Deportation Centre / Deportation Cell",
+      "current_window_count": 1,
+      "historical_count_before_window": 2,
+      "all_time_count": 3,
+      "current_refs": [
+        "LGL-00022"
+      ],
+      "historical_refs": [
+        "H-LGL-00025",
+        "X-EXTRA-006"
+      ],
+      "trend_status": "Repeated"
+    },
+    {
+      "entity": "MOH / Ministry of Health",
+      "current_window_count": 2,
+      "historical_count_before_window": 0,
+      "all_time_count": 2,
+      "current_refs": [
+        "LGL-00023",
+        "LGL-00004"
+      ],
+      "historical_refs": [],
+      "trend_status": "New"
+    },
+    {
+      "entity": "OPF",
+      "current_window_count": 18,
+      "historical_count_before_window": 19,
+      "all_time_count": 37,
+      "current_refs": [
+        "LGL-00029",
+        "LGL-00027",
+        "LGL-00026",
+        "LGL-00023",
+        "LGL-00022",
+        "LGL-00021",
+        "LGL-00019",
+        "LGL-00017"
+      ],
+      "historical_refs": [
+        "H-LGL-00030",
+        "H-LGL-00028",
+        "H-LGL-00025",
+        "H-LGL-00024",
+        "H-LGL-00020",
+        "H-LGL-00018",
+        "H-LGL-00016",
+        "H-LGL-00012"
+      ],
+      "trend_status": "Long-running"
+    },
+    {
+      "entity": "Embassy Consular Section",
+      "current_window_count": 3,
+      "historical_count_before_window": 11,
+      "all_time_count": 14,
+      "current_refs": [
+        "LGL-00027",
+        "CWA-FBK-2026-0009",
+        "CWA-FBK-2026-0002"
+      ],
+      "historical_refs": [
+        "H-LGL-00030",
+        "H-CWA-FBK-2026-0017",
+        "H-CWA-FBK-2026-0015",
+        "H-CWA-LOC-2026-0001",
+        "H-FBK-GEN-3",
+        "H-CWA-FBK-2026-0014",
+        "H-CWA-FBK-2026-0012",
+        "H-CWA-FBK-2026-0001"
+      ],
+      "trend_status": "Long-running"
+    }
+  ],
+  "input_file": "/Users/hamzatauqir/Desktop/Ambassador Pulse Offline/all_cases.csv",
+  "csv_headers": [
+    "reference",
+    "module",
+    "created_at",
+    "status",
+    "assigned_to",
+    "assigned_department",
+    "category",
+    "case_type",
+    "subject",
+    "details",
+    "requester_name",
+    "phone",
+    "email",
+    "passport",
+    "civil_id"
+  ],
+  "cases": [
+    {
+      "reference": "LGL-00029",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-03 07:25:36",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "Legal Assistance | NEED NEW OPF CARD",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "LGL-00027",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-03 05:37:53",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "opf | I am applying for an OPF Card as an Overseas Pakistani currently residing in Kuwait. I appreciate the initiative taken by the Embassy of Pakistan to introduce an online portal, which enables the overseas community to conveniently access services and r...",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "LGL-00026",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-02 16:15:46",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Family / Dependent Visa Restrictions",
+      "sensitivity": "High",
+      "excerpt": "Legal Assistance | Respected Ambassador, I hope this message finds you in good health. I am writing to respectfully seek your guidance and support regarding a family visa for my parents. I was born and raised in Kuwait and am currently employed here under V...",
+      "authorities": [
+        "Residency Affairs / Ministry of Interior",
+        "OPF"
+      ],
+      "suggested_action": "Track affected references and prepare consolidated policy note for senior review."
+    },
+    {
+      "reference": "CWA-FBK-2026-0016",
+      "module": "Welfare",
+      "created_at": "2026-05-02 12:29:22",
+      "status": "Assigned",
+      "assigned_to": "Shahid",
+      "assigned_department": "Community Welfare Wing Embassy",
+      "category": "Other",
+      "case_type": "community_feedback",
+      "theme": "General Welfare / Guidance",
+      "sensitivity": "Low",
+      "excerpt": "Deport | کچھ دن پہلے بہت سے پاکستانی شیخ میں پکڑے گئے ہیں جن کے اپنے کاروبار تھے یا کام کر رہے تھے جن کے گھر میں بھی ہیں اور اس کے باوجود ان کو رپورٹ کیا جا رہا ہے کیوں میں بیسک بھی گیا تھا وہاں پر بھی کمپین لکھوائی لیکن کوئی فائدہ نہیں ہوا ایک پاکستانی ہون...",
+      "authorities": [
+        "Embassy welfare section"
+      ],
+      "suggested_action": "Handle through routine welfare guidance and close once clear advice is provided."
+    },
+    {
+      "reference": "LGL-00023",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-02 07:11:44",
+      "status": "Assigned",
+      "assigned_to": "Awais",
+      "assigned_department": "CWA Office / AP",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Nurses / Health Worker Welfare",
+      "sensitivity": "Medium",
+      "excerpt": "legal-assist | Request for Assistance in Obtaining Good Standing Certificate from Kuwait MOH Dear Sir/Madam, I hope this message finds you well. I am writing to request your kind assistance in obtaining a Good Standing Certificate from the Kuwait Ministry o...",
+      "authorities": [
+        "Ministry of Health",
+        "Employer / health facility",
+        "Hospital administration",
+        "OPF"
+      ],
+      "suggested_action": "Track healthcare worker cases separately and identify common employer or facility issues."
+    },
+    {
+      "reference": "LGL-00022",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-02 06:32:54",
+      "status": "Assigned",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Legal / Detention / Police Matter",
+      "sensitivity": "High",
+      "excerpt": "legal-assist | aslam o alikum sir mera Naam Muhammad Sardar Lal Din ha, Mery Baity ka Naam Muhammad Amir ha woh is waqat Deportation Cell main ha. Hum nay us ki kitab Istarham wakeel Wazara main submitt karwai howi ha, hamara baita baygunnah ha, Shahid sab...",
+      "authorities": [
+        "Police / courts / detention authority",
+        "OPF"
+      ],
+      "suggested_action": "Prioritize consular welfare check and legal-status verification through appropriate channels."
+    },
+    {
+      "reference": "LGL-00021",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-02 03:10:36",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "opf | I want to apply my OPF card as early as possible",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "LGL-00019",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 21:54:36",
+      "status": "Assigned",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Other / Unclassified",
+      "sensitivity": "Low",
+      "excerpt": "legal-assist | One man he mack fack dacomint and sabmint in franc embasi",
+      "authorities": [
+        "Embassy case officer",
+        "OPF"
+      ],
+      "suggested_action": "Review manually and assign an operational owner if further detail is needed."
+    },
+    {
+      "reference": "LGL-00017",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 20:35:24",
+      "status": "Assigned",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Legal / Detention / Police Matter",
+      "sensitivity": "High",
+      "excerpt": "Legal Assistance | After 9 months of his civil ID Kuwait CID text on his number to visit their office for inquiry, he went there office and they arrested him by saying that their sponsor company is fake, it's sir very strange thing to arrest him after 9 mon...",
+      "authorities": [
+        "Police / courts / detention authority",
+        "OPF"
+      ],
+      "suggested_action": "Prioritize consular welfare check and legal-status verification through appropriate channels."
+    },
+    {
+      "reference": "LGL-00015",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 17:36:15",
+      "status": "Assigned",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "category": "",
+      "case_type": "Other",
+      "theme": "General Welfare / Guidance",
+      "sensitivity": "Low",
+      "excerpt": "Legal Assistance | Card",
+      "authorities": [
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Handle through routine welfare guidance and close once clear advice is provided."
+    },
+    {
+      "reference": "LGL-00014",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 16:05:55",
+      "status": "Assigned",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Labour / Salary / Employer Dispute",
+      "sensitivity": "Medium",
+      "excerpt": "legal-assist | Hi sir/madam i have a problem to take release from my company due to company file closures or suspended for temporary i need advice my visa expires in 20days hope I'll get advice as soon as possible thank you.",
+      "authorities": [
+        "Public Authority for Manpower",
+        "Employer / sponsor",
+        "OPF"
+      ],
+      "suggested_action": "Refer for labour follow-up and document employer, salary, and contract issues where present."
+    },
+    {
+      "reference": "FBK-GEN-2",
+      "module": "Feedback",
+      "created_at": "2026-05-01 16:01:20",
+      "status": "Acknowledged",
+      "assigned_to": "",
+      "assigned_department": "",
+      "category": "Other",
+      "case_type": "general_feedback",
+      "theme": "Other / Unclassified",
+      "sensitivity": "Low",
+      "excerpt": "Good | Hello sir This is very good service. Thank you for all guys. Now I am vacation in pakistan, sir have a questions . How much cast transit visa and second how many months stay 6 or7,8,,, | Other",
+      "authorities": [
+        "Embassy case officer"
+      ],
+      "suggested_action": "Review manually and assign an operational owner if further detail is needed."
+    },
+    {
+      "reference": "LGL-00013",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 14:34:08",
+      "status": "Resolved",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "Legal Assistance | OPF card request",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "LGL-00011",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 14:21:10",
+      "status": "Resolved",
+      "assigned_to": "",
+      "assigned_department": "",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "Legal Assistance | OPF",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "LGL-00009",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 13:07:46",
+      "status": "Resolved",
+      "assigned_to": "Rajab",
+      "assigned_department": "Legal",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Visit Visa Restrictions",
+      "sensitivity": "High",
+      "excerpt": "Legal Assistance | Aoa, I would like to explain my situation and request your kind support. My wife is currently 8 months pregnant. She arrived in Kuwait on a visit visa on 10 December, and her return ticket was confirmed for 8 March. However, due to region...",
+      "authorities": [
+        "Residency Affairs / Ministry of Interior",
+        "Ministry of Health",
+        "Hospital administration",
+        "OPF"
+      ],
+      "suggested_action": "Consolidate cases and monitor whether refusals reflect a wider policy pattern."
+    },
+    {
+      "reference": "LGL-00007",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 12:32:20",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "opf | Opf card",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "CWA-FBK-2026-0013",
+      "module": "Welfare",
+      "created_at": "2026-05-01 11:31:08",
+      "status": "Assigned",
+      "assigned_to": "Awais",
+      "assigned_department": "CWA Office",
+      "category": "Other",
+      "case_type": "community_feedback",
+      "theme": "General Welfare / Guidance",
+      "sensitivity": "Low",
+      "excerpt": "Travel for Hajj issue from Kuwait | السلام علیکم ورحمۃ اللہ وبرکاتہ ۔ سر میں آپ کی توجہ ایک مسئلہ کی طرف مبذول کروانا چاہتا ہوں جو کویت سے حج کے لیے ٹریول کرنے والوں کو پریشانی ہو رہی ہے۔ فلائنگ آپریشن میں مشکلات کی وجہ سے ہمیں فلائیٹ نہیں مل پا رہی اور جو...",
+      "authorities": [
+        "Embassy welfare section"
+      ],
+      "suggested_action": "Handle through routine welfare guidance and close once clear advice is provided."
+    },
+    {
+      "reference": "LGL-00005",
+      "module": "Legal/OPF",
+      "created_at": "2026-05-01 10:44:43",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "opf | Subject: Request for Action on Online Fraud Case I would like to inform you that I was a victim of an online money fraud. I had already filed a case regarding this matter, but unfortunately, no progress has been made so far. Despite providing all requ...",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "LGL-00004",
+      "module": "Legal/OPF",
+      "created_at": "2026-04-30 14:52:38",
+      "status": "Assigned",
+      "assigned_to": "Awais",
+      "assigned_department": "",
+      "category": "",
+      "case_type": "Other",
+      "theme": "Nurses / Health Worker Welfare",
+      "sensitivity": "Medium",
+      "excerpt": "Legal Assistance | Respected Sir, I hope you are doing well. I would like to bring to your kind attention that I am currently working as a registered nurse in aljahra hospital Kuwait. I have been facing serious domestic issues for a long time, and my family...",
+      "authorities": [
+        "Ministry of Health",
+        "Employer / health facility",
+        "Hospital administration",
+        "OPF"
+      ],
+      "suggested_action": "Track healthcare worker cases separately and identify common employer or facility issues."
+    },
+    {
+      "reference": "LGL-00003",
+      "module": "Legal/OPF",
+      "created_at": "2026-04-30 08:37:08",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "opf | OPF Card Guidance",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "LGL-00002",
+      "module": "Legal/OPF",
+      "created_at": "2026-04-30 02:43:54",
+      "status": "Assigned",
+      "assigned_to": "Zahid_New",
+      "assigned_department": "Community Welfare Wing Kuwait",
+      "category": "",
+      "case_type": "Other",
+      "theme": "OPF / Insurance / Compensation",
+      "sensitivity": "Medium",
+      "excerpt": "opf | My OPF card expired I want to renew it.",
+      "authorities": [
+        "OPF / insurance provider",
+        "Embassy welfare section",
+        "OPF"
+      ],
+      "suggested_action": "Route to welfare or OPF focal point and track claim evidence."
+    },
+    {
+      "reference": "CWA-FBK-2026-0009",
+      "module": "Welfare",
+      "created_at": "2026-04-29 09:23:15",
+      "status": "Resolved",
+      "assigned_to": "Amb",
+      "assigned_department": "",
+      "category": "Other",
+      "case_type": "community_feedback",
+      "theme": "Family / Dependent Visa Restrictions",
+      "sensitivity": "High",
+      "excerpt": "Request for Reopening of Visit Visas and Family Visas for Pakistani Families in Kuwait | Dear Sir/Madam, I hope this message finds you well. I would like to respectfully request the Embassy of Pakistan in Kuwait to kindly raise the issue of visit visas and...",
+      "authorities": [
+        "Residency Affairs / Ministry of Interior"
+      ],
+      "suggested_action": "Track affected references and prepare consolidated policy note for senior review."
+    },
+    {
+      "reference": "CWA-FBK-2026-0007",
+      "module": "Welfare",
+      "created_at": "2026-04-28 23:14:50",
+      "status": "Resolved",
+      "assigned_to": "",
+      "assigned_department": "",
+      "category": "Recommendation / Suggestion",
+      "case_type": "community_feedback",
+      "theme": "General Welfare / Guidance",
+      "sensitivity": "Low",
+      "excerpt": "test | test | Recommendation / Suggestion",
+      "authorities": [
+        "Embassy welfare section"
+      ],
+      "suggested_action": "Handle through routine welfare guidance and close once clear advice is provided."
+    },
+    {
+      "reference": "CWA-FBK-2026-0005",
+      "module": "Welfare",
+      "created_at": "2026-04-28 22:25:18",
+      "status": "Resolved",
+      "assigned_to": "",
+      "assigned_department": "",
+      "category": "Recommendation / Suggestion",
+      "case_type": "community_feedback",
+      "theme": "General Welfare / Guidance",
+      "sensitivity": "Low",
+      "excerpt": "test | test | Recommendation / Suggestion",
+      "authorities": [
+        "Embassy welfare section"
+      ],
+      "suggested_action": "Handle through routine welfare guidance and close once clear advice is provided."
+    },
+    {
+      "reference": "NCMP-00001",
+      "module": "Nurses",
+      "created_at": "2026-04-28 20:19:12",
+      "status": "Resolved",
+      "assigned_to": "",
+      "assigned_department": "",
+      "category": "Test",
+      "case_type": "nurse",
+      "theme": "Nurses / Health Worker Welfare",
+      "sensitivity": "Medium",
+      "excerpt": "Test | Test | Test",
+      "authorities": [
+        "Ministry of Health",
+        "Employer / health facility"
+      ],
+      "suggested_action": "Track healthcare worker cases separately and identify common employer or facility issues."
+    },
+    {
+      "reference": "CWA-FBK-2026-0002",
+      "module": "Welfare",
+      "created_at": "2026-04-28 15:32:59",
+      "status": "Assigned",
+      "assigned_to": "Awais",
+      "assigned_department": "",
+      "category": "Service Complaint",
+      "case_type": "community_feedback",
+      "theme": "Passport / NADRA / Consular Services",
+      "sensitivity": "Low",
+      "excerpt": "Dual citizen child first passport | I am a dual citizen (UK/ Pakistani). I visited Kuwait embassy to apply for my daughter’s first Pakistani passport. Officer asked me to get it made from UK or Pakistan. I am currently working and residing in Kuwait. My dau...",
+      "authorities": [
+        "Embassy consular section",
+        "NADRA / passport service desk"
+      ],
+      "suggested_action": "Route to consular service desk for document-specific follow-up."
+    }
+  ],
+  "all_cases_count": 61,
+  "historical_cases_count": 35,
+  "future_cases_count": 0,
+  "undated_cases_count": 0
+}

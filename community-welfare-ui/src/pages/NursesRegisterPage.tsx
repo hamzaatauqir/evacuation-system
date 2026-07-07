@@ -1,0 +1,1157 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { PublicHeader } from "../components/PublicHeader";
+import { PageFooter } from "../components/PageFooter";
+import { Card, Grid } from "../components/Layout";
+import { Stepper } from "../components/Stepper";
+import { FGroup, FInput, FSelect, FTextarea } from "../components/FormField";
+import { Btn } from "../components/Btn";
+import { Icon } from "../components/Icon";
+import { NoticeCard } from "../components/NoticeCard";
+import { T } from "../lib/tokens";
+import { api } from "../lib/api";
+
+const STEPS = ["Personal", "Contact", "Employment", "Welfare", "Account"];
+const PROFESSIONAL_CATEGORIES = ["Nurse", "Other Health Worker", "Doctor"];
+const VENDOR_ELIGIBLE_CATEGORIES = ["Nurse", "Other Health Worker"];
+const CURRENT_ARRANGEMENTS = [
+  "MOH Provided Hotel - Arrival Stay",
+  { value: "Embassy Contracted / Arranged", label: "AJA Care Vendor Embassy Contracted" },
+  "Private (Self Arranged)",
+  "Other",
+];
+const APPROVED_VENDOR_OPTIONS = ["AJA Care", "Other / Not Sure"];
+const COUNTRY_CODE_OPTIONS = [
+  { value: "+965", label: "+965 Kuwait" },
+  { value: "+92", label: "+92 Pakistan" },
+  { value: "+91", label: "+91 India" },
+  { value: "+971", label: "+971 UAE" },
+  { value: "+966", label: "+966 Saudi Arabia" },
+  { value: "+974", label: "+974 Qatar" },
+  { value: "+973", label: "+973 Bahrain" },
+  { value: "+968", label: "+968 Oman" },
+  { value: "+999", label: "Other" },
+];
+const QUALIFICATION_OPTIONS_BY_CATEGORY: Record<string, string[]> = {
+  Nurse: ["Diploma Nurse", "BSN Nursing", "Masters in Nursing (MSN)", "Other"],
+  Doctor: ["Doctor MBBS", "Doctor BDS", "Other"],
+  "Other Health Worker": ["Diploma Nurse", "BSN Nursing", "Masters in Nursing (MSN)", "Doctor MBBS", "Doctor BDS", "Other"],
+};
+
+interface FormState {
+  fullName?: string;
+  fatherName?: string;
+  gender?: string;
+  passport?: string;
+  civilId?: string;
+  cnic?: string;
+  nationality?: string;
+  phone?: string;
+  mobileCountryCode?: string;
+  mobileNumber?: string;
+  whatsappSameAsMobile?: boolean;
+  whatsappCountryCode?: string;
+  whatsappNumber?: string;
+  email?: string;
+  address?: string;
+  hospital?: string;
+  jobTitle?: string;
+  professionalCategory?: string;
+  qualificationDegree?: string;
+  qualificationDegreeOther?: string;
+  dept?: string;
+  empType?: string;
+  workPermit?: string;
+  mtonNumber?: string;
+  arrivalDate?: string;
+  batchNumber?: string;
+  currentArrangement?: string;
+  vendorName?: string;
+  facilityName?: string;
+  facilityArea?: string;
+  dateShiftedToFacility?: string;
+  contractStartDate?: string;
+  stayRemindersOptIn?: string;
+  mohHotelName?: string;
+  mohHotelArea?: string;
+  mohHotelStartDate?: string;
+  mohHotelExpectedEndDate?: string;
+  mohHotelDurationMonths?: string;
+  emergency?: string;
+  emergencyCountryCode?: string;
+  remarks?: string;
+  declared?: boolean;
+  password?: string;
+  confirmPassword?: string;
+}
+
+function passwordOk(pw: string): string | null {
+  if (!pw || pw.length < 8) return "Password must be at least 8 characters.";
+  if (!/[A-Za-z]/.test(pw)) return "Password must contain at least one letter.";
+  if (!/\d/.test(pw)) return "Password must contain at least one number.";
+  return null;
+}
+
+function normalizeMtonNumber(value: string) {
+  const raw = (value || "").trim().toUpperCase();
+  if (!raw) return "";
+  const match = raw.match(/^MTON[\s-]*E[\s-]*(\d{1,6})$/);
+  return match ? `MTON-E-${match[1]}` : raw.replace(/\s+/g, " ");
+}
+
+function isValidMtonNumber(value: string) {
+  return /^MTON-E-\d{1,6}$/.test(value);
+}
+
+function normalizeArrivalBatchNumber(value: string) {
+  return (value || "").replace(/[^0-9]/g, "");
+}
+
+function isValidArrivalBatchNumber(value: string) {
+  return /^[0-9]+$/.test((value || "").trim());
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isFilled(value: unknown): boolean {
+  return typeof value === "string" ? value.trim().length > 0 : !!value;
+}
+
+function addMonthsToIsoDate(value: string, months: number) {
+  const match = (value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const target = new Date(Date.UTC(year, month - 1 + months, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target.toISOString().slice(0, 10);
+}
+
+export function NursesRegisterPage() {
+  const navigate = useNavigate();
+  const [step, setStep] = useState(0);
+  const [form, setForm] = useState<FormState>({});
+  const [done, setDone] = useState(false);
+  const [submittedRef, setSubmittedRef] = useState("");
+  const [submitError, setSubmitError] = useState("");
+  const [stepError, setStepError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [showPw, setShowPw] = useState(false);
+  const normalizeDigits = (v: string) => (v || "").replace(/[^\d]/g, "");
+  const composePhone = (code: string, number: string) => {
+    const cc = (code || "").startsWith("+") ? (code || "") : `+${code || ""}`;
+    const num = normalizeDigits(number);
+    return cc && num ? `${cc}${num}` : "";
+  };
+
+  const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
+    setForm((p) => ({ ...p, [k]: v }));
+  const inp = <K extends keyof FormState>(k: K) => ({
+    value: (form[k] as string) || "",
+    onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
+      set(k, e.target.value as FormState[K]),
+  });
+  const isVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(form.professionalCategory || "");
+  const isEmbassyArranged = form.currentArrangement === "Embassy Contracted / Arranged";
+  const isMohHotel = form.currentArrangement === "MOH Provided Hotel - Arrival Stay";
+  const showAreaField =
+    isVendorEligible &&
+    ["Embassy Contracted / Arranged", "Private (Self Arranged)"].includes(form.currentArrangement || "");
+  const showStayArrangementWorkflow = isVendorEligible;
+  const showVendorSelection = isVendorEligible && isEmbassyArranged;
+  const showMohHotelDetails = isVendorEligible && isMohHotel;
+  const computedMohHotelExpectedEndDate = isMohHotel ? addMonthsToIsoDate(form.mohHotelStartDate || "", 3) : "";
+  const qualificationOptions = QUALIFICATION_OPTIONS_BY_CATEGORY[form.professionalCategory || ""] || [];
+  const showQualificationOther = form.qualificationDegree === "Other";
+
+  function validateStep(s: number): string {
+    if (s === 0) {
+      if (!isFilled(form.fullName)) return "Full Name as per Passport is required.";
+      if (!isFilled(form.fatherName)) return "Father Name is required.";
+      if (!isFilled(form.gender)) return "Gender is required.";
+      if (!isFilled(form.passport)) return "Passport Number is required.";
+      if (!isFilled(form.cnic)) return "CNIC (Pakistan National ID) is required.";
+      if (!isFilled(form.nationality)) return "Nationality is required.";
+      return "";
+    }
+    if (s === 1) {
+      const mobileDigits = normalizeDigits(form.mobileNumber || "");
+      if (!mobileDigits) return "Please enter a valid mobile number.";
+      const mobileCC = form.mobileCountryCode || "+965";
+      if (!mobileCC.startsWith("+")) return "Mobile country code must start with +.";
+      if (mobileDigits.length < 7 || mobileDigits.length > 15) {
+        return "Please enter a valid mobile number.";
+      }
+      if (form.whatsappSameAsMobile === false) {
+        const waCC = form.whatsappCountryCode || "";
+        if (!waCC || !waCC.startsWith("+")) return "WhatsApp country code is required.";
+        const waDigits = normalizeDigits(form.whatsappNumber || "");
+        if (!waDigits) return "WhatsApp number is required.";
+        if (waDigits.length < 7 || waDigits.length > 15) {
+          return "Please enter a valid WhatsApp number.";
+        }
+      }
+      if (!isFilled(form.email)) return "Email address is required.";
+      if (!EMAIL_RE.test((form.email || "").trim())) {
+        return "Please enter a valid email address.";
+      }
+      if (!isFilled(form.address)) return "Current address in Kuwait is required.";
+      return "";
+    }
+    if (s === 2) {
+      if (!isFilled(form.hospital)) return "Hospital / Workplace Name is required.";
+      if (!isFilled(form.jobTitle)) return "Job Title / Designation is required.";
+      if (!isFilled(form.professionalCategory)) return "Professional Category is required.";
+      if (!isFilled(form.qualificationDegree)) return "Qualification / Degree is required.";
+      if (form.qualificationDegree === "Other" && !isFilled(form.qualificationDegreeOther)) {
+        return "Please specify your qualification / degree.";
+      }
+      if (!isFilled(form.arrivalDate)) return "Date arrived in Kuwait is required.";
+      const batchNumber = (form.batchNumber || "").trim();
+      if (!batchNumber) return "Batch / cohort reference is required.";
+      if (!isValidArrivalBatchNumber(batchNumber)) {
+        return "Batch number must contain digits only.";
+      }
+      return "";
+    }
+    if (s === 3) {
+      if (showStayArrangementWorkflow && !isFilled(form.currentArrangement)) {
+        return "Current Stay Arrangement is required.";
+      }
+      if (showMohHotelDetails) {
+        const mohName = (form.mohHotelName || "").trim();
+        const mohArea = (form.mohHotelArea || "").trim();
+        const mohStart = (form.mohHotelStartDate || "").trim();
+        if (!mohName || !mohArea || !mohStart) {
+          return "Please provide hotel/facility name, area, and date shifted to hotel.";
+        }
+      }
+      const emergencyDigits = normalizeDigits(form.emergency || "");
+      if (!emergencyDigits) return "Emergency Contact Number is required.";
+      const emergencyCC = form.emergencyCountryCode || "+965";
+      if (!emergencyCC.startsWith("+")) return "Emergency country code must start with +.";
+      if (emergencyDigits.length < 7 || emergencyDigits.length > 15) {
+        return "Please enter a valid emergency contact number.";
+      }
+      if (!form.declared) {
+        return "Please tick the declaration to confirm the information is accurate.";
+      }
+      return "";
+    }
+    if (s === 4) {
+      const pwErr = passwordOk(form.password || "");
+      if (pwErr) return pwErr;
+      if ((form.password || "") !== (form.confirmPassword || "")) {
+        return "Passwords do not match.";
+      }
+      return "";
+    }
+    return "";
+  }
+
+  function scrollToFormTop() {
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
+  function handleNext() {
+    const err = validateStep(step);
+    if (err) {
+      setStepError(err);
+      scrollToFormTop();
+      return;
+    }
+    setStepError("");
+    setSubmitError("");
+    setStep((s) => Math.min(s + 1, STEPS.length - 1));
+  }
+
+  function handleBack() {
+    setStepError("");
+    setSubmitError("");
+    if (step === 0) {
+      navigate("/nurses");
+      return;
+    }
+    setStep((s) => Math.max(0, s - 1));
+  }
+
+  if (done) {
+    return (
+      <div className="fade-in" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+        <PublicHeader />
+        <div
+          style={{
+            minHeight: "70vh",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            flex: 1,
+          }}
+        >
+          <div style={{ textAlign: "center", maxWidth: 480 }}>
+            <div
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: "50%",
+                background: T.successBg,
+                border: "2px solid #86efac",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                margin: "0 auto 20px",
+              }}
+            >
+              <Icon name="check" size={32} color={T.successFg} />
+            </div>
+            <h2 style={{ fontSize: 24, fontWeight: 800, color: T.navy, marginBottom: 10 }}>
+              Registration Submitted
+            </h2>
+            <p style={{ fontSize: 14, color: T.muted, lineHeight: 1.7, marginBottom: 12 }}>
+              Your registration has been received. Please check your email inbox and verify your email address using the verification link sent to you. Once your email is verified, your portal account will be activated.
+            </p>
+            <p style={{ fontSize: 13, color: T.warningFg, fontWeight: 700, marginBottom: 12 }}>
+              Email verification pending. Please verify your email address to activate your portal account and receive official updates.
+            </p>
+            {submittedRef ? (
+              <p style={{ fontSize: 14, color: T.navy, fontWeight: 700, marginBottom: 24 }}>
+                Your reference: {submittedRef}
+              </p>
+            ) : null}
+            <NoticeCard type="info">
+              Staff may contact you via WhatsApp for verification. No document upload was required at
+              this stage.
+            </NoticeCard>
+            <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 24 }}>
+              <Btn variant="primary" onClick={() => navigate("/nurses/login")}>
+                Log in to Nurse Portal
+              </Btn>
+              <Btn variant="light" onClick={() => navigate("/nurses")}>
+                Back to Nurses Home
+              </Btn>
+            </div>
+          </div>
+        </div>
+        <PageFooter />
+      </div>
+    );
+  }
+
+  return (
+    <div className="fade-in" style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+      <PublicHeader />
+      <div style={{ background: "linear-gradient(160deg,#2D4A6B 0%,#3A6080 100%)", padding: "28px 24px 24px" }}>
+        <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+          <button
+            onClick={() => navigate("/nurses")}
+            style={{
+              background: "none",
+              border: "none",
+              color: "rgba(255,255,255,.6)",
+              fontSize: 12,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              marginBottom: 12,
+              padding: 0,
+              fontWeight: 600,
+            }}
+          >
+            <Icon name="exit" size={14} color="rgba(255,255,255,.6)" />
+            Back to Nurses Home
+          </button>
+          <h1 style={{ fontSize: 22, fontWeight: 800, color: "#fff", marginBottom: 4 }}>
+            Nurses / Health Workers Registration
+          </h1>
+          <p style={{ fontSize: 13, color: "rgba(255,255,255,.6)" }}>
+            Community Welfare Wing — Official Registration Portal for Pakistani nurses and health workers in Kuwait
+          </p>
+        </div>
+      </div>
+      <div
+        style={{
+          height: 3,
+          background: `linear-gradient(90deg,${T.green} ${((step + 1) / STEPS.length) * 100}%,${T.border} 0%)`,
+        }}
+      />
+
+      <main style={{ flex: 1 }}>
+        <div
+          style={{
+            maxWidth: 1000,
+            margin: "0 auto",
+            padding: "32px 24px",
+            display: "flex",
+            gap: 24,
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ flex: "1 1 560px" }}>
+            <Card>
+              <Stepper steps={STEPS} current={step} />
+
+              {step === 0 && (
+                <div className="fade-in">
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
+                    Personal Information
+                  </h3>
+                  <Grid cols={2} gap={14}>
+                    <div style={{ gridColumn: "1/-1" }}>
+                      <FInput
+                        label="Full Name as per Passport"
+                        req
+                        {...inp("fullName")}
+                        placeholder="e.g. Fatima Malik"
+                      />
+                    </div>
+                    <div style={{ gridColumn: "1/-1" }}>
+                      <FInput
+                        label="Father Name"
+                        req
+                        {...inp("fatherName")}
+                        placeholder="e.g. Muhammad Ashraf"
+                      />
+                    </div>
+                    <FSelect
+                      label="Gender"
+                      req
+                      {...inp("gender")}
+                      placeholder="Select gender"
+                      options={["Female", "Male", "Other"]}
+                    />
+                    <FInput label="Passport Number" req {...inp("passport")} placeholder="e.g. AK1234567" />
+                    <FInput
+                      label="Civil ID Number (optional)"
+                      hint="Leave blank if not yet issued."
+                      {...inp("civilId")}
+                      placeholder="e.g. 285-123-456-7"
+                    />
+                    <FInput label="CNIC (Pakistan National ID)" req {...inp("cnic")} placeholder="13-digit CNIC" />
+                    <FSelect
+                      label="Nationality"
+                      req
+                      {...inp("nationality")}
+                      placeholder="Select"
+                      options={["Pakistani", "Other"]}
+                    />
+                  </Grid>
+                </div>
+              )}
+
+              {step === 1 && (
+                <div className="fade-in">
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
+                    Contact Details
+                  </h3>
+                  <FInput
+                    label="Primary Mobile Number"
+                    req
+                    value={form.mobileNumber || ""}
+                    onChange={(e) => set("mobileNumber", e.target.value)}
+                    placeholder="e.g. 5XXXXXXX"
+                  />
+                  <FSelect
+                    label="Primary Mobile Country Code"
+                    req
+                    value={form.mobileCountryCode || "+965"}
+                    onChange={(e) => {
+                      const code = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        mobileCountryCode: code,
+                        whatsappCountryCode: prev.whatsappSameAsMobile === false ? (prev.whatsappCountryCode || code) : code,
+                      }));
+                    }}
+                    options={COUNTRY_CODE_OPTIONS}
+                  />
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, gridColumn: "1/-1", fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={form.whatsappSameAsMobile !== false}
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          whatsappSameAsMobile: e.target.checked,
+                          whatsappCountryCode: e.target.checked ? (prev.mobileCountryCode || "+965") : (prev.whatsappCountryCode || prev.mobileCountryCode || "+965"),
+                        }))
+                      }
+                    />
+                    WhatsApp number is same as mobile number
+                  </label>
+                  {form.whatsappSameAsMobile === false ? (
+                    <>
+                      <FSelect
+                        label="WhatsApp Country Code"
+                        req
+                        value={form.whatsappCountryCode || form.mobileCountryCode || "+965"}
+                        onChange={(e) => set("whatsappCountryCode", e.target.value)}
+                        options={COUNTRY_CODE_OPTIONS}
+                      />
+                      <FInput
+                        label="WhatsApp Number"
+                        req
+                        value={form.whatsappNumber || ""}
+                        onChange={(e) => set("whatsappNumber", e.target.value)}
+                        placeholder="e.g. 5XXXXXXX"
+                      />
+                    </>
+                  ) : null}
+                  <FInput label="Email Address (required for your account)" req {...inp("email")} type="email" placeholder="your@email.com" />
+                  <FTextarea
+                    label="Current address in Kuwait"
+                    req
+                    {...inp("address")}
+                    placeholder="Block, Street, Area, Governorate"
+                    rows={3}
+                  />
+                </div>
+              )}
+
+              {step === 2 && (
+                <div className="fade-in">
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
+                    Employment Details
+                  </h3>
+                  <FInput
+                    label="Hospital / Workplace Name"
+                    req
+                    {...inp("hospital")}
+                    placeholder="e.g. Al Sabah Hospital"
+                  />
+                  <FInput
+                    label="Job Title / Designation"
+                    req
+                    {...inp("jobTitle")}
+                    placeholder="e.g. Staff Nurse"
+                  />
+                  <FSelect
+                    label="Professional Category"
+                    req
+                    value={form.professionalCategory || ""}
+                    onChange={(e) => {
+                      const professionalCategory = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        professionalCategory,
+                        qualificationDegree: "",
+                        qualificationDegreeOther: "",
+                        ...(VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory)
+                          ? {}
+                          : {
+                              currentArrangement: "",
+                              vendorName: "",
+                              facilityName: "",
+                              facilityArea: "",
+                              dateShiftedToFacility: "",
+                              contractStartDate: "",
+                              stayRemindersOptIn: "Yes",
+                              mohHotelName: "",
+                              mohHotelArea: "",
+                              mohHotelStartDate: "",
+                              mohHotelExpectedEndDate: "",
+                              mohHotelDurationMonths: "",
+                            }),
+                      }));
+                    }}
+                    placeholder="Select category"
+                    options={PROFESSIONAL_CATEGORIES}
+                  />
+                  <FSelect
+                    label="Qualification / Degree"
+                    req
+                    value={form.qualificationDegree || ""}
+                    onChange={(e) => {
+                      const qualificationDegree = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        qualificationDegree,
+                        qualificationDegreeOther: qualificationDegree === "Other" ? prev.qualificationDegreeOther || "" : "",
+                      }));
+                    }}
+                    placeholder="Select qualification"
+                    options={qualificationOptions}
+                  />
+                  {showQualificationOther ? (
+                    <FInput
+                      label="Other Qualification / Degree"
+                      req
+                      {...inp("qualificationDegreeOther")}
+                      placeholder="Enter qualification / degree"
+                    />
+                  ) : null}
+                  <Grid cols={2} gap={14}>
+                    <FInput label="Department" {...inp("dept")} placeholder="e.g. Cardiology" />
+                    <FSelect
+                      label="Employer Type"
+                      {...inp("empType")}
+                      placeholder="Select"
+                      options={["Ministry of Health (MOH)", "Private Hospital", "Clinic", "Other"]}
+                    />
+                  </Grid>
+                  <FInput
+                    label="Work Permit / IQAMA Number"
+                    {...inp("workPermit")}
+                    placeholder="If available"
+                  />
+                  <FInput
+                    label="MOH / MTON Number"
+                    value={form.mtonNumber || ""}
+                    onChange={(e) => set("mtonNumber", e.target.value)}
+                    placeholder="MTON-E-145"
+                    hint="Optional at registration. If entered, use the format MTON-E-145."
+                  />
+                  <Grid cols={2} gap={14} style={{ marginTop: 8 }}>
+                    <FInput label="Date arrived in Kuwait" req {...inp("arrivalDate")} type="date" />
+                    <FInput
+                      label="Batch / cohort reference"
+                      req
+                      type="number"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={form.batchNumber || ""}
+                      onChange={(e) => set("batchNumber", normalizeArrivalBatchNumber(e.target.value))}
+                      placeholder="e.g. 39"
+                      hint="Batch number must contain digits only."
+                    />
+                  </Grid>
+                </div>
+              )}
+
+              {step === 3 && (
+                <div className="fade-in">
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
+                    Welfare & Current Stay Arrangement
+                  </h3>
+                  {showStayArrangementWorkflow ? (
+                    <FSelect
+                      label="Current Stay Arrangement"
+                      req
+                      value={form.currentArrangement || ""}
+                      onChange={(e) => {
+                        const currentArrangement = e.target.value;
+                        setForm((prev) => ({
+                          ...prev,
+                          currentArrangement,
+                          ...(currentArrangement === "Embassy Contracted / Arranged"
+                            ? {
+                                vendorName: prev.vendorName || "AJA Care",
+                                mohHotelName: "",
+                                mohHotelArea: "",
+                                mohHotelStartDate: "",
+                                mohHotelExpectedEndDate: "",
+                                mohHotelDurationMonths: "",
+                              }
+                            : currentArrangement === "MOH Provided Hotel - Arrival Stay"
+                            ? {
+                                vendorName: "",
+                                facilityName: "",
+                                dateShiftedToFacility: "",
+                                contractStartDate: "",
+                                stayRemindersOptIn: "",
+                                mohHotelDurationMonths: "3",
+                                mohHotelExpectedEndDate: addMonthsToIsoDate(prev.mohHotelStartDate || "", 3),
+                              }
+                            : {
+                                vendorName: "",
+                                facilityName: "",
+                                dateShiftedToFacility: "",
+                                contractStartDate: "",
+                                stayRemindersOptIn: "Yes",
+                                mohHotelName: "",
+                                mohHotelArea: "",
+                                mohHotelStartDate: "",
+                                mohHotelExpectedEndDate: "",
+                                mohHotelDurationMonths: "",
+                              }),
+                        }));
+                      }}
+                      placeholder="Select"
+                      options={CURRENT_ARRANGEMENTS}
+                    />
+                  ) : null}
+                  {showVendorSelection ? (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 14,
+                        background: T.surfaceLow,
+                        border: `1px solid ${T.borderLt}`,
+                        borderRadius: 10,
+                      }}
+                    >
+                      <h4 style={{ fontSize: 13, color: T.navy, fontWeight: 800, marginBottom: 12 }}>
+                        Current Stay Arrangement Details
+                      </h4>
+                      <Grid cols={2} gap={14}>
+                        <FSelect
+                          label="Approved Vendor / Service Provider"
+                          value={form.vendorName || "AJA Care"}
+                          onChange={(e) => set("vendorName", e.target.value)}
+                          options={APPROVED_VENDOR_OPTIONS}
+                        />
+                        <FInput label="Facility / Building Name" {...inp("facilityName")} placeholder="Building or facility name" />
+                        <FInput label="Date shifted to facility" {...inp("dateShiftedToFacility")} type="date" />
+                        <FInput label="Contract / stay period start date" {...inp("contractStartDate")} type="date" />
+                        <FSelect
+                          label="Receive reminders about leaving notice timelines?"
+                          value={form.stayRemindersOptIn || "Yes"}
+                          onChange={(e) => set("stayRemindersOptIn", e.target.value)}
+                          options={["Yes", "No"]}
+                        />
+                      </Grid>
+                    </div>
+                  ) : null}
+                  {showMohHotelDetails ? (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 14,
+                        background: T.surfaceLow,
+                        border: `1px solid ${T.borderLt}`,
+                        borderRadius: 10,
+                      }}
+                    >
+                      <h4 style={{ fontSize: 13, color: T.navy, fontWeight: 800, marginBottom: 12 }}>
+                        MOH Provided Hotel — Arrival Stay Details
+                      </h4>
+                      <Grid cols={2} gap={14}>
+                        <FInput label="Hotel / Facility Name" req {...inp("mohHotelName")} placeholder="Hotel or facility name" />
+                        <FInput label="Area" req {...inp("mohHotelArea")} placeholder="Area in Kuwait" />
+                        <FInput
+                          label="Date shifted to hotel / arrival stay"
+                          req
+                          value={form.mohHotelStartDate || ""}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              mohHotelStartDate: e.target.value,
+                              mohHotelDurationMonths: "3",
+                              mohHotelExpectedEndDate: addMonthsToIsoDate(e.target.value, 3),
+                            }))
+                          }
+                          type="date"
+                        />
+                        <FGroup label="Expected end date" hint="Auto-calculated from the hotel start date.">
+                          <input
+                            className="f-input"
+                            value={computedMohHotelExpectedEndDate}
+                            readOnly
+                            placeholder="Auto-calculated after the hotel start date is selected"
+                          />
+                        </FGroup>
+                        <div
+                          style={{
+                            gridColumn: "1/-1",
+                            padding: "12px 14px",
+                            background: "#fff",
+                            border: `1px solid ${T.borderLt}`,
+                            borderRadius: 10,
+                            fontSize: 13,
+                            color: T.navy,
+                            fontWeight: 700,
+                          }}
+                        >
+                          Expected stay duration: 3 months fixed for MOH arrival hotel stay
+                        </div>
+                      </Grid>
+                    </div>
+                  ) : null}
+                  {showAreaField ? (
+                    <FInput label="Area" {...inp("facilityArea")} placeholder="Area in Kuwait" />
+                  ) : null}
+                  <FInput
+                    label="Emergency Contact Number"
+                    req
+                    value={form.emergency || ""}
+                    onChange={(e) => set("emergency", e.target.value)}
+                    placeholder="e.g. 5XXXXXXX"
+                  />
+                  <FSelect
+                    label="Emergency Contact Country Code"
+                    req
+                    value={form.emergencyCountryCode || "+965"}
+                    onChange={(e) => set("emergencyCountryCode", e.target.value)}
+                    options={COUNTRY_CODE_OPTIONS}
+                  />
+                  <FTextarea
+                    label="Remarks / Special Concerns"
+                    {...inp("remarks")}
+                    placeholder="Any welfare concerns, special circumstances, or information for the Embassy..."
+                    rows={3}
+                  />
+                  <div
+                    style={{
+                      marginTop: 20,
+                      padding: "14px 16px",
+                      background: T.surfaceLow,
+                      borderRadius: 10,
+                      border: `1px solid ${T.borderLt}`,
+                    }}
+                  >
+                    <label
+                      style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer" }}
+                    >
+                      <input
+                        type="checkbox"
+                        style={{ marginTop: 3, accentColor: T.navy, width: 16, height: 16, flexShrink: 0 }}
+                        checked={!!form.declared}
+                        onChange={(e) => set("declared", e.target.checked)}
+                      />
+                      <span style={{ fontSize: 13, color: T.text, lineHeight: 1.6 }}>
+                        I declare that the information provided is accurate and complete. I understand
+                        it will be used for official community welfare records by the Embassy of
+                        Pakistan, Kuwait.
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {step === 4 && (
+                <div className="fade-in">
+                  <h3 style={{ fontSize: 16, fontWeight: 700, color: T.navy, marginBottom: 20 }}>
+                    Account password
+                  </h3>
+                  <p style={{ fontSize: 13, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
+                    Create a password for your Nurse Portal (minimum 8 characters, at least one letter and one
+                    number). You will sign in with your email or passport number (or Civil ID if you add one later).
+                  </p>
+                  <label style={{ display: "block", marginBottom: 12, fontSize: 13 }}>
+                    Password
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        className="f-input"
+                        style={{ flex: 1 }}
+                        type={showPw ? "text" : "password"}
+                        value={form.password || ""}
+                        onChange={(e) => set("password", e.target.value)}
+                        autoComplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        className="f-input"
+                        style={{ width: "auto", cursor: "pointer", padding: "8px 12px" }}
+                        onClick={() => setShowPw((s) => !s)}
+                      >
+                        {showPw ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                  </label>
+                  <label style={{ display: "block", marginBottom: 12, fontSize: 13 }}>
+                    Confirm password
+                    <input
+                      className="f-input"
+                      type={showPw ? "text" : "password"}
+                      value={form.confirmPassword || ""}
+                      onChange={(e) => set("confirmPassword", e.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {/* Navigation buttons */}
+              {stepError ? (
+                <div style={{ marginTop: 16 }}>
+                  <NoticeCard type="warning">{stepError}</NoticeCard>
+                </div>
+              ) : null}
+              {submitError ? (
+                <div style={{ marginTop: 16 }}>
+                  <NoticeCard type="warning">{submitError}</NoticeCard>
+                </div>
+              ) : null}
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginTop: 28,
+                  paddingTop: 20,
+                  borderTop: `1px solid ${T.borderLt}`,
+                }}
+              >
+                <Btn variant="light" onClick={handleBack}>
+                  {step === 0 ? "Cancel" : "← Back"}
+                </Btn>
+                <div style={{ display: "flex", gap: 10 }}>
+                  {step < 4 ? (
+                    <Btn variant="navy" onClick={handleNext}>
+                      Continue →
+                    </Btn>
+                  ) : (
+                    <Btn
+                      variant="primary"
+                      disabled={!form.declared || submitting}
+                      onClick={async () => {
+                        setSubmitError("");
+                        const pwErr = passwordOk(form.password || "");
+                        if (pwErr) {
+                          setSubmitError(pwErr);
+                          return;
+                        }
+                        if ((form.password || "") !== (form.confirmPassword || "")) {
+                          setSubmitError("Password and confirmation do not match.");
+                          return;
+                        }
+                        const professionalCategory = form.professionalCategory || "";
+                        const fatherName = (form.fatherName || "").trim();
+                        const mobileCountryCode = form.mobileCountryCode || "+965";
+                        const whatsappSameAsMobile = form.whatsappSameAsMobile !== false;
+                        const whatsappCountryCode = whatsappSameAsMobile ? mobileCountryCode : (form.whatsappCountryCode || mobileCountryCode);
+                        const emergencyCountryCode = form.emergencyCountryCode || "+965";
+                        const mobileDigits = normalizeDigits(form.mobileNumber || form.phone || "");
+                        const whatsappDigits = normalizeDigits(whatsappSameAsMobile ? mobileDigits : (form.whatsappNumber || ""));
+                        const emergencyDigits = normalizeDigits(form.emergency || "");
+                        const mobileFull = composePhone(mobileCountryCode, mobileDigits);
+                        const whatsappFull = composePhone(whatsappCountryCode, whatsappDigits);
+                        const emergencyFull = composePhone(emergencyCountryCode, emergencyDigits);
+                        if (!mobileCountryCode.startsWith("+") || !emergencyCountryCode.startsWith("+") || !whatsappCountryCode.startsWith("+")) {
+                          setSubmitError("Country code must start with +.");
+                          return;
+                        }
+                        if (mobileDigits.length < 7 || mobileDigits.length > 15) {
+                          setSubmitError("Primary mobile number must be 7 to 15 digits.");
+                          return;
+                        }
+                        if (!whatsappSameAsMobile && (whatsappDigits.length < 7 || whatsappDigits.length > 15)) {
+                          setSubmitError("WhatsApp number must be 7 to 15 digits.");
+                          return;
+                        }
+                        if (emergencyDigits.length < 7 || emergencyDigits.length > 15) {
+                          setSubmitError("Emergency contact number must be 7 to 15 digits.");
+                          return;
+                        }
+                        if (!fatherName) {
+                          setSubmitError("Father Name is required.");
+                          return;
+                        }
+                        const qualificationDegree = form.qualificationDegree || "";
+                        const qualificationDegreeOther = (form.qualificationDegreeOther || "").trim();
+                        const normalizedMton = normalizeMtonNumber(form.mtonNumber || "");
+                        const categoryVendorEligible = VENDOR_ELIGIBLE_CATEGORIES.includes(professionalCategory);
+                        if (!qualificationDegree) {
+                          setSubmitError("Qualification / Degree is required.");
+                          return;
+                        }
+                        if (qualificationDegree === "Other" && !qualificationDegreeOther) {
+                          setSubmitError("Other Qualification / Degree is required when Qualification / Degree is Other.");
+                          return;
+                        }
+                        if (categoryVendorEligible && !(form.currentArrangement || "").trim()) {
+                          setSubmitError("Current Stay Arrangement is required for Nurse / Other Health Worker.");
+                          return;
+                        }
+                        if (normalizedMton && !isValidMtonNumber(normalizedMton)) {
+                          setSubmitError("Please enter a valid MTON number in this format: MTON-E-145");
+                          return;
+                        }
+                        const batchNumber = (form.batchNumber || "").trim();
+                        if (!isValidArrivalBatchNumber(batchNumber)) {
+                          setSubmitError("Batch number must contain digits only.");
+                          return;
+                        }
+                        const normalizedBatchNumber = normalizeArrivalBatchNumber(batchNumber);
+                        const arrangement = categoryVendorEligible ? form.currentArrangement || "" : "";
+                        const arrangementFlag = categoryVendorEligible && /embassy/i.test(arrangement) ? "Yes" : "No";
+                        const includeFacilityWorkflow = categoryVendorEligible && arrangement === "Embassy Contracted / Arranged";
+                        const includeMohHotelWorkflow = categoryVendorEligible && arrangement === "MOH Provided Hotel - Arrival Stay";
+                        const mohHotelName = (form.mohHotelName || "").trim();
+                        const mohHotelArea = (form.mohHotelArea || "").trim();
+                        const mohHotelStartDate = (form.mohHotelStartDate || "").trim();
+                        if (includeMohHotelWorkflow && (!mohHotelName || !mohHotelArea || !mohHotelStartDate)) {
+                          setSubmitError("Please provide hotel/facility name, area, and date shifted to hotel.");
+                          return;
+                        }
+                        const mohHotelDuration = 3;
+                        const mohHotelExpectedEndDate = includeMohHotelWorkflow
+                          ? addMonthsToIsoDate(mohHotelStartDate, mohHotelDuration)
+                          : "";
+                        setSubmitting(true);
+                        try {
+                          const res = await api.post<{
+                            success?: boolean;
+                            ok?: boolean;
+                            reference?: string;
+                            reference_id?: string;
+                            error?: string;
+                          }>("/api/nurses/register", {
+                            full_name: form.fullName,
+                            father_name: fatherName,
+                            passport_number: form.passport,
+                            civil_id: (form.civilId || "").trim(),
+                            cnic: form.cnic,
+                            mobile: mobileFull,
+                            mobile_country_code: mobileCountryCode,
+                            mobile_number: mobileDigits,
+                            mobile_full: mobileFull,
+                            whatsapp_same_as_mobile: whatsappSameAsMobile ? 1 : 0,
+                            whatsapp_country_code: whatsappCountryCode,
+                            whatsapp_number: whatsappDigits,
+                            whatsapp_full: whatsappFull,
+                            email: form.email,
+                            arrival_date: form.arrivalDate,
+                            batch_number: normalizedBatchNumber,
+                            hospital: form.hospital,
+                            designation: form.jobTitle,
+                            professional_category: professionalCategory,
+                            qualification_degree: qualificationDegree,
+                            qualification_degree_other: qualificationDegree === "Other" ? qualificationDegreeOther : "",
+                            mton_number: normalizedMton,
+                            current_arrangement: arrangement,
+                            degree_type: form.dept || "",
+                            remarks: form.remarks || "",
+                            ["current_" + "accom" + "modation"]: arrangement,
+                            ["applying_for_" + "accom" + "modation"]: arrangementFlag,
+                            vendor_name: includeFacilityWorkflow ? (form.vendorName || "AJA Care") : "",
+                            facility_name: includeFacilityWorkflow ? (form.facilityName || "") : includeMohHotelWorkflow ? mohHotelName : "",
+                            facility_area: includeMohHotelWorkflow ? mohHotelArea : categoryVendorEligible ? (form.facilityArea || "") : "",
+                            date_shifted_to_facility: includeFacilityWorkflow ? (form.dateShiftedToFacility || "") : includeMohHotelWorkflow ? mohHotelStartDate : "",
+                            contract_start_date: includeFacilityWorkflow ? (form.contractStartDate || "") : "",
+                            stay_period_start_date: includeFacilityWorkflow ? (form.contractStartDate || "") : "",
+                            stay_reminders_opt_in: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
+                            receive_notice_reminders: includeFacilityWorkflow ? (form.stayRemindersOptIn || "Yes") : "",
+                            moh_hotel_name: includeMohHotelWorkflow ? mohHotelName : "",
+                            moh_hotel_area: includeMohHotelWorkflow ? mohHotelArea : "",
+                            moh_hotel_start_date: includeMohHotelWorkflow ? mohHotelStartDate : "",
+                            moh_hotel_expected_end_date: includeMohHotelWorkflow ? mohHotelExpectedEndDate : "",
+                            moh_hotel_duration_months: includeMohHotelWorkflow ? mohHotelDuration : 0,
+                            issue_notice: "",
+                            emergency_country_code: emergencyCountryCode,
+                            emergency_contact: emergencyDigits,
+                            emergency_contact_full: emergencyFull,
+                            password: form.password,
+                            confirm_password: form.confirmPassword,
+                          });
+                          if (!res.success && !res.ok) {
+                            setSubmitError(res.error || "Registration failed.");
+                            return;
+                          }
+                          setSubmittedRef((res.reference || res.reference_id || "").toString());
+                          setDone(true);
+                        } catch (e) {
+                          setSubmitError((e as Error).message || "Registration failed.");
+                        } finally {
+                          setSubmitting(false);
+                        }
+                      }}
+                    >
+                      {submitting ? "Submitting…" : "Submit registration"}
+                    </Btn>
+                  )}
+                </div>
+              </div>
+            </Card>
+          </div>
+
+          {/* Sidebar */}
+          <div style={{ width: 280, flexShrink: 0 }}>
+            <Card style={{ borderTop: `3px solid ${T.green}`, marginBottom: 14 }}>
+              <div
+                style={{
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: T.navy,
+                  marginBottom: 12,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <Icon name="info" size={15} color={T.green} />
+                Important Notice
+              </div>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {[
+                  "Enter accurate details as per your official documents.",
+                  "Information is used for community welfare and official Embassy records.",
+                  "Staff may contact you via WhatsApp for verification.",
+                  "No document upload is required here.",
+                  "Supporting documents may be requested via official email after initial verification.",
+                ].map((t, i) => (
+                  <li
+                    key={i}
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      fontSize: 12,
+                      color: T.muted,
+                      lineHeight: 1.6,
+                      marginBottom: 8,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 5,
+                        height: 5,
+                        borderRadius: "50%",
+                        background: T.green,
+                        flexShrink: 0,
+                        marginTop: 6,
+                      }}
+                    />
+                    {t}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+            <Card style={{ borderTop: `3px solid ${T.navy}` }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.navy, marginBottom: 10 }}>
+                Helpline
+              </div>
+              <a
+                href="mailto:parepkuwaitcwa37@gmail.com"
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  fontSize: 12,
+                  color: T.infoFg,
+                  marginBottom: 8,
+                }}
+              >
+                <Icon name="mail" size={14} color={T.infoFg} />
+                parepkuwaitcwa37@gmail.com
+              </a>
+              <a
+                href="tel:+96555977292"
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  fontSize: 12,
+                  color: T.infoFg,
+                }}
+              >
+                <Icon name="phone" size={14} color={T.infoFg} />
+                +965 5597 7292
+              </a>
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.borderLt}` }}>
+                <button
+                  onClick={() => navigate("/nurses/login")}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    fontSize: 12,
+                    color: T.muted,
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                  }}
+                >
+                  Already registered? Sign in →
+                </button>
+              </div>
+            </Card>
+          </div>
+        </div>
+      </main>
+      <PageFooter />
+    </div>
+  );
+}

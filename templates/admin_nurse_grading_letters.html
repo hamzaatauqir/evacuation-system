@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nurse Grading Letters - Embassy of Pakistan, Kuwait</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+  <style>
+    .gl-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:14px}
+    .gl-kpi{background:#fff;border:1px solid var(--cwa-border);border-radius:8px;padding:12px;box-shadow:var(--cwa-shadow)}
+    .gl-kpi span{display:block;font-size:11px;text-transform:uppercase;color:var(--cwa-muted);letter-spacing:.03em}
+    .gl-kpi strong{display:block;margin-top:6px;font-size:24px;color:var(--cwa-navy)}
+    .gl-status{display:inline-flex;align-items:center;border:1px solid #cbd5e1;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:700;background:#f8fafc}
+    .gl-detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0}
+    .gl-info{border:1px solid var(--cwa-border);border-radius:8px;padding:10px;background:#fff}
+    .gl-info b{display:block;margin-bottom:6px;color:var(--cwa-navy)}
+    .gl-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .gl-actions .cwa-btn{margin-top:0}
+    .gl-error{color:#991b1b;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:10px}
+    .gl-empty{color:var(--cwa-muted);padding:16px;text-align:center}
+    .gl-alert{border-radius:8px;padding:12px 14px;margin:12px 0}
+    .gl-alert--warning{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412}
+    .gl-alert--danger{background:#fef2f2;border:1px solid #fecaca;color:#991b1b}
+    .gl-alert strong{display:block;margin-bottom:6px}
+    .gl-list{margin:0;padding-left:18px}
+    .gl-preview-wrap{margin-top:10px}
+    .gl-section-title{margin:18px 0 10px;color:var(--cwa-navy)}
+    .gl-qual-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+    .gl-qual-tab{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #cbd5e1;border-radius:999px;background:#f8fafc;color:#102a43;font-size:13px;font-weight:700;cursor:pointer}
+    .gl-qual-tab.is-active{background:#102a43;border-color:#102a43;color:#fff}
+    .gl-qual-tab small{font-size:11px;font-weight:600;opacity:.85}
+    .gl-qual-status{display:inline-flex;align-items:center;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:800;border:1px solid transparent;white-space:nowrap}
+    .gl-qual-status--pending{background:#fff7ed;border-color:#fed7aa;color:#9a3412}
+    .gl-qual-status--verified{background:#ecfdf3;border-color:#86efac;color:#166534}
+    .gl-qual-status--corrected{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8}
+    .gl-qual-status--override{background:#f5f3ff;border-color:#c4b5fd;color:#6d28d9}
+    .gl-summary{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin:8px 0 0}
+    .gl-summary strong{font-size:16px;color:var(--cwa-navy)}
+    .gl-muted{font-size:12px;color:var(--cwa-muted)}
+    .gl-qual-panel{border:1px solid var(--cwa-border);border-radius:10px;padding:14px;background:#fff}
+    .gl-qual-panel__head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:10px}
+    .gl-qual-panel__meta{font-size:12px;color:var(--cwa-muted)}
+    .gl-qual-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:10px 0 14px}
+    .gl-qual-summary-card{border:1px solid var(--cwa-border);border-radius:8px;padding:10px;background:#f8fafc}
+    .gl-qual-summary-card b{display:block;margin-bottom:5px;color:var(--cwa-navy)}
+    .gl-inline-note{font-size:12px;color:var(--cwa-muted);margin:0 0 10px}
+    /* Pre-print correction modal */
+    .npc-overlay{position:fixed;inset:0;background:rgba(15,23,42,.55);display:none;align-items:flex-start;justify-content:center;z-index:1000;padding:40px 16px;overflow-y:auto}
+    .npc-overlay.is-open{display:flex}
+    .npc-modal{background:#fff;border-radius:12px;max-width:640px;width:100%;box-shadow:0 20px 50px rgba(15,23,42,.25);padding:22px 22px 16px}
+    .npc-modal h3{margin:0 0 4px;color:var(--cwa-navy)}
+    .npc-modal p.npc-lede{margin:0 0 14px;color:var(--cwa-muted);font-size:13px}
+    .npc-row{display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:12px}
+    .npc-row label{font-size:12px;font-weight:700;color:var(--cwa-navy);text-transform:uppercase;letter-spacing:.03em}
+    .npc-current{font-size:12px;color:var(--cwa-muted);background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;padding:6px 8px}
+    .npc-error{color:#991b1b;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:13px;display:none}
+    .npc-error.is-open{display:block}
+    .npc-success{color:#166534;background:#ecfdf3;border:1px solid #86efac;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:13px;display:none}
+    .npc-success.is-open{display:block}
+    .npc-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
+    .gl-ym-section{border:1px solid var(--cwa-border);border-radius:8px;padding:10px;margin:10px 0;background:#f8fafc}
+    .gl-ym-section b{display:block;margin-bottom:6px;color:var(--cwa-navy);font-size:13px}
+    .gl-ym-table{width:100%;border-collapse:collapse;margin:6px 0;font-size:13px}
+    .gl-ym-table th{font-weight:700;color:var(--cwa-navy);text-align:left;padding:4px 8px;border-bottom:1px solid var(--cwa-border)}
+    .gl-ym-table td{padding:4px 8px;border-bottom:1px solid #f0f4f8}
+    .gl-ym-sums{font-size:12px;color:var(--cwa-muted);margin-top:4px}
+    .gl-ym-mismatch{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:6px;padding:6px 10px;font-size:12px;margin-top:6px}
+    .gl-ym-editor-row{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:6px;align-items:end;margin-bottom:6px}
+    @media(max-width:1024px){.gl-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    @media(max-width:640px){
+      .gl-kpis{grid-template-columns:1fr}
+      .gl-actions{align-items:stretch}
+      .gl-actions .cwa-btn{width:100%}
+      .gl-qual-tab{width:100%;justify-content:space-between}
+    }
+  </style>
+</head>
+<body class="cwa-admin-body">
+<div class="cwa-admin">
+  <header class="cwa-admin-header">
+    <div class="cwa-admin-header__brand">
+      <div class="cwa-admin-header__logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="26" height="26"><path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#fff"/><polygon points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5" fill="#fff"/></svg>
+      </div>
+      <div class="cwa-admin-header__titles">
+        <div class="cwa-admin-header__gov">Government of Pakistan</div>
+        <div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div>
+        <div class="cwa-admin-header__wing">Admin - Community Welfare Wing</div>
+      </div>
+    </div>
+    <div class="cwa-admin-header__actions">
+      <a class="cwa-admin-header__logout" href="/admin/dashboard" data-community-hide>Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/logout">Logout</a>
+    </div>
+  </header>
+
+  <div class="cwa-admin-shell">
+    <aside class="cwa-admin-sidebar">
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
+        <a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">OV</span><span>Overview</span></a>
+        <a href="/admin/nurses"><span class="cwa-admin-sidebar__icon">NR</span><span>Nurses</span></a>
+        <a href="/admin/gl" class="is-active"><span class="cwa-admin-sidebar__icon">GL</span><span>Nurse Grading Letters</span></a>
+        <a href="/admin/legal-cases" data-community-hide><span class="cwa-admin-sidebar__icon">LG</span><span>Legal Cases</span></a>
+        <a href="/admin/death-cases" data-community-hide><span class="cwa-admin-sidebar__icon">DC</span><span>Death Cases</span></a>
+        <a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">WF</span><span>Welfare Cases</span></a>
+        <a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">MC</span><span>My Assigned Cases</span></a>
+        <a href="/admin/ambassador-review" data-community-hide><span class="cwa-admin-sidebar__icon">AR</span><span>Ambassador Review</span></a>
+      </div>
+    </aside>
+
+    <main class="cwa-admin-main">
+      <div class="cwa-admin-subhead">
+        <div>
+          <h1>Nurse Grading Letters</h1>
+          <p>Review, approve, generate, and issue nurse grading letters.</p>
+        </div>
+        <div class="gl-actions">
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="sendDocumentVisitNotices()">Send Original Document Visit Notices</button>
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="exportCsv()">Export CSV</button>
+        </div>
+      </div>
+
+      <div class="cwa-admin-content cwa-fade-in">
+        <div class="gl-kpis" aria-label="Grading letter summary">
+          <div class="gl-kpi"><span>Total Requests</span><strong id="kpiTotal">0</strong></div>
+          <div class="gl-kpi"><span>Submitted</span><strong id="kpiSubmitted">0</strong></div>
+          <div class="gl-kpi"><span>Under Review</span><strong id="kpiUnderReview">0</strong></div>
+          <div class="gl-kpi"><span>Approved</span><strong id="kpiApproved">0</strong></div>
+          <div class="gl-kpi"><span>Letter Generated</span><strong id="kpiGenerated">0</strong></div>
+          <div class="gl-kpi"><span>Issued</span><strong id="kpiIssued">0</strong></div>
+        </div>
+
+        <section class="cwa-card">
+          <div class="cwa-card__head">
+            <div>
+              <div class="cwa-card__title">Queue</div>
+              <div id="totalLine" style="font-size:12px;color:var(--cwa-muted)">Loading requests...</div>
+            </div>
+          </div>
+          <div class="cwa-form-row">
+            <input id="search" class="cwa-input" placeholder="Search by reference, nurse name, passport, or degree" style="flex:1 1 260px">
+            <select id="status" class="cwa-select" style="width:190px">
+              <option value="">All Status</option>
+              <option>SUBMITTED</option>
+              <option>UNDER_REVIEW</option>
+              <option>CORRECTION_REQUIRED</option>
+              <option>APPROVED</option>
+              <option>LETTER_GENERATED</option>
+              <option>ISSUED</option>
+              <option>REJECTED</option>
+              <option>CANCELLED</option>
+            </select>
+            <select id="qualification" class="cwa-select" style="width:230px">
+              <option value="">All Qualifications</option>
+              <option value="BSN_4Y">BSN Nursing 4 Years</option>
+              <option value="POST_RN_BSN">Post RN BSN</option>
+              <option value="GENERAL_NURSING_DIPLOMA">General Nursing Diploma</option>
+              <option value="SPECIALIZATION_MIDWIFERY">Specialization / Midwifery</option>
+              <option value="MASTERS_NURSING_MSN">Masters in Nursing (MSN)</option>
+            </select>
+            <input id="date_from" class="cwa-input" type="date" style="width:160px" aria-label="Date from">
+            <input id="date_to" class="cwa-input" type="date" style="width:160px" aria-label="Date to">
+            <button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="loadList(1)">Search</button>
+          </div>
+
+          <div class="cwa-table-wrap">
+            <table class="cwa-table">
+              <thead>
+                <tr>
+                  <th>Reference</th>
+                  <th>Nurse Name</th>
+                  <th>Passport</th>
+                  <th>Qualification</th>
+                  <th>Mode</th>
+                  <th>Final %</th>
+                  <th>Grade</th>
+                  <th>Status</th>
+                  <th>Submitted</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="rows"><tr><td colspan="10">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="detail" class="cwa-card" style="display:none"></section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+const USER_NAME='__USER_NAME__';
+const USER_ROLE='__USER_ROLE__';
+const DEFAULT_QUAL_OPTIONS=[
+  {code:'BSN_4Y',label:'BSN Nursing 4 Years'},
+  {code:'POST_RN_BSN',label:'Post RN BSN'},
+  {code:'GENERAL_NURSING_DIPLOMA',label:'General Nursing Diploma'},
+  {code:'SPECIALIZATION_MIDWIFERY',label:'Specialization / Midwifery'},
+  {code:'MASTERS_NURSING_MSN',label:'Masters in Nursing (MSN)'}
+];
+const DEFAULT_IDENTIFIER_OPTIONS=['Student Number','Seat Number','Registration Number','Enrollment Number','Roll Number','Serial Number'];
+let state={page:1,selected:null,detailData:null,selectedQualificationKey:''};
+const rowsEl=document.getElementById('rows');
+const detailEl=document.getElementById('detail');
+const totalLineEl=document.getElementById('totalLine');
+const searchEl=document.getElementById('search');
+function esc(v){return String(v ?? '').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
+function moneylessPct(v){
+  if(v===null||v===undefined||String(v).trim()==='') return '—';
+  const n=Number(v);
+  return Number.isFinite(n)?n.toFixed(2)+'%':'—';
+}
+function statusText(s){return String(s||'').replace(/_/g,' ');}
+function identifierType(value){
+  const current=String(value||'').trim().toLowerCase().replace(/[_-]+/g,' ');
+  return DEFAULT_IDENTIFIER_OPTIONS.find(o=>o.toLowerCase()===current)||'Student Number';
+}
+function qualificationStatusLabel(q){
+  const status=String((q&&q.verification_status)||'PENDING').toUpperCase();
+  return (q&&q.verification_status_label)||({PENDING:'Pending Review',VERIFIED:'Verified',CORRECTED_BY_OPERATOR:'Corrected by Operator',VERIFICATION_OVERRIDE:'Verification Override'}[status]||statusText(status));
+}
+function qualificationStatusClass(q){
+  const status=String((q&&q.verification_status)||'PENDING').toUpperCase();
+  if(status==='VERIFIED') return 'gl-qual-status--verified';
+  if(status==='CORRECTED_BY_OPERATOR') return 'gl-qual-status--corrected';
+  if(status==='VERIFICATION_OVERRIDE') return 'gl-qual-status--override';
+  return 'gl-qual-status--pending';
+}
+function qualificationStatusBadge(q){
+  return `<span class="gl-qual-status ${qualificationStatusClass(q)}">${esc(qualificationStatusLabel(q))}</span>`;
+}
+function normalizeQualifications(a){
+  return Array.isArray(a&&a.qualifications)&&a.qualifications.length?a.qualifications:[];
+}
+function qualificationKey(q,index){
+  return String(q&&q.id!=null&&q.id!==''?q.id:`idx-${index}`);
+}
+function getSelectedQualification(a){
+  const quals=normalizeQualifications(a);
+  if(!quals.length) return {qualification:null,index:-1,key:''};
+  let index=quals.findIndex((q,i)=>qualificationKey(q,i)===String(state.selectedQualificationKey||''));
+  if(index<0){
+    index=0;
+    state.selectedQualificationKey=qualificationKey(quals[0],0);
+  }
+  return {qualification:quals[index],index,key:state.selectedQualificationKey};
+}
+function verificationSummary(a){
+  const summary=(a&&a.qualification_verification_summary)||{};
+  const total=Number(summary.total ?? a.total_qualification_count ?? normalizeQualifications(a).length ?? 0);
+  const verified=Number(summary.verified ?? a.verified_qualification_count ?? 0);
+  return {
+    total,
+    verified,
+    remaining:Math.max(total-verified,0),
+    allVerified:Boolean(summary.all_verified ?? (total>0&&verified===total)),
+    text:summary.text || `${verified} of ${total} qualifications verified`
+  };
+}
+function qualificationOptions(selected){
+  const opts=Array.isArray(state.detailData&&state.detailData.qualification_options)&&state.detailData.qualification_options.length
+    ? state.detailData.qualification_options
+    : DEFAULT_QUAL_OPTIONS;
+  return opts.map(opt=>{
+    const code=opt.code||opt.value||'';
+    const label=opt.label||opt.name||code;
+    return `<option value="${esc(code)}" ${selected===code?'selected':''}>${esc(label)}</option>`;
+  }).join('');
+}
+function identifierOptions(selected){
+  const opts=Array.isArray(state.detailData&&state.detailData.student_identifier_options)&&state.detailData.student_identifier_options.length
+    ? state.detailData.student_identifier_options
+    : DEFAULT_IDENTIFIER_OPTIONS;
+  const current=identifierType(selected);
+  return opts.map(label=>`<option value="${esc(label)}" ${identifierType(label)===current?'selected':''}>${esc(label)}</option>`).join('');
+}
+function modeRadios(mode){
+  return ['MARKS','PERCENT','GPA'].map(m=>`<label style="display:inline-block;margin-right:12px"><input type="radio" name="q_mode" value="${m}" ${mode===m?'checked':''}> ${m}</label>`).join('');
+}
+function parseYearlyMarks(q){
+  try{
+    const raw=q&&q.yearly_marks;
+    if(!raw) return [];
+    const parsed=typeof raw==='string'?JSON.parse(raw):raw;
+    return Array.isArray(parsed)?parsed.filter(r=>r&&(r.obtained||r.total)):[];
+  }catch(e){return [];}
+}
+function yearlyMarksMismatch(q,rows){
+  if(!rows||!rows.length) return false;
+  const fo=parseFloat(q.obtained_marks), ft=parseFloat(q.total_marks);
+  if(!Number.isFinite(fo)||!Number.isFinite(ft)) return false;
+  let so=0,st=0;
+  for(const r of rows){const o=parseFloat(r.obtained),t=parseFloat(r.total);if(!Number.isFinite(o)||!Number.isFinite(t)) return false;so+=o;st+=t;}
+  return Math.abs(so-fo)>0.001||Math.abs(st-ft)>0.001;
+}
+function renderYearRows(rows){
+  const c=document.getElementById('q_yearly_rows');
+  if(!c) return;
+  if(!rows||!rows.length){c.innerHTML='';return;}
+  c.innerHTML=rows.map((r,i)=>`<div class="gl-ym-editor-row" data-year-index="${i}">
+    <input class="cwa-input" placeholder="Year ${i+1} / period label" value="${esc(r.label||('Year '+(i+1)))}" data-ym="label" style="font-size:13px">
+    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Obtained / Result" value="${esc(r.obtained||'')}" data-ym="obtained" style="font-size:13px">
+    <input class="cwa-input" type="number" min="0" step="0.01" placeholder="Total / Scale" value="${esc(r.total||'')}" data-ym="total" style="font-size:13px">
+    ${i>0?`<button type="button" class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="removeYearRow(${i})" title="Remove year" style="padding:4px 8px;font-size:12px">✕</button>`:'<div></div>'}
+  </div>`).join('');
+}
+function addYearRow(){
+  const rows=collectYearRows();
+  renderYearRows([...rows,{label:'Year '+(rows.length+1),obtained:'',total:''}]);
+}
+function removeYearRow(i){renderYearRows(collectYearRows().filter((_,j)=>j!==i));}
+function collectYearRows(){
+  const c=document.getElementById('q_yearly_rows');
+  if(!c) return [];
+  const rows=[];
+  c.querySelectorAll('[data-year-index]').forEach(row=>{
+    rows.push({label:(row.querySelector('[data-ym="label"]')||{}).value||'',obtained:(row.querySelector('[data-ym="obtained"]')||{}).value||'',total:(row.querySelector('[data-ym="total"]')||{}).value||''});
+  });
+  return rows;
+}
+async function api(url, opts){
+  try{
+    const r=await fetch(url,opts||{});
+    const d=await r.json().catch(()=>({success:false,error:'Server returned an invalid response.'}));
+    if(!r.ok || d.success===false) throw new Error(d.error||'Request failed.');
+    return d;
+  }catch(e){
+    const m=String(e.message||'');
+    throw new Error(/failed to fetch|networkerror|load failed/i.test(m) ? 'Request could not be completed. Please check your connection and try again.' : m);
+  }
+}
+function qs(page){
+  const p=new URLSearchParams();
+  p.set('page',page||state.page||1);
+  p.set('page_size',25);
+  ['search','status','qualification','date_from','date_to'].forEach(id=>{
+    const el=document.getElementById(id);
+    const v=(el&&el.value||'').trim();
+    if(v) p.set(id==='qualification'?'qualification_code':id,v);
+  });
+  return p.toString();
+}
+function normalizeItems(d){return Array.isArray(d.items)?d.items:(Array.isArray(d.rows)?d.rows:[]);}
+function updateKpis(d, items){
+  const k=d.kpis||d.summary||{};
+  const counts={};
+  items.forEach(a=>{const s=String(a.status||'').toLowerCase();counts[s]=(counts[s]||0)+1;});
+  kpiTotal.textContent=k.total_requests ?? k.total ?? d.total ?? items.length;
+  kpiSubmitted.textContent=k.submitted ?? counts.submitted ?? 0;
+  kpiUnderReview.textContent=k.under_review ?? counts.under_review ?? 0;
+  kpiApproved.textContent=k.approved ?? counts.approved ?? 0;
+  kpiGenerated.textContent=k.letter_generated ?? counts.letter_generated ?? 0;
+  kpiIssued.textContent=k.issued ?? counts.issued ?? 0;
+}
+async function loadList(page){
+  state.page=page||1;
+  rowsEl.innerHTML='<tr><td colspan="10">Loading...</td></tr>';
+  try{
+    const d=await api('/api/admin/gl/list?'+qs(state.page));
+    const items=normalizeItems(d);
+    updateKpis(d, items);
+    totalLineEl.textContent=(d.total ?? items.length)+' matching grading letter request(s)';
+    if(!items.length){
+      rowsEl.innerHTML='<tr><td colspan="10" class="gl-empty">No grading letter requests found.</td></tr>';
+      return;
+    }
+    rowsEl.innerHTML=items.map(a=>'<tr>'
+      +'<td>'+esc(a.ref_no||a.reference||'')+'</td>'
+      +'<td>'+esc((a.nurse&&a.nurse.full_name)||a.nurse_name||a.full_name||'')+'</td>'
+      +'<td>'+esc((a.nurse&&a.nurse.passport_number)||a.passport_number||a.passport||'')+'</td>'
+      +'<td>'+esc(a.qualification_label||a.qualification||a.qualification_code||'')+'</td>'
+      +'<td>'+esc(a.mode||'')+'</td>'
+      +'<td>'+esc(moneylessPct(a.final_percentage ?? a.computed_percentage))+'</td>'
+      +'<td>'+esc(a.final_grade_label||a.grade||'')+'</td>'
+      +'<td><span class="gl-status">'+esc(statusText(a.status))+'</span></td>'
+      +'<td>'+esc(a.submitted_at||a.created_at||'')+'</td>'
+      +'<td><button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="loadDetail('+Number(a.id||0)+')">View</button></td>'
+      +'</tr>').join('');
+  }catch(e){
+    totalLineEl.textContent='Unable to load grading letter requests.';
+    rowsEl.innerHTML='<tr><td colspan="10"><div class="gl-error">'+esc(e.message)+'</div></td></tr>';
+  }
+}
+function exportCsv(){window.location='/api/admin/gl/list.csv?'+qs(1);}
+async function loadDetail(id){
+  if(!id) return;
+  detailEl.style.display='block';
+  detailEl.innerHTML='<div class="gl-empty">Loading detail...</div>';
+  try{
+    const d=await api('/api/admin/gl/detail?id='+encodeURIComponent(id));
+    const next=d.application||d.item||null;
+    if(!state.selected || !next || String(state.selected.id||'')!==String(next.id||'')) state.selectedQualificationKey='';
+    state.selected=next;
+    state.detailData=d;
+    renderDetail(d);
+  }catch(e){
+    detailEl.innerHTML='<div class="gl-error">'+esc(e.message)+'</div>';
+  }
+}
+function actionButtons(a, canManage, blockers){
+  if(!canManage) return '';
+  let html='';
+  const blockerTitle=esc((blockers||[]).join(' '))||'Complete the required checks before generating the official PDF.';
+  if(a.status==='SUBMITTED') html+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'start-review\')">Start Review</button>';
+  if(a.status==='UNDER_REVIEW') html+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="approve()">Approve</button><button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="requestCorrection()">Request Correction</button>';
+  if(a.status==='APPROVED') html+=(a.can_generate_official===false
+    ? `<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" disabled title="${blockerTitle}">Generate PDF</button>`
+    : '<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'generate\')">Generate PDF</button>')
+    +'<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reopen()">Reopen</button>';
+  if(a.status==='LETTER_GENERATED') html+='<button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="doAction(\'mark-issued\')">Mark Issued</button>';
+  if(a.can_print_clean){
+    const letterUrl='/api/admin/gl/letter?id='+Number(a.id);
+    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="'+letterUrl+'&disposition=inline&force=1" target="_blank" rel="noopener">Print Final Letter</a>';
+    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="'+letterUrl+'&force=1" target="_blank" rel="noopener">Download Final PDF</a>';
+    html+='<a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/api/admin/gl/letter-docx?id='+Number(a.id)+'" target="_blank" rel="noopener">Download Word Copy</a>';
+  }
+  // Pre-print correction: visible while the letter is still actionable.
+  // Hidden once the request is rejected/cancelled (no point correcting then).
+  if(!['REJECTED','CANCELLED'].includes(a.status)) html+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="openCorrectionModal()" title="Correct nurse identity fields before printing the official letter">Correct Name / Father Name Before Print</button>';
+  if(!['ISSUED','REJECTED','CANCELLED'].includes(a.status)) html+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="reject()">Reject</button>';
+  if(['SUBMITTED','CORRECTION_REQUIRED'].includes(a.status)) html+='<button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="cancelReq()">Cancel</button>';
+  return html;
+}
+function renderDetail(d){
+  const a=d.application||d.item||{};
+  const n=a.nurse||{};
+  const identity=a.letter_identity||{};
+  const canManage=!!d.can_manage;
+  const warnings=Array.isArray(d.preview_warnings)?d.preview_warnings:[];
+  const blockers=Array.isArray(d.generation_blockers)?d.generation_blockers:[];
+  const qualifications=normalizeQualifications(a);
+  const selection=getSelectedQualification(a);
+  const q=selection.qualification;
+  const verification=verificationSummary(a);
+  const canEditQualification=canManage&&!['ISSUED','REJECTED','CANCELLED'].includes(a.status);
+  const canVerifyQualification=canManage&&['UNDER_REVIEW','APPROVED','LETTER_GENERATED'].includes(a.status);
+  const canOverrideFinal=canManage&&['UNDER_REVIEW','APPROVED','LETTER_GENERATED'].includes(a.status);
+  const noticeSummary=a.document_visit_email_sent_at
+    ? `Notice sent: ${a.document_visit_email_sent_at}${a.document_visit_email_sent_by ? ' by '+a.document_visit_email_sent_by : ''}`
+    : (a.document_visit_email_error ? `Last notice issue: ${a.document_visit_email_error}` : 'Notice not sent yet');
+  const qualificationTabs=qualifications.map((qual,index)=>{
+    const key=qualificationKey(qual,index);
+    return `<button class="gl-qual-tab ${key===selection.key?'is-active':''}" type="button" data-key="${esc(key)}" onclick="selectQualification(this.dataset.key)">
+      <span>${esc(qual.display_title||qual.qualification_label||qual.degree_title||('Qualification '+(index+1)))}</span>
+      ${qualificationStatusBadge(qual)}
+      <small>${esc('Q'+(index+1))}</small>
+    </button>`;
+  }).join('');
+  const selectedIdentifier=identifierType((q&&((q.identifier_type||q.student_identifier_type||q.student_no_label)))||'');
+  const sharedNote=qualifications.length>1
+    ? '<p class="gl-inline-note">Father name, relation text, and internal notes below apply to the full grading-letter request. The qualification form only updates the selected qualification chip.</p>'
+    : '';
+  const _ymRows=parseYearlyMarks(q);
+  const _ymMismatch=yearlyMarksMismatch(q,_ymRows);
+  const _ymSumO=_ymRows.reduce((s,r)=>s+Number(r.obtained||0),0);
+  const _ymSumT=_ymRows.reduce((s,r)=>s+Number(r.total||0),0);
+  const yearlySection=_ymRows.length?`<div class="gl-ym-section">
+    <b>Year-wise Result Breakdown (Internal Staff Cross-check Only)</b>
+    <table class="gl-ym-table"><thead><tr><th>Year / Period</th><th>Obtained / Result</th><th>Total / Scale</th></tr></thead>
+    <tbody>${_ymRows.map(r=>`<tr><td>${esc(r.label||'—')}</td><td>${esc(r.obtained||'—')}</td><td>${esc(r.total||'—')}</td></tr>`).join('')}</tbody></table>
+    <div class="gl-ym-sums">Year-wise totals: <strong>${_ymSumO.toFixed(2)}</strong> obtained / <strong>${_ymSumT.toFixed(2)}</strong> total</div>
+    ${_ymMismatch?'<div class="gl-ym-mismatch">&#9888; Year-wise total does not match the main marks entered by the nurse. Please cross-check with certificates.</div>':''}
+  </div>`:'';
+  const qualificationPanel=q?`
+    <div class="gl-qual-panel">
+      <div class="gl-qual-panel__head">
+        <div>
+          <h3 class="gl-section-title" style="margin:0 0 4px">Selected Qualification</h3>
+          <div><strong>${esc(q.display_title||q.qualification_label||q.degree_title||'Qualification')}</strong></div>
+          <div class="gl-qual-panel__meta">${esc('Qualification '+(selection.index+1))}${q.display_identifier?` • ${esc(selectedIdentifier)}: ${esc(q.display_identifier)}`:''}</div>
+        </div>
+        ${qualificationStatusBadge(q)}
+      </div>
+      <div class="gl-qual-summary-grid">
+        <div class="gl-qual-summary-card"><b>Qualification</b>${esc(q.qualification_label||'—')}<br>${esc(q.degree_title||'—')}</div>
+        <div class="gl-qual-summary-card"><b>Grading</b>Mode: ${esc(q.mode||'—')}<br>Computed: ${esc(moneylessPct(q.computed_percentage))}<br>Final: ${esc(moneylessPct(q.final_percentage ?? q.computed_percentage))}<br>Grade: ${esc(q.final_grade_label||'—')}</div>
+        <div class="gl-qual-summary-card"><b>Verification</b>Status: ${esc(qualificationStatusLabel(q))}<br>Verified By: ${esc(q.verified_by||'—')}<br>Verified At: ${esc(q.verified_at||'—')}</div>
+        <div class="gl-qual-summary-card"><b>Remarks</b>${esc(q.remarks||'—')}</div>
+      </div>
+      ${yearlySection}
+      ${sharedNote}
+      <div class="cwa-form-row">
+        <input id="q_father_name" class="cwa-input" placeholder="Father name for official letter" value="${esc(identity.father_name||'')}">
+        <input id="q_relation_override" class="cwa-input" placeholder="Relation text for letter" value="${esc(a.relation_override||'')}">
+        <textarea id="q_internal_notes" class="cwa-input" placeholder="Internal notes" style="min-height:72px;flex:1 1 360px">${esc(a.internal_notes||'')}</textarea>
+      </div>
+      <div class="cwa-form-row">
+        <select id="q_qualification_code" class="cwa-select">${qualificationOptions(q.qualification_code)}</select>
+        <input id="q_degree_title" class="cwa-input" placeholder="Degree title" value="${esc(q.degree_title||'')}">
+        <select id="q_student_identifier_type" class="cwa-select">${identifierOptions(selectedIdentifier)}</select>
+        <input id="q_student_no" class="cwa-input" placeholder="Enter the number exactly as printed on your certificate/transcript." value="${esc(q.student_no||q.identifier_value||'')}">
+      </div>
+      <div class="cwa-form-row">
+        <input id="q_institute" class="cwa-input" placeholder="College / Institute" value="${esc(q.institute||'')}">
+        <input id="q_university" class="cwa-input" placeholder="University / Body" value="${esc(q.university||'')}">
+        <input id="q_year_of_passing" class="cwa-input" type="number" placeholder="Year" value="${esc(q.year_of_passing||'')}">
+        <textarea id="q_remarks" class="cwa-input" placeholder="Qualification remarks" style="min-height:72px;flex:1 1 240px">${esc(q.remarks||'')}</textarea>
+      </div>
+      <div class="cwa-form-row">
+        <div>${modeRadios(q.mode||'MARKS')}</div>
+        <input id="q_total_marks" class="cwa-input" placeholder="Total marks" value="${esc(q.total_marks||'')}">
+        <input id="q_obtained_marks" class="cwa-input" placeholder="Obtained marks" value="${esc(q.obtained_marks||'')}">
+        <input id="q_entered_percentage" class="cwa-input" placeholder="Percentage" value="${esc(q.entered_percentage||'')}">
+        <input id="q_entered_gpa" class="cwa-input" placeholder="GPA obtained (max 4.00)" value="${esc(q.entered_gpa||'')}">
+      </div>
+      <div class="gl-ym-section">
+        <b>Year-wise Result Breakdown (Internal Staff Cross-check Only)</b>
+        <p style="margin:0 0 8px;font-size:12px;color:var(--cwa-muted)">For staff certificate verification only. Not shown on the official grading letter.</p>
+        <div id="q_yearly_rows"></div>
+        <button type="button" class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="addYearRow()" style="margin-top:6px;font-size:12px">+ Add Year</button>
+      </div>
+      <div class="gl-actions">
+        <button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="saveSelectedQualification()" ${canEditQualification?'':'disabled'}>Save Qualification</button>
+        <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="verifySelectedQualification()" ${(canVerifyQualification&&!q.is_verified)?'':'disabled'}>Mark Verified</button>
+      </div>
+    </div>
+  `:'<div class="gl-empty">No qualification details are available for this request.</div>';
+  const singleOverride=qualifications.length===1?`
+    <h3 class="gl-section-title">Override Final Result</h3>
+    <div class="cwa-form-row">
+      <input id="o_final_percentage" class="cwa-input" type="number" min="0" max="100" step="0.01" value="${esc(a.final_percentage||'')}">
+      <select id="o_final_grade_label" class="cwa-select">${['Excellent','Very Good','Good','Pass','Fail'].map(g=>`<option ${a.final_grade_label===g?'selected':''}>${g}</option>`).join('')}</select>
+      <input id="o_override_reason" class="cwa-input" placeholder="Required override reason" value="${esc(a.override_reason||'')}">
+      <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="overrideFinal()" ${canOverrideFinal?'':'disabled'}>Apply Override</button>
+    </div>
+  `:'';
+  detailEl.innerHTML=`
+    <div class="cwa-card__head">
+      <div>
+        <div class="cwa-card__title">${esc(a.ref_no||'Grading Letter')} <span class="gl-status">${esc(statusText(a.status))}</span></div>
+        <div class="gl-muted">${esc(verification.text)}${a.submitted_at?` • Submitted ${esc(a.submitted_at)}`:''}</div>
+      </div>
+      <div class="gl-actions">${actionButtons(a,canManage,blockers)}</div>
+    </div>
+    ${warnings.length?`<div class="gl-alert gl-alert--warning"><strong>Missing / review items</strong><ul class="gl-list">${warnings.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>`:''}
+    ${blockers.length?`<div class="gl-alert gl-alert--danger"><strong>Official PDF generation blocked</strong><ul class="gl-list">${blockers.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>`:''}
+    <div class="gl-detail-grid">
+      <div class="gl-info"><b>Current Nurse Profile</b>${esc(n.full_name||'—')}<br>Passport: ${esc(n.passport_number||'—')}<br>CNIC: ${esc(n.cnic||'—')}<br>Civil ID: ${esc(n.civil_id||'—')}<br>Mobile: ${esc(n.mobile||'—')}<br>WhatsApp: ${esc(n.whatsapp||'—')}<br>Email: ${esc(n.email||'—')}<br>MTON: ${esc(n.mton_number||'—')}<br>Workplace: ${esc(n.workplace||'—')}</div>
+      <div class="gl-info"><b>Official Letter Snapshot</b>${esc(identity.full_name||n.full_name||'—')}<br>Father Name: ${esc(identity.father_name||'—')}<br>Passport: ${esc(identity.passport_number||n.passport_number||'—')}<br>CNIC: ${esc(identity.cnic||'—')}<br>Civil ID: ${esc(identity.civil_id||'—')}<br>Mobile: ${esc(identity.mobile||'—')}<br>Email: ${esc(identity.email||'—')}</div>
+      <div class="gl-info"><b>Verification Summary</b><div class="gl-summary"><strong>${esc(verification.text)}</strong>${verification.allVerified?'<span class="gl-qual-status gl-qual-status--verified">Ready for Final Generation</span>':'<span class="gl-qual-status gl-qual-status--pending">Verification Pending</span>'}</div><div class="gl-muted" style="margin-top:8px">${esc(verification.remaining)} qualification(s) remaining</div></div>
+      <div class="gl-info"><b>Document Visit Notice</b>${esc(noticeSummary)}</div>
+    </div>
+    <h3 class="gl-section-title">Qualifications</h3>
+    <div class="gl-qual-tabs">${qualificationTabs||'<div class="gl-empty">No qualifications found.</div>'}</div>
+    ${qualificationPanel}
+    ${singleOverride}
+    <h3 class="gl-section-title">Correction / Notes</h3>
+    <div class="cwa-form-row"><textarea id="correction_notes" class="cwa-input" style="min-height:72px;flex:1 1 360px">${esc(a.correction_notes||'')}</textarea></div>
+    <h3 class="gl-section-title">Official Letter Preview</h3>
+    <div class="gl-preview-wrap">${d.letter_preview_html||'<div class="gl-empty">Preview unavailable.</div>'}</div>
+    <h3 class="gl-section-title">Audit Log</h3>
+    <div class="cwa-table-wrap">
+      <table class="cwa-table">
+        <thead><tr><th>Time</th><th>Actor</th><th>Event</th><th>Field</th><th>Old</th><th>New</th><th>Note</th></tr></thead>
+        <tbody>${(d.audit||[]).map(x=>`<tr><td>${esc(x.created_at)}</td><td>${esc(x.actor_id||x.actor_role)}</td><td>${esc(x.event_type)}</td><td>${esc(x.field_name)}</td><td>${esc(x.old_value)}</td><td>${esc(x.new_value)}</td><td>${esc(x.note)}</td></tr>`).join('')}</tbody>
+      </table>
+    </div>
+  `;
+  renderYearRows(_ymRows);
+}
+function selectQualification(key){
+  state.selectedQualificationKey=String(key||'');
+  if(state.detailData) renderDetail(state.detailData);
+}
+function selectedQualificationContext(){
+  return getSelectedQualification(state.selected||{});
+}
+function qualificationEditPayload(){
+  const selection=selectedQualificationContext();
+  const q=selection.qualification||{};
+  const mode=(document.querySelector('input[name="q_mode"]:checked')||{}).value||'MARKS';
+  const enteredPercentage=(document.getElementById('q_entered_percentage')||{}).value||'';
+  const enteredGpa=(document.getElementById('q_entered_gpa')||{}).value||'';
+  return {
+    id:state.selected.id,
+    action:'edit_qualification',
+    qualification_id:q.id,
+    qualification_index:selection.index,
+    father_name:(document.getElementById('q_father_name')||{}).value||'',
+    relation_override:(document.getElementById('q_relation_override')||{}).value||'',
+    internal_notes:(document.getElementById('q_internal_notes')||{}).value||'',
+    qualification_code:(document.getElementById('q_qualification_code')||{}).value||'',
+    qualification_other:q.qualification_other||'',
+    degree_title:(document.getElementById('q_degree_title')||{}).value||'',
+    student_identifier_type:(document.getElementById('q_student_identifier_type')||{}).value||'',
+    student_no:(document.getElementById('q_student_no')||{}).value||'',
+    institute:(document.getElementById('q_institute')||{}).value||'',
+    university:(document.getElementById('q_university')||{}).value||'',
+    year_of_passing:(document.getElementById('q_year_of_passing')||{}).value||'',
+    remarks:(document.getElementById('q_remarks')||{}).value||'',
+    mode,
+    marks_mode:mode,
+    total_marks:(document.getElementById('q_total_marks')||{}).value||'',
+    obtained_marks:(document.getElementById('q_obtained_marks')||{}).value||'',
+    entered_percentage:enteredPercentage,
+    percentage:enteredPercentage,
+    percent:enteredPercentage,
+    entered_gpa:enteredGpa,
+    gpa:enteredGpa,
+    yearly_marks:collectYearRows().filter(r=>(r.obtained||'').trim()!==''||(r.total||'').trim()!=='')
+  };
+}
+async function doAction(action, extra){
+  if(!state.selected) return;
+  try{
+    const d=await api('/api/admin/gl/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({id:state.selected.id,action},extra||{}))});
+    await loadDetail((d.application&&d.application.id)||state.selected.id);
+    await loadList(state.page);
+  }catch(e){alert(e.message);}
+}
+async function saveSelectedQualification(){await doAction('edit_qualification',qualificationEditPayload());}
+async function verifySelectedQualification(){
+  const selection=selectedQualificationContext();
+  if(!selection.qualification) return;
+  await doAction('verify_qualification',{qualification_id:selection.qualification.id,qualification_index:selection.index});
+}
+async function overrideFinal(){
+  await doAction('override',{
+    final_percentage:(document.getElementById('o_final_percentage')||{}).value||'',
+    final_grade_label:(document.getElementById('o_final_grade_label')||{}).value||'',
+    override_reason:(document.getElementById('o_override_reason')||{}).value||''
+  });
+}
+async function requestCorrection(){
+  await doAction('request-correction',{correction_notes:(document.getElementById('correction_notes')||{}).value||''});
+}
+async function approve(){
+  const a=state.selected||{};
+  const verification=verificationSummary(a);
+  const summary=verification.total>1
+    ? `Approve this grading letter request? ${verification.text}.`
+    : 'Approve this grading letter with final percentage '+moneylessPct(a.final_percentage)+' and grade '+(a.final_grade_label||'')+'?';
+  if(confirm(summary)) await doAction('approve');
+}
+async function reopen(){const reason=prompt('Reason for reopening approved request'); if(reason) await doAction('reopen',{reason});}
+async function reject(){const note=prompt('Reason / note for rejection'); if(note!==null) await doAction('reject',{note});}
+async function cancelReq(){const note=prompt('Reason / note for cancellation'); if(note!==null) await doAction('cancel',{note});}
+async function sendDocumentVisitNotices(){
+  if(!confirm('This will email grading-letter applicants who have not yet been notified to visit the Embassy with original documents. Continue?')) return;
+  try{
+    const result=await api('/api/admin/gl/send-document-visit-notices',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    alert(`Original document visit notices completed.\nSent: ${result.sent||0}\nSkipped: ${result.skipped||0}\nFailed: ${result.failed||0}`);
+    if(state.selected&&state.selected.id) await loadDetail(state.selected.id);
+    await loadList(state.page);
+  }catch(e){
+    alert(e.message);
+  }
+}
+['status','qualification','date_from','date_to'].forEach(id=>document.getElementById(id).addEventListener('change',()=>loadList(1)));
+searchEl.addEventListener('keydown',e=>{if(e.key==='Enter')loadList(1);});
+// ── Pre-print nurse-profile correction modal ──────────────────────
+function openCorrectionModal(){
+  const a=state.selected||{};
+  if(!a||!a.id){alert('Please open a grading-letter request first.');return;}
+  const n=a.nurse||{};
+  const identity=a.letter_identity||{};
+  // Pre-fill corrected fields with the values that the letter currently
+  // uses (snapshot wins over canonical), so a "no-op" submission is rejected
+  // by the server and the operator sees only real corrections.
+  document.getElementById('npc_full_name_current').textContent=(n.full_name||'—');
+  document.getElementById('npc_full_name').value=identity.full_name||n.full_name||'';
+  document.getElementById('npc_father_name_current').textContent=(identity.father_name||n.father_name||'—');
+  document.getElementById('npc_father_name').value=identity.father_name||n.father_name||'';
+  document.getElementById('npc_passport_current').textContent=(n.passport_number||identity.passport_number||'—');
+  document.getElementById('npc_passport').value=identity.passport_number||n.passport_number||'';
+  document.getElementById('npc_civil_id_current').textContent=(n.civil_id||identity.civil_id||'—');
+  document.getElementById('npc_civil_id').value=identity.civil_id||n.civil_id||'';
+  document.getElementById('npc_reason').value='';
+  document.getElementById('npc_error').classList.remove('is-open');
+  document.getElementById('npc_success').classList.remove('is-open');
+  document.getElementById('npc_overlay').classList.add('is-open');
+}
+function closeCorrectionModal(){document.getElementById('npc_overlay').classList.remove('is-open');}
+function npcShowError(msg){const e=document.getElementById('npc_error');e.textContent=msg;e.classList.add('is-open');document.getElementById('npc_success').classList.remove('is-open');}
+async function submitCorrection(){
+  const a=state.selected||{};
+  if(!a||!a.id) return;
+  const reason=(document.getElementById('npc_reason').value||'').trim();
+  if(!reason){npcShowError('Please enter a correction reason before saving.');return;}
+  const payload={
+    application_id:a.id,
+    full_name:(document.getElementById('npc_full_name').value||'').trim(),
+    father_name:(document.getElementById('npc_father_name').value||'').trim(),
+    passport_number:(document.getElementById('npc_passport').value||'').trim(),
+    civil_id:(document.getElementById('npc_civil_id').value||'').trim(),
+    reason
+  };
+  try{
+    const r=await fetch('/api/admin/gl/correct-nurse-profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json();
+    if(!r.ok||!d||d.success===false){
+      npcShowError((d&&d.error)||('Could not save correction (HTTP '+r.status+').'));
+      return;
+    }
+    const ok=document.getElementById('npc_success');
+    ok.textContent=d.message||'Details updated successfully. The grading letter will now use the corrected information.';
+    ok.classList.add('is-open');
+    document.getElementById('npc_error').classList.remove('is-open');
+    // Reload the detail so preview, identity panels, and audit log update.
+    await loadDetail(a.id);
+    await loadList(state.page);
+    setTimeout(closeCorrectionModal, 1200);
+  }catch(e){npcShowError(e&&e.message?e.message:'Network error.');}
+}
+loadList(1);
+</script>
+<div id="npc_overlay" class="npc-overlay" role="dialog" aria-modal="true" aria-labelledby="npc_title">
+  <div class="npc-modal">
+    <h3 id="npc_title">Correct Nurse Identity Before Printing</h3>
+    <p class="npc-lede">Updates the canonical nurse record AND this grading-letter snapshot. The corrected values will appear immediately in the preview and the printed PDF, and persist for future letters and admin views.</p>
+    <div id="npc_error" class="npc-error" role="alert"></div>
+    <div id="npc_success" class="npc-success" role="status"></div>
+    <div class="npc-row">
+      <label for="npc_full_name">Full Name (corrected)</label>
+      <input id="npc_full_name" class="cwa-input" maxlength="220" placeholder="Full name as per passport">
+      <div class="npc-current">Current nurse-record value: <span id="npc_full_name_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_father_name">Father Name (corrected)</label>
+      <input id="npc_father_name" class="cwa-input" maxlength="180" placeholder="Father's name as per official document">
+      <div class="npc-current">Current letter value: <span id="npc_father_name_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_passport">Passport Number (corrected)</label>
+      <input id="npc_passport" class="cwa-input" maxlength="80" placeholder="Passport number">
+      <div class="npc-current">Current nurse-record value: <span id="npc_passport_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_civil_id">Civil ID (corrected, optional)</label>
+      <input id="npc_civil_id" class="cwa-input" maxlength="60" placeholder="Civil ID (Kuwait)">
+      <div class="npc-current">Current nurse-record value: <span id="npc_civil_id_current">—</span></div>
+    </div>
+    <div class="npc-row">
+      <label for="npc_reason">Correction Reason (required)</label>
+      <input id="npc_reason" class="cwa-input" maxlength="240" placeholder="e.g. Spelling correction as per passport / Father name corrected as per official document / Typing error during registration">
+    </div>
+    <div class="npc-actions">
+      <button class="cwa-btn cwa-btn--light cwa-btn--sm" type="button" onclick="closeCorrectionModal()">Cancel</button>
+      <button class="cwa-btn cwa-btn--primary cwa-btn--sm" type="button" onclick="submitCorrection()">Save &amp; Refresh Preview</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

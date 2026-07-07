@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nurses Management — Embassy of Pakistan, Kuwait</title>
+  <link rel="stylesheet" href="/static/css/cwa-admin.css">
+</head>
+<body class="cwa-admin-body">
+<div class="cwa-admin">
+  <header class="cwa-admin-header">
+    <div class="cwa-admin-header__brand">
+      <div class="cwa-admin-header__logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="26" height="26"><path d="M44 32a16 16 0 1 1-12.5-15.6A12 12 0 1 0 44 32Z" fill="#fff"/><polygon points="46,23 48,28.5 53.8,28.5 49.1,32 50.9,37.5 46,34 41.1,37.5 42.9,32 38.2,28.5 44,28.5" fill="#fff"/></svg>
+      </div>
+      <div class="cwa-admin-header__titles">
+        <div class="cwa-admin-header__gov">Government of Pakistan</div>
+        <div class="cwa-admin-header__embassy">Embassy of Pakistan, Kuwait</div>
+        <div class="cwa-admin-header__wing">Admin — Community Welfare Wing</div>
+      </div>
+    </div>
+    <div class="cwa-admin-header__actions">
+      <a class="cwa-admin-header__logout" href="/admin/security">Two-Factor Security</a>
+      <a class="cwa-admin-header__logout" href="/admin/dashboard" data-community-hide>Main Dashboard</a>
+      <a class="cwa-admin-header__logout" href="/logout">Logout</a>
+    </div>
+  </header>
+
+  <div class="cwa-admin-shell">
+    <aside class="cwa-admin-sidebar">
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Community Welfare</div>
+        <a href="/admin/community-welfare"><span class="cwa-admin-sidebar__icon">▢</span><span>Overview</span><span class="badge-count hidden" data-badge="community_welfare"></span></a>
+        <a href="/admin/nurses" class="is-active"><span class="cwa-admin-sidebar__icon">◉</span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span></a>
+        <a href="/admin/gl"><span class="cwa-admin-sidebar__icon">GL</span><span>Nurse Grading Letters</span></a>
+        <a href="/admin/legal-cases" data-community-hide><span class="cwa-admin-sidebar__icon">⚖</span><span>Legal Cases</span><span class="badge-count hidden" data-badge="legal_cases"></span></a>
+        <a href="/admin/death-cases" data-community-hide><span class="cwa-admin-sidebar__icon">♥</span><span>Death Cases</span><span class="badge-count hidden" data-badge="death_cases"></span></a>
+        <a href="/admin/facility-roster" data-community-hide><span class="cwa-admin-sidebar__icon">FR</span><span>Facility Roster</span><span class="badge-count hidden" data-badge="facility_roster"></span></a>
+        <a href="/admin/facility-occupancy" data-community-hide><span class="cwa-admin-sidebar__icon">FO</span><span>Facility Occupancy</span><span class="badge-count hidden" data-badge="facility_occupancy"></span></a>
+        <a href="/admin/welfare-cases"><span class="cwa-admin-sidebar__icon">▣</span><span>Welfare Cases</span><span class="badge-count hidden" data-badge="welfare_cases"></span></a>
+        <a href="/admin/my-cases"><span class="cwa-admin-sidebar__icon">★</span><span>My Assigned Cases</span><span class="badge-count hidden" data-badge="my_cases"></span></a>
+        <a href="/admin/ambassador-review" data-community-hide><span class="cwa-admin-sidebar__icon">◆</span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></a>
+        <a href="/admin/alternative-facilities" data-community-hide><span class="cwa-admin-sidebar__icon">AF</span><span>Alternative Facilities</span><span class="badge-count hidden" data-badge="alternative_facilities"></span></a>
+      </div>
+      <div class="cwa-admin-sidebar__divider"></div>
+      <div class="cwa-admin-sidebar__group">
+        <div class="cwa-admin-sidebar__section-title">Quick Access</div>
+        <a href="/admin/dashboard" data-community-hide><span class="cwa-admin-sidebar__icon">⌂</span><span>Visa Dashboard</span></a>
+        <a href="/admin/security"><span class="cwa-admin-sidebar__icon">2F</span><span>Two-Factor Security</span></a>
+        <a href="/admin/nurses/my-complaints"><span class="cwa-admin-sidebar__icon">★</span><span>My Assigned</span></a>
+      </div>
+    </aside>
+
+    <main class="cwa-admin-main">
+      <div class="cwa-admin-subhead">
+        <div>
+          <h1>Nurses Management</h1>
+          <p id="totalLine">Loading…</p>
+        </div>
+        <div style="display:flex;gap:10px">
+          <a class="cwa-btn cwa-btn--navy cwa-btn--sm" href="/admin/security">Two-Factor Security</a>
+          <a class="cwa-btn cwa-btn--light cwa-btn--sm" href="/admin/nurses/accommodation">Accommodation / Hostel Roster</a>
+          <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="exportCsv()" data-community-hide>⤓ Export</button>
+        </div>
+      </div>
+
+      <div class="cwa-admin-content cwa-fade-in">
+        <div class="cwa-kpi-grid" id="kpiGrid">
+          <div class="cwa-kpi"><div><div class="cwa-kpi__label">Total Health Workers</div><div class="cwa-kpi__value" id="kpiTotal">—</div></div><div class="cwa-kpi__icon">◉</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Review</div><div class="cwa-kpi__value" id="kpiPending">—</div></div><div class="cwa-kpi__icon">⏱</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Corrections</div><div class="cwa-kpi__value" id="kpiCorrections">—</div></div><div class="cwa-kpi__icon">✎</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Embassy-Facilitated Residents</div><div class="cwa-kpi__value" id="kpiFacility">—</div></div><div class="cwa-kpi__icon">⌂</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">AJA Care Residents</div><div class="cwa-kpi__value" id="kpiAja">—</div></div><div class="cwa-kpi__icon">A</div></div>
+          <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">Confirmed Staying</div><div class="cwa-kpi__value" id="kpiConfirmed">—</div></div><div class="cwa-kpi__icon">✓</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Intending to Leave</div><div class="cwa-kpi__value" id="kpiIntending">—</div></div><div class="cwa-kpi__icon">→</div></div>
+          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Left Facility</div><div class="cwa-kpi__value" id="kpiLeft">—</div></div><div class="cwa-kpi__icon">L</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">MOH Arranged</div><div class="cwa-kpi__value" id="kpiMoh">—</div></div><div class="cwa-kpi__icon">M</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">MOH Provided Hotel</div><div class="cwa-kpi__value" id="kpiMohHotel">—</div><div class="cwa-kpi__sub">Arrival Stay (3-month default)</div></div><div class="cwa-kpi__icon">H</div></div>
+          <div class="cwa-kpi" data-accent="info"><div><div class="cwa-kpi__label">Private Self Arranged</div><div class="cwa-kpi__value" id="kpiPrivate">—</div></div><div class="cwa-kpi__icon">P</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Pending Stay Confirmation</div><div class="cwa-kpi__value" id="kpiStay">—</div></div><div class="cwa-kpi__icon">?</div></div>
+          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Needs Assistance</div><div class="cwa-kpi__value" id="kpiNeeds">—</div></div><div class="cwa-kpi__icon">!</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Reconciliation Required</div><div class="cwa-kpi__value" id="kpiRecon">—</div></div><div class="cwa-kpi__icon">R</div></div>
+          <div class="cwa-kpi" data-accent="warning"><div><div class="cwa-kpi__label">Notice Period Due</div><div class="cwa-kpi__value" id="kpiNotice">—</div></div><div class="cwa-kpi__icon">N</div></div>
+          <div class="cwa-kpi" data-accent="error"><div><div class="cwa-kpi__label">Open Welfare Requests</div><div class="cwa-kpi__value" id="kpiOpen">—</div></div><div class="cwa-kpi__icon">!</div></div>
+          <div class="cwa-kpi" data-accent="success"><div><div class="cwa-kpi__label">My Assigned</div><div class="cwa-kpi__value" id="kpiMine">—</div></div><div class="cwa-kpi__icon">★</div></div>
+        </div>
+
+        <div class="cwa-tabs" id="tabBar"></div>
+
+        <div class="cwa-form-row">
+          <div style="flex:1 1 240px;position:relative">
+            <input id="search" class="cwa-input" placeholder="Search name, passport, civil ID, hospital, complaint ID…" style="padding-left:34px">
+            <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--cwa-muted-lt)">⌕</span>
+          </div>
+          <select id="filterStatus" class="cwa-select" style="width:200px">
+            <option value="">All Status</option>
+            <option value="Pending Review">Pending Review</option>
+            <option value="Under Review">Under Review</option>
+            <option value="Approved">Approved</option>
+            <option value="Rejected">Rejected</option>
+            <option value="Needs More Information">Needs More Information</option>
+            <option value="PENDING">PENDING</option>
+            <option value="APPROVED">APPROVED</option>
+            <option value="REJECTED">REJECTED</option>
+            <option value="CANCELLED">CANCELLED</option>
+            <option value="Assigned">Assigned</option>
+            <option value="In Progress">In Progress</option>
+            <option value="Resolved">Resolved</option>
+            <option value="Closed">Closed</option>
+          </select>
+          <select id="filterPriority" class="cwa-select" style="width:160px">
+            <option value="">All Priority</option>
+            <option value="Urgent">Urgent</option>
+            <option value="Important">Important</option>
+            <option value="Normal">Normal</option>
+          </select>
+          <select id="filterAssigned" class="cwa-select" style="width:200px">
+            <option value="">All Assignees</option>
+          </select>
+          <button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="loadList()">Search</button>
+        </div>
+
+        <div class="cwa-card cwa-card--p0">
+          <div class="cwa-table-wrap">
+            <table class="cwa-table" id="resultsTable">
+              <thead><tr id="theadRow"></tr></thead>
+              <tbody id="rows"><tr><td colspan="11" class="cwa-empty">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div id="drawerHost"></div>
+<div id="toastHost"></div>
+
+<script>
+const USER_ROLE='__USER_ROLE__';
+const TABS = [
+  { key: 'all',          label: 'All Health Workers', endpoint: 'registrations',  params: {} },
+  { key: 'pending',      label: 'Pending Review',     endpoint: 'registrations',  params: { registration_status: 'Pending Review' } },
+  { key: 'embassy_facility', label: 'Embassy-facilitated Facility', endpoint: 'registrations', params: { current_arrangement: 'Embassy Contracted / Arranged' } },
+  { key: 'aja_care',     label: 'AJA Care',            endpoint: 'registrations', params: { current_arrangement: 'Embassy Contracted / Arranged', vendor_name: 'AJA Care' } },
+  { key: 'confirmed_staying', label: 'Confirmed Staying', endpoint: 'registrations', params: { facility_status: 'Confirmed Staying' } },
+  { key: 'intending_leave', label: 'Intending to Leave', endpoint: 'registrations', params: { facility_status: 'Intends to Leave' } },
+  { key: 'left_facility', label: 'Left Facility', endpoint: 'registrations', params: { facility_status: 'Left Facility' } },
+  { key: 'moh_arranged', label: 'MOH Arranged', endpoint: 'registrations', params: { current_arrangement: 'MOH Arranged' } },
+  { key: 'moh_hotel', label: 'MOH Hotel', endpoint: 'registrations', params: { current_arrangement: 'MOH Provided Hotel - Arrival Stay' } },
+  { key: 'private', label: 'Private Self Arranged', endpoint: 'registrations', params: { current_arrangement: 'Private (Self Arranged)' } },
+  { key: 'needs_assistance', label: 'Needs Assistance', endpoint: 'registrations', params: { welfare_followup_required: '1' } },
+  { key: 'no_response', label: 'No Response', endpoint: 'registrations', params: { monthly_checkin_status: 'No Response' } },
+  { key: 'reconciliation', label: 'Reconciliation Required', endpoint: 'registrations', params: { reconciliation_status: 'Reconciliation Required' } },
+  { key: 'corrections', label: 'Correction Requests', endpoint: 'correction-requests', params: {} },
+  { key: 'requests',     label: 'Nurse Requests',      endpoint: 'complaints', params: {} },
+  { key: 'welfare',      label: 'Welfare Issues',      endpoint: 'complaints', params: { scope: 'welfare' } },
+  { key: 'facility',     label: 'Facility Assistance', endpoint: 'complaints', params: { category: 'Facility Assistance Request' } },
+  { key: 'leaving',      label: 'Leaving Notices',     endpoint: 'leave-notices', params: {} },
+  { key: 'mine',         label: 'My Assigned',         endpoint: 'my-complaints', params: {} },
+  { key: 'resolved',     label: 'Resolved / Closed',   endpoint: 'complaints', params: { scope: 'resolved' } },
+  { key: 'registrations',label: 'Registrations',       endpoint: 'registrations', params: {} },
+];
+let activeTab = 'all';
+let activeRows = [];
+let summary = {};
+let assignees = [];
+
+function applyRoleScope(){
+  if(USER_ROLE==='community_desk'){
+    document.querySelectorAll('[data-community-hide]').forEach(el=>{el.style.display='none';});
+  }
+}
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function statusType(s){const x=(s||'').toLowerCase();if(x.includes('approved')||x.includes('resolved')||x.includes('closed'))return 'resolved';if(x.includes('reject'))return 'rejected';if(x.includes('assign'))return 'assigned';if(x.includes('review')||x.includes('progress')||x.includes('seen'))return 'processing';if(x.includes('await')||x.includes('needs'))return 'awaiting';return 'pending';}
+function priorityType(p){const x=(p||'').toLowerCase();if(x.includes('urgent'))return 'urgent';if(x.includes('important')||x.includes('high'))return 'high';if(x.includes('low'))return 'low';return 'medium';}
+function fmtTime(s){if(!s)return '—';return String(s).slice(0,16).replace('T',' ');}
+function isRegistrationTab(){const t=TABS.find(x=>x.key===activeTab);return !t || t.endpoint==='registrations';}
+function isCorrectionTab(){const t=TABS.find(x=>x.key===activeTab);return !!t && t.endpoint==='correction-requests';}
+async function api(url,opts){
+  const r=await fetch(url,Object.assign({credentials:'include'},opts||{}));
+  let d={};
+  try{d=await r.json();}catch(e){}
+  if(!r.ok)throw new Error(d.error||('HTTP '+r.status));
+  return d;
+}
+function toast(msg, type){
+  const el=document.createElement('div'); el.className='cwa-toast'; if(type)el.dataset.type=type; el.textContent=msg;
+  document.getElementById('toastHost').appendChild(el);
+  setTimeout(()=>el.remove(),3000);
+}
+
+function renderTabs(){
+  const bar=document.getElementById('tabBar');
+  bar.innerHTML=TABS.map(t=>`<button class="cwa-tab${t.key===activeTab?' is-active':''}" onclick="switchTab('${t.key}')">${esc(t.label)}<span class="cwa-tab__count" id="tc-${t.key}">—</span></button>`).join('');
+}
+function switchTab(k){
+  activeTab=k;
+  if(isCorrectionTab()){
+    document.getElementById('filterStatus').value='';
+    document.getElementById('filterPriority').value='';
+  }
+  renderTabs();
+  loadList();
+}
+
+function buildHeader(){
+  const cols = activeTab==='leaving'
+    ? ['Reference','Nurse','Passport','Reason','Status','Updated','Actions']
+    : isCorrectionTab()
+    ? ['Ref ID','Nurse Name','Field','Old Value','Requested Value','Reason','Date','Status','Actions']
+    : isRegistrationTab()
+    ? ['Nurse ID / Reference','Roster Reference','Name','Passport / Civil ID','Primary Mobile','WhatsApp','Workplace','Current Stay Arrangement','Vendor','Facility / Area','Current Status','Monthly Check-in Status','Last Confirmed At','Last Check-in Response At','Welfare Follow-up Required','Reconciliation Status','Assigned Officer','Actions']
+    : ['Reference','Nurse','Passport / Civil ID','Phone / WhatsApp','Category','Subject','Priority','Status','Assigned','Submitted','Updated','Actions'];
+  document.getElementById('theadRow').innerHTML=cols.map(c=>`<th>${esc(c)}</th>`).join('');
+  return cols.length;
+}
+
+function rowHtml(r){
+  if(activeTab==='leaving'){
+    return `<tr onclick="openDetail('${esc(r.nurse_reference_id||r.reference||'')}','leaving')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(r.reference_id||r.id||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_full_name||r.full_name||'')}</td><td>${esc(r.passport_number||'')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc((r.reason||'').slice(0,80))}</td><td><span class="cwa-badge" data-type="${statusType(r.status)}">${esc(r.status||'—')}</span></td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openDetail('${esc(r.nurse_reference_id||'')}','leaving')">View</button></td></tr>`;
+  }
+  if(isCorrectionTab()){
+    return `<tr onclick="openCorrectionDetail(${Number(r.id||0)})"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(r.ref_id||r.nurse_reference_id||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_name||'—')}</td><td>${esc(r.field_label||r.field_name||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.old_value||'—')}</td><td style="font-size:12px">${esc(r.requested_value||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc((r.reason||'').slice(0,120)||'—')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.created_at))}</td><td><span class="cwa-badge" data-type="${statusType(r.status)}">${esc(r.status_label||r.status||'—')}</span></td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openCorrectionDetail(${Number(r.id||0)})">Review</button></td></tr>`;
+  }
+  if(isRegistrationTab()){
+    const ref=r.nurse_reference_id||r.reference_id||r.reference||'';
+    const status=r.registration_status||r.status||'Pending Review';
+    const facility=[r.facility_name,r.facility_area].filter(Boolean).join(' / ')||'—';
+    return `<tr onclick="openRegDetail('${esc(ref)}')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-size:12px">${esc(r.roster_reference||'—')}</td><td style="font-weight:600">${esc(r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.mobile_full||r.phone||r.mobile||'—')}</td><td style="font-size:12px">${esc(r.whatsapp_full||r.mobile_full||r.phone||'—')}</td><td><span style="font-size:12px">${esc(r.hospital||r.hospital_workplace||r.workplace||'—')}</span></td><td style="font-size:12px">${esc(r.current_arrangement||r.current_accommodation||'—')}</td><td style="font-size:12px">${esc(r.vendor_name||'—')}</td><td style="font-size:12px">${esc(facility)}</td><td><span class="cwa-badge" data-type="${statusType(r.facility_current_status||status)}">${esc(r.facility_current_status||status)}</span></td><td><span class="cwa-badge" data-type="${statusType(r.monthly_checkin_status)}">${esc(r.monthly_checkin_status||'—')}</span></td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.last_confirmed_at))}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.last_monthly_checkin_response_at))}</td><td style="font-size:12px">${esc(r.welfare_followup_required?'Yes':'No')}</td><td style="font-size:12px">${esc(r.reconciliation_status||'—')}</td><td style="font-size:12px">${esc(r.assigned_to||'Unassigned')}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openRegDetail('${esc(ref)}')">View / Review</button></td></tr>`;
+  }
+  // complaints (default)
+  const ref = r.complaint_id||r.reference_id||'';
+  return `<tr onclick="openDetail('${esc(ref)}','complaint')"><td><span style="font-weight:700;font-size:12px;color:var(--cwa-navy)">${esc(ref||'—')}</span></td><td style="font-weight:600">${esc(r.nurse_name||r.nurse_full_name||r.full_name||'')}</td><td><div style="font-size:12px"><div style="font-weight:600">${esc(r.passport_number||'')}</div><div style="color:var(--cwa-muted-lt)">${esc(r.civil_id||'—')}</div></div></td><td style="font-size:12px">${esc(r.phone||r.mobile||'—')}<div style="color:var(--cwa-muted-lt)">${esc(r.whatsapp||'')}</div></td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.category||r.complaint_category||'—')}</td><td style="font-size:12px;color:var(--cwa-muted)">${esc(r.subject||'—')}</td><td><span class="cwa-badge" data-type="${priorityType(r.priority)}">${esc(r.priority||'Normal')}</span></td><td><span class="cwa-badge" data-type="${statusType(r.status||r.complaint_status)}">${esc(r.status||r.complaint_status||'—')}</span></td><td style="font-size:12px;color:${(r.assigned_to_username||r.assigned_to_name)?'var(--cwa-text)':'var(--cwa-muted-lt)'};font-style:${(r.assigned_to_username||r.assigned_to_name)?'normal':'italic'}">${esc(r.assigned_to_name||r.assigned_to_username||'Unassigned')}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.created_at))}</td><td style="font-size:11px;color:var(--cwa-muted-lt)">${esc(fmtTime(r.updated_at||r.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="event.stopPropagation();openDetail('${esc(ref)}','complaint')">Open</button></td></tr>`;
+}
+
+async function loadAssignees(){
+  try{
+    const d=await api('/api/admin/nurses/complaint-assignees');
+    assignees=(d.items||[]);
+    const sel=document.getElementById('filterAssigned');
+    sel.innerHTML='<option value="">All Assignees</option>'+assignees.map(a=>`<option value="${esc(a.username)}">${esc(a.display_name||a.username)}</option>`).join('');
+    sel.value='';
+  }catch(e){}
+}
+
+async function loadSummary(){
+  try{
+    summary = await api('/api/admin/nurses/summary');
+    const t=summary.totals||{};
+    document.getElementById('kpiTotal').textContent=(t.registrations||0).toLocaleString();
+    document.getElementById('kpiPending').textContent=(t.pending_registrations||0).toLocaleString();
+    document.getElementById('kpiCorrections').textContent=(t.correction_requests_pending||0).toLocaleString();
+    document.getElementById('kpiFacility').textContent=(t.facility_embassy_arranged||0).toLocaleString();
+    document.getElementById('kpiAja').textContent=(t.aja_care_residents||t.total_aja_care_residents||0).toLocaleString();
+    document.getElementById('kpiConfirmed').textContent=(t.confirmed_staying||0).toLocaleString();
+    document.getElementById('kpiIntending').textContent=(t.intending_to_leave||0).toLocaleString();
+    document.getElementById('kpiLeft').textContent=(t.left_facility||0).toLocaleString();
+    document.getElementById('kpiMoh').textContent=(t.moh_arranged||0).toLocaleString();
+    const mohHotelEl=document.getElementById('kpiMohHotel'); if(mohHotelEl) mohHotelEl.textContent=(t.moh_hotel_arrival_stay||t.moh_hotel||0).toLocaleString();
+    document.getElementById('kpiPrivate').textContent=(t.private_self_arranged||0).toLocaleString();
+    document.getElementById('kpiStay').textContent=(t.pending_stay_confirmation||t.facility_pending_confirmation||0).toLocaleString();
+    document.getElementById('kpiNeeds').textContent=(t.needs_assistance||t.facility_followup||0).toLocaleString();
+    document.getElementById('kpiRecon').textContent=(t.reconciliation_required||0).toLocaleString();
+    document.getElementById('kpiNotice').textContent=(t.facility_notice_due||0).toLocaleString();
+    document.getElementById('kpiOpen').textContent=(t.open_welfare_requests||t.facility_followup||0).toLocaleString();
+    document.getElementById('kpiMine').textContent=(t.facility_my_assigned||t.my_complaints||0).toLocaleString();
+    document.getElementById('totalLine').textContent=(t.registrations||0)+' health workers · '+(t.facility_total||0)+' facility records';
+    const counts={
+      all:t.registrations,pending:t.pending_registrations,embassy_facility:t.embassy_facilitated_residents||0,aja_care:t.aja_care_residents||t.total_aja_care_residents||0,
+      confirmed_staying:t.confirmed_staying||0,intending_leave:t.intending_to_leave||0,left_facility:t.left_facility||0,needs_assistance:t.needs_assistance||0,
+      no_response:t.no_response||0,reconciliation:t.reconciliation_required||0,
+      moh_arranged:t.moh_arranged||0,moh_hotel:t.moh_hotel_arrival_stay||t.moh_hotel||0,private:t.private_self_arranged||0,
+      corrections:t.correction_requests_pending||0,
+      requests:t.open_complaints||0,
+      welfare:t.welfare_complaints||0,facility:t.open_welfare_requests||0,leaving:t.facility_leaving||0,
+      mine:t.my_complaints||t.facility_my_assigned||0,resolved:t.resolved_complaints||0,registrations:t.registrations||0
+    };
+    Object.entries(counts).forEach(([k,v])=>{const el=document.getElementById('tc-'+k);if(el)el.textContent=v||0;});
+  }catch(e){}
+}
+
+async function loadList(){
+  const colCount=buildHeader();
+  document.getElementById('rows').innerHTML=`<tr><td colspan="${colCount}" class="cwa-empty">Loading…</td></tr>`;
+  const tab=TABS.find(t=>t.key===activeTab)||TABS[0];
+  const params=new URLSearchParams();
+  params.set('page','1'); params.set('page_size','100');
+  const search=document.getElementById('search').value.trim();
+  const fs=document.getElementById('filterStatus').value;
+  const fp=document.getElementById('filterPriority').value;
+  const fa=document.getElementById('filterAssigned').value;
+  if(search) params.set('search',search);
+  Object.entries(tab.params||{}).forEach(([k,v])=>params.set(k,v));
+  if(isRegistrationTab()){
+    if(fs) params.set('registration_status',fs);
+    if(fa) params.set('assigned_to',fa);
+  }else if(isCorrectionTab()){
+    if(fs) params.set('status',fs);
+  }else{
+    if(fs) params.set('status',fs);
+    if(fp) params.set('priority',fp);
+    if(fa) params.set('assigned_to',fa);
+  }
+  try{
+    const d=await api('/api/admin/nurses/'+tab.endpoint+'?'+params.toString());
+    activeRows=d.items||[];
+    if(!activeRows.length){
+      document.getElementById('rows').innerHTML=`<tr><td colspan="${colCount}" class="cwa-empty">${isRegistrationTab()?'No nurse registrations found.':(isCorrectionTab()?'No correction requests found.':'No nurse requests or welfare issues found.')}</td></tr>`;
+      return;
+    }
+    document.getElementById('rows').innerHTML=activeRows.map(rowHtml).join('');
+  }catch(e){
+    document.getElementById('rows').innerHTML=`<tr><td colspan="${colCount}" class="cwa-empty">Could not load list. ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function exportCsv(){
+  const params=new URLSearchParams();
+  const search=document.getElementById('search').value.trim();
+  if(search) params.set('search',search);
+  const fs=document.getElementById('filterStatus').value; if(fs) params.set('status',fs);
+  const fp=document.getElementById('filterPriority').value; if(fp) params.set('priority',fp);
+  const fa=document.getElementById('filterAssigned').value; if(fa) params.set('assigned_to',fa);
+  window.location='/api/admin/nurses/complaints/export?'+params.toString();
+}
+
+async function openRegDetail(ref){
+  if(!ref) return;
+  const d=await api('/api/admin/nurses/registration/detail?id='+encodeURIComponent(ref))
+    .catch(e=>({success:false,error:e.message}));
+  const fallback=activeRows.find(x=>(x.nurse_reference_id||x.reference_id||x.reference||'')===ref)||{};
+  const r=(d&&d.record&&Object.keys(d.record).length)?d.record:fallback;
+  const fallbackMessage=d&&d.success===false?'Unable to load full details. Basic row information is shown below.':'';
+  showDrawer({
+    kind: 'registration',
+    recordId: r.id,
+    ref: r.nurse_reference_id||ref,
+    title: r.full_name||'Nurse',
+    sub: 'Registration · '+(r.hospital||''),
+    status: r.registration_status||'—',
+    priority: '',
+    fallbackMessage,
+    profile: [
+      ['Passport', r.passport_number||''],
+      ['Civil ID', r.civil_id||'—'],
+      ['Batch / Flight No.', r.batch_number||'—'],
+      ['Arrival Date', r.arrival_date||'—'],
+      ['Visa Number', r.visa_number||'—'],
+      ['Email', r.email||'—'],
+      ['Email Status', r.email_status||'Verification Pending'],
+      ['Verification Email Sent At', r.email_verification_sent_at||'—'],
+      ['Primary Mobile', r.mobile_full||r.phone||r.mobile||''],
+      ['WhatsApp', r.whatsapp_full||r.mobile_full||r.phone||'—'],
+      ['Emergency Contact', r.emergency_contact_full||r.emergency_contact||'—'],
+      ['Hospital / Workplace', r.hospital||''],
+      ['Professional Category', r.professional_category||'—'],
+      ['Qualification / Degree', r.qualification_degree||'—'],
+      ['Other Qualification / Degree', r.qualification_degree_other||'—'],
+      ['Department', r.department||r.dept||''],
+      ['Current Stay Arrangement', r.current_arrangement||r.current_accommodation||'—'],
+      ['Vendor', r.vendor_name||'—'],
+      ['Roster Reference', r.roster_reference||'—'],
+      ['Facility / Building', r.facility_name||'—'],
+      ['Area', r.facility_area||'—'],
+      ['Room / Bed', [r.room_number,r.bed_number].filter(Boolean).join(' / ')||'—'],
+      ['Stay Period Start Date', r.contract_start_date||'—'],
+      ['Shifted Date', r.date_shifted_to_facility||'—'],
+      ['Notice Reminder Preference', r.stay_reminders_opt_in||r.receive_notice_reminders||'—'],
+      ['Contract End Date', r.contract_end_date||'—'],
+      ['Notice Period Start', r.notice_period_start_date||'—'],
+      ['Confirmation Status', r.confirmation_status||'—'],
+      ['Facility Status', r.facility_current_status||'—'],
+      ['Monthly Check-in Status', r.monthly_checkin_status||'—'],
+      ['Last Confirmed At', fmtTime(r.last_confirmed_at)],
+      ['Last Check-in Response At', fmtTime(r.last_monthly_checkin_response_at)],
+      ['Welfare Follow-up Required', r.welfare_followup_required?'Yes':'No'],
+      ['Reconciliation Status', r.reconciliation_status||'—'],
+      ['Action Required', r.action_required||'—'],
+      ['Assigned Officer', r.assigned_to||'Unassigned'],
+      ['Address', r.current_address||r.address||''],
+    ],
+    relatedRequests: d.recent_requests||[],
+    correctionRequests: d.correction_requests||[],
+    canReviewRegistration: true,
+    actions: d.actions||[],
+    timeline: d.actions||[],
+    visibilityHelp: 'Nurse-visible message is recorded separately from internal notes.'
+  });
+}
+
+async function openDetail(ref, kind){
+  if(!ref) return;
+  if(kind==='leaving'){
+    // detail endpoint for leave-notices isn't a single API; we surface what we have from list row
+    const r=activeRows.find(x=>x.nurse_reference_id===ref||x.reference_id===ref)||{};
+    showDrawer({
+      ref: r.reference_id||ref,
+      title: r.nurse_full_name||r.full_name||'Nurse',
+      sub: 'Leaving Notice',
+      status: r.status||'—',
+      priority: '',
+      profile: [
+        ['Passport', r.passport_number||''],
+        ['Current Facility', r.current_facility||''],
+        ['Room', r.room_number||'—'],
+        ['Intended Leaving Date', r.intended_leaving_date||''],
+        ['Reason', r.reason||''],
+      ],
+      actions: [],
+      timeline: [],
+      visibilityHelp: ''
+    });
+    return;
+  }
+  // complaint
+  const d=await api('/api/admin/nurses/complaint/detail?id='+encodeURIComponent(ref)).catch(e=>({success:false,error:e.message}));
+  if(!d.success){
+    showDrawer({
+      ref,
+      title: 'Request details unavailable',
+      sub: 'Recent Nurse Requests / Welfare Issues',
+      status: 'Unable to load',
+      priority: '',
+      profile: [['Reference', ref]],
+      requestDetails: [['Message', 'Unable to load full complaint details. Please refresh or check the complaint reference.']],
+      actions: [],
+      timeline: [],
+      fallbackMessage: 'Unable to load full complaint details. Please refresh or check the complaint reference.'
+    });
+    return;
+  }
+  const r=d.record||d.complaint||{};
+  const acts=d.actions||[];
+  showDrawer({
+    ref: r.complaint_id||ref,
+    title: r.nurse_name||r.nurse_full_name||r.full_name||'Nurse',
+    sub: (r.category||r.complaint_category||'')+' · '+(r.workplace||r.hospital||''),
+    status: r.status||r.complaint_status||'—',
+    priority: r.priority||'Normal',
+    profile: [
+      ['Nurse Reference', r.nurse_reference||r.nurse_reference_id||'—'],
+      ['Passport', r.passport_number||''],
+      ['Civil ID', r.civil_id||'—'],
+      ['Primary Mobile', r.mobile_full||r.phone||r.mobile||'—'],
+      ['WhatsApp', r.whatsapp_full||r.whatsapp||'—'],
+      ['Email', r.email||'—'],
+      ['Email Status', r.email_status||'Verification Pending'],
+      ['Workplace / Hospital', r.workplace||r.hospital||'—'],
+      ['Current Stay Arrangement', r.current_arrangement||'—'],
+      ['Facility / Building', r.facility_name||'—'],
+      ['Area', r.facility_area||'—'],
+    ],
+    requestDetails: [
+      ['Reference', r.complaint_id||r.complaint_reference||r.reference||ref],
+      ['Category', r.category||r.complaint_category||'—'],
+      ['Subject', r.subject||'—'],
+      ['Details / Message', r.description||r.details||'—'],
+      ['Status', r.status||r.complaint_status||'—'],
+      ['Priority', r.priority||'Normal'],
+      ['Preferred Contact Method', r.preferred_contact_method||'—'],
+      ['Submitted At', fmtTime(r.created_at)],
+    ],
+    facilityContext: [
+      ['Current Stay Arrangement', r.current_arrangement||'—'],
+      ['Approved Vendor / Service Provider', r.vendor_name||'—'],
+      ['Facility / Building', r.facility_name||'—'],
+      ['Area', r.facility_area||'—'],
+      ['Date shifted', r.date_shifted_to_facility||'—'],
+      ['Contract / stay period start date', r.contract_start_date||'—'],
+      ['Notice period status', r.stay_reminders_opt_in||'—'],
+    ],
+    canAct: true,
+    complaintId: r.complaint_id||ref,
+    assignees,
+    currentAssign: r.assigned_to_username||'',
+    actions: acts,
+    timeline: acts,
+    visibilityHelp: 'Nurse-visible message will appear in the nurse portal status view.'
+  });
+}
+
+async function openCorrectionDetail(id){
+  if(!id) return;
+  const d=await api('/api/admin/nurses/correction/detail?id='+encodeURIComponent(id)).catch(e=>({success:false,error:e.message}));
+  if(!d.success){
+    toast(d.error||'Correction request could not be loaded.','error');
+    return;
+  }
+  const r=d.request||{};
+  const n=d.nurse||{};
+  showDrawer({
+    kind: 'correction',
+    ref: r.ref_id||r.nurse_reference_id||'—',
+    title: n.full_name||r.nurse_name||'Nurse',
+    sub: 'Applicant Detail Correction Workflow',
+    status: r.status||'PENDING',
+    priority: '',
+    profile: [
+      ['Passport', n.passport_number||r.passport_number||'—'],
+      ['Civil ID', n.civil_id||'—'],
+      ['Batch / Flight No.', n.batch_number||'—'],
+      ['Arrival Date', n.arrival_date||'—'],
+      ['Visa Number', n.visa_number||'—'],
+      ['Employer / Hospital', n.hospital_workplace||'—'],
+    ],
+    requestDetails: [
+      ['Field', r.field_label||r.field_name||'—'],
+      ['Old Value', r.old_value||'—'],
+      ['Requested Value', r.requested_value||'—'],
+      ['Reason', r.reason||'—'],
+      ['Requested By', r.requested_by||'—'],
+      ['Submitted At', fmtTime(r.created_at)],
+      ['Status', r.status_label||r.status||'—'],
+      ['Reviewed By', r.reviewed_by||'—'],
+      ['Reviewed At', fmtTime(r.reviewed_at)],
+      ['Review Remarks', r.review_remarks||'—'],
+    ],
+    canReviewCorrection: String(r.status||'').toUpperCase()==='PENDING',
+    correctionRequestId: Number(r.id||0),
+    timeline: d.timeline||[],
+    correctionRequests: d.correction_requests||[],
+  });
+}
+
+function showDrawer(d){
+  const host=document.getElementById('drawerHost');
+  const profileHtml=(d.profile||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
+  const tlHtml=(d.timeline||[]).slice(0,12).map(a=>`<div class="cwa-drawer__timeline-item"><div class="cwa-drawer__timeline-dot"></div><div class="cwa-drawer__timeline-body"><div class="cwa-drawer__timeline-title">${esc(a.action_type||'Action')}: ${esc(a.new_status||a.note||'')}</div><div class="cwa-drawer__timeline-sub">${esc(a.note||'')} ${a.actor_username?('· by '+esc(a.actor_username)):''}</div></div><div class="cwa-drawer__timeline-time">${esc(fmtTime(a.created_at))}</div></div>`).join('') || '<div class="cwa-empty" style="padding:14px 0">No actions yet.</div>';
+  const requestHtml=(d.requestDetails||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
+  const facilityHtml=(d.facilityContext||[]).map(([l,v])=>`<div class="cwa-drawer__profile-item"><dt>${esc(l)}</dt><dd>${esc(v||'—')}</dd></div>`).join('');
+  const relatedHtml=(d.relatedRequests||[]).map(x=>`<tr><td>${esc(x.complaint_id||'—')}</td><td>${esc(x.category||'—')}</td><td>${esc(x.subject||'—')}</td><td><span class="cwa-badge" data-type="${statusType(x.status)}">${esc(x.status||'—')}</span></td><td>${esc(fmtTime(x.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="openDetail('${esc(x.complaint_id||'')}','complaint')">Open</button></td></tr>`).join('');
+  const correctionHtml=(d.correctionRequests||[]).map(x=>`<tr><td>${esc(x.field_label||x.field_name||'—')}</td><td>${esc(x.requested_value||'—')}</td><td><span class="cwa-badge" data-type="${statusType(x.status)}">${esc(x.status_label||x.status||'—')}</span></td><td>${esc(fmtTime(x.created_at))}</td><td><button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="openCorrectionDetail(${Number(x.id||0)})">Open</button></td></tr>`).join('');
+  const assignSel=(d.assignees||[]).length?`<select id="dwAssign" class="cwa-select">${d.assignees.map(a=>`<option value="${esc(a.username)}" ${a.username===d.currentAssign?'selected':''}>${esc(a.display_name||a.username)}</option>`).join('')}</select>`:`<input id="dwAssign" class="cwa-input" placeholder="Username">`;
+  const statusOpts=['Submitted','Seen by Admin','Assigned','In Progress','Resolved','Closed'].map(s=>`<option value="${esc(s)}" ${s===d.status?'selected':''}>${esc(s)}</option>`).join('');
+  host.innerHTML = `
+    <div class="cwa-drawer-overlay" onclick="closeDrawer()"></div>
+    <aside class="cwa-drawer" role="dialog" aria-label="Detail drawer">
+      <div class="cwa-drawer__head">
+        <div>
+          <div class="cwa-drawer__ref">${esc(d.ref)}</div>
+          <div class="cwa-drawer__title">${esc(d.title)}</div>
+          <div class="cwa-drawer__sub">${esc(d.sub||'')}</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          ${d.canAct?`<button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="window.open('/admin/print/case?module=nurse_complaint&reference='+encodeURIComponent('${esc(d.ref)}'),'_blank','noopener')">Print Case Summary</button>`:''}
+        </div>
+        <button class="cwa-drawer__close" onclick="closeDrawer()" aria-label="Close">×</button>
+      </div>
+      <div class="cwa-drawer__accent"></div>
+      <div class="cwa-drawer__body">
+        ${d.fallbackMessage?`<div class="cwa-empty" style="padding:10px;margin-bottom:12px;text-align:left">${esc(d.fallbackMessage)}</div>`:''}
+        <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
+          <span class="cwa-badge" data-type="${statusType(d.status)}">${esc(d.status||'—')}</span>
+          ${d.priority?`<span class="cwa-badge" data-type="${priorityType(d.priority)}">${esc(d.priority)} Priority</span>`:''}
+        </div>
+
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Nurse Profile</div>
+          <dl class="cwa-drawer__profile">${profileHtml}</dl>
+        </div>
+        ${requestHtml?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Submitted Request</div><dl class="cwa-drawer__profile">${requestHtml}</dl></div>`:''}
+        ${facilityHtml?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Facility Context</div><dl class="cwa-drawer__profile">${facilityHtml}</dl></div>`:''}
+        ${d.relatedRequests?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Recent Nurse Requests / Welfare Issues</div>${(d.relatedRequests||[]).length?`<table class="cwa-table"><thead><tr><th>Reference</th><th>Category</th><th>Subject</th><th>Status</th><th>Submitted</th><th>Action</th></tr></thead><tbody>${relatedHtml}</tbody></table>`:'<div class="cwa-empty" style="padding:12px 0">No recent nurse requests.</div>'}</div>`:''}
+        ${d.correctionRequests?`<div class="cwa-drawer__section"><div class="cwa-drawer__section-title">Correction Requests</div>${(d.correctionRequests||[]).length?`<table class="cwa-table"><thead><tr><th>Field</th><th>Requested Value</th><th>Status</th><th>Submitted</th><th>Action</th></tr></thead><tbody>${correctionHtml}</tbody></table>`:'<div class="cwa-empty" style="padding:12px 0">No correction requests.</div>'}</div>`:''}
+
+        ${d.canReviewRegistration?`
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Registration Review</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="dwRegStatus" class="cwa-select">
+              ${['Pending Review','Under Review','Approved','Rejected','Needs More Information','Closed'].map(s=>`<option value="${esc(s)}" ${s===d.status?'selected':''}>${esc(s)}</option>`).join('')}
+            </select>
+            <button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="doRegStatus(${Number(d.recordId||0)})">Save / Update</button>
+          </div>
+          <textarea id="dwRegNote" class="cwa-textarea" placeholder="Review note…" style="margin-top:10px"></textarea>
+          <label style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;color:var(--cwa-muted)"><input id="dwRegVisible" type="checkbox"> Nurse-visible message</label>
+        </div>
+        `:''}
+
+        ${d.canReviewCorrection?`
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Correction Review Decision</div>
+          <textarea id="dwCorrectionRemarks" class="cwa-textarea" placeholder="Add approval/rejection remarks for the nurse portal and audit trail." rows="3"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="doCorrectionApprove(${Number(d.correctionRequestId||0)})">Approve & Apply</button>
+            <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doCorrectionReject(${Number(d.correctionRequestId||0)})">Reject Request</button>
+          </div>
+        </div>
+        `:''}
+
+        ${d.canAct?`
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Assign to Staff</div>
+          <div style="display:flex;gap:8px;align-items:center">${assignSel}<button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="doAssign('${esc(d.complaintId)}')">Assign</button></div>
+        </div>
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Update Status</div>
+          <div style="display:flex;gap:8px;align-items:center"><select id="dwStatus" class="cwa-select">${statusOpts}</select><button class="cwa-btn cwa-btn--navy cwa-btn--sm" onclick="doStatus('${esc(d.complaintId)}')">Save</button></div>
+        </div>
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Add Note / Message</div>
+          <textarea id="dwNote" class="cwa-textarea" placeholder="Note text…"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <select id="dwNoteType" class="cwa-select" style="width:200px"><option value="internal">Internal Note</option><option value="nurse">Nurse-Visible Message</option></select>
+            <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doNote('${esc(d.complaintId)}')">Add Note</button>
+          </div>
+          ${d.visibilityHelp?`<div style="font-size:11px;color:var(--cwa-muted);margin-top:6px">${esc(d.visibilityHelp)}</div>`:''}
+        </div>
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Resolve / Close</div>
+          <textarea id="dwResolveNote" class="cwa-textarea" placeholder="Resolution note…" rows="2"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="cwa-btn cwa-btn--primary cwa-btn--sm" onclick="doResolve('${esc(d.complaintId)}')">✓ Mark Resolved</button>
+            <button class="cwa-btn cwa-btn--light cwa-btn--sm" onclick="doClose('${esc(d.complaintId)}')">Close</button>
+          </div>
+        </div>
+        `:''}
+
+        <div class="cwa-drawer__section">
+          <div class="cwa-drawer__section-title">Activity Timeline</div>
+          <div class="cwa-drawer__timeline">${tlHtml}</div>
+        </div>
+      </div>
+    </aside>`;
+}
+function closeDrawer(){document.getElementById('drawerHost').innerHTML='';}
+
+async function postAction(url, body, okMsg){
+  try{
+    const r=await fetch(url,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(d.success){toast(okMsg,'success');closeDrawer();loadList();loadSummary();}
+    else toast(d.error||'Action failed','error');
+  }catch(e){toast('Network error','error');}
+}
+function doAssign(ref){const a=document.getElementById('dwAssign').value;postAction('/api/admin/nurses/complaint/assign',{complaint_id:ref,assigned_to_username:a},'Assigned');}
+function doStatus(ref){const s=document.getElementById('dwStatus').value;postAction('/api/admin/nurses/complaint/status',{complaint_id:ref,status:s},'Status updated');}
+function doNote(ref){const n=document.getElementById('dwNote').value;const t=document.getElementById('dwNoteType').value;postAction('/api/admin/nurses/complaint/note',{complaint_id:ref,note:n,note_type:t,visible_to_nurse:t==='nurse'?1:0},'Note added');}
+function doResolve(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/nurses/complaint/resolve',{complaint_id:ref,resolution_note:n},'Resolved');}
+function doClose(ref){const n=document.getElementById('dwResolveNote').value;postAction('/api/admin/nurses/complaint/close',{complaint_id:ref,note:n},'Closed');}
+function doRegStatus(id){const s=document.getElementById('dwRegStatus').value;const n=document.getElementById('dwRegNote').value;const v=document.getElementById('dwRegVisible').checked;postAction('/api/admin/nurses/registration/status',{id:id,status:s,note:n,visible_to_nurse:v},'Registration updated');}
+function doCorrectionApprove(id){const remarks=(document.getElementById('dwCorrectionRemarks')||{}).value||'';postAction('/api/admin/nurses/corrections/approve',{id:id,remarks:remarks},'Correction request approved');}
+function doCorrectionReject(id){const remarks=(document.getElementById('dwCorrectionRemarks')||{}).value||'';if(!String(remarks||'').trim()){toast('Please add rejection remarks before rejecting this request.','error');return;}postAction('/api/admin/nurses/corrections/reject',{id:id,remarks:remarks},'Correction request rejected');}
+
+applyRoleScope();
+renderTabs();
+loadAssignees().then(()=>{loadSummary();loadList();});
+
+async function refreshNotificationBadges(){
+  try{
+    const r = await fetch('/api/admin/notification-counts', {credentials:'include'});
+    if(!r.ok) return;
+    const d = await r.json();
+    const counts = (d && d.counts) || {};
+    document.querySelectorAll('[data-badge]').forEach(el=>{
+      const key = el.dataset.badge;
+      const raw = Number(counts[key] || 0);
+      const val = Number.isFinite(raw) ? raw : 0;
+      if (val > 0) {
+        el.textContent = val > 99 ? '99+' : String(val);
+        el.classList.remove('hidden');
+      } else {
+        el.textContent = '';
+        el.classList.add('hidden');
+      }
+    });
+  }catch(_e){}
+}
+refreshNotificationBadges();
+setInterval(refreshNotificationBadges, 60000);
+window.addEventListener('focus', refreshNotificationBadges);
+</script>
+</body>
+</html>
