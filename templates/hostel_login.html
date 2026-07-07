@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hostel Partner Login — Pakistan Embassy Kuwait</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(160deg,#0d2b40,#15324a 55%,#1d4a30);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+    .box{background:#fff;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);width:100%;max-width:400px;padding:32px 30px}
+    .crest{text-align:center;margin-bottom:14px}
+    .crest .badge{display:inline-block;background:#e8f5e9;color:#0d5c22;border-radius:999px;padding:5px 14px;font-size:12px;font-weight:700}
+    h1{color:#15324a;font-size:21px;text-align:center;margin:8px 0 2px}
+    .sub{text-align:center;color:#68798a;font-size:13px;margin-bottom:22px}
+    label{display:block;font-size:12px;font-weight:700;color:#4f6374;margin-bottom:5px}
+    input{width:100%;padding:11px;border:1px solid #cfdde7;border-radius:7px;font:inherit;margin-bottom:15px}
+    input:focus{outline:2px solid #15324a33;border-color:#15324a}
+    button{width:100%;padding:12px;background:#15324a;color:#fff;border:0;border-radius:7px;font-weight:700;font-size:15px;cursor:pointer}
+    button:hover{background:#1d4260}
+    .err{color:#9d1d1d;background:#ffebee;border-radius:6px;padding:9px;font-size:13px;margin-top:12px;display:none}
+    .foot{margin-top:18px;text-align:center;color:#8b9aa8;font-size:11px;line-height:1.5}
+  </style>
+</head>
+<body>
+  <form class="box" onsubmit="return doLogin(event)">
+    <div class="crest"><span class="badge">Accommodation Partner Portal</span></div>
+    <h1>Hostel Partner Login</h1>
+    <p class="sub">Embassy of Pakistan, Kuwait — Community Welfare</p>
+    <label for="u">Username</label>
+    <input id="u" autocomplete="username" required>
+    <label for="p">Password</label>
+    <input id="p" type="password" autocomplete="current-password" required>
+    <button type="submit">Sign In</button>
+    <div class="err" id="err"></div>
+    <p class="foot">Access is restricted to authorised hostel partner staff.<br>
+    All activity in this portal is logged. For access issues contact the Embassy Community Welfare Wing.</p>
+  </form>
+<script>
+async function doLogin(e){
+  e.preventDefault();
+  const err=document.getElementById('err');
+  err.style.display='none';
+  try{
+    const r=await fetch('/api/hostel/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:document.getElementById('u').value.trim(),password:document.getElementById('p').value})});
+    const j=await r.json();
+    if(j.success){location.href=j.redirect_url||'/hostel/dashboard';return false}
+    err.textContent=j.error||'Login failed';err.style.display='block';
+  }catch(x){err.textContent='Could not reach the server. Try again.';err.style.display='block'}
+  return false;
+}
+</script>
+</body>
+</html>

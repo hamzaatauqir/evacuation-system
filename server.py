@@ -47,6 +47,18 @@ except Exception as exc:
     TOTP_IMPORT_ERROR = exc
     print(f"[totp] helper import skipped: {exc}", flush=True)
 
+# Hostel / Nurse Accommodation Partner module (AJA Care). Additive domain
+# module under app/domains/hostel; if it fails to import the portal still
+# boots and only the hostel routes are unavailable.
+HOSTEL_MODULE = None
+HOSTEL_IMPORT_ERROR = None
+try:
+    from app.domains import hostel as _hostel_module
+    HOSTEL_MODULE = _hostel_module
+except Exception as exc:
+    HOSTEL_IMPORT_ERROR = exc
+    print(f"[Hostel] module import skipped: {exc}", flush=True)
+
 PORT = int(os.environ.get('PORT', 8080))
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -3086,6 +3098,16 @@ def init_db():
             except Exception:
                 pass
 
+    if HOSTEL_MODULE is not None:
+        try:
+            HOSTEL_MODULE.ensure_schema(db)
+        except Exception as exc:
+            print(f"[Hostel] migration failed: {exc}", flush=True)
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
+
     # Dormant Phase 0 bootstrap: load additive TOTP schema if present,
     # but never let it break normal startup.
     try:
@@ -5609,6 +5631,7 @@ def can_access_admin_route(role, path):
             '/admin/welfare-cases',
             '/admin/my-cases',
             '/admin/aja-reconciliation',
+            '/admin/hostel-accommodation',
             '/staff/my-cases',
         }
         if path in allowed_pages:
@@ -5654,6 +5677,7 @@ def can_access_api_route(role, path):
             '/api/admin/notification-counts',
             '/api/admin/notifications',
             '/api/admin/aja-reconciliation/',
+            '/api/admin/hostel/',
             '/api/staff/my-cases',
             '/api/staff/transfer-destinations',
         )
@@ -34324,6 +34348,24 @@ def extract_multipart_upload(body, content_type, field_names=('file', 'pdf', 'ap
     return None, None
 
 
+# Inject shared helpers into the hostel partner module (app/domains/hostel).
+# The module never imports server.py; this one-time wiring keeps DB access,
+# password hashing, and upload parsing behavior identical to the rest of the
+# portal. Runs at module load, before any request and before init_db().
+if HOSTEL_MODULE is not None:
+    try:
+        HOSTEL_MODULE.configure(
+            get_db=get_db,
+            data_root=(RENDER_DISK if (RENDER_DISK.exists() and RENDER_DISK.is_dir()) else PROJECT_ROOT),
+            hash_password=_nurse_hash_password_pbkdf2,
+            verify_password=_nurse_verify_password_pbkdf2,
+            extract_multipart_upload=extract_multipart_upload,
+        )
+    except Exception as exc:
+        HOSTEL_MODULE = None
+        print(f"[Hostel] configure failed; hostel routes disabled: {exc}", flush=True)
+
+
 APPROVAL_REVIEW_PAGE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Approval PDF Review — Pakistan Embassy Kuwait</title>
@@ -38593,6 +38635,9 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'error': 'Invalid API key'}, 401)
             else:
                 self.send_json({'status': 'ok', 'message': 'Webhook active'})
+        elif HOSTEL_MODULE is not None and HOSTEL_MODULE.matches_path(path):
+            HOSTEL_MODULE.handle_get(self, path, params)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -41549,6 +41594,9 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             result = restore_backup(data.get('name', ''))
             self.send_json(result)
 
+        elif HOSTEL_MODULE is not None and HOSTEL_MODULE.matches_path(path):
+            HOSTEL_MODULE.handle_post(self, path, body)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -42742,6 +42790,7 @@ def _nurse_accommodation_admin_sidebar(active_path=''):
         '<div class="cwa-admin-sidebar__section-title">Nurses Accommodation</div>'
         + link('/admin/nurses', '←', 'Back to Nurses Management')
         + link('/admin/nurses/accommodation', 'AH', 'Accommodation / Hostel Roster')
+        + link('/admin/hostel-accommodation', 'HP', 'Hostel Partners (AJA Care)')
         + link('/admin/facility-roster', 'FR', 'Facility Roster')
         + link('/admin/facility-occupancy', 'FO', 'Facility Occupancy')
         + link('/admin/alternative-facilities', 'AF', 'Alternative Facilities')
@@ -47653,6 +47702,7 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <button data-cwa-nav onclick="window.location.href='/admin/nurses'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurses</span><span class="badge-count hidden" data-badge="nurses"></span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/nurses/my-complaints'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurse Complaints</span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/nurses/accommodation'"><span class="side-nav-icon" aria-hidden="true"></span><span>Nurse Accommodation</span></button>
+<button data-cwa-nav onclick="window.location.href='/admin/hostel-accommodation'"><span class="side-nav-icon" aria-hidden="true"></span><span>Hostel Partners (AJA Care)</span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/gl'"><span class="side-nav-icon" aria-hidden="true"></span><span>Grading Letters</span></button>
 <button data-cwa-nav onclick="window.location.href='/admin/ambassador-review'"><span class="side-nav-icon" aria-hidden="true"></span><span>Ambassador Review</span><span class="badge-count hidden" data-badge="ambassador_review"></span></button>
 <div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Emergency Visa / Transit Tools &mdash; Standby</div>
