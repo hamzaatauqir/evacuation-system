@@ -59,6 +59,18 @@ except Exception as exc:
     HOSTEL_IMPORT_ERROR = exc
     print(f"[Hostel] module import skipped: {exc}", flush=True)
 
+# Website Advertisements module (admin-managed homepage popup + banner).
+# Additive domain module under app/domains/ads; if it fails to import the
+# portal still boots and only the advertisement routes are unavailable.
+ADS_MODULE = None
+ADS_IMPORT_ERROR = None
+try:
+    from app.domains import ads as _ads_module
+    ADS_MODULE = _ads_module
+except Exception as exc:
+    ADS_IMPORT_ERROR = exc
+    print(f"[Ads] module import skipped: {exc}", flush=True)
+
 PORT = int(os.environ.get('PORT', 8080))
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -75,6 +87,7 @@ GRADING_LETTER_AVAILABLE = True
 FEATURE_NURSE_HOUSING = str(os.environ.get('FEATURE_NURSE_HOUSING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 FEATURE_NURSE_ONBOARDING = str(os.environ.get('FEATURE_NURSE_ONBOARDING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 FEATURE_NURSE_ACCOMMODATION_ADMIN = str(os.environ.get('FEATURE_NURSE_ACCOMMODATION_ADMIN', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+FEATURE_ADVERTISEMENTS = str(os.environ.get('FEATURE_ADVERTISEMENTS', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 
 NH_ACCOUNT_STATUS_PENDING_ARRIVAL = 'PENDING_ARRIVAL'
 NH_ACCOUNT_STATUS_ACTIVE = 'ACTIVE'
@@ -3103,6 +3116,16 @@ def init_db():
             HOSTEL_MODULE.ensure_schema(db)
         except Exception as exc:
             print(f"[Hostel] migration failed: {exc}", flush=True)
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
+
+    if ADS_MODULE is not None:
+        try:
+            ADS_MODULE.ensure_schema(db)
+        except Exception as exc:
+            print(f"[Ads] migration failed: {exc}", flush=True)
             try:
                 traceback.print_exc()
             except Exception:
@@ -34365,6 +34388,33 @@ if HOSTEL_MODULE is not None:
         HOSTEL_MODULE = None
         print(f"[Hostel] configure failed; hostel routes disabled: {exc}", flush=True)
 
+# Inject shared helpers into the website advertisements module (app/domains/ads).
+if ADS_MODULE is not None:
+    try:
+        ADS_MODULE.configure(
+            get_db=get_db,
+            data_root=(RENDER_DISK if (RENDER_DISK.exists() and RENDER_DISK.is_dir()) else PROJECT_ROOT),
+            project_root=PROJECT_ROOT,
+            extract_multipart_upload=extract_multipart_upload,
+        )
+    except Exception as exc:
+        ADS_MODULE = None
+        print(f"[Ads] configure failed; advertisement routes disabled: {exc}", flush=True)
+
+
+def ads_public_payload_json(base_path=''):
+    """Homepage advertisement payload as a JSON string ('null' when absent).
+
+    Never raises — a database or module failure must not break the homepage.
+    """
+    if ADS_MODULE is None or not FEATURE_ADVERTISEMENTS:
+        return 'null'
+    try:
+        return ADS_MODULE.public_payload_json(base_path)
+    except Exception as exc:
+        print(f"[Ads] public payload failed: {exc}", flush=True)
+        return 'null'
+
 
 APPROVAL_REVIEW_PAGE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -34986,6 +35036,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def render_public_home(self):
         context = self.public_route_context()
+        context['AD_PAYLOAD_JSON'] = ads_public_payload_json(self.request_base_path())
         if self.render_template_with_context(PUBLIC_HOME_TEMPLATE_NAME, context):
             return
         fallback = (
@@ -35619,6 +35670,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if user['role'] in ('fee_collector', 'iraq_cwa'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
             app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
+            ads_nav_button = ''
+            if ADS_MODULE is not None and FEATURE_ADVERTISEMENTS and user['role'] == 'admin':
+                ads_nav_button = ('<button data-cwa-nav onclick="window.location.href=\'/admin/advertisements\'">'
+                                  '<span class="side-nav-icon" aria-hidden="true"></span>'
+                                  '<span>Website Advertisements</span></button>')
+            app_html = app_html.replace('__ADS_NAV_BUTTON__', ads_nav_button)
             self.send_html(app_html)
         elif path == '/admin/print/ambassador-review-pack':
             user = self.require_auth()
@@ -38637,6 +38694,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
                 self.send_json({'status': 'ok', 'message': 'Webhook active'})
         elif HOSTEL_MODULE is not None and HOSTEL_MODULE.matches_path(path):
             HOSTEL_MODULE.handle_get(self, path, params)
+        elif ADS_MODULE is not None and FEATURE_ADVERTISEMENTS and ADS_MODULE.matches_path(path):
+            ADS_MODULE.handle_get(self, path, params)
 
         else:
             self.send_response(404)
@@ -41596,6 +41655,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
 
         elif HOSTEL_MODULE is not None and HOSTEL_MODULE.matches_path(path):
             HOSTEL_MODULE.handle_post(self, path, body)
+        elif ADS_MODULE is not None and FEATURE_ADVERTISEMENTS and ADS_MODULE.matches_path(path):
+            ADS_MODULE.handle_post(self, path, body)
 
         else:
             self.send_response(404)
@@ -47718,6 +47779,7 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <button onclick="go('fee-report',this)" data-fee-report-nav><span class="side-nav-icon" aria-hidden="true"></span><span>Fee Reporting</span></button>
 <div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Security &amp; Admin</div>
 <button type="button" onclick="window.location.href='/admin/security'"><span class="side-nav-icon" aria-hidden="true"></span><span>Two-Factor Security</span></button>
+__ADS_NAV_BUTTON__
 <button onclick="go('admin',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Admin</span></button>
 <button data-cwa-nav onclick="window.open('/','_blank')"><span class="side-nav-icon" aria-hidden="true"></span><span>Public Portal ↗</span></button>
 </div>

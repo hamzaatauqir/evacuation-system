@@ -30,3 +30,5 @@ templates/nurses_accommodation.html
 templates/nurses_complaint.html
 templates/nurses_leaving_notice.html
 templates/nurses_login.html
+# Added 2026-07-12 (website advertisements module)
+ad_uploads/
