@@ -37,3 +37,6 @@ community-welfare-ui/dist/
 generated_letters/
 private/
 hostel_agreement_uploads/
+
+# Added 2026-07-12 (website advertisements module)
+ad_uploads/
