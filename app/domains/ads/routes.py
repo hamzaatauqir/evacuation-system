@@ -8,8 +8,9 @@ send_json/send_html helpers (security headers included).
 Management endpoints are strictly admin-role only (owner decision #1): the
 portal's require_auth() runs first, then an explicit in-handler role check —
 operator / operator_special are rejected even though route-level RBAC would
-admit them. The only public surfaces are /ads/media/* (read-only images with
-generated names) and the payload server.py embeds into the homepage.
+admit them. The public surfaces are /ads/media/* (read-only images with
+generated names), the payload server.py embeds into the homepage, and
+PUBLIC_ACTIVE_PATH (read-only JSON for the cross-origin React site).
 """
 import json
 import re
@@ -20,12 +21,20 @@ from .audit import list_audit
 ADMIN_PAGE_PATH = '/admin/advertisements'
 PREVIEW_PATH = '/admin/advertisements/preview'
 MEDIA_PREFIX = '/ads/media/'
+# Read-only, unauthenticated. Serves the same selection as the embedded
+# homepage payload; never preview data. Under /api/ so the portal's existing
+# _cors_headers_if_api() applies the CORS allowlist automatically.
+PUBLIC_ACTIVE_PATH = '/api/public/advertisements/active'
+# Short TTL: an admin activating an ad should see it publicly within a minute,
+# while still absorbing homepage traffic spikes.
+_PUBLIC_CACHE_HEADERS = {'Cache-Control': 'public, max-age=60'}
 
 
 def matches_path(path):
     return (
         path == ADMIN_PAGE_PATH
         or path == PREVIEW_PATH
+        or path == PUBLIC_ACTIVE_PATH
         or path.startswith('/api/admin/advertisements')
         or path.startswith(MEDIA_PREFIX)
     )
@@ -132,6 +141,8 @@ def _render_preview(handler, ad_id):
 # ── GET ──────────────────────────────────────────────────────────
 
 def handle_get(handler, path, params):
+    # ── Public surfaces: must be handled BEFORE the admin gate below. ──
+
     # Public, read-only ad images (generated names only; long-lived cache).
     if path.startswith(MEDIA_PREFIX):
         target, mime = media.resolve_media(path[len(MEDIA_PREFIX):])
@@ -139,6 +150,20 @@ def handle_get(handler, path, params):
             handler.send_json({'success': False, 'error': 'File not found'}, 404)
         else:
             _send_media(handler, target, mime)
+        return
+
+    # Public active-advertisement JSON for the React site. No authentication:
+    # this is the same content already embedded in the public homepage.
+    # Intentionally passes no request state — the response is cacheable and
+    # must not vary with client-supplied headers.
+    if path == PUBLIC_ACTIVE_PATH:
+        try:
+            result = service.public_payload_api()
+        except Exception:
+            # An ad failure must never surface as a 500 to the public site;
+            # the frontend treats a null advertisement as "nothing to show".
+            result = {'success': True, 'advertisement': None}
+        handler.send_json(result, 200, extra_headers=_PUBLIC_CACHE_HEADERS)
         return
 
     user = _admin_user(handler)
@@ -180,6 +205,12 @@ def handle_get(handler, path, params):
 # ── POST ─────────────────────────────────────────────────────────
 
 def handle_post(handler, path, body):
+    # The public read-only endpoint is GET-only; answer 405 rather than
+    # sending an unauthenticated caller through the admin login redirect.
+    if path == PUBLIC_ACTIVE_PATH:
+        handler.send_json({'success': False, 'error': 'Method not allowed'}, 405)
+        return
+
     user = _admin_user(handler)
     if not user:
         return

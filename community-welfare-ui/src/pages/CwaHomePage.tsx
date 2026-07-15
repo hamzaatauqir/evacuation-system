@@ -8,6 +8,7 @@ import { PageFooter } from "../components/PageFooter";
 import { Btn } from "../components/Btn";
 import { Icon, type IconName } from "../components/Icon";
 import { InternationalNursesDayCampaignCard } from "../components/InternationalNursesDayCampaignCard";
+import { HomepageAds } from "../components/HomepageAds";
 import { T } from "../lib/tokens";
 import { PUBLIC_PORTAL_PATHS, navigateToPublicPortal } from "../lib/publicRoutes";
 import { isInternationalNursesDayCampaignActive } from "../lib/seasonalCampaigns";
@@ -194,6 +195,9 @@ export function CwaHomePage() {
 
       <main style={{ flex: 1 }}>
         <Section bg={T.bg} style={{ paddingTop: 64, paddingBottom: 64 }} id="cw-services">
+          {/* Banner renders here (below the hero, before the services grid),
+              matching the Flask homepage slot; the popup portals to <body>. */}
+          <HomepageAds />
           {showInternationalNursesDayCampaign ? (
             <div style={{ marginBottom: 28 }}>
               <InternationalNursesDayCampaignCard variant="homepage" portalHref="/nurses/login" />

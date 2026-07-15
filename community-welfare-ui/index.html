@@ -20,10 +20,23 @@
         const targetPath = aliasMap.get(rawPath) || aliasMap.get(segmentPath);
         if (!targetPath) return;
 
-        const envCandidates = ["%VITE_BACKEND_PORTAL_URL%", "%VITE_API_BASE_URL%"].map((value) =>
-          value === "%VITE_BACKEND_PORTAL_URL%" || value === "%VITE_API_BASE_URL%" ? "" : value
-        );
-        let backend = envCandidates.find(Boolean) || "";
+        // Vite substitutes %VITE_X% throughout this file. Detect an
+        // unsubstituted placeholder structurally (leading + trailing '%')
+        // rather than by comparing against the placeholder's own text: the
+        // build rewrites every occurrence, so a literal sentinel would be
+        // rewritten to the same value as the variable, always match, and
+        // silently discard the configured backend. Keep this mirrored with
+        // src/lib/backendOrigin.ts.
+        const readEnv = (value) => {
+          const trimmed = (value || "").trim();
+          if (!trimmed) return "";
+          if (trimmed.charAt(0) === "%" && trimmed.charAt(trimmed.length - 1) === "%") return "";
+          // portal.cwakuwait.com is retired and answers 403.
+          if (/^https?:\/\/portal\.cwakuwait\.com(?:\/|$)/i.test(trimmed)) return "";
+          return trimmed.replace(/\/+$/, "");
+        };
+
+        let backend = readEnv("%VITE_BACKEND_PORTAL_URL%") || readEnv("%VITE_API_BASE_URL%");
         const host = (window.location.hostname || "").toLowerCase();
 
         if (!backend) {
@@ -34,13 +47,17 @@
             host === "www.cwakuwait.com" ||
             host === "community-welfare-ui.onrender.com"
           ) {
-            backend = "https://portal.cwakuwait.com";
+            backend = "https://evacuation-system.onrender.com";
           } else {
             backend = window.location.origin;
           }
         }
 
-        window.location.replace(backend.replace(/\/+$/, "") + targetPath);
+        const target = backend.replace(/\/+$/, "") + targetPath;
+        // Never redirect to this same page: the React router would forward
+        // again and loop forever. Let the SPA render its manual link instead.
+        if (target === window.location.origin + targetPath && rawPath === targetPath) return;
+        window.location.replace(target);
       })();
     </script>
     <title>Embassy of Pakistan Kuwait — Community Welfare Wing</title>

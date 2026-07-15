@@ -184,6 +184,22 @@ CHECKS = [
     },
     {"name": "ads media missing file", "method": "GET", "path": "/ads/media/does-not-exist.png", "allowed": {404}},
     {"name": "site ads js asset", "method": "GET", "path": "/static/js/site-ads.js", "allowed": {200}},
+    # Public read-only ads API: reachable WITHOUT auth (200), or 404 with the
+    # feature flag off. A 302 here would mean it fell through to the admin gate.
+    {
+        "name": "public advertisements api unauthenticated",
+        "method": "GET",
+        "path": "/api/public/advertisements/active",
+        "allowed": {200, 404},
+    },
+    {
+        "name": "public advertisements api is GET-only",
+        "method": "POST",
+        "path": "/api/public/advertisements/active",
+        "allowed": {405, 404},
+        "body": b"{}",
+        "headers": {"Content-Type": "application/json"},
+    },
 ]
 
 

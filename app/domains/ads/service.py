@@ -497,24 +497,60 @@ def payload_to_json(payload):
     return json.dumps(payload, ensure_ascii=True).replace('<', '\\u003c')
 
 
+def _public_payload_dict(db, now, media_base):
+    """The single active-advertisement selection used by every public surface.
+
+    Both the embedded homepage payload and the public JSON API go through
+    here, so publication rules can never drift between them. Returns None when
+    nothing is live. Only ever admits status='ACTIVE' rows that are also
+    inside their schedule window (effective_status), so DRAFT / PAUSED /
+    ARCHIVED / SCHEDULED / EXPIRED are all excluded.
+    """
+    popup_row = _effective_placement_row(db, 'popup_enabled', now)
+    banner_row = _effective_placement_row(db, 'banner_enabled', now)
+    if popup_row is None and banner_row is None:
+        return None
+    return {
+        'popup': _popup_dict(popup_row, media_base) if popup_row is not None else None,
+        'banner': _banner_dict(banner_row, media_base) if banner_row is not None else None,
+    }
+
+
 def public_payload_json(base_path=''):
     """Active-advertisement payload for the homepage. Returns a JSON string.
+
+    Media URLs stay backend-relative here: this payload is embedded into a
+    page served by this same backend (Flask homepage + admin preview).
 
     Never raises to the caller's benefit — server.py additionally wraps this
     in a try/except so a failure here can never break the homepage.
     """
     db = core.get_db()
     try:
-        now = core.utc_now_str()
-        popup_row = _effective_placement_row(db, 'popup_enabled', now)
-        banner_row = _effective_placement_row(db, 'banner_enabled', now)
-        if popup_row is None and banner_row is None:
+        payload = _public_payload_dict(db, core.utc_now_str(), base_path)
+        if payload is None:
             return 'null'
-        payload = {
-            'popup': _popup_dict(popup_row, base_path) if popup_row is not None else None,
-            'banner': _banner_dict(banner_row, base_path) if banner_row is not None else None,
-        }
         return payload_to_json(payload)
+    finally:
+        db.close()
+
+
+def public_payload_api():
+    """Active-advertisement payload for the public JSON API. Returns a dict.
+
+    Identical selection to public_payload_json (same _public_payload_dict),
+    but media URLs are absolute because the caller is a different origin
+    (the React site on cwakuwait.com). Never consults preview logic:
+    unpublished advertisements are not returned here under any circumstance.
+
+    Takes no request state on purpose: the media base is env-only, so this
+    response is byte-identical for every caller and safe to cache publicly.
+    """
+    db = core.get_db()
+    try:
+        payload = _public_payload_dict(db, core.utc_now_str(),
+                                       core.public_media_base())
+        return {'success': True, 'advertisement': payload}
     finally:
         db.close()
 

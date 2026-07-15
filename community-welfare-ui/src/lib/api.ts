@@ -1,60 +1,9 @@
-const LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1)$/i;
-const DEPRECATED_PORTAL_HOST_RE = /^https?:\/\/portal\.cwakuwait\.com(?:\/|$)/i;
-
-function trimTrailingSlash(value: string) {
-  return value.trim().replace(/\/+$/, "");
-}
-
-function isAbsoluteUrl(value: string) {
-  return /^https?:\/\//i.test(value.trim());
-}
-
-function isLocalhostUrl(value: string) {
-  return /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(value.trim());
-}
-
-function sanitizeConfiguredBase(value?: string) {
-  const trimmed = trimTrailingSlash(value || "");
-  if (!trimmed || DEPRECATED_PORTAL_HOST_RE.test(trimmed)) return "";
-  return trimmed;
-}
-
-function localBackendOrigin() {
-  if (typeof window !== "undefined" && window.location) {
-    const { protocol, hostname, port } = window.location;
-    if (LOCAL_HOST_RE.test(hostname)) {
-      const targetPort = port && port !== "8080" ? "8080" : port || "8080";
-      return `${protocol}//${hostname}:${targetPort}`;
-    }
-  }
-  return "http://localhost:8080";
-}
-
-function browserOrigin() {
-  if (typeof window !== "undefined" && window.location?.origin) {
-    return trimTrailingSlash(window.location.origin);
-  }
-  return localBackendOrigin();
-}
-
-function resolveBaseUrl(primary?: string, fallback?: string) {
-  const candidate = sanitizeConfiguredBase(primary) || sanitizeConfiguredBase(fallback);
-  if (candidate && !(import.meta.env.PROD && isLocalhostUrl(candidate))) {
-    return candidate;
-  }
-  if (typeof window !== "undefined" && LOCAL_HOST_RE.test(window.location?.hostname || "")) {
-    return localBackendOrigin();
-  }
-  return import.meta.env.PROD ? "" : browserOrigin();
-}
-
-function joinBaseAndPath(base: string, path: string) {
-  if (isAbsoluteUrl(path)) return trimTrailingSlash(path);
-  const normalized = path.startsWith("/") ? path : `/${path}`;
-  const trimmedBase = trimTrailingSlash(base);
-  if (!trimmedBase) return normalized;
-  return `${trimmedBase}${normalized}`;
-}
+/**
+ * API client. Backend-origin resolution lives in ./backendOrigin — do not
+ * reintroduce a second copy here; three call sites disagreeing is what broke
+ * the production API base.
+ */
+import { joinBaseAndPath, resolveApiBaseUrl, viteEnv } from "./backendOrigin";
 
 function displayBaseUrl(base: string) {
   if (base) return base;
@@ -64,10 +13,10 @@ function displayBaseUrl(base: string) {
   return "this site";
 }
 
-const API_BASE_INTERNAL = resolveBaseUrl(import.meta.env.VITE_API_BASE_URL);
-const BACKEND_PORTAL_INTERNAL = resolveBaseUrl(
-  import.meta.env.VITE_BACKEND_PORTAL_URL,
-  import.meta.env.VITE_API_BASE_URL
+const API_BASE_INTERNAL = resolveApiBaseUrl(viteEnv().VITE_API_BASE_URL);
+const BACKEND_PORTAL_INTERNAL = resolveApiBaseUrl(
+  viteEnv().VITE_BACKEND_PORTAL_URL,
+  viteEnv().VITE_API_BASE_URL
 );
 
 const API_BASE = displayBaseUrl(API_BASE_INTERNAL);

@@ -64,6 +64,71 @@ def main(argv):
         # 302 = redirected to /login (flag on); 404 = feature flag off.
         check(f'{method} {path} gated', status in (302, 404), f'(got {status})')
 
+    print('— Public active-advertisement API (unauthenticated, read-only) —')
+    status, headers, body = request(base, 'GET', '/api/public/advertisements/active')
+    # 404 only when FEATURE_ADVERTISEMENTS is off.
+    check('public ads endpoint reachable without auth', status in (200, 404), f'(got {status})')
+    if status == 200:
+        import json as _json
+        try:
+            payload = _json.loads(body.decode('utf-8', errors='replace'))
+        except Exception as exc:
+            payload = None
+            check('public ads endpoint returns JSON', False, f'({exc})')
+        if payload is not None:
+            check('public ads endpoint returns JSON', True)
+            check('response has success flag', payload.get('success') is True)
+            check('response has advertisement key', 'advertisement' in payload)
+            ad = payload.get('advertisement')
+            check('advertisement is null or an object', ad is None or isinstance(ad, dict))
+            # Unpublished ads must never reach the public API.
+            check('preview flag never exposed publicly',
+                  not isinstance(ad, dict) or 'preview' not in ad)
+            if isinstance(ad, dict):
+                for slot in ('popup', 'banner'):
+                    item = ad.get(slot)
+                    if not isinstance(item, dict):
+                        continue
+                    for field in ('image', 'mobileImage'):
+                        url = item.get(field) or ''
+                        if not url:
+                            continue
+                        # Relative media URLs would be fetched from the React
+                        # site's own origin, where they 404.
+                        check(f'{slot}.{field} is an absolute backend URL',
+                              url.startswith('http://') or url.startswith('https://'),
+                              f'(got {url!r} — set PUBLIC_BACKEND_ORIGIN)')
+        check('public ads endpoint is cacheable',
+              'public' in (headers.get('Cache-Control') or '').lower(),
+              f"(got {headers.get('Cache-Control')!r})")
+
+    # CORS: the React site is a different origin and must be allowed.
+    for origin in ('https://cwakuwait.com', 'https://www.cwakuwait.com'):
+        status, headers, _ = request(base, 'GET', '/api/public/advertisements/active',
+                                     headers={'Origin': origin})
+        if status == 404:
+            continue  # feature flag off
+        check(f'CORS allows {origin}',
+              headers.get('Access-Control-Allow-Origin') == origin,
+              f"(got {headers.get('Access-Control-Allow-Origin')!r})")
+        status, headers, _ = request(base, 'OPTIONS', '/api/public/advertisements/active',
+                                     headers={'Origin': origin,
+                                              'Access-Control-Request-Method': 'GET'})
+        check(f'CORS preflight allows {origin}',
+              headers.get('Access-Control-Allow-Origin') == origin,
+              f"(got {status} {headers.get('Access-Control-Allow-Origin')!r})")
+
+    status, headers, _ = request(base, 'GET', '/api/public/advertisements/active',
+                                 headers={'Origin': 'https://evil.example.com'})
+    if status != 404:
+        check('CORS rejects an unlisted origin',
+              headers.get('Access-Control-Allow-Origin') is None,
+              f"(got {headers.get('Access-Control-Allow-Origin')!r})")
+
+    status, _, _ = request(base, 'POST', '/api/public/advertisements/active', body=b'{}',
+                           headers=json_hdr)
+    check('public ads endpoint is GET-only', status in (405, 404), f'(got {status})')
+
     print('— Public media route —')
     status, _, _ = request(base, 'GET', '/ads/media/does-not-exist.png')
     check('missing media -> 404 (or 404 flag-off)', status == 404, f'(got {status})')

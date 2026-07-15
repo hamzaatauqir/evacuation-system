@@ -4,6 +4,7 @@ Pure Python with no import-time side effects. server.py calls configure(...)
 once at startup to inject the helpers the module needs, so the module never
 imports server.py.
 """
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -71,6 +72,60 @@ MANAGE_ROLES = {'admin'}
 
 def user_can_manage(user):
     return bool(user) and (user.get('role') or '').strip() in MANAGE_ROLES
+
+
+# ── Public origin (cross-origin media URLs) ──────────────────────
+# The React site on cwakuwait.com is a different origin from this backend, so
+# media URLs it receives must be absolute. Read at call time (not import time)
+# so the value can be changed/tested without reimporting the module.
+
+def public_backend_origin():
+    """Normalised 'scheme://host[:port]' from PUBLIC_BACKEND_ORIGIN, or ''.
+
+    Returns '' when unset or unusable, which makes callers fall back to
+    backend-relative URLs — the pre-existing same-origin behaviour.
+    """
+    raw = str(os.environ.get('PUBLIC_BACKEND_ORIGIN') or '').strip().rstrip('/')
+    if not raw:
+        return ''
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ''
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return ''
+    return f'{parsed.scheme}://{parsed.netloc}'
+
+
+def public_base_path():
+    """Mount prefix from PUBLIC_BASE_PATH env, normalised to '' or '/prefix'.
+
+    Deliberately env-only. The request-scoped equivalent in server.py also
+    honours the X-Forwarded-Prefix / X-Script-Name request headers, which must
+    not influence a response served with 'Cache-Control: public' — a client
+    could otherwise vary a cacheable body via a request header.
+    """
+    raw = str(os.environ.get('PUBLIC_BASE_PATH') or '').strip()
+    if not raw or raw == '/':
+        return ''
+    if '://' in raw:
+        try:
+            raw = urlparse(raw).path or ''
+        except Exception:
+            raw = ''
+    raw = '/' + raw.strip('/')
+    return '' if raw == '/' else raw
+
+
+def public_media_base():
+    """Prefix for media URLs handed to cross-origin consumers.
+
+    Origin and mount prefix both come from the environment, never from the
+    request, so the public payload is identical for every caller and safe to
+    cache. Degrades to a relative path when PUBLIC_BACKEND_ORIGIN is unset
+    rather than emitting a broken host.
+    """
+    return f'{public_backend_origin()}{public_base_path()}'
 
 
 # ── Timezone (owner decision #10) ────────────────────────────────
