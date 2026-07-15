@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Community Welfare Wing Digital Services</title>
-  <link rel="stylesheet" href="__BASE_PATH__/static/css/cwa-ui.css?v=20260512-nurses-day">
+  <link rel="stylesheet" href="__BASE_PATH__/static/css/cwa-ui.css?v=20260712-ads1">
   <script src="__BASE_PATH__/static/js/seasonal-campaigns.js?v=20260512-nurses-day"></script>
 </head>
 <body class="cwa-ui">
@@ -89,6 +89,7 @@
           <a class="cwa-btn primary" href="__NURSES_URL__/login">Open Nurses Portal</a>
         </div>
       </article>
+      <div id="cwaAdBannerSlot" class="cwa-ad-banner-slot"></div>
       <div class="cwa-section-head">
         <div>
           <h2>Available Services</h2>
@@ -193,5 +194,7 @@
       });
     })();
   </script>
+  <script>window.CWA_ADS = __AD_PAYLOAD_JSON__;</script>
+  <script src="__BASE_PATH__/static/js/site-ads.js?v=20260712-ads1" defer></script>
 </body>
 </html>

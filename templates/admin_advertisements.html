@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Website Advertisements — Embassy of Pakistan Kuwait</title>
+<style>
+:root{--navy:#002147;--green:#106e09;--border:#d7dee8;--muted:#5b6b7c;--bg:#f2f5f9}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,Arial,sans-serif;background:var(--bg);color:#16222e}
+a{color:var(--navy)}
+.topbar{background:var(--navy);color:#fff;padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.topbar h1{margin:0;font-size:19px}
+.topbar .who{font-size:13px;opacity:.9}
+.topbar a{color:#dbeafe;text-decoration:none;font-weight:600;font-size:14px}
+.wrap{max-width:1240px;margin:0 auto;padding:18px 22px 60px}
+.panel{background:#fff;border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 4px 14px rgba(0,33,71,.06);margin-bottom:16px}
+.panel h2{margin:0 0 12px;font-size:17px;color:var(--navy)}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+button{padding:9px 13px;border-radius:8px;border:1px solid var(--green);background:var(--green);color:#fff;font-weight:600;cursor:pointer;font-size:13px}
+button.secondary{background:#fff;color:var(--navy);border-color:var(--navy)}
+button.warn{background:#fff;color:#9d1d1d;border-color:#c98a8a}
+button:disabled{opacity:.5;cursor:not-allowed}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 9px;border-bottom:1px solid #e8edf3;text-align:left;vertical-align:top}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+tr:hover td{background:#f7fafc}
+.chip{display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid #cbd5e1;white-space:nowrap}
+.chip.DRAFT{background:#f1f5f9;color:#475569}
+.chip.ACTIVE{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+.chip.SCHEDULED{background:#dbeafe;color:#1d4ed8;border-color:#bfdbfe}
+.chip.EXPIRED{background:#fef9c3;color:#854d0e;border-color:#fde68a}
+.chip.PAUSED{background:#fee2e2;color:#991b1b;border-color:#fecaca}
+.chip.ARCHIVED{background:#e2e8f0;color:#334155}
+.rowactions{display:flex;gap:6px;flex-wrap:wrap}
+.rowactions button{padding:5px 9px;font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+label{display:block;margin:10px 0 4px;font-size:12.5px;font-weight:700;color:#37485a}
+input[type=text],input[type=number],input[type=datetime-local],select,textarea{width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font:inherit;background:#fff}
+textarea{min-height:74px;resize:vertical}
+.hint{font-size:12px;color:var(--muted);margin-top:3px}
+.msg{margin:10px 0;padding:10px 12px;border-radius:8px;font-size:13.5px;display:none}
+.msg.err{display:block;background:#fee2e2;border:1px solid #fecaca;color:#991b1b}
+.msg.ok{display:block;background:#dcfce7;border:1px solid #bbf7d0;color:#166534}
+fieldset{border:1px solid var(--border);border-radius:10px;margin:14px 0;padding:4px 14px 14px}
+legend{font-size:13px;font-weight:800;color:var(--navy);padding:0 6px}
+.imgslots{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+.imgslot{border:1px dashed #c3cedb;border-radius:10px;padding:10px;font-size:12.5px}
+.imgslot img{max-width:100%;max-height:110px;display:block;margin:8px 0;border-radius:6px;border:1px solid var(--border)}
+.imgslot .none{color:var(--muted);margin:8px 0}
+.checkline{display:flex;align-items:center;gap:8px;margin:10px 0 2px;font-size:13.5px;font-weight:700;color:#37485a}
+.checkline input{width:auto}
+.badge-v{font-size:11px;color:var(--muted)}
+.audit-table{max-height:320px;overflow:auto;display:block}
+.form-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;align-items:center}
+.hidden{display:none}
+@media(max-width:900px){.grid2,.grid3,.imgslots{grid-template-columns:1fr}.tablewrap{overflow-x:auto}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>Website Advertisements</h1>
+  <div class="who">__USER_NAME__ (__USER_ROLE__) &nbsp;·&nbsp; <a href="/admin/dashboard">← Back to Dashboard</a></div>
+</div>
+<div class="wrap">
+
+  <div class="panel">
+    <div class="toolbar">
+      <button onclick="newAd()">+ New Advertisement</button>
+      <button class="secondary" onclick="loadList()">Refresh</button>
+      <span class="hint">One advertisement may be effectively active per placement (popup / banner). All times are Asia/Kuwait.</span>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Name</th><th>Reference</th><th>Status</th><th>Placement</th>
+          <th>Starts (Kuwait)</th><th>Ends (Kuwait)</th><th>Version</th>
+          <th>Updated</th><th>By</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="listBody"><tr><td colspan="10" class="hint">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel hidden" id="editorPanel">
+    <h2 id="editorTitle">New Advertisement</h2>
+    <div class="msg" id="formMsg"></div>
+
+    <fieldset>
+      <legend>General</legend>
+      <div class="grid2">
+        <div>
+          <label for="f_internal_name">Internal name *</label>
+          <input type="text" id="f_internal_name" maxlength="120">
+          <div class="hint">Internal only — never shown to the public.</div>
+        </div>
+        <div>
+          <label for="f_campaign_reference">Campaign reference</label>
+          <input type="text" id="f_campaign_reference" maxlength="80">
+        </div>
+      </div>
+      <div class="grid3">
+        <div>
+          <label for="f_disclosure_label">Public disclosure label</label>
+          <select id="f_disclosure_label">
+            <option>Announcement</option><option>Advertisement</option><option>Campaign</option>
+            <option>Public Awareness</option><option>Embassy Initiative</option>
+          </select>
+        </div>
+        <div>
+          <label for="f_language">Language</label>
+          <select id="f_language"><option value="en">English only</option><option value="en+ur">English + Urdu</option></select>
+        </div>
+        <div>
+          <label for="f_display_frequency">Popup display frequency</label>
+          <select id="f_display_frequency">
+            <option value="once_per_version">Once per published version (recommended)</option>
+            <option value="once_per_session">Once per browser session</option>
+            <option value="every_visit">Every homepage visit</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid3">
+        <div>
+          <label for="f_dismissal_hours">Re-show after dismissal (hours)</label>
+          <input type="number" id="f_dismissal_hours" min="0" max="8760" value="168">
+          <div class="hint">0 = never re-show the same version after dismissal. Default 168 (7 days).</div>
+        </div>
+        <div>
+          <label for="f_starts_at_kw">Start (Kuwait time)</label>
+          <input type="datetime-local" id="f_starts_at_kw">
+          <div class="hint">Leave empty to start immediately on activation.</div>
+        </div>
+        <div>
+          <label for="f_ends_at_kw">End (Kuwait time)</label>
+          <input type="datetime-local" id="f_ends_at_kw">
+          <div class="hint">Leave empty for no automatic expiry.</div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Large homepage popup</legend>
+      <div class="checkline"><input type="checkbox" id="f_popup_enabled"><label for="f_popup_enabled" style="margin:0">Enable popup</label></div>
+      <div class="grid2">
+        <div>
+          <label for="f_heading">Heading</label>
+          <input type="text" id="f_heading" maxlength="150">
+        </div>
+        <div>
+          <label for="f_heading_ur">Heading (Urdu, optional)</label>
+          <input type="text" id="f_heading_ur" maxlength="150" dir="rtl" lang="ur">
+        </div>
+      </div>
+      <div class="grid2">
+        <div>
+          <label for="f_description">Supporting text</label>
+          <textarea id="f_description" maxlength="1000"></textarea>
+        </div>
+        <div>
+          <label for="f_description_ur">Supporting text (Urdu, optional)</label>
+          <textarea id="f_description_ur" maxlength="1000" dir="rtl" lang="ur"></textarea>
+        </div>
+      </div>
+      <div class="grid3">
+        <div>
+          <label for="f_cta_label">Call-to-action label</label>
+          <input type="text" id="f_cta_label" maxlength="60" placeholder="View Details">
+        </div>
+        <div>
+          <label for="f_cta_url">Call-to-action link</label>
+          <input type="text" id="f_cta_url" maxlength="500" placeholder="https://… or /internal-path">
+          <div class="hint">HTTPS links or internal paths only. javascript:, data:, plain http and // are rejected.</div>
+        </div>
+        <div>
+          <label for="f_cta_new_tab">Open link in</label>
+          <select id="f_cta_new_tab"><option value="1">New tab</option><option value="0">Same tab</option></select>
+        </div>
+      </div>
+      <div class="grid2">
+        <div>
+          <label for="f_contact_number">Contact number (optional)</label>
+          <input type="text" id="f_contact_number" maxlength="30" placeholder="+965 …">
+        </div>
+        <div>
+          <label for="f_external_website">Website address (optional)</label>
+          <input type="text" id="f_external_website" maxlength="500" placeholder="https://…">
+        </div>
+      </div>
+      <label for="f_image_alt_text">Accessible image alternative text</label>
+      <input type="text" id="f_image_alt_text" maxlength="200" placeholder="Describe the image for screen-reader users">
+      <div class="hint">Required before activation when an image is set. Shared by popup and banner images.</div>
+      <div class="imgslots">
+        <div class="imgslot" data-slot="popup">
+          <strong>Popup image (desktop)</strong>
+          <div class="imgpreview"></div>
+          <input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="uploadImage(this,'popup')">
+        </div>
+        <div class="imgslot" data-slot="popup_mobile">
+          <strong>Popup image (mobile, optional)</strong>
+          <div class="imgpreview"></div>
+          <input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="uploadImage(this,'popup_mobile')">
+        </div>
+      </div>
+      <div class="hint">JPEG, PNG or WebP · max 4 MB · max 4000×4000 px · min width 400 px · SVG not accepted. Save the advertisement once before uploading images.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Smaller homepage banner</legend>
+      <div class="checkline"><input type="checkbox" id="f_banner_enabled"><label for="f_banner_enabled" style="margin:0">Enable banner</label></div>
+      <div class="grid2">
+        <div>
+          <label for="f_banner_heading">Banner heading</label>
+          <input type="text" id="f_banner_heading" maxlength="150">
+        </div>
+        <div>
+          <label for="f_banner_heading_ur">Banner heading (Urdu, optional)</label>
+          <input type="text" id="f_banner_heading_ur" maxlength="150" dir="rtl" lang="ur">
+        </div>
+      </div>
+      <div class="grid2">
+        <div>
+          <label for="f_banner_description">Short description</label>
+          <textarea id="f_banner_description" maxlength="500"></textarea>
+        </div>
+        <div>
+          <label for="f_banner_description_ur">Short description (Urdu, optional)</label>
+          <textarea id="f_banner_description_ur" maxlength="500" dir="rtl" lang="ur"></textarea>
+        </div>
+      </div>
+      <div class="grid3">
+        <div>
+          <label for="f_banner_button_label">Button label</label>
+          <input type="text" id="f_banner_button_label" maxlength="60">
+        </div>
+        <div>
+          <label for="f_banner_button_url">Button link</label>
+          <input type="text" id="f_banner_button_url" maxlength="500" placeholder="https://… or /internal-path">
+        </div>
+        <div>
+          <label for="f_banner_dismissible">Visitor can dismiss banner</label>
+          <select id="f_banner_dismissible"><option value="1">Yes</option><option value="0">No</option></select>
+        </div>
+      </div>
+      <div class="imgslots">
+        <div class="imgslot" data-slot="banner">
+          <strong>Banner image (desktop)</strong>
+          <div class="imgpreview"></div>
+          <input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="uploadImage(this,'banner')">
+        </div>
+        <div class="imgslot" data-slot="banner_mobile">
+          <strong>Banner image (mobile, optional)</strong>
+          <div class="imgpreview"></div>
+          <input type="file" accept=".jpg,.jpeg,.png,.webp" onchange="uploadImage(this,'banner_mobile')">
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="form-actions">
+      <button onclick="saveAd()">Save</button>
+      <button class="secondary" onclick="openPreview()" id="btnPreview" disabled>Preview (does not publish)</button>
+      <button class="secondary" onclick="loadAudit()" id="btnAudit" disabled>History</button>
+      <button class="secondary" onclick="closeEditor()">Close</button>
+      <span class="badge-v" id="editorMeta"></span>
+    </div>
+  </div>
+
+  <div class="panel hidden" id="auditPanel">
+    <h2>Change history</h2>
+    <div class="tablewrap audit-table">
+      <table>
+        <thead><tr><th>When (Kuwait)</th><th>Event</th><th>By</th><th>From</th><th>To</th><th>Note</th></tr></thead>
+        <tbody id="auditBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+<script>
+'use strict';
+let CURRENT = null; // loaded advertisement (detail dict) or null for a new one
+
+async function jget(url){
+  const r = await fetch(url, {credentials:'include'});
+  const j = await r.json().catch(()=>({success:false,error:'Invalid server response'}));
+  return {status:r.status, body:j};
+}
+async function jpost(url, data){
+  const r = await fetch(url, {method:'POST', credentials:'include',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+  const j = await r.json().catch(()=>({success:false,error:'Invalid server response'}));
+  return {status:r.status, body:j};
+}
+function showMsg(text, ok){
+  const m = document.getElementById('formMsg');
+  m.textContent = text;
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+  if (ok) setTimeout(()=>{ m.className='msg'; }, 4000);
+}
+function td(text){ const c = document.createElement('td'); c.textContent = text == null ? '' : String(text); return c; }
+
+const TEXT_FIELDS = ['internal_name','campaign_reference','heading','heading_ur','description','description_ur',
+  'image_alt_text','cta_label','cta_url','contact_number','external_website','banner_heading','banner_heading_ur',
+  'banner_description','banner_description_ur','banner_button_label','banner_button_url','starts_at_kw','ends_at_kw'];
+const SELECT_FIELDS = ['disclosure_label','language','display_frequency','cta_new_tab','banner_dismissible'];
+const CHECK_FIELDS = ['popup_enabled','banner_enabled'];
+
+function fillForm(item){
+  CURRENT = item;
+  document.getElementById('editorPanel').classList.remove('hidden');
+  document.getElementById('auditPanel').classList.add('hidden');
+  document.getElementById('editorTitle').textContent = item ? ('Edit: ' + item.internal_name) : 'New Advertisement';
+  document.getElementById('formMsg').className = 'msg';
+  TEXT_FIELDS.forEach(f => { document.getElementById('f_'+f).value = item ? (item[f] || '') : ''; });
+  document.getElementById('f_dismissal_hours').value = item ? item.dismissal_hours : 168;
+  SELECT_FIELDS.forEach(f => {
+    const elx = document.getElementById('f_'+f);
+    if (!item) { elx.selectedIndex = 0; if (f==='cta_new_tab'||f==='banner_dismissible') elx.value='1'; return; }
+    elx.value = String(item[f]);
+  });
+  CHECK_FIELDS.forEach(f => { document.getElementById('f_'+f).checked = !!(item && item[f]); });
+  const saved = !!(item && item.id);
+  document.getElementById('btnPreview').disabled = !saved;
+  document.getElementById('btnAudit').disabled = !saved;
+  document.querySelectorAll('.imgslot input[type=file]').forEach(inp => { inp.disabled = !saved; inp.value=''; });
+  ['popup','popup_mobile','banner','banner_mobile'].forEach(slot => {
+    const box = document.querySelector('.imgslot[data-slot="'+slot+'"] .imgpreview');
+    box.textContent = '';
+    const name = item ? (item[slot === 'popup' ? 'popup_image' : slot === 'popup_mobile' ? 'popup_mobile_image'
+      : slot === 'banner' ? 'banner_image' : 'banner_mobile_image'] || '') : '';
+    if (name) {
+      const img = document.createElement('img');
+      img.src = '/ads/media/' + encodeURIComponent(name);
+      img.alt = 'Current ' + slot + ' image';
+      box.appendChild(img);
+    } else {
+      const none = document.createElement('div');
+      none.className = 'none';
+      none.textContent = 'No image uploaded.';
+      box.appendChild(none);
+    }
+  });
+  document.getElementById('editorMeta').textContent = item
+    ? ('Content version v' + item.content_version + ' · status ' + item.effective_status + ' · last updated ' + (item.updated_at_kw_display||'') + ' by ' + (item.updated_by||''))
+    : 'Not saved yet — save before uploading images, previewing or activating.';
+  document.getElementById('editorPanel').scrollIntoView({behavior:'smooth'});
+}
+
+function newAd(){ fillForm(null); }
+function closeEditor(){ CURRENT=null; document.getElementById('editorPanel').classList.add('hidden'); document.getElementById('auditPanel').classList.add('hidden'); }
+
+function collectForm(){
+  const data = {};
+  TEXT_FIELDS.forEach(f => { data[f] = document.getElementById('f_'+f).value.trim(); });
+  SELECT_FIELDS.forEach(f => { data[f] = document.getElementById('f_'+f).value; });
+  CHECK_FIELDS.forEach(f => { data[f] = document.getElementById('f_'+f).checked ? '1' : '0'; });
+  data.dismissal_hours = document.getElementById('f_dismissal_hours').value;
+  if (CURRENT && CURRENT.id) { data.id = CURRENT.id; data.expected_updated_at = CURRENT.updated_at; }
+  return data;
+}
+
+async function saveAd(){
+  const {status, body} = await jpost('/api/admin/advertisements/save', collectForm());
+  if (!body.success) { showMsg(body.error || ('Save failed (HTTP ' + status + ')'), false); return; }
+  fillForm(body.item);
+  showMsg(body.content_version_bumped ? 'Saved. Public content changed — a new content version was published to visitors on next activation/display.' : 'Saved.', true);
+  loadList();
+}
+
+async function uploadImage(input, slot){
+  if (!CURRENT || !CURRENT.id) { showMsg('Save the advertisement first, then upload images.', false); input.value=''; return; }
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('ad_id', String(CURRENT.id));
+  fd.append('slot', slot);
+  const r = await fetch('/api/admin/advertisements/upload-image', {method:'POST', credentials:'include', body:fd});
+  const j = await r.json().catch(()=>({success:false,error:'Invalid server response'}));
+  if (!j.success) { showMsg(j.error || 'Upload failed. The previous image is unchanged.', false); input.value=''; return; }
+  fillForm(j.item);
+  showMsg('Image uploaded (' + slot + ').', true);
+  loadList();
+}
+
+async function statusAction(id, action, name){
+  if (action === 'archive' && !confirm('Archive "' + name + '"? It will disappear from the public site but its record and history are kept. Archived advertisements cannot be reactivated (duplicate instead).')) return;
+  let payload = {id, action};
+  let {status, body} = await jpost('/api/admin/advertisements/status', payload);
+  if (status === 409 && body.conflicts) {
+    const names = body.conflicts.map(c => '"' + c.internal_name + '" (' + c.placements.join(', ') + ')').join(', ');
+    if (!confirm('Another advertisement is currently active for the same placement: ' + names + '.\n\nPause it and activate "' + name + '" instead?')) return;
+    payload.confirm_conflict = '1';
+    ({status, body} = await jpost('/api/admin/advertisements/status', payload));
+  }
+  if (!body.success) { alert(body.error || ('Action failed (HTTP ' + status + ')')); return; }
+  if (CURRENT && CURRENT.id === id) fillForm(body.item);
+  loadList();
+}
+
+async function duplicateAd(id){
+  const {body} = await jpost('/api/admin/advertisements/duplicate', {id});
+  if (!body.success) { alert(body.error || 'Duplicate failed'); return; }
+  fillForm(body.item);
+  loadList();
+}
+
+async function editAd(id){
+  const {body} = await jget('/api/admin/advertisements/detail?id=' + id);
+  if (!body.success) { alert(body.error || 'Load failed'); return; }
+  fillForm(body.item);
+}
+
+function openPreview(){
+  if (!CURRENT || !CURRENT.id) return;
+  window.open('/admin/advertisements/preview?id=' + CURRENT.id, '_blank', 'noopener');
+}
+
+async function loadAudit(){
+  if (!CURRENT || !CURRENT.id) return;
+  const {body} = await jget('/api/admin/advertisements/audit?id=' + CURRENT.id);
+  const tbody = document.getElementById('auditBody');
+  tbody.textContent = '';
+  (body.items || []).forEach(row => {
+    const tr = document.createElement('tr');
+    tr.appendChild(td(row.created_at_kw_display || row.created_at));
+    tr.appendChild(td(row.event_type));
+    tr.appendChild(td(row.actor));
+    tr.appendChild(td(row.old_value));
+    tr.appendChild(td(row.new_value));
+    tr.appendChild(td(row.note));
+    tbody.appendChild(tr);
+  });
+  if (!(body.items || []).length) {
+    const tr = document.createElement('tr');
+    const c = td('No history recorded.'); c.colSpan = 6;
+    tr.appendChild(c); tbody.appendChild(tr);
+  }
+  document.getElementById('auditPanel').classList.remove('hidden');
+  document.getElementById('auditPanel').scrollIntoView({behavior:'smooth'});
+}
+
+async function loadList(){
+  const {body} = await jget('/api/admin/advertisements');
+  const tbody = document.getElementById('listBody');
+  tbody.textContent = '';
+  const items = body.items || [];
+  if (!items.length) {
+    const tr = document.createElement('tr');
+    const c = td('No advertisements yet. Create the first one.'); c.colSpan = 10; c.className='hint';
+    tr.appendChild(c); tbody.appendChild(tr);
+    return;
+  }
+  items.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.appendChild(td(item.internal_name));
+    tr.appendChild(td(item.campaign_reference));
+    const st = document.createElement('td');
+    const chip = document.createElement('span');
+    chip.className = 'chip ' + item.effective_status;
+    chip.textContent = item.effective_status;
+    st.appendChild(chip);
+    if (item.effective_status !== item.status) {
+      const small = document.createElement('div');
+      small.className = 'badge-v';
+      small.textContent = 'stored: ' + item.status;
+      st.appendChild(small);
+    }
+    tr.appendChild(st);
+    tr.appendChild(td((item.placements || []).join(' + ') || '—'));
+    tr.appendChild(td(item.starts_at_kw_display || 'immediate'));
+    tr.appendChild(td(item.ends_at_kw_display || 'no expiry'));
+    tr.appendChild(td('v' + item.content_version));
+    tr.appendChild(td(item.updated_at_kw_display || ''));
+    tr.appendChild(td(item.updated_by || item.created_by || ''));
+    const actions = document.createElement('td');
+    const box = document.createElement('div');
+    box.className = 'rowactions';
+    function act(label, cls, fn, disabled){
+      const b = document.createElement('button');
+      b.textContent = label; b.className = cls || 'secondary'; b.disabled = !!disabled;
+      b.addEventListener('click', fn);
+      box.appendChild(b);
+    }
+    act('Edit', 'secondary', () => editAd(item.id), item.status === 'ARCHIVED');
+    act('Preview', 'secondary', () => window.open('/admin/advertisements/preview?id=' + item.id, '_blank', 'noopener'));
+    if (item.status === 'ACTIVE') act('Pause', 'warn', () => statusAction(item.id, 'pause', item.internal_name));
+    else if (item.status !== 'ARCHIVED') act('Activate', '', () => statusAction(item.id, 'activate', item.internal_name));
+    act('Duplicate', 'secondary', () => duplicateAd(item.id));
+    if (item.status !== 'ARCHIVED') act('Archive', 'warn', () => statusAction(item.id, 'archive', item.internal_name));
+    actions.appendChild(box);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  });
+}
+
+loadList();
+</script>
+</body>
+</html>

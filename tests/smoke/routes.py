@@ -171,6 +171,19 @@ CHECKS = [
         "body": b"{}",
         "headers": {"Content-Type": "application/json"},
     },
+    # ── Website Advertisements module (admin-only management, public media) ──
+    {"name": "advertisements admin gate", "method": "GET", "path": "/admin/advertisements", "allowed": {302, 404}},
+    {"name": "advertisements list api gate", "method": "GET", "path": "/api/admin/advertisements", "allowed": {302, 404}},
+    {
+        "name": "advertisements save api gate",
+        "method": "POST",
+        "path": "/api/admin/advertisements/save",
+        "allowed": {302, 404},
+        "body": b"{}",
+        "headers": {"Content-Type": "application/json"},
+    },
+    {"name": "ads media missing file", "method": "GET", "path": "/ads/media/does-not-exist.png", "allowed": {404}},
+    {"name": "site ads js asset", "method": "GET", "path": "/static/js/site-ads.js", "allowed": {200}},
 ]
 
 
