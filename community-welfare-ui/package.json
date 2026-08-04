@@ -12,7 +12,8 @@
     "smoke:campaign": "node --experimental-strip-types scripts/seasonalCampaignsSmoke.ts",
     "smoke:apibase": "node --experimental-strip-types scripts/apiBaseSmoke.ts",
     "smoke:ads": "node --experimental-strip-types scripts/homepageAdsSmoke.ts",
-    "smoke": "npm run smoke:campaign && npm run smoke:apibase && npm run smoke:ads"
+    "smoke:appointments": "node --experimental-strip-types scripts/appointmentsSmoke.ts",
+    "smoke": "npm run smoke:campaign && npm run smoke:apibase && npm run smoke:ads && npm run smoke:appointments"
   },
   "dependencies": {
     "react": "^19.2.5",

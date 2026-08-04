@@ -9,9 +9,11 @@ import { Btn } from "../components/Btn";
 import { Icon, type IconName } from "../components/Icon";
 import { InternationalNursesDayCampaignCard } from "../components/InternationalNursesDayCampaignCard";
 import { HomepageAds } from "../components/HomepageAds";
+import { AppointmentBookingCard } from "../components/AppointmentBookingCard";
 import { T } from "../lib/tokens";
 import { PUBLIC_PORTAL_PATHS, navigateToPublicPortal } from "../lib/publicRoutes";
 import { isInternationalNursesDayCampaignActive } from "../lib/seasonalCampaigns";
+import { openAppointmentBooking } from "../lib/appointments";
 
 type Variant = "primary" | "navy" | "secondary" | "ghost" | "danger" | "light";
 
@@ -174,6 +176,17 @@ export function CwaHomePage() {
               >
                 <Icon name="search" size={17} color="white" /> Track Application
               </Btn>
+              <Btn
+                size="lg"
+                style={{
+                  background: "rgba(255,255,255,.08)",
+                  color: "#fff",
+                  borderColor: "rgba(255,255,255,.2)",
+                }}
+                onClick={openAppointmentBooking}
+              >
+                <Icon name="clock" size={17} color="white" /> Book an Appointment
+              </Btn>
             </div>
             <p
               style={{
@@ -198,6 +211,7 @@ export function CwaHomePage() {
           {/* Banner renders here (below the hero, before the services grid),
               matching the Flask homepage slot; the popup portals to <body>. */}
           <HomepageAds />
+          <AppointmentBookingCard />
           {showInternationalNursesDayCampaign ? (
             <div style={{ marginBottom: 28 }}>
               <InternationalNursesDayCampaignCard variant="homepage" portalHref="/nurses/login" />
