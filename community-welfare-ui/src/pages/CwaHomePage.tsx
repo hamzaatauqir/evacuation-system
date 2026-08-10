@@ -32,6 +32,18 @@ export function CwaHomePage() {
   const showInternationalNursesDayCampaign = isInternationalNursesDayCampaignActive();
   const services: Service[] = [
     {
+      // Placed first deliberately: downloading a form is the lightest-weight,
+      // highest-frequency action on this page, and it is usually the step
+      // before one of the case-submitting services below.
+      icon: "download",
+      title: "Download Embassy Forms",
+      desc: "Official downloadable forms for Passport, NADRA, attestation, consular and community welfare services.",
+      cta: "Open Service",
+      accent: "#B45309",
+      ctaVariant: "secondary",
+      onClick: () => navigate("/forms"),
+    },
+    {
       icon: "transit",
       title: "KSA Transit Visa Application",
       desc: "For Pakistani nationals requiring KSA transit or travel facilitation through the Embassy.",

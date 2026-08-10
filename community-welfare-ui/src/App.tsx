@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { CwaHomePage } from "./pages/CwaHomePage";
+import { FormsPage } from "./pages/FormsPage";
 import { NursesHomePage } from "./pages/NursesHomePage";
 import { NursesRegisterPage } from "./pages/NursesRegisterPage";
 import { NursesLoginPage } from "./pages/NursesLoginPage";
@@ -29,6 +30,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<CwaHomePage />} />
+      {/* Must stay above the "*" catch-all below, which redirects to "/". */}
+      <Route path="/forms" element={<FormsPage />} />
       <Route path="/register" element={<PublicRouteForwarder />} />
       <Route path="/embassy-registration" element={<PublicRouteForwarder />} />
       <Route path="/ksa-transit" element={<PublicRouteForwarder />} />

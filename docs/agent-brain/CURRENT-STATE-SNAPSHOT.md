@@ -1,6 +1,23 @@
 # Current State Snapshot — Embassy Portal
 
-Updated: 2026-07-12
+Updated: 2026-08-10
+
+- **New (2026-08-10, uncommitted):** `app/domains/forms/` — Embassy Forms Library
+  (staff-managed public PDF downloads). Public: `/forms` (backend page),
+  `/api/public/forms` (JSON for the React site), `/forms/download/<id>` (the PDF,
+  `attachment`, outside `/api/` on purpose). Staff: `/admin/forms` +
+  `/api/admin/forms[/detail|/preview|/audit|/save|/upload-file|/status|/reorder|/categories]`.
+  Tables `embassy_forms`, `embassy_form_categories`, `embassy_form_versions`,
+  `embassy_form_audit`. PDFs in `embassy_forms/` (`/data` on Render).
+  Roles: admin + operator manage; archive/categories/audit are admin-only;
+  `operator_special` excluded. Kill-switch `FEATURE_FORMS_LIBRARY=0`.
+  React: `src/pages/FormsPage.tsx`, `src/lib/publicForms.ts`, `/forms` route,
+  homepage card first in `CwaHomePage.tsx`. Tests: `tests/smoke/forms_module.py`
+  (107), `forms_workflow.py` (89, localhost E2E), `scripts/publicFormsSmoke.ts`
+  (34), 16 new CHECKS in `routes.py`. **Not committed, not deployed.**
+  Outstanding: `backup_onedrive.sh` Step 3c for `/data/embassy_forms` (server-side
+  file, gitignored); confirm `/data` free space before go-live. See DECISION-LOG
+  2026-08-10 entry.
 
 - **New (2026-07-12, uncommitted):** `app/domains/ads/` — Website Advertisements
   module (admin-managed homepage popup + banner). Admin page

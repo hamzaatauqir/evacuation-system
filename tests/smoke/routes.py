@@ -200,6 +200,60 @@ CHECKS = [
         "body": b"{}",
         "headers": {"Content-Type": "application/json"},
     },
+    # ── Embassy Forms Library ────────────────────────────────────
+    # Public surfaces: reachable WITHOUT auth (200), or 404 with
+    # FEATURE_FORMS_LIBRARY off. A 302 would mean the request fell through to
+    # the admin gate, which for a citizen-facing page is a defect.
+    {"name": "public forms page", "method": "GET", "path": "/forms", "allowed": {200, 404}},
+    {
+        "name": "public forms api unauthenticated",
+        "method": "GET",
+        "path": "/api/public/forms",
+        "allowed": {200, 404},
+    },
+    {
+        "name": "public forms api is GET-only",
+        "method": "POST",
+        "path": "/api/public/forms",
+        "allowed": {405, 404},
+        "body": b"{}",
+        "headers": {"Content-Type": "application/json"},
+    },
+    # Unknown / malformed ids must 404 rather than error, and must never reveal
+    # whether the id exists as a draft.
+    {"name": "forms download unknown id", "method": "GET", "path": "/forms/download/99999999", "allowed": {404}},
+    {"name": "forms download non-numeric id", "method": "GET", "path": "/forms/download/abc", "allowed": {404}},
+    {"name": "forms download traversal attempt", "method": "GET", "path": "/forms/download/..%2f..%2fetc%2fpasswd", "allowed": {404}},
+    # Management surfaces are gated; 302 to /login when logged out, 404 flag-off.
+    {"name": "forms admin gate", "method": "GET", "path": "/admin/forms", "allowed": {302, 404}},
+    {"name": "forms list api gate", "method": "GET", "path": "/api/admin/forms", "allowed": {302, 404}},
+    {"name": "forms detail api gate", "method": "GET", "path": "/api/admin/forms/detail?id=1", "allowed": {302, 404}},
+    {"name": "forms preview api gate", "method": "GET", "path": "/api/admin/forms/preview?id=1", "allowed": {302, 404}},
+    {"name": "forms audit api gate", "method": "GET", "path": "/api/admin/forms/audit", "allowed": {302, 404}},
+    {
+        "name": "forms save api gate",
+        "method": "POST",
+        "path": "/api/admin/forms/save",
+        "allowed": {302, 401, 403, 404},
+        "body": b"{}",
+        "headers": {"Content-Type": "application/json"},
+    },
+    {
+        "name": "forms status api gate",
+        "method": "POST",
+        "path": "/api/admin/forms/status",
+        "allowed": {302, 401, 403, 404},
+        "body": b"{}",
+        "headers": {"Content-Type": "application/json"},
+    },
+    {
+        "name": "forms categories api gate",
+        "method": "POST",
+        "path": "/api/admin/forms/categories",
+        "allowed": {302, 401, 403, 404},
+        "body": b"{}",
+        "headers": {"Content-Type": "application/json"},
+    },
 ]
 
 

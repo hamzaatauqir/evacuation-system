@@ -1,5 +1,88 @@
 # Decision Log — Embassy Portal
 
+## 2026-08-10 — Embassy Forms Library (staff-managed public downloads)
+
+- **Domain module, not monolith:** all logic in `app/domains/forms/`
+  (core/schema/storage/audit/service/routes), mirroring `ads`. `server.py` got
+  ~90 additive lines (guarded import, `FEATURE_FORMS_LIBRARY` flag, `configure()`,
+  `ensure_schema()` in `init_db()`, GET/POST dispatch tails, `FORMS_URL` +
+  homepage fragments in `public_route_context`, `render_main_app_html`).
+- **PDF only (owner decision).** DOC/DOCX deliberately unsupported: DOCX is a
+  ZIP container so content validation is far weaker, many citizens cannot open
+  it on a phone, and the Embassy wants a fixed non-editable document.
+- **Nothing is ever hard-deleted (owner decision).** `ARCHIVED` is terminal but
+  reversible; there is no delete route and no delete function. Superseded files
+  stay on disk and gain an `embassy_form_versions` row, so a mistaken
+  "Replace File" is recoverable. A genuine erasure is a deliberate `sqlite3`
+  action in the Render shell, not a button.
+- **Two public surfaces, deliberately different prefixes:**
+  `/api/public/forms` is JSON under `/api/` so `_cors_headers_if_api()` applies
+  the CORS allowlist automatically; `/forms/download/<id>` is NOT under `/api/`
+  because file responses carry no CORS headers and must be reached by top-level
+  navigation (a plain `<a href>`), never `fetch()`. Same reasoning as
+  `/ads/media/*`. Both React and the backend template use anchors.
+- **Public download URL is stable across replacement** — `/forms/download/<id>`
+  never changes, so printed/bookmarked links survive a new revision. That is why
+  the download cache is `max-age=300`, NOT the `immutable` used for ad media
+  (whose URL carries a unique generated name).
+- **Downloads are always `Content-Disposition: attachment`**, so a crafted PDF
+  never renders inside the Embassy's own origin. PDFs are NOT scanned for
+  `/JavaScript` or `/OpenAction`: real government forms are frequently fillable
+  AcroForms whose field validation is JavaScript, so that check would reject
+  legitimate documents. Transport-level mitigation instead.
+- **Own byte-exact multipart reader** (`storage.extract_upload`). The shared
+  `server.py:extract_multipart_upload` ends with `rest.rstrip(b'\r\n')`, which
+  strips *every* trailing CR/LF rather than the single delimiter CRLF — any file
+  ending in a newline (most PDFs, `%%EOF\n`) is silently truncated. Harmless for
+  the OCR paths that use it; unacceptable when the file is re-served and a
+  digital signature would break. **The shared helper was deliberately left
+  alone** — it is load-bearing for Iraq/MOFA, hostel and ads uploads.
+- **Roles enforced in-handler, not by route RBAC.** `FULL_SYSTEM_ROLES` contains
+  admin, operator AND operator_special, so `can_access_admin_route()` admits all
+  three. `MANAGE_ROLES = {admin, operator}` (upload/edit/replace/publish/reorder);
+  `ADMIN_ROLES = {admin}` (archive/restore, categories, audit trail).
+  `operator_special` is excluded — the dashboard already hides every
+  `[data-cwa-nav]` button from it.
+- **Categories are data, not an enum** (`embassy_form_categories`, seeded with 7
+  rows). The brief requires staff to run the library without a developer; a
+  hard-coded list fails on the first new consular category. Re-seeding only ever
+  inserts a missing slug, so an admin rename is never reverted on restart.
+- **XSS:** the public page injects one JSON payload and builds its DOM with
+  `textContent` only; React renders staff text as text nodes. Staff-entered
+  content is never placed in an HTML token — `render_template_with_context()`
+  escapes nothing.
+- **Audit:** dedicated append-only `embassy_form_audit` (matching every recent
+  module), plus ONE summary row in the global `audit_log` for publish and
+  archive only. Public downloads are counted (`download_count`) but never
+  individually logged — that would be a high-volume table of IP-adjacent data
+  with no operational value.
+- **Storage:** `/data/embassy_forms/` via the standard
+  `RENDER_DISK if exists else PROJECT_ROOT` fallback. NOT `/var/data` — that path
+  does not exist in this deployment (it survives only as a generic example in
+  `TOTP_2FA_Implementation_Plan.md`).
+- **Kill-switch:** `FEATURE_FORMS_LIBRARY=0` → all routes 404, nav hidden, and the
+  homepage card/nav links vanish. The card is injected from `server.py` via
+  `__FORMS_CARD__` / `__FORMS_NAV_LINK__` / `__FORMS_MOBILE_LINK__` rather than
+  hard-coded in `cwa_home.html`, precisely so the flag removes it cleanly instead
+  of leaving a link to a 404.
+- **Fixed while here:** `/dashboard` rendered `MAIN_APP` without substituting
+  `__ADS_NAV_BUTTON__`, so that literal string was visible in the sidebar. Both
+  render sites now go through `render_main_app_html()`.
+- Verified 2026-08-10: `py_compile` clean; `routes.py` 70/70 (16 new CHECKS);
+  `forms_module.py` 107/107; `forms_workflow.py` 89/89 (localhost E2E);
+  `ads_module` 37, `ads_public_api` 43, `ads_workflow` 77, `hostel_module` 21 —
+  all identical to a stashed pre-change baseline; frontend `typecheck` 11 errors
+  (all pre-existing in `AdminNursesAccommodationPage.tsx`, unchanged), `build`
+  green, `lint` clean, `npm run smoke` 5/5 suites green. Flag-off boot verified
+  forms-free; upload → restart → download verified byte-identical.
+- Route inventory NOT appended (matches hostel/ads precedent — the baseline is a
+  no-deletion safety net; all 408 literal entries still resolve).
+- **NOT deployed, NOT committed.** Deploy order when approved: backend first,
+  then push the frontend to BOTH `embassy-portal-new-update` and
+  `community-welfare-ui-update` (cwakuwait.com deploys from the latter only).
+  `backup_onedrive.sh` still needs a Step 3c for `/data/embassy_forms` — the
+  script is gitignored and lives on the server.
+
 ## 2026-07-12 — Website Advertisements module (homepage popup + banner)
 
 - **Domain module, not monolith:** all logic in `app/domains/ads/` (core/schema/

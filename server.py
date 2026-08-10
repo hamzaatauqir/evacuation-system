@@ -71,6 +71,18 @@ except Exception as exc:
     ADS_IMPORT_ERROR = exc
     print(f"[Ads] module import skipped: {exc}", flush=True)
 
+# Embassy Forms Library (staff-managed public downloadable forms).
+# Additive domain module under app/domains/forms; if it fails to import the
+# portal still boots and only the forms routes are unavailable.
+FORMS_MODULE = None
+FORMS_IMPORT_ERROR = None
+try:
+    from app.domains import forms as _forms_module
+    FORMS_MODULE = _forms_module
+except Exception as exc:
+    FORMS_IMPORT_ERROR = exc
+    print(f"[Forms] module import skipped: {exc}", flush=True)
+
 PORT = int(os.environ.get('PORT', 8080))
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -88,6 +100,7 @@ FEATURE_NURSE_HOUSING = str(os.environ.get('FEATURE_NURSE_HOUSING', '1')).strip(
 FEATURE_NURSE_ONBOARDING = str(os.environ.get('FEATURE_NURSE_ONBOARDING', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 FEATURE_NURSE_ACCOMMODATION_ADMIN = str(os.environ.get('FEATURE_NURSE_ACCOMMODATION_ADMIN', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 FEATURE_ADVERTISEMENTS = str(os.environ.get('FEATURE_ADVERTISEMENTS', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
+FEATURE_FORMS_LIBRARY = str(os.environ.get('FEATURE_FORMS_LIBRARY', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 
 NH_ACCOUNT_STATUS_PENDING_ARRIVAL = 'PENDING_ARRIVAL'
 NH_ACCOUNT_STATUS_ACTIVE = 'ACTIVE'
@@ -3126,6 +3139,16 @@ def init_db():
             ADS_MODULE.ensure_schema(db)
         except Exception as exc:
             print(f"[Ads] migration failed: {exc}", flush=True)
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
+
+    if FORMS_MODULE is not None:
+        try:
+            FORMS_MODULE.ensure_schema(db)
+        except Exception as exc:
+            print(f"[Forms] migration failed: {exc}", flush=True)
             try:
                 traceback.print_exc()
             except Exception:
@@ -34401,6 +34424,68 @@ if ADS_MODULE is not None:
         ADS_MODULE = None
         print(f"[Ads] configure failed; advertisement routes disabled: {exc}", flush=True)
 
+# Inject shared helpers into the Embassy Forms Library module (app/domains/forms).
+if FORMS_MODULE is not None:
+    try:
+        # No extract_multipart_upload here on purpose: the forms module parses
+        # uploads with its own byte-exact reader. The shared helper's trailing
+        # rstrip(b'\r\n') truncates any file ending in a newline, which is fine
+        # for the OCR paths that use it but would corrupt a stored PDF.
+        FORMS_MODULE.configure(
+            get_db=get_db,
+            data_root=(RENDER_DISK if (RENDER_DISK.exists() and RENDER_DISK.is_dir()) else PROJECT_ROOT),
+            project_root=PROJECT_ROOT,
+        )
+    except Exception as exc:
+        FORMS_MODULE = None
+        print(f"[Forms] configure failed; forms routes disabled: {exc}", flush=True)
+
+
+def forms_user_can_manage(user):
+    """True when this user may see the Forms Library nav entry.
+
+    Cosmetic only — the authoritative gate is the in-handler role check inside
+    app/domains/forms/routes.py. Never raises: a nav helper must not be able to
+    break the admin dashboard.
+    """
+    if FORMS_MODULE is None or not FEATURE_FORMS_LIBRARY:
+        return False
+    try:
+        from app.domains.forms import core as _forms_core
+        return _forms_core.user_can_manage(user)
+    except Exception:
+        return False
+
+
+def render_main_app_html(user):
+    """MAIN_APP with every placeholder substituted, for one signed-in user.
+
+    Single source of substitution because MAIN_APP is rendered from two routes
+    (/admin/dashboard and /dashboard). Previously only /admin/dashboard replaced
+    __ADS_NAV_BUTTON__, so /dashboard rendered that placeholder as visible text
+    in the sidebar. Routing both through here keeps a new module's placeholder
+    from repeating that.
+
+    Optional nav buttons are role-gated here, but that is presentation only —
+    every forms route re-checks the role in-handler.
+    """
+    html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
+
+    ads_nav_button = ''
+    if ADS_MODULE is not None and FEATURE_ADVERTISEMENTS and user['role'] == 'admin':
+        ads_nav_button = ('<button data-cwa-nav onclick="window.location.href=\'/admin/advertisements\'">'
+                          '<span class="side-nav-icon" aria-hidden="true"></span>'
+                          '<span>Website Advertisements</span></button>')
+    html = html.replace('__ADS_NAV_BUTTON__', ads_nav_button)
+
+    forms_nav_button = ''
+    if forms_user_can_manage(user):
+        forms_nav_button = ('<button data-cwa-nav onclick="window.location.href=\'/admin/forms\'">'
+                            '<span class="side-nav-icon" aria-hidden="true"></span>'
+                            '<span>Forms Library</span></button>')
+    html = html.replace('__FORMS_NAV_BUTTON__', forms_nav_button)
+    return html
+
 
 def ads_public_payload_json(base_path=''):
     """Homepage advertisement payload as a JSON string ('null' when absent).
@@ -34988,6 +35073,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def public_frontend_url(self):
         return PUBLIC_SITE_URL or self.app_absolute_url('/')
 
+    def forms_home_fragments(self):
+        """Homepage nav links and service card for the Forms Library, or ''.
+
+        Rendered here rather than hard-coded in cwa_home.html so the
+        FEATURE_FORMS_LIBRARY kill-switch removes them cleanly — a static card
+        would keep pointing at a route that 404s once the flag is off.
+        """
+        if FORMS_MODULE is None or not FEATURE_FORMS_LIBRARY:
+            return {'FORMS_NAV_LINK': '', 'FORMS_MOBILE_LINK': '', 'FORMS_CARD': ''}
+        href = self.app_path('/forms')
+        return {
+            'FORMS_NAV_LINK': f'        <a class="cwa-nav-link" href="{href}">Forms</a>',
+            'FORMS_MOBILE_LINK': f'      <a class="cwa-mobile-link" href="{href}">Download Forms</a>',
+            'FORMS_CARD': (
+                '        <article class="cwa-card">\n'
+                '          <h3>Download Embassy Forms</h3>\n'
+                '          <p>Official downloadable forms for Passport, NADRA, attestation, '
+                'consular and community welfare services.</p>\n'
+                f'          <a class="cwa-btn secondary" href="{href}">Open Service</a>\n'
+                '        </article>'
+            ),
+        }
+
     def public_route_context(self):
         return {
             'BASE_PATH': self.request_base_path(),
@@ -35001,7 +35109,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             'DEATH_URL': self.app_path('/death-cases'),
             'LOCATING_URL': self.app_path('/locating-assistance'),
             'FEEDBACK_URL': self.app_path('/community-feedback'),
+            'FORMS_URL': self.app_path('/forms'),
             'LOGIN_URL': self.app_path('/login'),
+            **self.forms_home_fragments(),
         }
 
     def inject_public_route_context(self, html):
@@ -35669,14 +35779,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not user: return
             if user['role'] in ('fee_collector', 'iraq_cwa'):
                 self.send_json({'error': 'Unauthorized'}, 403); return
-            app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
-            ads_nav_button = ''
-            if ADS_MODULE is not None and FEATURE_ADVERTISEMENTS and user['role'] == 'admin':
-                ads_nav_button = ('<button data-cwa-nav onclick="window.location.href=\'/admin/advertisements\'">'
-                                  '<span class="side-nav-icon" aria-hidden="true"></span>'
-                                  '<span>Website Advertisements</span></button>')
-            app_html = app_html.replace('__ADS_NAV_BUTTON__', ads_nav_button)
-            self.send_html(app_html)
+            self.send_html(render_main_app_html(user))
         elif path == '/admin/print/ambassador-review-pack':
             user = self.require_auth()
             if not user: return
@@ -35707,8 +35810,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_html(fee_collection_page_html(user))
             else:
                 # Inject user role into the page
-                app_html = MAIN_APP.replace('__USER_ROLE__', user['role']).replace('__USER_NAME__', user['user'])
-                self.send_html(app_html)
+                self.send_html(render_main_app_html(user))
         elif path == '/admin/community-welfare':
             user = self.require_auth()
             if not user: return
@@ -38696,6 +38798,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             HOSTEL_MODULE.handle_get(self, path, params)
         elif ADS_MODULE is not None and FEATURE_ADVERTISEMENTS and ADS_MODULE.matches_path(path):
             ADS_MODULE.handle_get(self, path, params)
+        elif FORMS_MODULE is not None and FEATURE_FORMS_LIBRARY and FORMS_MODULE.matches_path(path):
+            FORMS_MODULE.handle_get(self, path, params)
 
         else:
             self.send_response(404)
@@ -41657,6 +41761,8 @@ table{{width:100%;border-collapse:collapse;margin-top:10px}} th,td{{border-botto
             HOSTEL_MODULE.handle_post(self, path, body)
         elif ADS_MODULE is not None and FEATURE_ADVERTISEMENTS and ADS_MODULE.matches_path(path):
             ADS_MODULE.handle_post(self, path, body)
+        elif FORMS_MODULE is not None and FEATURE_FORMS_LIBRARY and FORMS_MODULE.matches_path(path):
+            FORMS_MODULE.handle_post(self, path, body)
 
         else:
             self.send_response(404)
@@ -47780,6 +47886,7 @@ body.mobile-nav-open .nav{transform:translateX(0)!important}
 <div style="margin:10px 8px 6px;color:#94a3b8;font-size:.72em;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Security &amp; Admin</div>
 <button type="button" onclick="window.location.href='/admin/security'"><span class="side-nav-icon" aria-hidden="true"></span><span>Two-Factor Security</span></button>
 __ADS_NAV_BUTTON__
+__FORMS_NAV_BUTTON__
 <button onclick="go('admin',this)"><span class="side-nav-icon" aria-hidden="true"></span><span>Admin</span></button>
 <button data-cwa-nav onclick="window.open('/','_blank')"><span class="side-nav-icon" aria-hidden="true"></span><span>Public Portal ↗</span></button>
 </div>

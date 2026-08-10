@@ -32,3 +32,6 @@ templates/nurses_leaving_notice.html
 templates/nurses_login.html
 # Added 2026-07-12 (website advertisements module)
 ad_uploads/
+# Added 2026-08-10 (Embassy Forms Library). Uploaded PDFs live on the Render
+# persistent disk at /data/embassy_forms; this ignores the local dev copy.
+embassy_forms/

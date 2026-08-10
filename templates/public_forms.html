@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Embassy Forms &amp; Downloads — Community Welfare Wing</title>
+  <meta name="description" content="Download official Embassy of Pakistan Kuwait forms for passport, NADRA, attestation, consular and community welfare services.">
+  <link rel="stylesheet" href="__BASE_PATH__/static/css/cwa-ui.css?v=20260712-ads1">
+  <style>
+    /* Page-specific only — everything structural comes from cwa-ui.css. */
+    .fx-intro{margin-bottom:22px}
+    .fx-controls{display:flex;flex-direction:column;gap:14px;margin-bottom:24px}
+    .fx-search{position:relative;max-width:520px}
+    .fx-search input{width:100%;padding:12px 14px;border:1px solid #d8e0e7;border-radius:10px;font:inherit;background:#fff}
+    .fx-search input:focus-visible{outline:2px solid #2F7D4E;outline-offset:1px}
+    .fx-filters{display:flex;flex-wrap:wrap;gap:8px}
+    .fx-filter{display:inline-block;padding:7px 14px;border-radius:999px;border:1px solid #d8e0e7;background:#fff;
+               font-size:13px;font-weight:600;color:#2D4A6B;cursor:pointer;text-decoration:none;line-height:1.4}
+    .fx-filter:hover{border-color:#2F7D4E}
+    .fx-filter[aria-current="true"]{background:#2D4A6B;border-color:#2D4A6B;color:#fff}
+    .fx-filter:focus-visible{outline:2px solid #2F7D4E;outline-offset:2px}
+    .fx-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:18px}
+    .fx-card{background:#fff;border:1px solid #E3EBF0;border-top:3px solid #2D4A6B;border-radius:14px;
+             padding:20px 20px 18px;display:flex;flex-direction:column;box-shadow:0 2px 8px rgba(0,33,71,.06)}
+    .fx-cat{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#5B6773;margin-bottom:7px}
+    .fx-title{font-size:15.5px;font-weight:700;color:#2D4A6B;line-height:1.4;margin:0 0 8px}
+    .fx-title-ur{font-size:14px;color:#5B6773;margin:0 0 8px;direction:rtl;text-align:right}
+    .fx-desc{font-size:13px;color:#5B6773;line-height:1.65;flex:1;margin:0 0 14px}
+    .fx-meta{font-size:12px;color:#7A8A96;margin-bottom:14px;font-variant-numeric:tabular-nums}
+    .fx-dl{display:block;width:100%;text-align:center;padding:11px 14px;border-radius:9px;background:#2F7D4E;
+           color:#fff;font-weight:700;font-size:13.5px;text-decoration:none;border:1px solid #2F7D4E}
+    .fx-dl:hover{background:#276841}
+    .fx-dl:focus-visible{outline:2px solid #2D4A6B;outline-offset:2px}
+    .fx-empty{background:#fff;border:1px solid #E3EBF0;border-radius:12px;padding:28px;text-align:center;color:#5B6773}
+    .fx-empty strong{display:block;color:#2D4A6B;margin-bottom:6px;font-size:15px}
+    .fx-count{font-size:12.5px;color:#7A8A96;margin-bottom:12px}
+    @media (max-width:520px){ .fx-grid{grid-template-columns:1fr} }
+  </style>
+</head>
+<body class="cwa-ui">
+  <header class="cwa-topbar">
+    <div class="cwa-shell cwa-topbar-shell">
+      <div class="cwa-logo-strip">Embassy of Pakistan, Kuwait · Community Welfare Wing</div>
+      <nav class="cwa-nav" aria-label="Public services navigation">
+        <a class="cwa-nav-link" href="__PUBLIC_HOME_URL__">Home</a>
+        <a class="cwa-nav-link" href="__NURSES_URL__">Nurses</a>
+        <a class="cwa-nav-link" href="__LEGAL_URL__">Legal &amp; OPF</a>
+        <a class="cwa-nav-link" href="__DEATH_URL__">Death Cases</a>
+        <a class="cwa-nav-link" href="__FEEDBACK_URL__">Feedback</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="cwa-shell" style="padding-top:28px;padding-bottom:48px">
+    <div class="fx-intro">
+      <h1 style="margin:0 0 10px;color:#2D4A6B">Embassy Forms &amp; Downloads</h1>
+      <p style="margin:0;color:#5B6773;max-width:64ch;line-height:1.7">
+        Official forms issued by the Embassy of Pakistan, Kuwait. Download the form you need,
+        print it, complete it, and bring it with you to your appointment or visit.
+      </p>
+      <p id="fxUpdated" class="fx-count" style="margin-top:10px"></p>
+    </div>
+
+    <div class="fx-controls">
+      <div class="fx-search">
+        <label for="fxSearch" class="cwa-visually-hidden" style="position:absolute;left:-9999px">Search forms</label>
+        <input type="search" id="fxSearch" placeholder="Search forms — passport, NICOP, attestation…"
+               autocomplete="off" spellcheck="false">
+      </div>
+      <div class="fx-filters" id="fxFilters" role="group" aria-label="Filter forms by category"></div>
+    </div>
+
+    <p class="fx-count" id="fxCount" aria-live="polite"></p>
+    <div class="fx-grid" id="fxGrid"></div>
+    <div class="fx-empty" id="fxEmpty" hidden></div>
+
+    <div class="cwa-help" style="margin-top:34px">
+      <strong>Cannot find the form you need?</strong><br>
+      Email: <a href="mailto:parepkuwaitcwa37@gmail.com">parepkuwaitcwa37@gmail.com</a><br>
+      Phone/WhatsApp: <a href="tel:+96555977292">+965 5597 7292</a>
+    </div>
+
+    <footer class="cwa-footer">
+      <div style="font-weight:700">Embassy of Pakistan Kuwait - Community Welfare Wing</div>
+      <div class="cwa-footer-links">
+        <a href="__PUBLIC_HOME_URL__">Home</a>
+        <a data-service="ksa-transit" href="__KSA_REGISTER_URL__">KSA Transit Visa</a>
+        <a href="__KSA_TRACK_URL__">Track Application</a>
+        <a href="__LOGIN_URL__">Official Login</a>
+      </div>
+    </footer>
+  </section>
+
+  <script>window.CWA_FORMS = __FORMS_PAYLOAD_JSON__;</script>
+  <script>
+  /* Every value below originates from staff input, so the DOM is built with
+     textContent and setAttribute only — never innerHTML. The server-side
+     template renderer escapes nothing, so this is the one safe way to put
+     admin-entered content on this page. Same strategy as window.CWA_ADS. */
+  (function () {
+    'use strict';
+    var payload = window.CWA_FORMS || {};
+    var forms = Array.isArray(payload.forms) ? payload.forms : [];
+    var categories = Array.isArray(payload.categories) ? payload.categories : [];
+    var grid = document.getElementById('fxGrid');
+    var empty = document.getElementById('fxEmpty');
+    var count = document.getElementById('fxCount');
+    var search = document.getElementById('fxSearch');
+    var filters = document.getElementById('fxFilters');
+    var activeCategory = 'all';
+
+    var updated = document.getElementById('fxUpdated');
+    if (payload.updatedDisplay) {
+      updated.textContent = 'Library last updated ' + payload.updatedDisplay + '.';
+    }
+
+    function readCategoryFromUrl() {
+      try {
+        var value = new URLSearchParams(window.location.search).get('category');
+        if (!value) return 'all';
+        for (var i = 0; i < categories.length; i++) {
+          if (categories[i].slug === value) return value;
+        }
+      } catch (_err) {}
+      return 'all';
+    }
+
+    function buildFilters() {
+      filters.textContent = '';
+      var all = [{ slug: 'all', label: 'All' }].concat(categories);
+      all.forEach(function (cat) {
+        var link = document.createElement('a');
+        link.className = 'fx-filter';
+        link.textContent = cat.label;
+        link.href = cat.slug === 'all' ? '?' : ('?category=' + encodeURIComponent(cat.slug));
+        link.setAttribute('aria-current', cat.slug === activeCategory ? 'true' : 'false');
+        link.addEventListener('click', function (event) {
+          event.preventDefault();
+          activeCategory = cat.slug;
+          try {
+            window.history.replaceState({}, '', link.href);
+          } catch (_err) {}
+          buildFilters();
+          render();
+        });
+        filters.appendChild(link);
+      });
+    }
+
+    function matches(form, query) {
+      if (activeCategory !== 'all' && form.categorySlug !== activeCategory) return false;
+      if (!query) return true;
+      var haystack = [form.title, form.titleUr, form.description, form.category, form.versionLabel]
+        .filter(Boolean).join(' ').toLowerCase();
+      return haystack.indexOf(query) >= 0;
+    }
+
+    function metaLine(form) {
+      var bits = [form.fileType || 'PDF'];
+      if (form.languageLabel) bits.push(form.languageLabel);
+      if (form.fileSizeDisplay) bits.push(form.fileSizeDisplay);
+      if (form.updatedDisplay) bits.push('Updated ' + form.updatedDisplay);
+      return bits.join(' · ');
+    }
+
+    function card(form) {
+      var article = document.createElement('article');
+      article.className = 'fx-card';
+
+      var cat = document.createElement('div');
+      cat.className = 'fx-cat';
+      cat.textContent = form.category || 'Other';
+      article.appendChild(cat);
+
+      var title = document.createElement('h2');
+      title.className = 'fx-title';
+      title.textContent = form.title || '';
+      article.appendChild(title);
+
+      if (form.titleUr) {
+        var titleUr = document.createElement('p');
+        titleUr.className = 'fx-title-ur';
+        titleUr.setAttribute('dir', 'rtl');
+        titleUr.setAttribute('lang', 'ur');
+        titleUr.textContent = form.titleUr;
+        article.appendChild(titleUr);
+      }
+
+      var desc = document.createElement('p');
+      desc.className = 'fx-desc';
+      desc.textContent = form.description || '';
+      article.appendChild(desc);
+
+      var meta = document.createElement('p');
+      meta.className = 'fx-meta';
+      meta.textContent = metaLine(form);
+      article.appendChild(meta);
+
+      /* A plain anchor, deliberately: the download route sits outside /api/ and
+         carries no CORS headers, so it must be reached by top-level navigation
+         rather than fetch(). */
+      var link = document.createElement('a');
+      link.className = 'fx-dl';
+      link.href = form.downloadUrl || '#';
+      link.setAttribute('rel', 'noopener');
+      link.textContent = 'Download Form';
+      var label = 'Download ' + (form.title || 'form');
+      if (form.fileSizeDisplay) label += ' (PDF, ' + form.fileSizeDisplay + ')';
+      link.setAttribute('aria-label', label);
+      article.appendChild(link);
+
+      return article;
+    }
+
+    function render() {
+      var query = (search.value || '').trim().toLowerCase();
+      var visible = forms.filter(function (form) { return matches(form, query); });
+
+      grid.textContent = '';
+      empty.textContent = '';
+
+      if (!forms.length) {
+        empty.hidden = false;
+        grid.hidden = true;
+        count.textContent = '';
+        var none = document.createElement('strong');
+        none.textContent = 'No forms are published yet.';
+        empty.appendChild(none);
+        empty.appendChild(document.createTextNode(
+          'Please check back shortly, or contact the Community Welfare Wing for the form you need.'));
+        return;
+      }
+
+      if (!visible.length) {
+        empty.hidden = false;
+        grid.hidden = true;
+        count.textContent = '';
+        var head = document.createElement('strong');
+        head.textContent = 'No forms match that search.';
+        empty.appendChild(head);
+        empty.appendChild(document.createTextNode('Try a different word, or browse by category above.'));
+        return;
+      }
+
+      empty.hidden = true;
+      grid.hidden = false;
+      count.textContent = visible.length === forms.length
+        ? (forms.length + (forms.length === 1 ? ' form available' : ' forms available'))
+        : ('Showing ' + visible.length + ' of ' + forms.length + ' forms');
+      visible.forEach(function (form) { grid.appendChild(card(form)); });
+    }
+
+    activeCategory = readCategoryFromUrl();
+    buildFilters();
+    search.addEventListener('input', render);
+    render();
+  })();
+  </script>
+</body>
+</html>

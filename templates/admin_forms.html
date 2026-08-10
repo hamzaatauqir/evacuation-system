@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Forms Library — Embassy of Pakistan Kuwait</title>
+<style>
+:root{--navy:#002147;--green:#106e09;--border:#d7dee8;--muted:#5b6b7c;--bg:#f2f5f9}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,Arial,sans-serif;background:var(--bg);color:#16222e}
+a{color:var(--navy)}
+.topbar{background:var(--navy);color:#fff;padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.topbar h1{margin:0;font-size:19px}
+.topbar .who{font-size:13px;opacity:.9}
+.topbar a{color:#dbeafe;text-decoration:none;font-weight:600;font-size:14px}
+.wrap{max-width:1240px;margin:0 auto;padding:18px 22px 60px}
+.panel{background:#fff;border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 4px 14px rgba(0,33,71,.06);margin-bottom:16px}
+.panel h2{margin:0 0 12px;font-size:17px;color:var(--navy)}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+button{padding:9px 13px;border-radius:8px;border:1px solid var(--green);background:var(--green);color:#fff;font-weight:600;cursor:pointer;font-size:13px}
+button.secondary{background:#fff;color:var(--navy);border-color:var(--navy)}
+button.warn{background:#fff;color:#9d1d1d;border-color:#c98a8a}
+button:disabled{opacity:.5;cursor:not-allowed}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 9px;border-bottom:1px solid #e8edf3;text-align:left;vertical-align:top}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+tr:hover td{background:#f7fafc}
+tr.dragging td{opacity:.45}
+tr.drop-target td{border-top:2px solid var(--green)}
+.chip{display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid #cbd5e1;white-space:nowrap}
+.chip.DRAFT{background:#f1f5f9;color:#475569}
+.chip.PUBLISHED{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+.chip.ARCHIVED{background:#e2e8f0;color:#334155}
+.chip .dot{font-size:14px;line-height:1}
+.rowactions{display:flex;gap:6px;flex-wrap:wrap}
+.rowactions button{padding:5px 9px;font-size:12px}
+.handle{cursor:grab;color:#94a3b8;font-size:15px;user-select:none;padding-right:2px}
+.handle:active{cursor:grabbing}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+label{display:block;margin:10px 0 4px;font-size:12.5px;font-weight:700;color:#37485a}
+input[type=text],input[type=number],input[type=date],select,textarea{width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font:inherit;background:#fff}
+textarea{min-height:74px;resize:vertical}
+.hint{font-size:12px;color:var(--muted);margin-top:3px}
+.msg{margin:10px 0;padding:10px 12px;border-radius:8px;font-size:13.5px;display:none}
+.msg.err{display:block;background:#fee2e2;border:1px solid #fecaca;color:#991b1b}
+.msg.ok{display:block;background:#dcfce7;border:1px solid #bbf7d0;color:#166534}
+fieldset{border:1px solid var(--border);border-radius:10px;margin:14px 0;padding:4px 14px 14px}
+legend{font-size:13px;font-weight:800;color:var(--navy);padding:0 6px}
+.checkline{display:flex;align-items:center;gap:8px;margin:10px 0 2px;font-size:13.5px;font-weight:700;color:#37485a}
+.checkline input{width:auto}
+.fileslot{border:1px dashed #c3cedb;border-radius:10px;padding:12px;font-size:12.5px;margin-top:8px}
+.fileslot .none{color:var(--muted)}
+.fileslot strong{word-break:break-all}
+.form-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;align-items:center}
+.hidden{display:none}
+.tablewrap{overflow-x:auto}
+.nums{font-variant-numeric:tabular-nums}
+.vlist{font-size:12.5px;color:var(--muted);margin:6px 0 0;padding-left:18px}
+@media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>Forms Library</h1>
+  <div class="who">__USER_NAME__ (__USER_ROLE__) &nbsp;·&nbsp; <a href="__PUBLIC_FORMS_URL__" target="_blank" rel="noopener">View public page ↗</a> &nbsp;·&nbsp; <a href="/admin/dashboard">← Back to Dashboard</a></div>
+</div>
+<div class="wrap">
+
+  <div class="panel">
+    <div class="toolbar">
+      <button onclick="newForm()">+ Upload New Form</button>
+      <button class="secondary" onclick="loadList()">Refresh</button>
+      <input type="text" id="q" placeholder="Search title or description…" style="max-width:260px" oninput="renderList()">
+      <select id="fCategory" style="max-width:190px" onchange="renderList()"><option value="">All categories</option></select>
+      <select id="fStatus" style="max-width:170px" onchange="renderList()">
+        <option value="">All statuses</option><option value="DRAFT">Draft</option>
+        <option value="PUBLISHED">Published</option><option value="ARCHIVED">Archived</option>
+      </select>
+      <span class="hint">Published forms appear on the public page within about a minute. PDF only, max __MAX_FILE_MB__ MB.</span>
+    </div>
+    <div id="listMsg" class="msg"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th style="width:26px"></th><th>Form</th><th>Category</th><th>Status</th>
+          <th>Updated</th><th class="nums">Downloads</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="listBody"></tbody>
+      </table>
+    </div>
+    <p class="hint" id="orderHint">Drag the ⠿ handle to reorder. Order applies to the public page.</p>
+  </div>
+
+  <div class="panel" id="editorPanel" hidden>
+    <h2 id="editorTitle">New Form</h2>
+    <div id="formMsg" class="msg"></div>
+
+    <fieldset>
+      <legend>Form details</legend>
+      <div class="grid2">
+        <div>
+          <label for="title">Title (English) *</label>
+          <input type="text" id="title" maxlength="200" placeholder="NICOP Modification Form">
+        </div>
+        <div>
+          <label for="title_ur">Title (Urdu)</label>
+          <input type="text" id="title_ur" maxlength="200" dir="rtl">
+        </div>
+      </div>
+      <div class="grid2">
+        <div>
+          <label for="description">Short description (English)</label>
+          <textarea id="description" maxlength="600" placeholder="Use this form for modification or correction of NICOP information."></textarea>
+        </div>
+        <div>
+          <label for="description_ur">Short description (Urdu)</label>
+          <textarea id="description_ur" maxlength="600" dir="rtl"></textarea>
+        </div>
+      </div>
+      <div class="grid3">
+        <div>
+          <label for="category_id">Category *</label>
+          <select id="category_id"></select>
+        </div>
+        <div>
+          <label for="language">Language</label>
+          <select id="language"></select>
+        </div>
+        <div>
+          <label for="version_label">Version label</label>
+          <input type="text" id="version_label" maxlength="60" placeholder="Aug 2026 revision">
+        </div>
+      </div>
+      <div class="grid3">
+        <div>
+          <label for="effective_date">Effective date</label>
+          <input type="date" id="effective_date">
+          <div class="hint">Optional. Shown to citizens when set.</div>
+        </div>
+        <div>
+          <label for="display_order">Display order</label>
+          <input type="number" id="display_order" min="0" max="99999" value="0">
+          <div class="hint">Lower appears first. Drag-reorder overwrites this.</div>
+        </div>
+        <div>
+          <div class="checkline" style="margin-top:32px">
+            <input type="checkbox" id="is_featured"><label for="is_featured" style="margin:0">Featured (pin to top)</label>
+          </div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>PDF file</legend>
+      <div id="fileSlot" class="fileslot"><span class="none">Save the form details first, then attach a PDF.</span></div>
+      <div id="fileControls" class="hidden" style="margin-top:10px">
+        <input type="file" id="fileInput" accept="application/pdf,.pdf">
+        <button type="button" class="secondary" onclick="uploadFile()" id="uploadBtn">Upload / Replace file</button>
+        <div class="hint">Replacing keeps the same public link. The previous file is retained in the version history and is no longer publicly downloadable.</div>
+      </div>
+      <ul id="versionList" class="vlist"></ul>
+    </fieldset>
+
+    <div class="form-actions">
+      <button onclick="saveForm()" id="saveBtn">Save details</button>
+      <button class="secondary" onclick="closeEditor()">Close</button>
+      <span id="editorMeta" class="hint"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="categoryPanel" hidden>
+    <h2>Categories</h2>
+    <div id="catMsg" class="msg"></div>
+    <div class="toolbar">
+      <input type="text" id="newCatLabel" placeholder="New category name" style="max-width:240px" maxlength="60">
+      <button onclick="createCategory()">Add category</button>
+      <span class="hint">Categories appear as filters on the public page. A category in use by an active form cannot be deactivated.</span>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Category</th><th>Slug</th><th class="nums">Order</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="catBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" id="auditPanel" hidden>
+    <h2>Audit trail</h2>
+    <div class="toolbar">
+      <button class="secondary" onclick="loadAudit()">Refresh audit</button>
+      <span class="hint">Staff actions only. Public downloads are counted, never individually logged.</span>
+    </div>
+    <div class="tablewrap" style="max-height:340px;overflow:auto">
+      <table>
+        <thead><tr><th>When (Kuwait)</th><th>Event</th><th>Actor</th><th>Form</th><th>Detail</th></tr></thead>
+        <tbody id="auditBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+const CAN_ADMIN = __CAN_ADMIN__;
+let CURRENT = null;      // loaded form detail, or null for a new one
+let ITEMS = [];          // last loaded list
+let CATEGORIES = [];
+let LANGUAGES = [];
+
+async function jget(url){
+  const r = await fetch(url, {credentials:'include'});
+  const j = await r.json().catch(()=>({success:false,error:'Invalid server response'}));
+  return {status:r.status, body:j};
+}
+async function jpost(url, data){
+  const r = await fetch(url, {method:'POST', credentials:'include',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+  const j = await r.json().catch(()=>({success:false,error:'Invalid server response'}));
+  return {status:r.status, body:j};
+}
+function showMsg(id, text, ok){
+  const m = document.getElementById(id);
+  m.textContent = text;
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+  if (ok) setTimeout(()=>{ m.className='msg'; }, 4000);
+}
+function td(text){ const c = document.createElement('td'); c.textContent = text == null ? '' : String(text); return c; }
+function mkButton(label, cls, onClick){
+  const b = document.createElement('button');
+  b.type = 'button'; b.textContent = label;
+  if (cls) b.className = cls;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+// ── List ─────────────────────────────────────────────────────────
+async function loadList(){
+  const {body} = await jget('/api/admin/forms');
+  if (!body.success){ showMsg('listMsg', body.error || 'Could not load the forms list.', false); return; }
+  ITEMS = body.items || [];
+  CATEGORIES = body.categories || [];
+  LANGUAGES = body.languages || [];
+  fillCategorySelects();
+  fillLanguageSelect();
+  renderList();
+  if (CAN_ADMIN){ renderCategories(); loadAudit(); }
+}
+
+function fillCategorySelects(){
+  const filter = document.getElementById('fCategory');
+  const prevFilter = filter.value;
+  filter.textContent = '';
+  const all = document.createElement('option'); all.value=''; all.textContent='All categories';
+  filter.appendChild(all);
+  const editor = document.getElementById('category_id');
+  const prevEditor = editor.value;
+  editor.textContent = '';
+  CATEGORIES.forEach(c=>{
+    const o = document.createElement('option'); o.value = String(c.id); o.textContent = c.label;
+    filter.appendChild(o.cloneNode(true));
+    if (c.is_active){ editor.appendChild(o); }
+  });
+  filter.value = prevFilter; editor.value = prevEditor;
+}
+function fillLanguageSelect(){
+  const sel = document.getElementById('language');
+  const prev = sel.value;
+  sel.textContent = '';
+  LANGUAGES.forEach(l=>{
+    const o = document.createElement('option'); o.value = l.value; o.textContent = l.label; sel.appendChild(o);
+  });
+  sel.value = prev || 'en';
+}
+
+function visibleItems(){
+  const q = (document.getElementById('q').value || '').trim().toLowerCase();
+  const cat = document.getElementById('fCategory').value;
+  const st = document.getElementById('fStatus').value;
+  return ITEMS.filter(it=>{
+    if (st && it.status !== st) return false;
+    if (cat && String(it.category_id) !== cat) return false;
+    if (!q) return true;
+    return (it.title + ' ' + (it.description||'') + ' ' + (it.category_label||'')).toLowerCase().includes(q);
+  });
+}
+
+function renderList(){
+  const tbody = document.getElementById('listBody');
+  tbody.textContent = '';
+  const rows = visibleItems();
+  const filtered = rows.length !== ITEMS.length;
+  document.getElementById('orderHint').textContent = filtered
+    ? 'Clear the search and filters to reorder forms.'
+    : 'Drag the ⠿ handle to reorder. Order applies to the public page.';
+  if (!rows.length){
+    const tr = document.createElement('tr');
+    const c = td(ITEMS.length ? 'No forms match the current filters.' : 'No forms yet. Click “+ Upload New Form” to add the first one.');
+    c.colSpan = 7; c.style.color = '#5b6b7c'; tr.appendChild(c); tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach(item=>{
+    const tr = document.createElement('tr');
+    tr.dataset.id = String(item.id);
+
+    const h = document.createElement('td');
+    const handle = document.createElement('span');
+    handle.className = 'handle'; handle.textContent = '⠿';
+    handle.title = filtered ? 'Clear filters to reorder' : 'Drag to reorder';
+    if (!filtered){ tr.draggable = true; attachDrag(tr); } else { handle.style.opacity = '.35'; }
+    h.appendChild(handle); tr.appendChild(h);
+
+    const nameCell = document.createElement('td');
+    const strong = document.createElement('div');
+    strong.style.fontWeight = '700'; strong.textContent = item.title;
+    nameCell.appendChild(strong);
+    const sub = document.createElement('div');
+    sub.className = 'hint';
+    const bits = [];
+    if (!item.has_file) bits.push('no file attached');
+    else bits.push('PDF' + (item.file_size_display ? ' · ' + item.file_size_display : '') + ' · v' + item.version_number);
+    if (item.version_label) bits.push(item.version_label);
+    if (item.is_featured) bits.push('featured');
+    sub.textContent = bits.join(' · ');
+    nameCell.appendChild(sub);
+    tr.appendChild(nameCell);
+
+    tr.appendChild(td(item.category_label));
+
+    const stCell = document.createElement('td');
+    const chip = document.createElement('span');
+    chip.className = 'chip ' + item.status;
+    const dot = document.createElement('span');
+    dot.className = 'dot'; dot.setAttribute('aria-hidden','true');
+    dot.textContent = item.status === 'PUBLISHED' ? '●' : (item.status === 'DRAFT' ? '○' : '⊘');
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(' ' + item.status.charAt(0) + item.status.slice(1).toLowerCase()));
+    stCell.appendChild(chip);
+    tr.appendChild(stCell);
+
+    tr.appendChild(td(item.updated_display));
+    const dl = td(item.download_count); dl.className = 'nums'; tr.appendChild(dl);
+
+    const actions = document.createElement('td');
+    const box = document.createElement('div'); box.className = 'rowactions';
+    if (item.status !== 'ARCHIVED'){
+      box.appendChild(mkButton('Edit', 'secondary', ()=>editForm(item.id)));
+    }
+    if (item.has_file){
+      box.appendChild(mkButton('Preview', 'secondary', ()=>{
+        window.open('/api/admin/forms/preview?id=' + encodeURIComponent(item.id), '_blank', 'noopener');
+      }));
+    }
+    if (item.status === 'DRAFT' && item.has_file){
+      box.appendChild(mkButton('Publish', '', ()=>statusAction(item.id, 'publish', item.title)));
+    }
+    if (item.status === 'PUBLISHED'){
+      box.appendChild(mkButton('Unpublish', 'secondary', ()=>statusAction(item.id, 'unpublish', item.title)));
+    }
+    if (CAN_ADMIN && item.status !== 'ARCHIVED'){
+      box.appendChild(mkButton('Archive', 'warn', ()=>statusAction(item.id, 'archive', item.title)));
+    }
+    if (CAN_ADMIN && item.status === 'ARCHIVED'){
+      box.appendChild(mkButton('Restore', 'secondary', ()=>statusAction(item.id, 'restore', item.title)));
+    }
+    actions.appendChild(box);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Reorder ──────────────────────────────────────────────────────
+let DRAG_ID = null;
+function attachDrag(tr){
+  tr.addEventListener('dragstart', e=>{
+    DRAG_ID = tr.dataset.id; tr.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', DRAG_ID); } catch(_e){}
+  });
+  tr.addEventListener('dragend', ()=>{ tr.classList.remove('dragging'); clearTargets(); });
+  tr.addEventListener('dragover', e=>{ e.preventDefault(); clearTargets(); tr.classList.add('drop-target'); });
+  tr.addEventListener('drop', e=>{
+    e.preventDefault(); clearTargets();
+    if (!DRAG_ID || DRAG_ID === tr.dataset.id) return;
+    const tbody = document.getElementById('listBody');
+    const dragged = tbody.querySelector('tr[data-id="' + DRAG_ID + '"]');
+    if (dragged) tbody.insertBefore(dragged, tr);
+    saveOrder();
+  });
+}
+function clearTargets(){
+  document.querySelectorAll('#listBody tr.drop-target').forEach(r=>r.classList.remove('drop-target'));
+}
+async function saveOrder(){
+  const order = Array.from(document.querySelectorAll('#listBody tr[data-id]')).map(r=>Number(r.dataset.id));
+  const {body} = await jpost('/api/admin/forms/reorder', {order});
+  if (!body.success){ showMsg('listMsg', body.error || 'Could not save the new order.', false); loadList(); return; }
+  showMsg('listMsg', 'Order saved.', true);
+  loadList();
+}
+
+// ── Editor ───────────────────────────────────────────────────────
+function newForm(){
+  CURRENT = null;
+  document.getElementById('editorPanel').hidden = false;
+  document.getElementById('editorTitle').textContent = 'New Form';
+  ['title','title_ur','description','description_ur','version_label','effective_date'].forEach(id=>{
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('display_order').value = '0';
+  document.getElementById('is_featured').checked = false;
+  document.getElementById('language').value = 'en';
+  document.getElementById('fileControls').classList.add('hidden');
+  document.getElementById('fileSlot').textContent = '';
+  const none = document.createElement('span');
+  none.className = 'none'; none.textContent = 'Save the form details first, then attach a PDF.';
+  document.getElementById('fileSlot').appendChild(none);
+  document.getElementById('versionList').textContent = '';
+  document.getElementById('editorMeta').textContent = '';
+  document.getElementById('editorPanel').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+async function editForm(id){
+  const {body} = await jget('/api/admin/forms/detail?id=' + encodeURIComponent(id));
+  if (!body.success){ showMsg('listMsg', body.error || 'Could not load that form.', false); return; }
+  CURRENT = body.form;
+  document.getElementById('editorPanel').hidden = false;
+  document.getElementById('editorTitle').textContent = 'Edit: ' + CURRENT.title;
+  document.getElementById('title').value = CURRENT.title || '';
+  document.getElementById('title_ur').value = CURRENT.title_ur || '';
+  document.getElementById('description').value = CURRENT.description || '';
+  document.getElementById('description_ur').value = CURRENT.description_ur || '';
+  document.getElementById('category_id').value = String(CURRENT.category_id || '');
+  document.getElementById('language').value = CURRENT.language || 'en';
+  document.getElementById('version_label').value = CURRENT.version_label || '';
+  document.getElementById('effective_date').value = CURRENT.effective_date || '';
+  document.getElementById('display_order').value = String(CURRENT.display_order || 0);
+  document.getElementById('is_featured').checked = !!CURRENT.is_featured;
+  renderFileSlot(CURRENT, body.versions || []);
+  document.getElementById('editorMeta').textContent =
+    'Created by ' + (CURRENT.created_by || '—') + ' · last updated ' + (CURRENT.updated_at_kw || '—') +
+    ' by ' + (CURRENT.updated_by || '—');
+  document.getElementById('editorPanel').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function renderFileSlot(form, versions){
+  const slot = document.getElementById('fileSlot');
+  slot.textContent = '';
+  if (form.has_file){
+    const line = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = form.original_filename || '(file)';
+    line.appendChild(strong);
+    const meta = document.createElement('div');
+    meta.className = 'hint';
+    meta.textContent = 'Version ' + form.version_number + ' · ' + (form.file_size_display || '') +
+                       ' · ' + (form.download_count || 0) + ' downloads';
+    line.appendChild(meta);
+    slot.appendChild(line);
+  } else {
+    const none = document.createElement('span');
+    none.className = 'none'; none.textContent = 'No file attached yet. This form cannot be published until a PDF is uploaded.';
+    slot.appendChild(none);
+  }
+  document.getElementById('fileControls').classList.remove('hidden');
+  const vl = document.getElementById('versionList');
+  vl.textContent = '';
+  (versions || []).forEach(v=>{
+    const li = document.createElement('li');
+    li.textContent = 'v' + v.version_number + ' — ' + (v.original_filename || '(file)') +
+                     ' — replaced ' + (v.superseded_at || '') + ' by ' + (v.replaced_by || '');
+    vl.appendChild(li);
+  });
+}
+
+function collectPayload(){
+  return {
+    id: CURRENT ? CURRENT.id : 0,
+    title: document.getElementById('title').value,
+    title_ur: document.getElementById('title_ur').value,
+    description: document.getElementById('description').value,
+    description_ur: document.getElementById('description_ur').value,
+    category_id: Number(document.getElementById('category_id').value || 0),
+    language: document.getElementById('language').value,
+    version_label: document.getElementById('version_label').value,
+    effective_date: document.getElementById('effective_date').value,
+    display_order: Number(document.getElementById('display_order').value || 0),
+    is_featured: document.getElementById('is_featured').checked ? 1 : 0
+  };
+}
+
+async function saveForm(){
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  try {
+    const {body} = await jpost('/api/admin/forms/save', collectPayload());
+    if (!body.success){ showMsg('formMsg', body.error || 'Could not save.', false); return; }
+    showMsg('formMsg', 'Saved.', true);
+    await loadList();
+    await editForm(body.id);
+  } finally { btn.disabled = false; }
+}
+
+async function uploadFile(){
+  const input = document.getElementById('fileInput');
+  if (!CURRENT || !CURRENT.id){ showMsg('formMsg', 'Save the form details before uploading a file.', false); return; }
+  if (!input.files || !input.files.length){ showMsg('formMsg', 'Choose a PDF file first.', false); return; }
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('form_id', String(CURRENT.id));
+    fd.append('file', input.files[0]);
+    const r = await fetch('/api/admin/forms/upload-file', {method:'POST', credentials:'include', body:fd});
+    const j = await r.json().catch(()=>({success:false,error:'Invalid server response'}));
+    if (!j.success){ showMsg('formMsg', j.error || 'Upload failed.', false); return; }
+    showMsg('formMsg', j.replaced ? 'File replaced. The public link is unchanged.' : 'File uploaded.', true);
+    input.value = '';
+    await loadList();
+    await editForm(CURRENT.id);
+  } finally { btn.disabled = false; }
+}
+
+function closeEditor(){
+  document.getElementById('editorPanel').hidden = true;
+  CURRENT = null;
+}
+
+async function statusAction(id, action, title){
+  const prompts = {
+    publish: 'Publish “' + title + '”? It becomes downloadable by the public.',
+    unpublish: 'Unpublish “' + title + '”? It disappears from the public page immediately.',
+    archive: 'Archive “' + title + '”? It is withdrawn from public view but retained for the record.',
+    restore: 'Restore “' + title + '” to draft?'
+  };
+  if (!window.confirm(prompts[action] || 'Continue?')) return;
+  const {body} = await jpost('/api/admin/forms/status', {id, action});
+  if (!body.success){ showMsg('listMsg', body.error || 'Action failed.', false); return; }
+  showMsg('listMsg', 'Done — status is now ' + body.new_status + '.', true);
+  loadList();
+}
+
+// ── Categories (admin only) ──────────────────────────────────────
+function renderCategories(){
+  const tbody = document.getElementById('catBody');
+  tbody.textContent = '';
+  CATEGORIES.forEach(c=>{
+    const tr = document.createElement('tr');
+    tr.appendChild(td(c.label));
+    tr.appendChild(td(c.slug));
+    const o = td(c.display_order); o.className = 'nums'; tr.appendChild(o);
+    tr.appendChild(td(c.is_active ? 'Active' : 'Inactive'));
+    const actions = document.createElement('td');
+    const box = document.createElement('div'); box.className = 'rowactions';
+    box.appendChild(mkButton('Rename', 'secondary', ()=>renameCategory(c)));
+    box.appendChild(mkButton(c.is_active ? 'Deactivate' : 'Activate',
+      c.is_active ? 'warn' : 'secondary',
+      ()=>categoryAction(c.id, c.is_active ? 'deactivate' : 'activate')));
+    actions.appendChild(box); tr.appendChild(actions);
+    tbody.appendChild(tr);
+  });
+}
+async function createCategory(){
+  const el = document.getElementById('newCatLabel');
+  const label = (el.value || '').trim();
+  if (!label){ showMsg('catMsg', 'Enter a category name.', false); return; }
+  const {body} = await jpost('/api/admin/forms/categories', {action:'create', label});
+  if (!body.success){ showMsg('catMsg', body.error || 'Could not create the category.', false); return; }
+  el.value = '';
+  showMsg('catMsg', 'Category added.', true);
+  loadList();
+}
+async function renameCategory(c){
+  const label = window.prompt('New name for “' + c.label + '”:', c.label);
+  if (label === null) return;
+  const {body} = await jpost('/api/admin/forms/categories', {action:'update', id:c.id, label, display_order:c.display_order});
+  if (!body.success){ showMsg('catMsg', body.error || 'Could not rename.', false); return; }
+  showMsg('catMsg', 'Category updated.', true);
+  loadList();
+}
+async function categoryAction(id, action){
+  const {body} = await jpost('/api/admin/forms/categories', {action, id});
+  if (!body.success){ showMsg('catMsg', body.error || 'Action failed.', false); return; }
+  showMsg('catMsg', 'Category updated.', true);
+  loadList();
+}
+
+// ── Audit (admin only) ───────────────────────────────────────────
+async function loadAudit(){
+  const {body} = await jget('/api/admin/forms/audit?limit=200');
+  if (!body.success) return;
+  const tbody = document.getElementById('auditBody');
+  tbody.textContent = '';
+  (body.items || []).forEach(row=>{
+    const tr = document.createElement('tr');
+    tr.appendChild(td(row.created_at_kw));
+    tr.appendChild(td(row.event_type));
+    tr.appendChild(td(row.actor));
+    tr.appendChild(td(row.form_id || '—'));
+    tr.appendChild(td([row.old_value, row.new_value, row.note].filter(Boolean).join(' → ')));
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Boot ─────────────────────────────────────────────────────────
+if (CAN_ADMIN){
+  document.getElementById('categoryPanel').hidden = false;
+  document.getElementById('auditPanel').hidden = false;
+}
+loadList();
+</script>
+</body>
+</html>
